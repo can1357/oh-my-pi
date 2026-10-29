@@ -29,7 +29,7 @@ use std::{
 };
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
-use ax::{AxRegistry, register_node};
+use ax::{AppFocus, AxRegistry, register_node};
 use backend::{
 	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
 	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
@@ -1503,7 +1503,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, "desktop", h)?)
+						Some(register_node(ax, registry, "desktop", h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1511,7 +1511,7 @@ impl Worker {
 			},
 			Request::AxNode { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let props = self.ax()?.props(&h)?;
+				let props = ax::node_props(self.ax()?, &h, &mut AppFocus::default())?;
 				Ok(Response::Node(Some(ax::node_to_napi(reference.clone(), props))))
 			},
 			Request::AxAttributes { reference, .. } => {
@@ -1533,6 +1533,7 @@ impl Worker {
 				let target = self.registry.target(reference)?;
 				let handles = self.ax()?.children(&h)?;
 				let mut nodes = Vec::with_capacity(handles.len());
+				let mut focus = AppFocus::default();
 				for h in handles {
 					let (backend, registry) = (&mut self.backend, &mut self.registry);
 					let ax = backend
@@ -1540,7 +1541,7 @@ impl Worker {
 						.map_err(|error| error.clone())?
 						.ax()
 						.ok_or_else(DesktopError::ax_unsupported)?;
-					nodes.push(register_node(ax, registry, &target, h)?);
+					nodes.push(register_node(ax, registry, &target, h, &mut focus)?);
 				}
 				Ok(Response::Nodes(nodes))
 			},
@@ -1556,7 +1557,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, &target, h)?)
+						Some(register_node(ax, registry, &target, h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1564,12 +1565,17 @@ impl Worker {
 			},
 			Request::AxPerform { reference, action, menu, .. } => {
 				let h = self.registry.resolve(reference)?;
-				match menu {
-					Some(path) => self.ax()?.perform_menu(&h, action, path)?,
-					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h)?,
-					None => self.ax()?.perform(&h, action)?,
+				let performed = match menu {
+					Some(path) => self.ax()?.perform_menu(&h, action, path),
+					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h),
+					None => self.ax()?.perform(&h, action),
+				};
+				match performed {
+					Err(error) if error.code == ErrorCode::AxUnconfirmed => {
+						Err(self.name_unconfirmed_target(reference, &h, error))
+					},
+					performed => performed.map(|()| Response::Unit),
 				}
-				Ok(Response::Unit)
 			},
 			Request::AxSetValue { reference, value, .. } => {
 				let h = self.registry.resolve(reference)?;
@@ -1618,6 +1624,33 @@ impl Worker {
 }
 
 impl Worker {
+	/// `error`, an action on `reference` whose outcome is unconfirmed, naming
+	/// the window and app the element is in now, so the caller knows which one
+	/// to inspect. Only reads: nothing is sent again.
+	fn name_unconfirmed_target(
+		&mut self,
+		reference: &str,
+		handle: &ax::AxHandle,
+		error: DesktopError,
+	) -> DesktopError {
+		let windows = self
+			.backend()
+			.and_then(|backend| backend.windows())
+			.unwrap_or_default();
+		let window = self
+			.ax()
+			.and_then(|ax| ax.window_id(handle, &windows))
+			.ok()
+			.and_then(|id| windows.into_iter().find(|window| window.id == id));
+		let target = match window {
+			Some(window) => {
+				format!("{reference} is in window {} of {} ({:?})", window.id, window.app, window.title)
+			},
+			None => format!("{reference}'s window could not be identified"),
+		};
+		DesktopError::new(error.code, format!("{} ({target})", error.message))
+	}
+
 	/// The error for keys addressed to `reference` that were never sent
 	/// because the element did not take keyboard focus: where focus is now,
 	/// with the focused element's `ax()` line and a ref for it.
@@ -2677,6 +2710,8 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// A press is delivered and the app answers with an unrelated error.
+		unconfirmed:       bool,
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
@@ -2859,6 +2894,8 @@ mod capture_tests {
 				}),
 				actions: Vec::new(),
 				child_count: 0,
+				selected: false,
+				role_name: None,
 			})
 		}
 
@@ -2897,6 +2934,13 @@ mod capture_tests {
 			tree.pressed.push(id);
 			if tree.stale_presses {
 				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			if tree.unconfirmed {
+				return Err(DesktopError::new(
+					ErrorCode::AxUnconfirmed,
+					"AX action 'AXPress' was requested, but its outcome could not be confirmed. It may \
+					 already have taken effect: observe the window before retrying",
+				));
 			}
 			let Some(copy) = tree.press_rebuilds_as else {
 				return Ok(());
@@ -3287,7 +3331,8 @@ mod capture_tests {
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		let reference = register_node(ax, registry, origin, AxHandle::Test(1))?.ref_;
+		let reference =
+			register_node(ax, registry, origin, AxHandle::Test(1), &mut AppFocus::default())?.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(
 			&Request::AxClick { reference, options: ParsedPointerOptions::parse(None)?, reply },
@@ -3845,6 +3890,23 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn an_unconfirmed_action_names_the_window_and_app_to_inspect_and_is_sent_once() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().unconfirmed = true;
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("before retrying"), "{}", error.message);
+		assert!(
+			error
+				.message
+				.contains(&format!("e2 is in window {WAYLAND_ID} of obsidian (\"Obsidian\")")),
+			"{}",
+			error.message
+		);
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
 	fn every_call_on_a_rebuilt_element_names_its_copy() {
 		fn e2() -> String {
 			"e2".to_string()
@@ -4055,9 +4117,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = make(reference, reply);
 			let before = *queries.lock();
@@ -4078,9 +4141,10 @@ mod capture_tests {
 			.ok()
 			.and_then(|backend| backend.ax())
 			.unwrap();
-		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-			.unwrap()
-			.ref_;
+		let reference =
+			register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+				.unwrap()
+				.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		let request = Request::AxClick {
 			reference: reference.clone(),
@@ -4107,9 +4171,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = Request::AxInput {
 				reference: reference.clone(),
@@ -4922,7 +4987,7 @@ mod capture_tests {
 				reply,
 			}
 		};
-		for action in ["press", "AXPress", "axraise"] {
+		for action in ["press", "AXPress"] {
 			let source = CancellationSource::default();
 			let result = call(&mut worker, perform(action), &source);
 			assert!(
@@ -4937,7 +5002,8 @@ mod capture_tests {
 			assert!(token.check().is_ok(), "the user's Escape leaves {action} running");
 		}
 		assert_eq!(tree.lock().pressed, [2], "the fake tree runs only `press`");
-		for action in ["raise", " Raise ", "AXRaise"] {
+		// macOS runs any spelling of AXRaise, `axraise` included.
+		for action in ["raise", " Raise ", "AXRaise", "axraise", "AxRaise"] {
 			let source = CancellationSource::default();
 			let error = call(&mut worker, perform(action), &source)
 				.err()

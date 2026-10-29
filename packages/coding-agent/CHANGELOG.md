@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `computer` tool's `el.perform()` takes an action by any spelling `ax()` lists (`perform("open")`), and `computer.backgroundFallback: refuse` refuses every spelling of a raise, open, context menu or popup press ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

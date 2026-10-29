@@ -26,7 +26,7 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::{AxBackend, KeyboardFocus, is_raise_action},
+		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
 		control,
 		error::{CoreResult, DesktopError},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
@@ -56,7 +56,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 16] = [
+const NODE_ATTRIBUTES: [&str; 17] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -64,6 +64,7 @@ const NODE_ATTRIBUTES: [&str; 16] = [
 	"AXDescription",
 	"AXEnabled",
 	"AXFocused",
+	"AXSelected",
 	"AXSubrole",
 	"AXRoleDescription",
 	"AXValueDescription",
@@ -81,15 +82,16 @@ const VALUE: usize = 3;
 const DESCRIPTION: usize = 4;
 const ENABLED: usize = 5;
 const FOCUSED: usize = 6;
-const SUBROLE: usize = 7;
-const ROLE_DESCRIPTION: usize = 8;
-const VALUE_DESCRIPTION: usize = 9;
-const HELP: usize = 10;
-const IDENTIFIER: usize = 11;
-const URL: usize = 12;
-const PLACEHOLDER: usize = 13;
-const POSITION: usize = 14;
-const SIZE: usize = 15;
+const SELECTED: usize = 7;
+const SUBROLE: usize = 8;
+const ROLE_DESCRIPTION: usize = 9;
+const VALUE_DESCRIPTION: usize = 10;
+const HELP: usize = 11;
+const IDENTIFIER: usize = 12;
+const URL: usize = 13;
+const PLACEHOLDER: usize = 14;
+const POSITION: usize = 15;
+const SIZE: usize = 16;
 
 /// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
 /// ([`read_identity`]) or to name a field by its placeholder. A batch that
@@ -1193,6 +1195,15 @@ impl AxBackend for MacAx {
 			copy_attribute_result(element, "AXRole").err() == Some(AXError::InvalidUIElement)
 		})
 	}
+
+	fn focused_within(&mut self, h: &AxHandle) -> Option<AxHandle> {
+		let app = probe_application(element_pid(mac_handle(h).ok()?).ok()?)?;
+		copy_element(&app, "AXFocusedUIElement").map(AxHandle::Mac)
+	}
+
+	fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
+		attribute_settable_answer(mac_handle(h).ok()?, "AXValue")
+	}
 }
 
 fn element_props(
@@ -1221,6 +1232,8 @@ fn element_props(
 	let description = nonempty(string(DESCRIPTION))
 		.or_else(|| nonempty(string(PLACEHOLDER)).filter(|_| title.is_none()));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
+	let role_name = window_control_name(&native_role, [&title, &description], string(SUBROLE));
+	let selected = selected(values, &native_role);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
 		native_role,
@@ -1239,7 +1252,46 @@ fn element_props(
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
 		partial: identity.is_none(),
 		identity,
+		selected,
+		role_name: role_name.map(str::to_owned),
 	})
+}
+
+/// Whether the element reports itself selected. Only list and table rows and
+/// cells, buttons, and the file icons of Finder's icon view count: Finder's
+/// icon list reports a section rather than the icons as its selected
+/// children.
+fn selected(values: &NodeValues, native_role: &str) -> bool {
+	matches!(native_role, "AXRow" | "AXCell" | "AXButton" | "AXImage")
+		&& values
+			.get(SELECTED)
+			.ok()
+			.flatten()
+			.and_then(|value| value.downcast::<CFBoolean>().ok())
+			.is_some_and(|value| value.as_bool())
+}
+
+/// The name a window's own button, which has no title or description, takes
+/// from its subrole.
+fn window_control_name(
+	native_role: &str,
+	labels: [&Option<String>; 2],
+	subrole: Option<String>,
+) -> Option<&'static str> {
+	let unlabeled = labels
+		.into_iter()
+		.flatten()
+		.all(|label| label.trim().is_empty());
+	if !unlabeled || native_role != "AXButton" {
+		return None;
+	}
+	match subrole?.as_str() {
+		"AXCloseButton" => Some("close"),
+		"AXMinimizeButton" => Some("minimize"),
+		"AXZoomButton" => Some("zoom"),
+		"AXFullScreenButton" => Some("full screen"),
+		_ => None,
+	}
 }
 
 /// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
@@ -1318,11 +1370,10 @@ fn perform_choosing(
 	// Read before any probe of the target, as for background input
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
-	let native = action_name(action);
 	let actions = copy_strings_from_action_names(element)?;
-	if !actions.contains(&native) {
-		return Err(unsupported_action(&native, &actions));
-	}
+	let Some(native) = supported_action(&actions, action).cloned() else {
+		return Err(unsupported_action(&native_action_name(action), &actions));
+	};
 	// AXRaise is an explicit request to change stacking, including the
 	// takeover preparation path. Other semantic actions must stay background.
 	if is_raise_action(action) {
@@ -1332,8 +1383,8 @@ fn perform_choosing(
 		return element_action_result(&native, send_action(element, &native));
 	}
 	let pid = element_pid(element)?;
-	let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-	let perform = || press_into_view(&native, scroll_first, |action| send_action(element, action));
+	let scroll = scroll_before_press(&native, &actions, || process::is_uikit(pid));
+	let perform = || press_into_view(&native, scroll, |action| send_action(element, action));
 	// A menu that a background application opens takes the keyboard from the
 	// user's app, so it is closed before the action returns; a frontmost
 	// application's menu stays open for the next call unless an item is asked
@@ -1523,13 +1574,18 @@ fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 }
 
 fn attribute_settable(element: &AXUIElement, name: &str) -> bool {
+	attribute_settable_answer(element, name) == Some(true)
+}
+
+/// `AXUIElementIsAttributeSettable`'s answer; `None` when the query failed.
+fn attribute_settable_answer(element: &AXUIElement, name: &str) -> Option<bool> {
 	let attribute = CFString::from_str(name);
 	let mut settable = 0;
 	// SAFETY: The Boolean out parameter is writable and all CF objects outlive
 	// the synchronous AX query.
 	(unsafe { element.is_attribute_settable(&attribute, NonNull::from(&mut settable)) }
 		== AXError::Success)
-		&& settable != 0
+		.then_some(settable != 0)
 }
 
 fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult<()> {
@@ -1613,14 +1669,18 @@ fn text_readback(sent: &str, expected: &str, actual: Option<&str>, secure: bool)
 	)))
 }
 
+/// The system time zone, re-read each call: CF caches it per process, and the
+/// target app follows changes to it.
+fn system_zone() -> Option<CFRetained<CFTimeZone>> {
+	CFTimeZone::reset_system();
+	CFTimeZone::system()
+}
+
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
 /// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
 /// in the system time zone the control displays, then read back as one.
 fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
-	// CF caches the system zone per process; the target app follows changes to
-	// it.
-	CFTimeZone::reset_system();
-	let zone = CFTimeZone::system()
+	let zone = system_zone()
 		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
 	let offset_at = |at: f64| zone.seconds_from_gmt(at) as i64;
 	let Some(request) = date::parse(text) else {
@@ -1996,23 +2056,35 @@ fn replace_utf16_selection(
 /// In a Mac Catalyst (`UIKit`) app, pressing a row scrolled out of its view
 /// reports success and does nothing. Scrolling it into view first lets the
 /// press land; for an element already in view the scroll changes nothing.
-fn scrolls_before_press(native: &str, actions: &[String], uikit: impl FnOnce() -> bool) -> bool {
-	native == "AXPress" && actions.iter().any(|action| action == SCROLL_TO_VISIBLE) && uikit()
+/// The element's own spelling of [`SCROLL_TO_VISIBLE`] when `native`, its
+/// own spelling of the action to perform, is a press that scrolls first.
+fn scroll_before_press<'a>(
+	native: &str,
+	actions: &'a [String],
+	uikit: impl FnOnce() -> bool,
+) -> Option<&'a str> {
+	if !native.eq_ignore_ascii_case("AXPress") {
+		return None;
+	}
+	let scroll = actions
+		.iter()
+		.find(|action| action.eq_ignore_ascii_case(SCROLL_TO_VISIBLE))?;
+	uikit().then_some(scroll.as_str())
 }
 
-/// Sends `native`, after [`SCROLL_TO_VISIBLE`] when `scroll_first`. A failed
-/// scroll leaves the action to report its own outcome; a run cancelled during
-/// the scroll sends nothing more, and nothing is sent once the user has
-/// pressed a key or clicked in the app since the call was admitted
+/// Sends `native`, after `scroll` when given. A failed scroll leaves the
+/// action to report its own outcome; a run cancelled during the scroll sends
+/// nothing more, and nothing is sent once the user has pressed a key or
+/// clicked in the app since the call was admitted
 /// ([`control::intervention::check_press`]).
 fn press_into_view(
 	native: &str,
-	scroll_first: bool,
+	scroll: Option<&str>,
 	mut send: impl FnMut(&str) -> AXError,
 ) -> CoreResult<()> {
 	control::intervention::check_press()?;
-	if scroll_first {
-		let _ = send(SCROLL_TO_VISIBLE);
+	if let Some(scroll) = scroll {
+		let _ = send(scroll);
 		control::check()?;
 		control::intervention::check_press()?;
 	}
@@ -2033,13 +2105,16 @@ fn send_action(element: &AXUIElement, action: &str) -> AXError {
 /// `CannotComplete` from `AXPerformAction` means messaging failed or the app
 /// did not reply in time, e.g. while the action runs a modal dialog. The
 /// request was made, so its outcome is unknown rather than failed.
+/// `AttributeUnsupported` names no attribute an action reads; Preview answers
+/// it after following a PDF link's `AXPressAction` and Finder after carrying
+/// out an icon's `AXOpen`, so it is no proof of failure either.
 fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
-	if error == AXError::CannotComplete {
+	if matches!(error, AXError::CannotComplete | AXError::AttributeUnsupported) {
 		return Err(DesktopError::ax_unconfirmed(format!(
 			"AX action '{action}' was requested, but its outcome could not be confirmed: the app did \
-			 not reply in time or messaging failed ({error:?}), for example because the action \
-			 opened a modal dialog. It may already have taken effect: observe the window before \
-			 retrying"
+			 not reply in time, messaging failed or the app answered with an unrelated error \
+			 ({error:?}), for example because the action opened a modal dialog. It may already have \
+			 taken effect: observe the window before retrying"
 		)));
 	}
 	ax_result(error, format!("AX action '{action}' failed"))
@@ -2304,21 +2379,21 @@ fn bounds_matches_window(bounds: AxBounds, window: &DesktopWindow) -> bool {
 		&& (bounds.height - f64::from(window.height)).abs() <= 2.0
 }
 
-fn action_name(action: &str) -> String {
-	match action.trim().to_ascii_lowercase().as_str() {
-		"press" => "AXPress".to_string(),
-		"raise" => "AXRaise".to_string(),
-		"showmenu" | "show_menu" => "AXShowMenu".to_string(),
-		_ if action.starts_with("AX") => action.to_string(),
-		_ => format!("AX{action}"),
-	}
+/// The element's own name for `action`, matched regardless of case: `ax()`
+/// lists actions in lowercase.
+fn supported_action<'a>(available: &'a [String], action: &str) -> Option<&'a String> {
+	let requested = native_action_name(action);
+	available
+		.iter()
+		.find(|name| name.eq_ignore_ascii_case(&requested))
 }
 
 /// Renders an AX attribute value as stable, agent-readable text for
 /// [`AxProps::value`] and `attributes()`.
 ///
-/// Numbers print as numbers (checkbox/radio state, slider position) and an
-/// element reference (a radio group's selected button) prints as that
+/// Numbers print as numbers (checkbox/radio state, slider position), a date
+/// as the local ISO-8601 time the control shows and `setValue` takes back, and
+/// an element reference (a radio group's selected button) prints as that
 /// element's title or description, so snapshots never carry CF debug text
 /// whose pointer addresses change between otherwise identical reads.
 fn stringify_value(value: &CFType) -> String {
@@ -2330,6 +2405,15 @@ fn stringify_value(value: &CFType) -> String {
 	}
 	if let Some(number) = value.downcast_ref::<CFNumber>() {
 		return stringify_number(number);
+	}
+	if let Some(date) = value.downcast_ref::<CFDate>() {
+		// Without the zone a read still names the right instant, in UTC.
+		let zone = system_zone();
+		return date::format_local(date.absolute_time(), |at| {
+			zone
+				.as_ref()
+				.map_or(0, |zone| zone.seconds_from_gmt(at) as i64)
+		});
 	}
 	if let Some(element) = value.downcast_ref::<AXUIElement>() {
 		return nonempty(copy_string(element, "AXTitle"))
@@ -2464,7 +2548,7 @@ mod tests {
 		let mut expected: Vec<_> = NodeRead::Walk.attributes().collect();
 		expected.retain(|index| !super::IDENTITY_ONLY.contains(index));
 		assert_eq!(asked, expected);
-		assert_eq!(asked.len(), 7);
+		assert_eq!(asked.len(), 8);
 		assert_eq!(required_string(values.get(ROLE), "AXRole").unwrap(), "AXTextArea");
 		assert_eq!(values.get(VALUE).unwrap_err(), AXError::CannotComplete);
 		assert!(values.get(TITLE).unwrap().is_none());
@@ -2489,11 +2573,12 @@ mod tests {
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
 		let walk = |help: &CFType| {
-			let entries: [&CFType; 14] = [
+			let entries: [&CFType; 15] = [
 				null,
 				&role,
 				&title,
 				&no_value,
+				null,
 				null,
 				null,
 				null,
@@ -2561,7 +2646,7 @@ mod tests {
 		// One walk read of a Reminders date field, with `title` and
 		// `description` as its own labels.
 		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
-			let mut entries = [null; 14];
+			let mut entries = [null; 15];
 			entries[ROLE] = role;
 			entries[TITLE] = title;
 			entries[DESCRIPTION] = description;
@@ -2613,6 +2698,97 @@ mod tests {
 	}
 
 	#[test]
+	fn an_unrelated_attribute_error_from_an_action_is_unconfirmed() {
+		let error =
+			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn listed_actions_perform_whatever_their_case() {
+		let available = ["AXOpen", "AXShowMenu", "AXPressAction", "AXRaise"].map(String::from);
+		let native = |action| super::supported_action(&available, action).map(String::as_str);
+		assert_eq!(native("open"), Some("AXOpen"));
+		assert_eq!(native("pressaction"), Some("AXPressAction"));
+		assert_eq!(native("showmenu"), Some("AXShowMenu"));
+		assert_eq!(native("AXOpen"), Some("AXOpen"));
+		assert_eq!(native("press"), None);
+		assert_eq!(native("axopen"), Some("AXOpen"));
+		assert_eq!(native("axOpen"), Some("AXOpen"));
+		assert_eq!(native(" open "), Some("AXOpen"));
+		assert_eq!(native("AxShowMenu"), Some("AXShowMenu"));
+		// A raise by any spelling is the raise the Escape stop arms for.
+		for raise in ["axraise", "AxRaise", " Raise "] {
+			assert_eq!(native(raise), Some("AXRaise"));
+			assert!(super::is_raise_action(raise), "{raise}");
+		}
+		// Unicode White_Space trims (U+0085 does, U+FEFF does not), and only
+		// ASCII letters fold; the tool's refusals name actions by the same rule.
+		assert_eq!(native("\u{85}open"), Some("AXOpen"));
+		assert_eq!(native("open\u{85}"), Some("AXOpen"));
+		assert_eq!(native("\u{feff}open"), None);
+		assert_eq!(native("open\u{feff}"), None);
+		let custom = ["AXÖffnen".to_owned()];
+		assert_eq!(
+			super::supported_action(&custom, "axÖffnen").map(String::as_str),
+			Some("AXÖffnen")
+		);
+		assert_eq!(super::supported_action(&custom, "axöffnen"), None);
+		// An element advertising another case is answered with its own spelling.
+		let lower = ["axshowmenu", "axpress", "axopen"].map(String::from);
+		let native = |action| super::supported_action(&lower, action).map(String::as_str);
+		assert_eq!(native("showmenu"), Some("axshowmenu"));
+		assert_eq!(native("press"), Some("axpress"));
+		assert_eq!(native("AXOpen"), Some("axopen"));
+		// `ax()` lists only `open` for a button that also presses; the press
+		// runs.
+		let both = ["AXPress", "AXOpen"].map(String::from);
+		assert_eq!(super::supported_action(&both, "press").map(String::as_str), Some("AXPress"));
+	}
+
+	#[test]
+	fn rows_cells_buttons_and_icons_report_their_selection() {
+		use super::{SELECTED, selected};
+
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let yes: &CFType = objc2_core_foundation::CFBoolean::new(true);
+		let walk = |slot: &CFType| {
+			let mut entries = [null; 15];
+			entries[SELECTED] = slot;
+			NodeValues::from_batch(
+				Ok(CFArray::from_objects(&entries)),
+				NodeRead::Walk.attributes(),
+				|_| unreachable!("an answered batch needs no lone reads"),
+			)
+		};
+		let marked = walk(yes);
+		for role in ["AXRow", "AXCell", "AXButton", "AXImage"] {
+			assert!(selected(&marked, role), "{role}");
+		}
+		assert!(!selected(&marked, "AXStaticText"));
+		assert!(!selected(&walk(null), "AXRow"));
+	}
+
+	#[test]
+	fn only_an_unlabeled_window_button_takes_its_subrole_name() {
+		use super::window_control_name;
+
+		let name = |role, title: Option<&str>, subrole: &str| {
+			window_control_name(role, [&title.map(str::to_owned), &None], Some(subrole.to_owned()))
+		};
+		assert_eq!(name("AXButton", None, "AXCloseButton"), Some("close"));
+		assert_eq!(name("AXButton", None, "AXMinimizeButton"), Some("minimize"));
+		assert_eq!(name("AXButton", None, "AXZoomButton"), Some("zoom"));
+		assert_eq!(name("AXButton", None, "AXFullScreenButton"), Some("full screen"));
+		assert_eq!(name("AXButton", Some(" "), "AXCloseButton"), Some("close"));
+		assert_eq!(name("AXButton", Some("Close tab"), "AXCloseButton"), None);
+		assert_eq!(name("AXButton", None, "AXSortButton"), None);
+		assert_eq!(name("AXCheckBox", None, "AXCloseButton"), None);
+	}
+
+	#[test]
 	fn a_menu_action_in_a_popover_or_sheet_is_aimed_at_that_window() {
 		// Calendar's Repeat popup reports window 25567 as its AXWindow and maps
 		// to its event popover 25579; a field in Automator's Save sheet 25670
@@ -2648,6 +2824,14 @@ mod tests {
 		let (first, second) = (url(), url());
 		assert_eq!(stringify_value(&first), "https://example.com/a");
 		assert_eq!(stringify_value(&first), stringify_value(&second));
+	}
+
+	#[test]
+	fn dates_render_as_the_local_time_set_value_takes_back() {
+		let at = 813_499_200.0;
+		let text = stringify_value(&objc2_core_foundation::CFDate::new(None, at).unwrap());
+		assert_eq!(&text[10..11], "T", "{text}");
+		assert_eq!(super::date::parse(&text), Some(super::date::DateRequest::Instant(at)), "{text}");
 	}
 
 	#[test]
@@ -2988,7 +3172,7 @@ mod tests {
 
 	#[test]
 	fn only_a_uikit_press_scrolls_its_element_into_view_first() {
-		use super::scrolls_before_press;
+		use super::scroll_before_press;
 
 		let actions = |names: &[&str]| {
 			names
@@ -2997,29 +3181,40 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		let row = actions(&["AXPress", "AXScrollToVisible", "AXShowMenu"]);
-		assert!(scrolls_before_press("AXPress", &row, || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || true), Some("AXScrollToVisible"));
+		// An element advertising its actions in another case scrolls by its own
+		// spelling.
+		let lower = actions(&["axpress", "axscrolltovisible"]);
+		assert_eq!(scroll_before_press("axpress", &lower, || true), Some("axscrolltovisible"));
 		// An AppKit app, another action, or an element that cannot scroll: press
 		// as is.
-		assert!(!scrolls_before_press("AXPress", &row, || false));
-		assert!(!scrolls_before_press("AXShowMenu", &row, || true));
-		assert!(!scrolls_before_press("AXPress", &actions(&["AXPress"]), || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || false), None);
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || true), None);
+		assert_eq!(scroll_before_press("AXPress", &actions(&["AXPress"]), || true), None);
 		// The app is only classified when the press could scroll.
-		assert!(!scrolls_before_press("AXShowMenu", &row, || unreachable!()));
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || unreachable!()), None);
 	}
 
 	#[test]
 	fn a_press_follows_its_scroll_unless_the_run_was_cancelled() {
-		use super::{SCROLL_TO_VISIBLE, press_into_view};
+		use super::{press_into_view, scroll_before_press, supported_action};
 		use crate::desktop::control;
 
-		let run = |scroll_first: bool, scroll_result: AXError, cancel: bool| {
+		// `available` as the element advertises it, pressed through
+		// `perform("press")`.
+		let run = |available: &[&str], scroll_result: AXError, cancel: bool| {
+			let available: Vec<String> = available.iter().map(|name| (*name).to_owned()).collect();
+			let native = supported_action(&available, "press")
+				.expect("a press")
+				.clone();
+			let scroll = scroll_before_press(&native, &available, || true);
 			let source = control::CancellationSource::default();
 			let token = source.token();
 			let mut sent = Vec::new();
 			let result = control::with_token_for_test(&token, || {
-				press_into_view("AXPress", scroll_first, |action| {
+				press_into_view(&native, scroll, |action| {
 					sent.push(action.to_owned());
-					if action != SCROLL_TO_VISIBLE {
+					if Some(action) != scroll {
 						return AXError::Success;
 					}
 					if cancel {
@@ -3030,15 +3225,33 @@ mod tests {
 			});
 			(result.map_err(|error| error.code), sent)
 		};
-		let both = vec![SCROLL_TO_VISIBLE.to_owned(), "AXPress".to_owned()];
-		assert_eq!(run(true, AXError::Success, false), (Ok(()), both.clone()));
+		let sent = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		let canonical = ["AXPress", "AXScrollToVisible"];
+		let both = sent(&["AXScrollToVisible", "AXPress"]);
+		assert_eq!(run(&canonical, AXError::Success, false), (Ok(()), both.clone()));
 		// A failed scroll still presses.
-		assert_eq!(run(true, AXError::Failure, false), (Ok(()), both));
-		assert_eq!(run(false, AXError::Success, false), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(run(&canonical, AXError::Failure, false), (Ok(()), both));
+		assert_eq!(run(&["AXPress"], AXError::Success, false), (Ok(()), sent(&["AXPress"])));
 		// Cancelled while scrolling: the press is never sent.
 		assert_eq!(
-			run(true, AXError::Success, true),
-			(Err(ErrorCode::Cancelled), vec![SCROLL_TO_VISIBLE.to_owned()])
+			run(&canonical, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["AXScrollToVisible"]))
+		);
+		// An element advertising both in another case gets its own spellings:
+		// the scroll, then one press, and no press once cancelled.
+		let lower = ["axpress", "axscrolltovisible"];
+		assert_eq!(
+			run(&lower, AXError::Success, false),
+			(Ok(()), sent(&["axscrolltovisible", "axpress"]))
+		);
+		assert_eq!(
+			run(&lower, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["axscrolltovisible"]))
 		);
 	}
 
@@ -3057,7 +3270,7 @@ mod tests {
 				listener.record_for_test(7, std::time::Instant::now());
 			}
 			let mut sent = Vec::new();
-			let result = press_into_view("AXPress", true, |action| {
+			let result = press_into_view("AXPress", Some(SCROLL_TO_VISIBLE), |action| {
 				sent.push(action.to_owned());
 				// The user clicks in the app while the scroll runs.
 				listener.record_for_test(7, std::time::Instant::now());

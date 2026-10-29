@@ -358,6 +358,22 @@ const RAISE_ROUTE = "Background input and screenshots reach a covered window, so
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
+ * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
+ * is sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
+ * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
+ * whichever of the element's actions matches with only ASCII letters folded; on this key the
+ * steps before the match only uppercase the `AX` prefix.
+ */
+function nativeActionKey(action: string): string {
+	const name = action
+		.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+		.replace(/[A-Z]/g, letter => letter.toLowerCase());
+	if (name === "show_menu") return "axshowmenu";
+	return name.startsWith("ax") ? name : `ax${name}`;
+}
+
+/**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
  * model: a call that would bring an application forward or drive the user's
  * own pointer or keyboard is refused before anything is sent. `effect` says
@@ -737,8 +753,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
-		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+		const native = nativeActionKey(action);
+		if (native === "axraise") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -747,11 +763,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
-		// to any other name). On an item in Chrome's Open panel it brings the
-		// panel's application to the front, even when the action fails, and it
-		// stays there.
-		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
+		// On an item in Chrome's Open panel `AXOpen` brings the panel's application to the front, even
+		// when the action fails, and it stays there.
+		if (this.#session.capabilities.backend === "quartz" && native === "axopen") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -761,8 +775,8 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
-		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
-		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+		// `AXShowMenu` opens the element's context menu.
+		if (native === "axshowmenu") {
 			refuseMenu(
 				this.#session,
 				context,
@@ -774,8 +788,7 @@ class El {
 		}
 		if (menu !== undefined)
 			refuseMenu(this.#session, context, "perform with menu", "a menu", MENU_ROUTE, `element ${this.ref}`);
-		// The names native `axPerform` runs as `AXPress`.
-		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+		if (native === "axpress") {
 			refuseControlMenu(
 				this.#session,
 				context,
@@ -784,7 +797,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
+		// macOS runs the key the refusals checked; UIA and AT-SPI match their own action names as given.
+		const sent = this.#session.capabilities.backend === "quartz" ? native : action;
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, sent, menu));
 	}
 
 	/**
