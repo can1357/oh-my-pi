@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
 import { restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
@@ -484,5 +485,93 @@ test("resuming an archived id opens the live file its conversation went on in", 
 	// The archived copy is the stale one; resuming it would diverge.
 	expect(target?.session.path).toBe(continuationFile);
 	expect(target?.continuation?.from).toBe(archiveFile);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("forking an archived session brings its subagent transcripts along", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested subagent prompt", root));
+	await archiveEverything();
+
+	const fork = await SessionManager.forkFrom(archiveFile, root, undefined, undefined, {
+		suppressBreadcrumb: true,
+	});
+	try {
+		const forked = fork.getSessionFile() ?? "";
+		expect(forked.endsWith(".jsonl")).toBe(true);
+		expect(await Bun.file(path.join(forked.slice(0, -".jsonl".length), "sub.jsonl")).text()).toContain(
+			"nested subagent prompt",
+		);
+	} finally {
+		await fork.close();
+	}
+});
+
+test("a plain-file command resolves an archived id to a live transcript with its artifacts", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested subagent prompt", root));
+	await archiveEverything();
+
+	// `omp render`, `omp session pack`/`moved` and `omp anonymize` all read
+	// what this returns as an ordinary file beside its artifact tree.
+	const resolved = await resolveSessionFileArg(SESSION_ID, root);
+
+	expect(resolved).toBe(sessionFile);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toContain("nested subagent prompt");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("a restore keeps the permissions of an artifact directory it merges into", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await fs.chmod(artifacts, 0o755);
+	await archiveEverything();
+	// A directory the live tree already holds, tightened against other local users.
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "later.txt"), "written after the archive");
+	await fs.chmod(artifacts, 0o700);
+
+	await restoreArchivedSession(archiveFile, root);
+
+	expect((await fs.stat(artifacts)).mode & 0o777).toBe(0o700);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toContain("nested");
+});
+
+test("opening an archive another process already restored and carried on reads the live turns", async () => {
+	await archiveEverything();
+	// The window between an opener reading the archive and its restore taking
+	// the gc lock: another process restored the session and appended a turn.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await fs.appendFile(
+		sessionFile,
+		`${JSON.stringify({ type: "message", id: "m3", message: { role: "user", content: "APPENDED-AFTER-RESTORE" } })}\n`,
+	);
+
+	const manager = await SessionManager.open(archiveFile, undefined, undefined, { suppressBreadcrumb: true });
+	try {
+		expect(manager.getSessionFile()).toBe(sessionFile);
+		const entries = manager.getEntries().map(entry => JSON.stringify(entry));
+		expect(entries.some(entry => entry.includes("APPENDED-AFTER-RESTORE"))).toBe(true);
+	} finally {
+		await manager.close();
+	}
+});
+
+test("opening a session whose artifact tree could not be restored fails instead of hiding it", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await archiveEverything();
+	// A live directory standing where the archived artifact file belongs: the
+	// transcript comes back, the tree cannot.
+	await fs.mkdir(path.join(artifacts, "sub.jsonl"), { recursive: true });
+
+	await expect(SessionManager.open(archiveFile, undefined, undefined, { suppressBreadcrumb: true })).rejects.toThrow(
+		"artifact tree",
+	);
+	// The archive is kept, so the retry the error names has both halves.
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });

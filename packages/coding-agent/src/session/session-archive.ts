@@ -22,7 +22,7 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { withGcLock } from "./gc-lock";
+import { statIfPresent, withGcLock } from "./gc-lock";
 import { sessionStagingPath } from "./session-storage";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -102,16 +102,6 @@ export interface RestoredSession {
 	artifactsRestored: boolean;
 	/** What restoring could not bring back, in words a caller can print. */
 	notRestored: string[];
-}
-
-async function pathExists(target: string): Promise<boolean> {
-	try {
-		await fs.stat(target);
-		return true;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
-	}
 }
 
 /**
@@ -211,9 +201,12 @@ async function copyEntryDereferenced(source: string, destination: string): Promi
 			throw new Error(`${destination} is not a directory, so ${source} cannot be restored into it`);
 		}
 		await fs.mkdir(destination, { recursive: true });
-		// `mkdir` applies the umask, so a tree deliberately tightened below it
-		// would otherwise come back readable to more than it was.
-		await fs.chmod(destination, stat.mode & 0o7777);
+		// Only a directory this restore created takes the archived mode: `mkdir`
+		// applies the umask, so a tree deliberately tightened below it would
+		// otherwise come back readable to more than it was. A directory the live
+		// tree already holds keeps its own permissions — merging an archive into
+		// a private `0700` directory must not widen it to the archive's mode.
+		if (!existing) await fs.chmod(destination, stat.mode & 0o7777);
 		for (const entry of await fs.readdir(source)) {
 			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry));
 		}
@@ -253,7 +246,7 @@ async function copyTreeDereferenced(source: string, destination: string): Promis
  * Streamed on both sides: a transcript can be tens of megabytes, and this
  * runs with the gc lock held.
  */
-async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
+export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
 	const live = await fs.open(sessionPath, "r");
 	try {
 		let offset = 0;
@@ -300,13 +293,13 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
 	let bytes: number;
-	if (await pathExists(sessionPath)) {
+	if (await statIfPresent(sessionPath)) {
 		// The transcript is already live. Either another process restored it
 		// while this one waited for the lock, or an earlier attempt moved the
 		// transcript and failed on its artifact tree. Finishing that attempt is
 		// the only way the tree comes home, so a retry resumes rather than
 		// refusing — for this session, carried on or not, never another.
-		if ((await pathExists(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
+		if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
 			throw new Error(`Refusing to restore over a different session file: ${sessionPath}`);
 		}
 		bytes = (await fs.stat(sessionPath)).size;
@@ -315,8 +308,8 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	}
 
 	const notRestored: string[] = [];
-	const hasArtifacts = await pathExists(archiveArtifacts);
-	let artifactsRestored = !hasArtifacts && (await pathExists(liveArtifacts));
+	const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
+	let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
 	if (hasArtifacts) {
 		try {
 			await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
@@ -352,4 +345,30 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
 		}
 		throw error;
 	}
+}
+
+/**
+ * The live `.jsonl` path of a session file, bringing it out of the archive
+ * first when that is where it lives. Everything that reads a session as an
+ * ordinary file — the writer, a fork and its artifact copy, `omp render`,
+ * `omp session pack`, `omp anonymize` — goes through here, so none of them
+ * has to understand `.jsonl.gz`, and none of them silently drops the
+ * subagent transcripts and tool output stored beside it.
+ *
+ * A restore that could not bring the artifact tree back fails here rather
+ * than handing out a transcript whose artifacts are still in the archive:
+ * the live transcript wins every later id lookup, so an unreported half
+ * restore is one nothing would retry.
+ */
+export async function materializeSessionFile(sessionFile: string, agentDir?: string): Promise<string> {
+	if (!isArchivedSessionPath(sessionFile)) return sessionFile;
+	const restored = await restoreArchivedSession(sessionFile, agentDir);
+	if (restored.notRestored.length > 0) {
+		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
+		throw new Error(
+			`Restored the transcript of "${sessionFile}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
+				`The archive is kept; \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` retries it once the path is clear.`,
+		);
+	}
+	return restored.sessionPath;
 }
