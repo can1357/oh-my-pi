@@ -2,13 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added TokenRhythm (`tokenrhythm`) as a provider: `/login tokenrhythm` with an API key, the live `/v1/models` roster, and per-family reasoning controls verified against the host (DeepSeek V4 toggle plus low/high/max; Qwen and Seed toggle; GLM, Kimi, LongCat, MiniMax and MiMo always on with no disable field) ([#16053](https://github.com/can1357/oh-my-pi/pull/16053) by [@openvictory](https://github.com/openvictory))
+
+### Fixed
+
+- Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Removed the raw `@oh-my-pi/pi-catalog/models.json` export; use the bundled model registry APIs instead.
 
 ### Added
 
-- Added TokenRhythm (`tokenrhythm`) as a provider: `/login tokenrhythm` with an API key, the live `/v1/models` roster, and per-family reasoning controls verified against the host (DeepSeek V4 toggle plus low/high/max; Qwen and Seed toggle; GLM, Kimi, LongCat, MiniMax and MiMo always on with no disable field) ([#16053](https://github.com/can1357/oh-my-pi/pull/16053) by [@openvictory](https://github.com/openvictory))
 - Added `nextBuildPriceChange(cost, now)` to identify when a model's dated pricing card may change, allowing callers to safely reuse earlier builds until that time.
 - Added the `selector-revision-suffix` catalog axis for Google Vertex, so `google-vertex/claude-opus-4-8` resolves exactly to `claude-opus-4-8@default`.
 
