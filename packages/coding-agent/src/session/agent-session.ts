@@ -2915,7 +2915,8 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Source of out-of-band mail waiting for the user (`omp poke` held by Esc). A
 	 * user-authored prompt that is about to run or queue calls it synchronously
-	 * and sends what it returns ahead of the user's message, in the same turn.
+	 * and sends what it returns ahead of the user's message, in the same turn;
+	 * {@link resume} sends it into the turn it resumes.
 	 */
 	setHeldMailProvider(provider: (() => CustomMessage[]) | undefined): void {
 		this.#heldMailProvider = provider;
@@ -8157,6 +8158,8 @@ export class AgentSession implements SettingsScope {
 			});
 			return;
 		}
+		// Mail an interrupt held back rides in the resumed turn, as it rides with a prompt.
+		for (const mail of this.#heldMailProvider?.() ?? []) this.agent.steer(mail);
 		this.#noteUserTurn();
 		this.#todo.resetCycle();
 		this.#resetPromptMaintenanceState();

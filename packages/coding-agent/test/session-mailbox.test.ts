@@ -58,6 +58,8 @@ describe("session mailbox delivery", () => {
 	let contexts: Context[];
 	let release: PromiseWithResolvers<void>;
 	let toolStarted: PromiseWithResolvers<void>;
+	let stalled: boolean;
+	let stallStarted: PromiseWithResolvers<void>;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@omp-session-mailbox-");
@@ -71,6 +73,8 @@ describe("session mailbox delivery", () => {
 		contexts = [];
 		release = Promise.withResolvers<void>();
 		toolStarted = Promise.withResolvers<void>();
+		stalled = false;
+		stallStarted = Promise.withResolvers<void>();
 	});
 
 	afterEach(async () => {
@@ -135,9 +139,34 @@ describe("session mailbox delivery", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [slowTool], messages: [] },
 			convertToLlm,
-			streamFn: (_model, context) => {
+			streamFn: (_model, context, options) => {
 				contexts.push(context);
 				const last = requestTexts(context).at(-1);
+				if (last === "stall" && !stalled) {
+					// Hold the first such request until Esc aborts it, before any output.
+					stalled = true;
+					stallStarted.resolve();
+					const stream = new AssistantMessageEventStream();
+					options?.signal?.addEventListener(
+						"abort",
+						() => {
+							const aborted: AssistantMessage = {
+								role: "assistant",
+								content: [],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: zeroUsage,
+								stopReason: "aborted",
+								timestamp: Date.now(),
+							};
+							stream.push({ type: "start", partial: aborted });
+							stream.push({ type: "error", reason: "aborted", error: aborted });
+						},
+						{ once: true },
+					);
+					return stream;
+				}
 				const message: AssistantMessage = {
 					role: "assistant",
 					content:
@@ -244,6 +273,32 @@ describe("session mailbox delivery", () => {
 		expect(pokeAt).toBeGreaterThan(-1);
 		expect(texts.indexOf("NEXT_USER_MESSAGE")).toBeGreaterThan(pokeAt);
 		await pollUntil(mailbox, () => isMailDone(sessionId, heldId));
+	});
+
+	it("carries mail an Esc held into the turn the continue shortcut resumes, not a turn after it", async () => {
+		const { session: opened, mailbox } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		// Esc before any output: the continue shortcut re-runs the prompt as is.
+		const run = opened.prompt("stall");
+		await stallStarted.promise;
+		await opened.abort({ reason: USER_INTERRUPT_LABEL });
+		await run.catch(() => {});
+		await opened.waitForIdle();
+		contexts.length = 0;
+		expect(opened.interruptLatched).toBe(true);
+
+		const heldId = await poke(sessionId, "HELD_POKE");
+		await mailbox.poll();
+		expect(listNewMail(sessionId)).toEqual([`${heldId}.json`]);
+
+		await opened.resume();
+		await opened.waitForIdle();
+		expect(contexts).toHaveLength(1);
+		const texts = requestTexts(contexts[0]!);
+		expect(texts.indexOf("stall")).toBeGreaterThan(-1);
+		expect(texts.findIndex(text => text.includes("HELD_POKE"))).toBeGreaterThan(texts.indexOf("stall"));
+		await pollUntil(mailbox, () => isMailDone(sessionId, heldId));
+		expect(contexts).toHaveLength(1);
 	});
 
 	it("takes no waiting mail for a prompt that fails because a turn is running", async () => {
