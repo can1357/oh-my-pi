@@ -10,6 +10,7 @@
 - Background jobs, subagent tasks, owned services, IRC inbox arrivals, and replies owed to the session now write completion records to the capability channel store (`~/.local/state/capability-channels/completions.jsonl`), so the capability wait settles on omp's in-run events
 - Steering (or an interrupting peer message) now cancels an in-flight capability `wait` call: the MCP request is aborted and the server receives `notifications/cancelled`. The capability wait stays a top-level tool like the built-in wait it replaces, since a call routed through `write xd://` cannot be steered
 - New `tools.xdevAlwaysOn` setting (glob patterns matched against tool names, default `[]`): a matching enabled tool stays top-level with its own schema instead of mounting under `xd://`, like the harness's built-in always-top-level set. Use it for MCP tools that must be callable directly: in `config.yml`, `tools:` → `xdevAlwaysOn:` → `- "mcp__server_alpha_*"`. Changes apply live
+- Sessions can live in Postgres/MySQL/SQLite instead of local files: setting `SESSIONS_DB_URL` (and optional `SESSIONS_DB_TABLE`) routes every create, resume, fork, and picker path through one shared SQL-backed storage; unset, sessions stay on local files exactly as before. `scripts/import-sessions-to-sql.ts` (`--dry-run`, `--limit N`) imports existing `~/.omp/agent/sessions` JSONL into it
 
 ### Removed
 
@@ -105,7 +106,7 @@
 
 ### Fixed
 
-- Fixed auto-QA reports whose tool is a URI (`xd://tui: …`) being filed under the wrong tool name; a one-line report without `: ` after its tool name is now refused with the format hint ([#16278](https://github.com/can1357/oh-my-pi/pull/16278) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed auto-QA reports whose tool is a URI (`xd://tui: …`) being filed under the wrong tool name; a one-line report without `:` after its tool name is now refused with the format hint ([#16278](https://github.com/can1357/oh-my-pi/pull/16278) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed agents guessing `conflict://<N>` ids for merge conflicts a ranged `read` didn't show: the warning and the not-found error now point to `<path>:conflicts` to register them ([#16269](https://github.com/can1357/oh-my-pi/pull/16269) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed agents opening your own Chrome through the relay (with `browser.relay` on) when they asked the `browser` tool for Chromium with `app.tern: false`; the tool now points them to `app.relay: false` ([#16294](https://github.com/can1357/oh-my-pi/pull/16294) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `%pip install` in Python eval failing with "No module named pip" when the kernel's interpreter is a venv without pip, such as one made by `uv venv`: it now installs pip into that venv first, with `ensurepip` or, where that is unavailable, `uv` ([#16300](https://github.com/can1357/oh-my-pi/pull/16300) by [@will-bogusz](https://github.com/will-bogusz))

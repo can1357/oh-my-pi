@@ -11,6 +11,7 @@ import { listSessionsReadOnly } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
+import { resolveSessionStorage } from "../session/session-storage-env";
 import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
 import type { ModelRegistry } from "../config/model-registry";
@@ -242,6 +243,7 @@ export async function prepareSeance(context: {
 		cwd: context.session.cwd,
 		sessionDirHint: sessionFile ? path.dirname(sessionFile) : undefined,
 		artifactsDirHint: context.session.getArtifactsDir?.() ?? undefined,
+		storage: await resolveSessionStorage(),
 	});
 	const modelRegistry = context.session.modelRegistry;
 	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");
