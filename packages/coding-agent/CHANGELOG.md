@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A stream, socket or chunked transfer that dies on a request no retry layer below has replayed — the model had begun streaming, or the wording is one no provider loop retries — is now retried twice on the same model, with full-jitter backoff, before `retry.fallbackChains` moves the session down; a cut whose wording omp did not recognise no longer walks the chain on its first failure. A 429, a 529, an overload, a usage limit, a timeout, a refusal and a failure a provider loop has already replayed still walk the chain at once ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A cut stream, closed socket or truncated chunked transfer now gets up to two more tries on the same model before `retry.fallbackChains` moves the session to another one; a 429, a 529, an overload, a usage limit, a timeout and a refusal still move at once ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

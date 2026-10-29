@@ -1814,11 +1814,18 @@ export class TurnRecovery {
 	 *
 	 * Excluded on purpose:
 	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
-	 *   same cap while a chain entry may sit under a different one;
+	 *   same cap while a chain entry may sit under a different one. Capacity
+	 *   named on any link of the cause chain counts, not only the one that
+	 *   carried the wire wording;
+	 * - a rejected credential ({@link AIError.Flag.AuthFailed}) — the far side
+	 *   answered and refused, and refuses the replay too;
 	 * - a classifier refusal and an account-policy denial, which reproduce;
 	 * - a timeout ({@link AIError.Flag.Timeout}) — each held replay costs a
 	 *   whole first-event window, minutes against a wedged route, for evidence
 	 *   that already points at the route rather than at the wire.
+	 *
+	 * The caller drops the hold when `retry.maxDelayMs` would refuse the wait it
+	 * asks for; see the fail-fast cap in `#applyRetryPolicy`.
 	 *
 	 * Never applies once the retry budget is spent (e.g. `retry.maxRetries: 0`):
 	 * there is no same-model retry left, so the fallback-chain consult is the
@@ -2759,10 +2766,10 @@ export class TurnRecovery {
 		// A held wire failure takes full jitter, not the narrow band: a shared upstream
 		// failure can make many clients retry at once, so they must not replay in the
 		// same quarter-window.
-		const connectionHold = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
+		const connectionHoldCandidate = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: connectionHold
+			: connectionHoldCandidate
 				? calculateFullJitterRetryDelayMs(retrySettings.baseDelayMs, this.#retryAttempt)
 				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
@@ -3000,6 +3007,14 @@ export class TurnRecovery {
 				waitMs <= effectiveUsageLimitWaitMs;
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
+		// The hold trades the chain consult for one more request on this model, so
+		// it is only a trade while that request can still happen. When the wait it
+		// would take is past `retry.maxDelayMs` (a cap below the backoff base, e.g.
+		// 100ms against the 500ms default), the fail-fast branch below ends the
+		// turn because neither model nor credential switched — so holding would
+		// spend the chain's only consult on a retry the cap then refuses. Consult
+		// the chain instead; a switch zeroes the wait.
+		const connectionHold = connectionHoldCandidate && !exceedsDelayCap(delayMs);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A

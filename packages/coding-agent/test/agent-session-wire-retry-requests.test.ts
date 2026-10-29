@@ -1,7 +1,9 @@
 /**
  * Counts the requests that actually reach the wire when a connection dies,
- * driving the real `anthropic-messages` provider loop under a real
- * `AgentSession` against a local TCP server.
+ * driving the real provider loops under a real `AgentSession` against a local
+ * TCP server — `anthropic-messages`, whose client retries ten times of its
+ * own, and the fetch route (`openai-completions`), where `fetchWithRetry`
+ * replays six times and the pre-output retry runs that cycle twice.
  *
  * The session-level retry tests script a mock stream, so they see one request
  * per turn attempt and cannot see the provider's own retry budget at all. That
@@ -17,6 +19,7 @@ import type { ApiKey, Model } from "@oh-my-pi/pi-ai";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -242,5 +245,82 @@ describe("wire retries reaching the provider", () => {
 
 		expect(totalWireRequests).toBe(2);
 		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"]);
+	}, 60_000);
+
+	/**
+	 * The same question on the fetch route. A reset before headers is replayed
+	 * by `fetchWithRetry` (six attempts) and that whole cycle again by the
+	 * pre-output provider retry, whatever the diagnostic says — the layer reads
+	 * no text. A hold on top of those twelve would make it thirty-six.
+	 */
+	async function runFetchRoute(): Promise<{ requestsBeforeFallback: number | undefined; requestedModels: string[] }> {
+		const stub = startWireStub(() => "cutBeforeHeaders");
+		cleanups.push(() => stub.stop());
+		// Its own credential store and registry: the runs above spend anthropic
+		// and openai credentials on a dead wire, and a provider those runs left
+		// cooling down would never be offered as this run's chain candidate.
+		const routeStorage = await AuthStorage.create(path.join(tempDir.path(), "fetch-route-auth.db"));
+		cleanups.push(() => routeStorage.close());
+		const routeRegistry = new ModelRegistry(routeStorage, path.join(tempDir.path(), "fetch-route-models.yml"));
+		const bundled = getBundledModel("openai", "gpt-4o") as Model;
+		const primaryModel: Model<"openai-completions"> = {
+			...bundled,
+			api: "openai-completions",
+			baseUrl: `http://127.0.0.1:${stub.port}/v1`,
+		} as Model<"openai-completions">;
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		routeStorage.keys.setRuntime("openai", "openai-test-key");
+		routeStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		const requestedModels: string[] = [];
+		let requestsBeforeFallback: number | undefined;
+		const fallbackMock = createMockModel({
+			responses: [{ content: ["recovered on fallback"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => routeRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (requestedModel.provider === "openai") {
+					return streamOpenAICompletions(primaryModel, context, {
+						...options,
+						apiKey: resolveKey(options?.apiKey),
+					});
+				}
+				requestsBeforeFallback ??= stub.requests();
+				return fallbackMock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [fallback] },
+		});
+		settings.setModelRole("default", primary);
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry: routeRegistry });
+		cleanups.push(() => sessionManager.close());
+		cleanups.push(() => session.dispose());
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("count the wire requests");
+		await session.waitForIdle();
+		return { requestsBeforeFallback, requestedModels };
+	}
+
+	it("does not re-run the fetch budget for a reset before headers", async () => {
+		// Twelve: six `fetchWithRetry` attempts, the whole cycle again under the
+		// pre-output provider retry, and then the chain. A hold here would make
+		// it thirty-six.
+		const { requestsBeforeFallback, requestedModels } = await runFetchRoute();
+
+		expect(requestsBeforeFallback).toBe(12);
+		expect(requestedModels).toEqual(["openai/gpt-4o", "anthropic/claude-sonnet-4-5"]);
 	}, 60_000);
 });

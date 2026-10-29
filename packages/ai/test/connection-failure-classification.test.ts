@@ -104,4 +104,84 @@ describe("connection-failure classification", () => {
 
 		expect(AIError.is(AIError.classify(wrapper), AIError.Flag.Connection)).toBe(true);
 	});
+
+	it("keeps a terminal 4xx out of the retry lane when a socket errno rides along", () => {
+		// The errno arm reads `code` without looking at the message, so a request
+		// the provider rejected as malformed must not become retriable because the
+		// socket that carried the rejection was reset afterwards. Stripping only
+		// `Connection` would leave `Transient` behind and auto-retry a 400.
+		const sameLink = Object.assign(new Error("invalid request"), { status: 400, code: "ECONNRESET" });
+		const wrapper = Object.assign(new Error("400 Bad Request"), {
+			status: 400,
+			cause: Object.assign(new Error("request failed"), { code: "ECONNRESET" }),
+		});
+
+		for (const error of [sameLink, wrapper]) {
+			const id = AIError.classify(error);
+			expect(AIError.is(id, AIError.Flag.Connection)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it.each([
+		[
+			"a capacity wrapper over a wire-worded cause",
+			new Error("model is busy", { cause: new Error("socket hang up") }),
+		],
+		[
+			"a wire-worded wrapper over a capacity cause",
+			new Error("socket hang up", { cause: new Error("model is busy") }),
+		],
+		[
+			"a capacity wrapper over a cause carrying only the errno",
+			new Error("model is busy", { cause: Object.assign(new Error("request failed"), { code: "ECONNRESET" }) }),
+		],
+	])("drops the connection lane for %s", (_label, error) => {
+		// Capacity is read per link, so a refusal and the wire wording that sits
+		// on a different link used to assemble into a held chain against a model
+		// that answered and declined for load.
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Connection)).toBe(false);
+	});
+
+	it("drops the connection lane for a status deeper than the status reader reaches", () => {
+		// `status()` stops at the third link, so a wire-worded outer error over
+		// three wrappers kept the lane even though the request reached a status
+		// line — the case the transport and pre-output retries already replayed.
+		const served = new AIError.ProviderHttpError("upstream failed while generating", 500);
+		const error = new Error("premature close", {
+			cause: new Error("stream failed", { cause: new Error("relay failed", { cause: served }) }),
+		});
+
+		expect(AIError.status(error)).toBeUndefined();
+		const id = AIError.classify(error);
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it.each([
+		[
+			"a stream id that reads like a status code",
+			"<StreamReset stream_id:503, error_code:2, remote_reset:True>",
+			true,
+		],
+		["a genuine 503 beside a stream reset", "503 Service Unavailable <StreamReset stream_id:1, error_code:2>", false],
+	])("reads %s correctly", (_label, errorMessage, connection) => {
+		// The capacity readers search for bare `503`/`529` tokens, which an h2
+		// frame field satisfies by accident: `stream_id:503` is a stream, not a
+		// refusal, and the reset it reports never reached a status line.
+		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
+	});
+
+	it("keeps a rejected credential off the connection lane", () => {
+		// The far side answered and refused the credential; replaying it holds the
+		// session on a route that refuses it again, and the hold reads only the
+		// connection bit.
+		expect(flagsOfMessage("authentication failed: socket is closed")).toEqual({
+			connection: false,
+			retriable: false,
+		});
+		const assembled = AIError.classify(new Error("authentication failed", { cause: new Error("socket hang up") }));
+		expect(AIError.is(assembled, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(assembled, AIError.Flag.Connection)).toBe(false);
+	});
 });

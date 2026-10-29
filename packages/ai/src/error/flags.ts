@@ -640,6 +640,28 @@ function isCapacityPressure(text: string, reason: RateLimitReason): boolean {
 }
 
 /**
+ * Values of HTTP/2 frame fields. `stream_id:503` names a stream on the
+ * connection, not a status code, but both capacity readers search for bare
+ * `503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the pattern
+ * above), so a Python h2 `<StreamReset stream_id:503, …>` would read as a
+ * capacity refusal and veto the connection lane for a reset that never reached
+ * a status line. Blank these fields' digits before capacity is judged; a status
+ * token anywhere else in the sentence still counts.
+ */
+const H2_FRAME_FIELD_VALUE_PATTERN = /\b(?:stream_id|last_stream_id|promised_stream_id|error_code)\s*[:=]\s*\d+/gi;
+
+/**
+ * Whether a diagnostic carries capacity or quota evidence — see
+ * {@link isCapacityPressure}. Pass `reason` when the caller already parsed it;
+ * it is re-parsed only when frame-field digits had to be blanked first.
+ */
+function hasCapacityEvidence(text: string, reason?: RateLimitReason): boolean {
+	const capacityText = text.replace(H2_FRAME_FIELD_VALUE_PATTERN, match => match.replace(/\d+/g, ""));
+	if (capacityText === text) return isCapacityPressure(text, reason ?? parseRateLimitReason(text));
+	return isCapacityPressure(capacityText, parseRateLimitReason(capacityText));
+}
+
+/**
  * Transport diagnostics for a wire that died after the request was accepted:
  * the socket, the SSE stream or the chunked transfer failed partway. Two kinds
  * of wording are deliberately absent. Connect-phase (`unable to connect`,
@@ -689,7 +711,7 @@ const WIRE_FAILURE_CODE_PATTERN = /^(?:ECONNRESET|EPIPE|ECONNABORTED|UND_ERR_SOC
  */
 function isConnectionFailure(text: string, status: number | undefined, reason: RateLimitReason): boolean {
 	if (status !== undefined) return false;
-	if (isCapacityPressure(text, reason)) return false;
+	if (hasCapacityEvidence(text, reason)) return false;
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||
@@ -705,15 +727,25 @@ function isConnectionFailure(text: string, status: number | undefined, reason: R
 }
 
 /**
- * `Flag.Connection` means "no status, no capacity signal", but both assembly
- * points OR per-link kinds together: a statusless connection-worded cause
- * under a 429 or 5xx wrapper, or beside a proven usage limit, would otherwise
- * carry the bit past its own guard and hold the fallback chain for a throttled
- * route. Strip it when the assembled picture contradicts it.
+ * `Flag.Connection` means "no status, no capacity signal, no rejected
+ * credential", but both assembly points OR per-link kinds together: a
+ * statusless connection-worded cause under a 429 or 5xx wrapper, beside a
+ * proven usage limit, beside capacity wording on another link, or beside an
+ * authentication rejection would otherwise carry the bit past its own guard
+ * and hold the fallback chain for a route that answered.
+ *
+ * `capacityEvidence` is the per-link capacity reading the caller collected:
+ * `isConnectionFailure` sees only the link it classifies, so
+ * `Error("model is busy", { cause: Error("socket hang up") })` reaches here
+ * with the bit set from the cause and the refusal recorded on the wrapper.
+ * An auth rejection is read off the assembled kinds, which is where
+ * `isAuthFailureText` on any link puts it.
  */
-function withoutContradictedConnection(kinds: number, status: number | undefined): number {
+function withoutContradictedConnection(kinds: number, status: number | undefined, capacityEvidence: boolean): number {
 	if ((kinds & Flag.Connection) === 0) return kinds;
-	if (status !== undefined || (kinds & Flag.UsageLimit) !== 0) return kinds & ~Flag.Connection;
+	if (status !== undefined || capacityEvidence || (kinds & (Flag.UsageLimit | Flag.AuthFailed)) !== 0) {
+		return kinds & ~Flag.Connection;
+	}
 	return kinds;
 }
 
@@ -839,8 +871,14 @@ function classifyText(
 			// Connection-level within the same non-terminal-4xx window: the wire or
 			// a gateway in front of the model failed, so an identical replay is
 			// worth one cheap try before the fallback chain advances. A usage limit
-			// already proven above is a cap the replay re-hits, never that.
-			if ((kinds & Flag.UsageLimit) === 0 && isConnectionFailure(errorMessage, statusClean, reason)) {
+			// already proven above is a cap the replay re-hits, never that, and a
+			// statusless credential rejection ("authentication failed: socket is
+			// closed") is a request the far side answered and refused — replaying
+			// it holds the session on a route that will refuse it again.
+			if (
+				(kinds & (Flag.UsageLimit | Flag.AuthFailed)) === 0 &&
+				isConnectionFailure(errorMessage, statusClean, reason)
+			) {
 				kinds |= Flag.Connection | Flag.Transient;
 			}
 		}
@@ -895,7 +933,16 @@ export function classify(error: unknown, api?: Api): number {
 	// down so the terminal-4xx guard in classifyText sees it on the status-less
 	// cause.
 	let governingTerminalStatus: number | undefined;
+	// What the connection finalizer needs that no single link carries:
+	// `status(error)` alone stops at the third link (`statusInternal`, depth 2),
+	// and a capacity refusal on one link is invisible to the link that supplies
+	// the wire wording. The messages are kept rather than read here, so the
+	// capacity parse runs only for an error that still claims the lane.
+	let statusSeen: number | undefined;
+	const linkMessages: string[] = [];
 	while (link !== undefined && link !== null) {
+		const linkStatus = status(link);
+		statusSeen ??= linkStatus;
 		if (typeof link === "object") {
 			if (seen.has(link)) break;
 			seen.add(link);
@@ -911,9 +958,16 @@ export function classify(error: unknown, api?: Api): number {
 				}
 				// A runtime that reports the wire failure as an errno puts it in
 				// `code` and leaves the message generic ("fetch failed"), so the
-				// text predicates never see it. The status gate still applies, via
-				// `withoutContradictedConnection` below.
-				if (WIRE_FAILURE_CODE_PATTERN.test(link.code)) {
+				// text predicates never see it. Gated by the same terminal-4xx
+				// window as the text arm in `classifyText`: a request the provider
+				// rejected as malformed or unentitled replays identically, whatever
+				// errno the socket carried on the way out, so neither bit is
+				// retriable there. The status gate for the lane itself still
+				// applies, via `withoutContradictedConnection` below.
+				if (
+					WIRE_FAILURE_CODE_PATTERN.test(link.code) &&
+					!isTerminalClientErrorStatus(linkStatus ?? governingTerminalStatus)
+				) {
 					kinds |= Flag.Connection | Flag.Transient;
 				}
 			}
@@ -988,7 +1042,7 @@ export function classify(error: unknown, api?: Api): number {
 			}
 		}
 
-		const linkStatus = status(link);
+		if (linkMessage !== undefined) linkMessages.push(linkMessage);
 		const textId = classifyText(linkMessage, linkStatus ?? governingTerminalStatus, causeTokenEvidence, api);
 		kinds |= textId & KIND_MASK;
 		if (isTerminalClientErrorStatus(linkStatus)) governingTerminalStatus = linkStatus;
@@ -996,7 +1050,11 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
-	return kinds !== 0 ? create(withoutContradictedConnection(kinds, status(error))) : (status(error) ?? 0);
+	if (kinds === 0) return status(error) ?? 0;
+	// Only an error still holding the lane pays for the capacity parse.
+	const capacityEvidence =
+		(kinds & Flag.Connection) !== 0 && linkMessages.some(message => hasCapacityEvidence(message));
+	return create(withoutContradictedConnection(kinds, statusSeen, capacityEvidence));
 }
 
 /**
@@ -1165,7 +1223,13 @@ export function classifyMessage(message: {
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
 	}
-	kinds = withoutContradictedConnection(kinds, currentStatus);
+	kinds = withoutContradictedConnection(
+		kinds,
+		currentStatus,
+		(kinds & Flag.Connection) !== 0 &&
+			classificationMessage !== undefined &&
+			hasCapacityEvidence(classificationMessage),
+	);
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
 	message.errorId = id;

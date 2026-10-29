@@ -579,6 +579,7 @@ describe("AgentSession retry recovery", () => {
 			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
 			fallback: getBundledModel("openai", "gpt-5.5"),
 		},
+		retryDelays: { baseDelayMs?: number; maxDelayMs?: number } = {},
 	): Promise<{
 		primary: string;
 		fallback: string;
@@ -608,8 +609,8 @@ describe("AgentSession retry recovery", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 100,
+			"retry.baseDelayMs": retryDelays.baseDelayMs ?? 5,
+			"retry.maxDelayMs": retryDelays.maxDelayMs ?? 100,
 			"retry.maxRetries": maxRetries,
 			"retry.modelFallback": true,
 			"retry.fallbackChains": { default: [fallback] },
@@ -759,6 +760,33 @@ describe("AgentSession retry recovery", () => {
 
 		expect(requestedModels).toEqual([primary, primary]);
 		expect(retryStartDelaysMs).toEqual([0]);
+	});
+
+	it("consults the fallback chain when the delay cap would refuse the held retry", async () => {
+		// A `retry.maxDelayMs` below the backoff base makes the held same-model
+		// retry impossible: the fail-fast branch ends the turn because neither
+		// model nor credential switched. Holding would spend the turn's only
+		// chain consult on a retry the cap then refuses, so the session dies with
+		// a healthy fallback untried. With random pinned at 0.9 the held wait is
+		// 900ms against a 100ms cap.
+		vi.spyOn(Math, "random").mockReturnValue(0.9);
+		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery(
+			[
+				{
+					content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+					stopReason: "error",
+					errorMessage: TRANSFER_ENCODING_CUT,
+				},
+				{ content: ["recovered on fallback"], stopReason: "stop" },
+			],
+			2,
+			undefined,
+			{ baseDelayMs: 1000, maxDelayMs: 100 },
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+		successfulAssistantEntry(sessionManager, "recovered on fallback");
 	});
 
 	it("advances the fallback chain at once for an account-policy denial worded as a wire failure", async () => {
