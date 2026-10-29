@@ -87,6 +87,18 @@ Build invalidation is bounded: editing roboomp Python touches only the
 runtime layer; editing pi source rebuilds `oh-my-pi/pi:dev`, which
 roboomp's `Dockerfile.robomp` extends via `FROM ${PI_BASE}`.
 
+### Native artifact cache
+
+The shared native cache is stored in `/data/natives-cache`, inaccessible to slot
+users. Cache hits use independent reflinked files when supported, otherwise
+copies. Image-built artifacts seed the cache; successful tasks can add entries
+for newer source states. Consequently, tasks sharing a cache key must trust
+each other's executable artifacts, as with the shared Cargo and Rustup caches.
+
+To disable it in Compose, set `ROBOMP_NATIVES_CACHE_ENABLED=false` in `.env`
+and recreate the orchestrator. The former `/data/cache/pi-natives` cache is
+not reused; remove it after checking whether it contains sensitive data.
+
 ### Public URL
 
 roboomp does not ship a tunnel. Cloudflare, smee, ngrok are all fine. The

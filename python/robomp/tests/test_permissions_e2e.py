@@ -338,11 +338,11 @@ def test_git_pool_metadata_survives_root_push_and_retry_slot(
 
 
 def _prepare_shared_natives_cache(slot_tmp_path: Path) -> NativesCache:
-    """Provision `/data/cache/pi-natives` shape (root:omp, setgid 2770)."""
+    """Provision a root-only shared cache."""
     cache_root = slot_tmp_path / "cache" / "pi-natives"
     cache_root.mkdir(parents=True)
-    os.chown(cache_root, 0, _SHARED_OMP_GID)
-    cache_root.chmod(0o2770)
+    os.chown(cache_root, 0, 0)
+    cache_root.chmod(0o700)
     return NativesCache(cache_root)
 
 
@@ -368,18 +368,7 @@ def test_natives_cache_shares_artifacts_across_slot_workspaces(
     db: Database,
     tool_loop: asyncio.AbstractEventLoop,
 ) -> None:
-    """End-to-end: capture under slot 1, populate under slot 2, prove that:
-
-    1. A capture from a slot-owned workspace lands in the shared cache with
-       group `omp` setgid inheritance so any other slot can read it.
-    2. ensure_workspace under a different slot UID auto-populates the cached
-       `.node` (hardlink, inode shared) and copies the companions.
-    3. Slot 2 can read the populated `.node`, and a temp-rename rebuild
-       (mirroring napi's `installBinary`) leaves the cache entry intact.
-    4. An in-place truncate-rewrite of a companion (mirroring `gen-enums.ts`
-       / `installGeneratedBindings`) does NOT mutate the cached companion —
-       this is exactly why companions are copied, not hardlinked.
-    """
+    """Slots reuse cached artifacts without gaining access to the cache itself."""
     _require_linux_root_toolchain()
     workspaces = slot_tmp_path / "workspaces"
     natives_cache = _prepare_shared_natives_cache(slot_tmp_path)
@@ -405,14 +394,12 @@ def test_natives_cache_shares_artifacts_across_slot_workspaces(
 
     key = natives_compute_key(ws1.repo_dir, target="linux-arm64")
     native_dir1 = ws1.repo_dir / "packages" / "natives" / "native"
-    stored = natives_cache.capture(_REPO, key, native_dir1, source_workspace=ws1.workspace_key)
+    stored = natives_cache.capture(_REPO, key, native_dir1, source_workspace=ws1.workspace_key, expected_uid=_SLOT_ONE)
     assert stored is not None
     cached_node = stored / "pi_natives.linux-arm64.node"
     cached_companion = stored / "index.d.ts"
-    # Cache root is setgid `omp`; new files inherit gid `omp` so any slot
-    # with `extra_groups=[omp]` can read them.
-    assert cached_node.stat().st_gid == _SHARED_OMP_GID
-    assert cached_companion.stat().st_gid == _SHARED_OMP_GID
+    assert cached_node.stat().st_uid == 0
+    assert cached_companion.stat().st_uid == 0
 
     # --- Workspace 2: a different slot UID gets auto-populated on ensure. ---
     ws2 = manager.ensure_workspace(
@@ -429,17 +416,16 @@ def test_natives_cache_shares_artifacts_across_slot_workspaces(
     native_dir2 = ws2.repo_dir / "packages" / "natives" / "native"
     ws2_node = native_dir2 / "pi_natives.linux-arm64.node"
     ws2_companion = native_dir2 / "index.d.ts"
-    assert ws2_node.exists(), "auto-populate must hardlink the .node into ws2"
+    assert ws2_node.exists(), "auto-populate must copy the .node into ws2"
     assert ws2_companion.exists(), "auto-populate must copy companions into ws2"
 
-    # The .node is hardlinked: same inode, nlink ≥ 2.
-    assert ws2_node.stat().st_ino == cached_node.stat().st_ino
-    assert cached_node.stat().st_nlink >= 2
+    # Each populated artifact has an independent inode.
+    assert ws2_node.stat().st_ino != cached_node.stat().st_ino
     # The companion is COPIED: independent inode.
     assert ws2_companion.stat().st_ino != cached_companion.stat().st_ino
 
-    # Slot 2 must be able to read the populated artifacts (group omp + 0660
-    # via setgid inheritance from the cache root).
+    # Slot 2 can read the workspace copies but not the root-only cache.
+    _run_ok(bindings2, ["test", "!", "-r", str(cached_node)])
     _run_ok(bindings2, ["test", "-r", "packages/natives/native/pi_natives.linux-arm64.node"])
     _run_ok(bindings2, ["test", "-r", "packages/natives/native/index.d.ts"])
 
@@ -478,5 +464,5 @@ def test_natives_cache_shares_artifacts_across_slot_workspaces(
 
     # --- Recapture from ws2 (different key now — but same key here since
     #     tree didn't change) is idempotent under the flock. ---
-    again = natives_cache.capture(_REPO, key, native_dir2, source_workspace=ws2.workspace_key)
+    again = natives_cache.capture(_REPO, key, native_dir2, source_workspace=ws2.workspace_key, expected_uid=_SLOT_TWO)
     assert again is not None and again == stored, "second capture must reuse the same entry"
