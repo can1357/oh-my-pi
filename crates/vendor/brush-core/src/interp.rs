@@ -431,6 +431,28 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
+/// Cooperates with Tokio's scheduler at an interpreter loop boundary.
+///
+/// `mapfile` uses a 64 KiB byte budget; this checkpoint spends Tokio's
+/// cooperative task budget instead. They share only the yield-then-check
+/// cancellation shape.
+///
+/// The cancellation check alone is not enough. Every sub-future of a loop of
+/// synchronous builtins (`while :; do :; done`, a `for` over expanded words,
+/// the writer of a process substitution) is already ready, so the future never
+/// returns `Pending` and the worker polling it never returns to the scheduler.
+/// Nothing outside can then take that worker back: the run's own timer, the
+/// job's cancel token (set through an `async fn` that needs a worker of its
+/// own) and `JoinHandle::abort` (which drops a future at its next yield point)
+/// all wait for a yield that never comes. One task per worker is therefore
+/// enough to take the whole runtime, with no way back short of ending the
+/// process. Spending the cooperative budget restores all three.
+async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	// After the cooperative yield, so a cancellation raised while this task was
+	// parked is seen on the step that follows it.
+	ensure_not_cancelled(params)
+}
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -471,7 +493,7 @@ impl Execute for ast::Program {
 		let mut result = ExecutionResult::success();
 
 		for command in &self.complete_commands {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			// Execute the command and handle any errors without immediately propagating
 			// them. This allows interactive shells to continue executing subsequent
 			// commands even after errors.
@@ -510,7 +532,7 @@ impl Execute for ast::CompoundList {
 		let mut result = ExecutionResult::success();
 
 		for ast::CompoundListItem(ao_list, sep) in &self.0 {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
 			if run_async {
@@ -796,7 +818,7 @@ impl Execute for ast::AndOrList {
 		let mut result = self.first.execute(shell, &first_params).await?;
 
 		for (index, next_ao) in self.additional.iter().enumerate() {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			// Check for non-normal control flow.
 			if !result.is_normal_flow() {
 				break;
@@ -1390,7 +1412,7 @@ impl Execute for ast::ForClauseCommand {
 		}
 
 		for value in expanded_values {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if shell.options().print_commands_and_arguments {
 				if let Some(unexpanded_values) = &self.values {
 					shell
@@ -1584,7 +1606,7 @@ impl Execute for (WhileOrUntil, &ast::WhileOrUntilClauseCommand) {
 		condition_params.suppress_errexit = true;
 
 		loop {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			let condition_result = test_condition.execute(shell, &condition_params).await?;
 
 			// Update status for condition
@@ -1657,7 +1679,7 @@ impl Execute for ast::ArithmeticForClauseCommand {
 		}
 
 		loop {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if let Some(condition) = &self.condition {
 				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
 				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
