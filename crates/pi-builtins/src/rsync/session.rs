@@ -47,7 +47,7 @@ use crate::rsync::flist::FlistOpts;
 use crate::rsync::flists::Flists;
 use crate::rsync::generator::{self, DestTrees, SibOut, Sibling};
 use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
-use crate::rsync::iconv;
+use crate::rsync::iconv::{self, MsgCharset};
 use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
 use crate::rsync::meta::MetaOpts;
 use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
@@ -557,11 +557,18 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 	if io.cancel.load(Ordering::Relaxed) { RERR_SIGNAL } else { code }
 }
 
+/// The charset the shell's locale lets printed messages carry (upstream
+/// setup_iconv's `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`).
+fn msg_charset(io: &HostIo) -> MsgCharset {
+	MsgCharset::for_locale(&iconv::locale_charset(&|key: &str| io.getenv(key)))
+}
+
 /// A logger for diagnostics before the run's own logger exists.
 fn startup_logger(io: &HostIo, am_server: bool) -> Logger {
 	let cfg = LogConfig {
 		am_server,
 		human_readable: 1,
+		charset: msg_charset(io),
 		time_zone: Some(io.tz.clone()),
 		..LogConfig::default()
 	};
@@ -577,6 +584,7 @@ fn log_config(io: &HostIo, opts: &Options, am_server: bool, local_server: bool) 
 		log_file_format: opts.logfile_format.clone(),
 		human_readable: u8::try_from(opts.human_readable).unwrap_or(u8::MAX),
 		eight_bit_output: opts.allow_8bit_chars,
+		charset: msg_charset(io),
 		stderr_mode: opts.stderr_mode(),
 		am_server,
 		quiet: opts.quiet > 0,

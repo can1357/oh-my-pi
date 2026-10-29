@@ -2791,8 +2791,22 @@ mod testing {
 		stdin: &str,
 		cwd: impl Into<PathBuf>,
 	) -> (i32, Capture) {
+		run_util_env::<U>(argv, stdin, cwd, &[])
+	}
+
+	/// [`run_util`] with `env` exported in the host environment, for a utility
+	/// whose behaviour depends on a variable (the locale, `RSYNC_*`).
+	pub(crate) fn run_util_env<U: Utility>(
+		argv: &[&str],
+		stdin: &str,
+		cwd: impl Into<PathBuf>,
+		env: &[(&str, &str)],
+	) -> (i32, Capture) {
 		let spec = Spec::of_sync::<U>();
 		let (mut host, capture) = test_host(spec, stdin, cwd);
+		for (key, value) in env {
+			host.set_test_var(key, value);
+		}
 		let code = match parse_for_test::<U>(spec, argv, &mut host) {
 			Ok(parsed) => run_caught::<U>(parsed, &mut host),
 			Err(code) => code,
@@ -3394,7 +3408,7 @@ mod testing {
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, run_async_util, run_script, run_util};
+pub(crate) use testing::{Capture, run_async_util, run_script, run_util, run_util_env};
 #[cfg(all(test, unix, feature = "util.grep"))]
 pub(crate) use testing::tree_with_sparse_file;
 

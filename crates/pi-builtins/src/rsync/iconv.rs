@@ -15,6 +15,7 @@
 //! way a build without ICONV_OPTION does (options already refuse `--iconv`).
 
 use std::io;
+use std::sync::Arc;
 
 use crate::rsync::exit::{RERR_UNSUPPORTED, RsyncError};
 
@@ -58,6 +59,76 @@ pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
 /// What `nl_langinfo(CODESET)` returns for the C locale.
 fn ascii_codeset() -> &'static str {
 	if cfg!(target_os = "linux") { "ANSI_X3.4-1968" } else { "US-ASCII" }
+}
+
+/// How the bytes of a message are checked before they are printed, derived
+/// from the locale charset: upstream's `ic_chck`, which setup_iconv opens as
+/// `iconv_open(defset, defset)` for a client that escapes, and log.c's
+/// `rwrite` runs every message through — each byte the charset cannot
+/// represent is printed as `\#ddd`, the rest as it is.
+#[derive(Clone, Default)]
+pub(crate) enum MsgCharset {
+	/// The C/POSIX locale (and any locale libc cannot name a codeset for):
+	/// no byte above 0x7F converts, so every one of them is escaped.
+	#[default]
+	Ascii,
+	/// A UTF-8 locale: valid sequences pass, each byte of an invalid one is escaped.
+	Utf8,
+	/// Any other charset, checked through iconv like upstream.
+	Other(Arc<MsgCheck>),
+	/// `iconv_open` refused the charset (upstream `ic_chck == (iconv_t)-1`):
+	/// the caller falls back to escaping by printability.
+	Bytes,
+}
+
+impl MsgCharset {
+	/// The check a locale charset ([`locale_charset`]) calls for.
+	pub(crate) fn for_locale(charset: &str) -> Self {
+		let is = |name: &str| charset.eq_ignore_ascii_case(name);
+		if charset.is_empty() || is(ascii_codeset()) || is("US-ASCII") || is("ASCII") {
+			return Self::Ascii;
+		}
+		if is("UTF-8") || is("UTF8") {
+			return Self::Utf8;
+		}
+		MsgCheck::open(charset).map_or(Self::Bytes, |check| Self::Other(Arc::new(check)))
+	}
+}
+
+/// Upstream's `ic_chck`: a conversion from the locale charset to itself, which
+/// converts what the charset accepts and stops at the first byte it does not.
+pub(crate) struct MsgCheck {
+	#[cfg(unix)]
+	conv: sys::Converter,
+}
+
+impl MsgCheck {
+	/// None when `iconv_open` refuses the charset (or the platform has no iconv).
+	fn open(charset: &str) -> Option<Self> {
+		#[cfg(unix)]
+		return sys::Converter::open(charset, charset).ok().map(|conv| Self { conv });
+		#[cfg(not(unix))]
+		{
+			let _ = charset;
+			None
+		}
+	}
+
+	/// The longest prefix of `msg` the charset accepts, converted, and how many
+	/// input bytes it came from: a short count means the next byte starts an
+	/// invalid or incomplete sequence (upstream rwrite's `iconvbufs` loop).
+	pub(crate) fn convert_prefix(&self, msg: &[u8]) -> (Vec<u8>, usize) {
+		#[cfg(unix)]
+		{
+			let (out, used, _) = self.conv.run(msg, false);
+			(out, used)
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = msg;
+			(Vec::new(), 0)
+		}
+	}
 }
 
 /// A pair of open conversions for one side of a transfer.
@@ -225,6 +296,18 @@ mod sys {
 		/// Converts all of `input` (state reset first, like ICB_INIT); an invalid or
 		/// truncated sequence fails with its errno.
 		pub(super) fn convert(&self, input: &[u8]) -> io::Result<Vec<u8>> {
+			let (out, _, err) = self.run(input, true);
+			match err {
+				Some(err) => Err(err),
+				None => Ok(out),
+			}
+		}
+
+		/// Converts from the start of `input` until it is exhausted or a sequence
+		/// the charset refuses is reached: the output, the input bytes consumed,
+		/// and the error that stopped it. `flush` ends the conversion by writing
+		/// out any shift state.
+		pub(super) fn run(&self, input: &[u8], flush: bool) -> (Vec<u8>, usize, Option<io::Error>) {
 			let guard = lock(&self.cd);
 			let cd = guard.0;
 			// SAFETY: null buffers reset the conversion state.
@@ -235,6 +318,7 @@ mod sys {
 			let mut in_ptr = input.as_ptr() as *mut c_char;
 			let mut in_left = input.len();
 			let mut done = 0usize;
+			let mut failure = None;
 			while in_left > 0 {
 				let mut out_ptr = out[done..].as_mut_ptr() as *mut c_char;
 				let mut out_left = out.len() - done;
@@ -251,12 +335,14 @@ mod sys {
 							out.resize(out.len() + grow, 0);
 						},
 						Some(libc::EINTR) => {},
-						_ => return Err(err),
+						_ => {
+							failure = Some(err);
+							break;
+						},
 					}
 				}
 			}
-			// Flush any shift state.
-			loop {
+			while flush && failure.is_none() {
 				let mut out_ptr = out[done..].as_mut_ptr() as *mut c_char;
 				let mut out_left = out.len() - done;
 				// SAFETY: a null input flushes; the output range is the unused tail of `out`.
@@ -272,7 +358,7 @@ mod sys {
 				break;
 			}
 			out.truncate(done);
-			Ok(out)
+			(out, input.len() - in_left, failure)
 		}
 	}
 }

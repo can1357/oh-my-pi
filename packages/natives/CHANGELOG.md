@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's built-in `rsync` now escapes non-ASCII bytes in the file names it prints when the shell's locale is C/POSIX, the way rsync 3.5.1 does; a UTF-8 locale and `--8-bit-output` print them unescaped ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

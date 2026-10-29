@@ -1,9 +1,10 @@
 //! The scenario tables. One line per scenario:
-//! `c(name, expected_exit, fixture_tweaks, args)`, or `u(…)` for a scenario
-//! whose stdout lines the reference emits in a racy order (its sender,
-//! generator, and receiver are separate processes, and the incremental file
-//! list of a subdirectory is built while earlier files are itemized): those
-//! compare stdout as a sorted multiset of lines.
+//! `c(name, expected_exit, fixture_tweaks, args)`, `cc(…)` for a scenario run
+//! in the C locale instead of the UTF-8 one (see [`super::C_LOCALE`]), or
+//! `u(…)` for a scenario whose stdout lines the reference emits in a racy
+//! order (its sender, generator, and receiver are separate processes, and the
+//! incremental file list of a subdirectory is built while earlier files are
+//! itemized): those compare stdout as a sorted multiset of lines.
 //!
 //! - `expected_exit` is what the reference returns (asserted for both sides,
 //!   so a table typo surfaces as a reference mismatch rather than a silent
@@ -17,7 +18,7 @@
 //! Every scenario here was run against rsync 3.5.1 repeatedly to confirm its
 //! normalized output and resulting trees are deterministic.
 
-use super::{Case, c, u};
+use super::{Case, c, cc, u};
 
 /// Local transfers: both halves in one invocation.
 pub(super) const LOCAL: &[Case] = &[
@@ -36,6 +37,10 @@ pub(super) const LOCAL: &[Case] = &[
 	c("single_file", 0, "", &["-ai", "src/big.bin", "dst/"]),
 	c("single_file_rename", 0, "", &["-ai", "src/small.txt", "renamed.txt"]),
 	c("odd_names", 0, "", &["-ai", "src/with space.txt", "src/ünï cødé.txt", "src/-dash", "dst/"]),
+	// The same names in the C locale, where both sides escape every byte above
+	// 0x7F, and with the `-8` that turns the escaping off on both.
+	cc("odd_names_c_locale", 0, "", &["-ai", "src/with space.txt", "src/ünï cødé.txt", "src/-dash", "dst/"]),
+	cc("odd_names_c_locale_8bit", 0, "", &["-ai", "-8", "src/ünï cødé.txt", "dst/"]),
 	c("stats", 0, "stale", &["-a", "--stats", "src/", "dst/"]),
 	c("stats_h", 0, "stale", &["-a", "--stats", "-h", "src/", "dst/"]),
 	c("stats_hh", 0, "stale", &["-a", "--stats", "-hh", "src/", "dst/"]),
@@ -190,6 +195,8 @@ pub(super) const LOCAL: &[Case] = &[
 pub(super) const RSH: &[Case] = &[
 	c("push", 0, "", &["-ai", "src/", "h:dst/"]),
 	c("pull", 0, "", &["-ai", "h:src/", "dst/"]),
+	cc("push_odd_names_c_locale", 0, "", &["-ai", "src/ünï cødé.txt", "h:dst/"]),
+	cc("pull_odd_names_c_locale", 0, "", &["-ai", "h:src/ünï cødé.txt", "dst/"]),
 	c("push_stale", 0, "stale", &["-ai", "src/", "h:dst/"]),
 	c("pull_stale", 0, "stale", &["-ai", "h:src/", "dst/"]),
 	c("push_delta_stats", 0, "stale", &["-a", "--stats", "src/", "h:dst/"]),

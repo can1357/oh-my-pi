@@ -35,6 +35,7 @@ use crate::rsync::{
 		SIGNIFICANT_ITEM_FLAGS, mode_is_dir, mode_is_reg,
 	},
 	exit::{self, RsyncError},
+	iconv::MsgCharset,
 };
 
 /// Message classes (upstream `enum logcode`; values equal the MSG_* codes).
@@ -119,6 +120,9 @@ pub(crate) struct LogConfig {
 	/// -h level: 0 = --no-h, 1 = default (separators), 2 = -h (1000), 3 = -hh (1024).
 	pub human_readable: u8,
 	pub eight_bit_output: bool,
+	/// What the locale lets a printed message contain (upstream `ic_chck`);
+	/// bytes it cannot represent are octal-escaped.
+	pub charset: MsgCharset,
 	/// [`STDERR_ERRORS`], [`STDERR_ALL`], or [`STDERR_CLIENT`].
 	pub stderr_mode: u8,
 	pub am_server: bool,
@@ -738,7 +742,10 @@ impl Logger {
 			to_stderr = true;
 		}
 		let escape_8bit = !cfg.eight_bit_output;
-		let validate_utf8 = escape_8bit && !cfg.am_server && inner.remote.is_none();
+		// Upstream opens ic_chck only for a client that escapes (rsync.c
+		// setup_iconv) and checks every message it prints against it.
+		let checked =
+			(escape_8bit && !cfg.am_server && inner.remote.is_none()).then_some(&cfg.charset);
 		let mut line = Vec::with_capacity(buf.len() + 8);
 		if inner.needs_newline.swap(0, Ordering::Relaxed) != 0 {
 			line.push(b'\n');
@@ -754,15 +761,35 @@ impl Logger {
 			}
 			_ => body,
 		};
-		if validate_utf8 {
-			for chunk in body.utf8_chunks() {
-				filter_into(&mut line, chunk.valid().as_bytes(), false, false);
-				for &byte in chunk.invalid() {
-					push_octal(&mut line, byte);
+		match checked {
+			Some(MsgCharset::Utf8) => {
+				for chunk in body.utf8_chunks() {
+					filter_into(&mut line, chunk.valid().as_bytes(), false, false);
+					for &byte in chunk.invalid() {
+						push_octal(&mut line, byte);
+					}
 				}
-			}
-		} else {
-			filter_into(&mut line, body, escape_8bit, false);
+			},
+			Some(MsgCharset::Ascii) => {
+				let mut rest = body;
+				while let Some(at) = rest.iter().position(|byte| !byte.is_ascii()) {
+					filter_into(&mut line, &rest[..at], false, false);
+					push_octal(&mut line, rest[at]);
+					rest = &rest[at + 1..];
+				}
+				filter_into(&mut line, rest, false, false);
+			},
+			Some(MsgCharset::Other(check)) => {
+				let mut rest = body;
+				while !rest.is_empty() {
+					let (converted, used) = check.convert_prefix(rest);
+					filter_into(&mut line, &converted, false, false);
+					let Some(&bad) = rest.get(used) else { break };
+					push_octal(&mut line, bad);
+					rest = &rest[used + 1..];
+				}
+			},
+			Some(MsgCharset::Bytes) | None => filter_into(&mut line, body, escape_8bit, false),
 		}
 		if let Some(last) = trailing {
 			line.push(last);
@@ -1036,9 +1063,10 @@ mod tests {
 
 	#[test]
 	fn names_are_escaped_like_the_reference() {
-		// Captured: `\001` and invalid UTF-8 escape, valid UTF-8, tab, and DEL pass, and a
-		// literal `\#123` gets its backslash escaped.
-		let (logger, out, _) = client(LogConfig::default());
+		// Captured in a UTF-8 locale: `\001` and invalid UTF-8 escape, valid UTF-8, tab,
+		// and DEL pass, and a literal `\#123` gets its backslash escaped.
+		let utf8 = || LogConfig { charset: MsgCharset::Utf8, ..LogConfig::default() };
+		let (logger, out, _) = client(utf8());
 		logger.rprintf(LogCode::Info, b"a\x01b\n");
 		logger.rprintf(LogCode::Info, "caf\u{e9}\n".as_bytes());
 		logger.rprintf(LogCode::Info, b"x\\#123y\n");
@@ -1048,9 +1076,46 @@ mod tests {
 			out.bytes(),
 			b"a\\#001b\ncaf\xc3\xa9\nx\\#134#123y\nt\tz\x7fd\nl1 -> b\\#377c\\#303\n".to_vec()
 		);
-		let (logger, out, _) = client(LogConfig { eight_bit_output: true, ..LogConfig::default() });
+		let (logger, out, _) = client(LogConfig { eight_bit_output: true, ..utf8() });
 		logger.rprintf(LogCode::Info, b"l1 -> b\xffc\xc3 \xc2\x85\x01\n");
 		assert_eq!(out.bytes(), b"l1 -> b\xffc\xc3 \xc2\x85\\#001\n".to_vec());
+	}
+
+	/// The locale decides which bytes of a name reach the terminal. rsync 3.5.1
+	/// from an empty environment (the C locale) prints
+	/// `>f+++++++++ \#303\#274n\#303\#257 c\#303\#270d\#303\#251.txt` for
+	/// `ünï cødé.txt`, prints the name itself under `LC_ALL=C.UTF-8`, and prints
+	/// it under `-8` in either locale.
+	#[test]
+	fn high_bit_bytes_are_escaped_for_the_locale_charset() {
+		let name = ">f+++++++++ ünï cødé.txt\n".as_bytes();
+		// An empty environment is the C locale, which is LogConfig's default.
+		let (logger, out, _) = client(LogConfig::default());
+		logger.rprintf(LogCode::Info, name);
+		assert_eq!(
+			out.bytes(),
+			b">f+++++++++ \\#303\\#274n\\#303\\#257 c\\#303\\#270d\\#303\\#251.txt\n".to_vec()
+		);
+		let (logger, out, _) = client(LogConfig { charset: MsgCharset::Utf8, ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, name);
+		assert_eq!(out.bytes(), name.to_vec());
+		let (logger, out, _) = client(LogConfig { eight_bit_output: true, ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, name);
+		assert_eq!(out.bytes(), name.to_vec());
+	}
+
+	/// A locale charset that is neither ASCII nor UTF-8 is checked through
+	/// iconv: Latin-1's own `é` (0xE9) prints, where a UTF-8 locale escapes it.
+	#[cfg(unix)]
+	#[test]
+	fn other_locale_charsets_print_what_they_can_represent() {
+		let latin1 = MsgCharset::for_locale("ISO-8859-1");
+		let (logger, out, _) = client(LogConfig { charset: latin1, ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, b"caf\xe9\n");
+		assert_eq!(out.bytes(), b"caf\xe9\n".to_vec());
+		let (logger, out, _) = client(LogConfig { charset: MsgCharset::Utf8, ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, b"caf\xe9\n");
+		assert_eq!(out.bytes(), b"caf\\#351\n".to_vec());
 	}
 
 	#[test]
