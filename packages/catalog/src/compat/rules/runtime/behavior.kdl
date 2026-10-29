@@ -428,7 +428,6 @@ behavior {
 		model "oss-120b"
 		model "cerebras/zai-glm-4.7"
 		model "cerebras/zai-glm-4.6"
-		model "cerebras/zai-glm"
 		model "claude-haiku-4-5"
 		model "claude-haiku-4.5"
 		model "haiku-4-5"
@@ -463,7 +462,6 @@ behavior {
 		model "anthropic/claude-opus-5"
 		model "claude-opus-5"
 		model "opus-5"
-		model "openai-codex/gpt-5.5"
 		model "gpt-5.5"
 		model "claude-opus-4-8"
 		model "claude-opus-4.8"
@@ -479,6 +477,11 @@ behavior {
 		model "openrouter/google/gemini-3-pro-image"
 		model "google/gemini-3-pro-image"
 		model "deepinfra/black-forest-labs/FLUX-2-pro"
+		// Factory Droid last, in the CLI's own preference order: a Factory
+		// login alone can generate, and no other provider's turn moves.
+		model "factory-droid/gpt-image-2.5-sunburst"
+		model "factory-droid/gpt-image-2.5-flare"
+		model "factory-droid/gemini-3-pro-image-preview"
 	}
 	role-defaults "web" {
 		model "web/parallel"

@@ -98,7 +98,7 @@ exec hosts. Replaces cargo-xwin.
   compiler/linker/rc/mt to the wrappers and selects the static release `/MT`
   runtime, matching the addon's static-CRT policy (issue #8439).
 
-## What to verify on can.internal (linux-x64)
+## What to verify on the Linux CI runners (linux-x64)
 
 1. `bazel build //:natives-win32-x64-baseline` end-to-end link; check the
    produced `pi_natives.win32-x64-baseline.node` imports (dumpbin/llvm-readobj):

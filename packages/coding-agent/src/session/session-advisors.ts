@@ -2399,12 +2399,10 @@ export class SessionAdvisors {
 			compactionContextTokens(
 				providerContextTokens,
 				fixedPromptTokens +
-					estimateContextToolSchemaTokens(
-						agent.state.tools,
-						agent.tokenizer,
-						model,
-						this.#host.settings.revision,
-					) +
+					estimateContextToolSchemaTokens(agent.state.tools, agent.tokenizer, model, {
+						sourceRevision: this.#host.settings.revision,
+						pruneDescriptions: agent.prunesToolDescriptions(model),
+					}) +
 					storedConversationTokens +
 					incomingTokens,
 			);
