@@ -750,7 +750,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	async #tagNumberedRows(text: string, view: NumberedView): Promise<string> {
 		const spillThreshold = resolveArtifactSpillThreshold(this.session.settings);
 		if (Buffer.byteLength(text) > spillThreshold) return text;
-		const tags = await planNumberedFileTags(this.session, view.command, view.cwd, view.output);
+		const tags = await planNumberedFileTags(
+			this.session,
+			view.command,
+			view.cwd,
+			view.output,
+			shellBuiltinsDisabled(this.session.settings),
+		);
 		if (!tags) return text;
 		const tagged = `${text}\n\n${tags.notice}`;
 		if (Buffer.byteLength(tagged) > spillThreshold) return text;

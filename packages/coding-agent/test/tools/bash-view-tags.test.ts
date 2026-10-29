@@ -295,6 +295,24 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).headHash(path.join(cwd, "1-target"))).toBeNull();
 	});
 
+	it("names no tag for a system rg that may read a config file, unless told to skip it", async () => {
+		// A `--no-filename` in `RIPGREP_CONFIG_PATH` prints a's row `2:target` as
+		// `1:2:target`, which reads as row 2 of file `1`, a row `-m1` never printed.
+		await Bun.write(path.join(cwd, "a"), "2:target\n");
+		await Bun.write(path.join(cwd, "1"), "target-first\ntarget\n");
+		expect(
+			await planNumberedFileTags(session, "rg -nm1 target a 1", cwd, "1:2:target\n1:target-first\n", true),
+		).toBeUndefined();
+		const tags = await planNumberedFileTags(
+			session,
+			"rg --no-config -nm1 target a 1",
+			cwd,
+			"a:1:2:target\n1:1:target-first\n",
+			true,
+		);
+		expect(tags?.notice).toContain("[1#");
+	});
+
 	it("keeps a redirection's quoted target attached to it", async () => {
 		// `-m1` stops each file at its first match: row 2 comes from b, not a.
 		await Bun.write(path.join(cwd, "a"), "target\ntarget\n");

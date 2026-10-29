@@ -127,6 +127,7 @@ const NUMBERERS: Record<string, OptionSpec> = {
 			"multiline",
 			"pcre2",
 			"text",
+			"no-config",
 		]),
 		longValued: new Set(["max-count", "regexp", "file", "color", "max-columns", "threads"]),
 		longOptional: new Set(),
@@ -196,9 +197,11 @@ interface Numbered {
 /**
  * The words naming the files a numberer reads (its pattern and option values
  * dropped), or `undefined` when the command does not print those files' line
- * numbers or takes an option outside its {@link OptionSpec}.
+ * numbers or takes an option outside its {@link OptionSpec}. A system `rg`
+ * (`systemTools`) also reads options from `RIPGREP_CONFIG_PATH`, which can
+ * change its rows (`--no-filename`), unless the command passes `--no-config`.
  */
-function numbererFiles(name: string, args: Word[]): Numbered | undefined {
+function numbererFiles(name: string, args: Word[], systemTools: boolean): Numbered | undefined {
 	if (name === "nl") {
 		// Only `-ba` numbers every line; the default skips blank ones.
 		const [option, ...files] = args;
@@ -212,6 +215,7 @@ function numbererFiles(name: string, args: Word[]): Numbered | undefined {
 	let withNames = false;
 	let patternGiven = false;
 	let optionsEnded = false;
+	let configIgnored = !systemTools || name !== "rg";
 	const operands: Word[] = [];
 	for (let i = 0; i < args.length; i++) {
 		const word = args[i].value;
@@ -240,6 +244,7 @@ function numbererFiles(name: string, args: Word[]): Numbered | undefined {
 				return undefined;
 			}
 			withNames ||= option === "with-filename";
+			configIgnored ||= option === "no-config";
 			if (option === spec.numberLong) {
 				if (!early) return undefined;
 				numbered = true;
@@ -265,7 +270,7 @@ function numbererFiles(name: string, args: Word[]): Numbered | undefined {
 		}
 	}
 	// An expanded pattern can turn into a pattern and files (`s*`).
-	if (!numbered || operands.some(operand => EXPANDING.test(operand.active))) return undefined;
+	if (!numbered || !configIgnored || operands.some(operand => EXPANDING.test(operand.active))) return undefined;
 	return { files: spec.pattern && !patternGiven ? operands.slice(1) : operands, withNames, rows: spec.rows };
 }
 
@@ -298,7 +303,7 @@ interface ParsedView {
  * working directory. A second command, any other command or filter, keyword,
  * subshell, comment or input redirection gives `undefined`.
  */
-function parseView(command: string, cwd: string): ParsedView | undefined {
+function parseView(command: string, cwd: string, systemTools: boolean): ParsedView | undefined {
 	const tokens = lexShellCommand(command);
 	const stages: Word[][] = [[]];
 	for (let i = 0; i < tokens.length; i++) {
@@ -331,7 +336,7 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 
 	const [[name, ...args], ...filters] = stages;
 	if (name === undefined) return undefined;
-	const numbered = numbererFiles(name.value, args);
+	const numbered = numbererFiles(name.value, args, systemTools);
 	if (!numbered || numbered.files.length === 0 || numbered.files.length > MAX_TAGGED_FILES) return undefined;
 	for (const [stage, ...stageArgs] of filters) {
 		if (stage === undefined || !keepsRows(stage.value, stageArgs)) return undefined;
@@ -371,18 +376,20 @@ async function readLines(file: string): Promise<{ text: string; lines: string[] 
 /**
  * Verify a finished `bash` command's numbered rows against the files they
  * name, or `undefined` when the output shows no current line of any file.
- * Nothing is recorded until the returned `commit` runs.
+ * Nothing is recorded until the returned `commit` runs. `systemTools`: the
+ * shell runs system binaries in place of its builtins (`PI_DISABLE_UUTILS_BUILTINS`).
  */
 export async function planNumberedFileTags(
 	session: ToolSession,
 	command: string,
 	cwd: string,
 	output: string,
+	systemTools = false,
 ): Promise<NumberedFileTags | undefined> {
 	if (!path.isAbsolute(cwd) || !resolveFileDisplayMode(session).hashLines || !MAYBE_NUMBERED.test(output)) {
 		return undefined;
 	}
-	const view = parseView(command, cwd);
+	const view = parseView(command, cwd, systemTools);
 	if (!view) return undefined;
 
 	const contents = new Map<string, { text: string; lines: string[] }>();
