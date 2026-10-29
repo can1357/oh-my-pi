@@ -1728,4 +1728,207 @@ describe("AgentSession triggerTurn aside", () => {
 		expect(persisted(session, "CARD_AT_DISPOSE")).toBe(true);
 		expect(agentEnds).toEqual([false, true]);
 	});
+
+	it("is not ended by a send that fails while the turn its records went to is still running", async () => {
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			await harness.session.sendCustomMessage(card("CARD_IN_RUNNING_WAKE"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, mock, agentEnds } = harness;
+		// The extension turn answers at once; the wake turn its stranded aside starts is held
+		// mid-stream, which is past the point where the wake gave its records to that turn.
+		const wakeStreamReached = Promise.withResolvers<void>();
+		const releaseWakeStream = Promise.withResolvers<void>();
+		mock.push(async () => ({ content: ["Acknowledged."] }));
+		mock.push(async () => {
+			wakeStreamReached.resolve();
+			await releaseWakeStream.promise;
+			return { content: ["Woken."] };
+		});
+		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			throw new Error("image normalization failed");
+		});
+		try {
+			await session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+			await wakeStreamReached.promise;
+
+			await expect(
+				session.sendCustomMessage(
+					{
+						customType: "ext-card",
+						content: [
+							{ type: "text", text: "CARD_THAT_FAILS" },
+							{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+						],
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: "aside", triggerTurn: true },
+				),
+			).rejects.toThrow("image normalization failed");
+			// The turn the first record was handed to is still streaming: nothing has ended the run.
+			expect(agentEnds).toEqual([false]);
+
+			releaseWakeStream.resolve();
+			await settle(session);
+		} finally {
+			releaseWakeStream.resolve();
+			normalizeSpy.mockRestore();
+		}
+
+		expect(mock.calls).toHaveLength(2);
+		expect(requestsContaining(mock, "CARD_IN_RUNNING_WAKE")).toBe(1);
+		expect(agentEnds).toEqual([false, true]);
+	});
+
+	it("is not ended by a resume that runs while the turn the send itself started is streaming", async () => {
+		const normalizeStarted = Promise.withResolvers<void>();
+		const releaseNormalize = Promise.withResolvers<void>();
+		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			normalizeStarted.resolve();
+			await releaseNormalize.promise;
+			return images;
+		});
+		const asideStreamReached = Promise.withResolvers<void>();
+		const releaseAsideStream = Promise.withResolvers<void>();
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			// The extension API returns void: the send is not awaited, and its normalization runs on.
+			void harness.session.sendCustomMessage(imageCard("CARD_SLOW_IMAGE"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, mock, agentEnds } = harness;
+		mock.push(async () => ({ content: ["Acknowledged."] }));
+		mock.push(async () => {
+			asideStreamReached.resolve();
+			await releaseAsideStream.promise;
+			return { content: ["Answered."] };
+		});
+		try {
+			await session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+			await normalizeStarted.promise;
+			await settle(session);
+			expect(agentEnds).toEqual([false]);
+
+			// The aside's own turn starts and is held mid-stream. Its record is in no queue now: it
+			// belongs to that turn, which is the continuation the end above was left open for.
+			releaseNormalize.resolve();
+			await asideStreamReached.promise;
+
+			// Plan mode makes the aside below fold rather than wake, so the resume its send triggers
+			// finds nothing queued that owes a turn — and must still not end the run.
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			expect(await session.sendCustomMessage(card("PLAIN_ASIDE"), { deliverAs: "aside" })).toBe(false);
+			expect(agentEnds).toEqual([false]);
+
+			releaseAsideStream.resolve();
+			await settle(session);
+		} finally {
+			releaseNormalize.resolve();
+			releaseAsideStream.resolve();
+			normalizeSpy.mockRestore();
+		}
+
+		// The aside got the turn it asked for (the plain one rode that turn as a step-boundary
+		// aside), and that turn's end is the only one that closed the run.
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("CARD_SLOW_IMAGE");
+		expect(agentEnds).toEqual([false, true]);
+	});
+
+	it("keeps the end open across the park a cancelled preflight makes on a running transition", async () => {
+		const normalizeStarted = Promise.withResolvers<void>();
+		const releaseNormalize = Promise.withResolvers<void>();
+		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			normalizeStarted.resolve();
+			await releaseNormalize.promise;
+			return images;
+		});
+		const preflightReached = Promise.withResolvers<void>();
+		const releasePreflight = Promise.withResolvers<void>();
+		let holdPreflight = false;
+		const preflightSpy = spyOn(TurnRecovery.prototype, "maybeApplyUsageAwareFallback").mockImplementation(
+			async () => {
+				if (!holdPreflight) return false;
+				holdPreflight = false;
+				preflightReached.resolve();
+				await releasePreflight.promise;
+				return false;
+			},
+		);
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			// The extension API returns void: the send is not awaited, and its normalization runs on.
+			void harness.session.sendCustomMessage(imageCard("CARD_PARKED_BY_SWITCH"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, mock, agentEnds } = harness;
+		// Plan mode proves the parked record still carries its turn request: an aside without one
+		// folds into context here instead of waking.
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		const switchPaused = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		session.setSessionBeforeSwitchReconciler(async () => {
+			switchPaused.resolve();
+			await releaseSwitch.promise;
+		});
+		const setSessionFileSpy = spyOn(SessionManager.prototype, "setSessionFile").mockImplementation(async () => {
+			throw new Error("forced switch failure");
+		});
+		let switched: Promise<boolean> | undefined;
+		try {
+			await session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+			await normalizeStarted.promise;
+			await settle(session);
+			// That run's end is held open for the turn the still-normalizing aside asked for.
+			expect(agentEnds).toEqual([false]);
+
+			// Released at idle, the aside goes to its own prompt, whose preflight is held.
+			holdPreflight = true;
+			releaseNormalize.resolve();
+			await preflightReached.promise;
+
+			// The switch disconnects the agent and its internal abort cancels that preflight; it
+			// then pauses before it snapshots the IRC queues and bumps the generation.
+			switched = session.switchSession(path.join(tempDir.path(), "target.jsonl"));
+			await switchPaused.promise;
+			releasePreflight.resolve();
+			await setImmediate();
+			// The record is parked with the transition, which still owes it a turn, so the run must
+			// not have been declared over in the gap between the cancelled prompt and that park.
+			expect(agentEnds).toEqual([false]);
+
+			releaseSwitch.resolve();
+			await expect(switched).rejects.toThrow("forced switch failure");
+			await settle(session);
+		} finally {
+			releaseNormalize.resolve();
+			releasePreflight.resolve();
+			releaseSwitch.resolve();
+			normalizeSpy.mockRestore();
+			preflightSpy.mockRestore();
+			setSessionFileSpy.mockRestore();
+			session.setSessionBeforeSwitchReconciler(null);
+			await switched?.catch(() => {});
+		}
+
+		expect(mock.calls).toHaveLength(2);
+		expect(requestsContaining(mock, "CARD_PARKED_BY_SWITCH")).toBe(1);
+		expect(agentEnds).toEqual([false, true]);
+	});
 });
