@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Added
 
 - Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.

@@ -101,6 +101,31 @@ export const cfgPrewalkEnabled = register({
 	},
 });
 
+export const cfgPrewalkFrom = register({
+	id: "prewalk.from",
+	type: "string",
+	default: "@default",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk planning model",
+		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+	},
+});
+
+export const cfgPrewalkInto = register({
+	id: "prewalk.into",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk target",
+		description:
+			"Model or role (default '@smol') that prewalk hands off to at the first edit/write: /prewalk, /prewalk restart, Enable Prewalk, and --prewalk. Auto-prewalk uses its own target.",
+	},
+});
+
 export const cfgPrewalkAuto = register({
 	id: "prewalk.auto",
 	type: "enum",

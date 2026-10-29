@@ -48,7 +48,6 @@ import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
-	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
 	expandRoleAlias,
 	getModelMatchPreferences,
@@ -192,6 +191,7 @@ import {
 	cfgHideThinkingBlock,
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
+	cfgPrewalkInto,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
@@ -1641,29 +1641,25 @@ export async function buildSessionOptions(
 			? true
 			: !restoringSession && cfgPrewalkEnabled.get(activeSettings);
 	if (prewalkEnabled) {
-		const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-		let targetPatterns: string[];
+		const target = parsed.prewalkInto ?? cfgPrewalkInto.get(activeSettings);
+		// `--model` mutates only the session default role. Resolve an explicit
+		// `--prewalk-into` against the pre-mutation default while leaving all
+		// other role lookups live; the configured `prewalk.into` keeps resolving
+		// against the live settings.
+		const roleLookup =
+			parsed.prewalkInto === undefined
+				? activeSettings
+				: {
+						getModelRole: (role: string) =>
+							role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
+					};
 
-		if (parsed.prewalkInto === undefined) {
-			// Preserve the existing default-prewalk behavior; this PR only needs
-			// pre-override role semantics for an explicit target.
-			targetPatterns = [expandRoleAlias(DEFAULT_PREWALK_TARGET, activeSettings)];
-		} else {
-			// `--model` mutates only the session default role. Resolve explicit
-			// prewalk aliases against the pre-mutation default while leaving all
-			// other role lookups live.
-			const preModelOverrideRoleLookup = {
-				getModelRole: (role: string) =>
-					role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
-			};
-
-			// Bare `default` is a backwards-compatible special selector handled
-			// by expandRoleAlias rather than the prefixed role-alias grammar.
-			const targetSelector =
-				target.trim() === "default" ? expandRoleAlias(target, preModelOverrideRoleLookup) : target;
-			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup);
-			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
-		}
+		// Bare `default` is a backwards-compatible special selector handled
+		// by expandRoleAlias rather than the prefixed role-alias grammar.
+		const targetSelector = target.trim() === "default" ? expandRoleAlias(target, roleLookup) : target;
+		// Keep every role candidate so a later authenticated fallback can still arm prewalk.
+		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
+		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
