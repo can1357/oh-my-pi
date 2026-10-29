@@ -9,7 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
-import { findArchivedSessionFiles } from "./session-archive";
+import { findArchivedSessionFiles, liveSessionPathForArchive } from "./session-archive";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -897,8 +897,14 @@ export async function findSessionContinuation(
 	options: FindSessionContinuationOptions = {},
 ): Promise<SessionContinuation | undefined> {
 	const target = path.resolve(sessionPath);
+	// An archived transcript is read where it lies, but it is named for — and
+	// continued in — the live bucket `gc --archive` moved it out of. Searching
+	// beside the archive finds no continuation at all: the archive bucket holds
+	// no `.jsonl` sibling. Resuming the id would then open the cold copy while
+	// the conversation went on in another file.
+	const bucketPath = liveSessionPathForArchive(target) ?? target;
 	const start = await scanSessionFile(target, storage, false);
-	const named = parseSessionFileName(target);
+	const named = parseSessionFileName(bucketPath);
 	const replaced =
 		named !== undefined &&
 		(start ? options.matchedByFileName === true && start.id !== named.id : storage.existsSync(target));
@@ -913,14 +919,14 @@ export async function findSessionContinuation(
 	} else {
 		return undefined;
 	}
-	const continuations = await continuationsAfter(target, since, storage);
+	const continuations = await continuationsAfter(bucketPath, since, storage);
 	const children = continuations.get(rootId);
 	if (!children) return undefined;
 	const activityOf = activityReader(storage);
 	// A replaced file holds no turn of the session its name records, so every
 	// copy that continues that session counts; otherwise the file is the first copy.
 	const copies = replaced || !start ? [...children] : [start];
-	const seen = new Set([target, ...copies.map(copy => copy.path)]);
+	const seen = new Set([target, bucketPath, ...copies.map(copy => copy.path)]);
 	for (let i = 0; i < copies.length; i++) {
 		const next = continuations.get(copies[i].id);
 		if (!next) continue;

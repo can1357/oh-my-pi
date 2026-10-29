@@ -7,7 +7,7 @@ import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cl
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
 import { restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
-import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -453,4 +453,36 @@ test("gc reclaims the temps a killed restore leaves behind, transcript or not", 
 
 	expect(result.archive?.deletedTemps).toBe(2);
 	for (const leftover of leftovers) expect(await Bun.file(leftover).exists()).toBe(false);
+});
+
+test("resuming an archived id opens the live file its conversation went on in", async () => {
+	await archiveEverything();
+	const continuationId = "01a18630-42ae-7117-ba7c-ffffffffffff";
+	const continuationFile = path.join(path.dirname(sessionFile), `2026-02-01T00-00-00-000Z_${continuationId}.jsonl`);
+	await Bun.write(
+		continuationFile,
+		`${[
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: continuationId,
+				timestamp: "2026-02-01T00:00:00.000Z",
+				cwd: root,
+				continuationOf: SESSION_ID,
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "m9",
+				timestamp: "2026-02-01T00:00:01.000Z",
+				message: { role: "user", content: "the conversation went on here" },
+			}),
+		].join("\n")}\n`,
+	);
+
+	const target = await resolveResumeTarget(SESSION_ID, root);
+
+	// The archived copy is the stale one; resuming it would diverge.
+	expect(target?.session.path).toBe(continuationFile);
+	expect(target?.continuation?.from).toBe(archiveFile);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
