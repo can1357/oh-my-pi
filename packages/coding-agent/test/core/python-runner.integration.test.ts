@@ -59,12 +59,12 @@ const SLEEP = Bun.which("sleep") ?? "/bin/sleep";
 
 /**
  * Starts a kernel on a pip-less venv. `ensurepipMain` shadows the stdlib `ensurepip`'s
- * `__main__` and `uvScript` (POSIX sh) becomes `uv`; PATH holds nothing else, so a
- * system uv never runs.
+ * `__main__`, `sitecustomize` runs at interpreter startup, and `uvScript` (POSIX sh)
+ * becomes `uv`; PATH holds nothing else, so a system uv never runs.
  */
 async function startPiplessKernel(
 	dir: string,
-	fakes: { ensurepipMain?: string; uvScript?: string },
+	fakes: { ensurepipMain?: string; sitecustomize?: string; uvScript?: string },
 ): Promise<{ kernel: PythonKernel; python: string; sitePackages: string }> {
 	const python = await createPiplessVenv(dir);
 	const purelib = Bun.spawnSync([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]);
@@ -76,12 +76,17 @@ async function startPiplessKernel(
 		await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\nPATH=/usr/bin:/bin\n${fakes.uvScript}\n`);
 		await fs.chmod(path.join(binDir, "uv"), 0o755);
 	}
+	const fakeRoot = path.join(dir, "fake");
 	if (fakes.ensurepipMain !== undefined) {
-		const fakeDir = path.join(dir, "fake", "ensurepip");
+		const fakeDir = path.join(fakeRoot, "ensurepip");
 		await fs.mkdir(fakeDir, { recursive: true });
 		await Bun.write(path.join(fakeDir, "__init__.py"), "");
 		await Bun.write(path.join(fakeDir, "__main__.py"), fakes.ensurepipMain);
-		env.PYTHONPATH = path.dirname(fakeDir);
+		env.PYTHONPATH = fakeRoot;
+	}
+	if (fakes.sitecustomize !== undefined) {
+		await Bun.write(path.join(fakeRoot, "sitecustomize.py"), fakes.sitecustomize);
+		env.PYTHONPATH = fakeRoot;
 	}
 	const kernel = await PythonKernel.start({ cwd: dir, interpreter: python, env });
 	return { kernel, python, sitePackages };
@@ -89,6 +94,14 @@ async function startPiplessKernel(
 
 /** An `ensurepip` that fails the way Debian's disabled system copy does. */
 const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
+
+/** Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`. */
+const CHILD_SPAWNING_ENSUREPIP = [
+	"import os, subprocess",
+	`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
+	'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+	"child.wait()",
+].join("\n");
 
 /** Running and not a zombie: a killed process may wait a moment for its reaper. */
 function isRunning(pid: number): boolean {
@@ -336,15 +349,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
 		async () => {
 			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
-			// Like the real `ensurepip`, runs pip in a child process.
-			const { kernel } = await startPiplessKernel(tempDir.path(), {
-				ensurepipMain: [
-					"import os, subprocess",
-					`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
-					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
-					"child.wait()",
-				].join("\n"),
-			});
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: CHILD_SPAWNING_ENSUREPIP });
 			try {
 				const pids = await cancelInstall(kernel, "%pip install six");
 				expect(pids.filter(isRunning)).toEqual([]);
@@ -354,6 +359,132 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		},
 		30_000,
 	);
+
+	// A procfs inherited from a parent PID namespace: every pid and parent pid it reports is the outer one.
+	const outerNamespaceStat = [
+		"import builtins, io, re",
+		"_open = builtins.open",
+		"def _open_outer(file, mode='r', *args, **kwargs):",
+		"    handle = _open(file, mode, *args, **kwargs)",
+		"    if isinstance(file, str) and re.fullmatch(r'/proc/(self|\\d+)/stat', file) and 'b' in mode:",
+		"        pid, rest = handle.read().split(b' ', 1)",
+		"        handle.close()",
+		"        name, fields = rest.rsplit(b')', 1)",
+		"        fields = fields.split()",
+		"        fields[1] = str(int(fields[1]) + 100000).encode()",
+		"        return io.BytesIO(str(int(pid) + 100000).encode() + b' ' + name + b') ' + b' '.join(fields))",
+		"    return handle",
+		"builtins.open = _open_outer",
+	];
+	for (const [procfs, listing, extra] of [
+		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')", []],
+		["is an empty, unmounted directory", "return []", []],
+		["belongs to a parent PID namespace", "return _listdir(path)", outerNamespaceStat],
+	] as const) {
+		// What a kernel sees without a procfs of its own (some containers and
+		// chroots, nested PID namespaces): /proc lists nothing, or nothing it can
+		// match, and Linux `ps` reads /proc too, so it is hidden as well.
+		const noProcfs = [
+			"import os",
+			"_listdir = os.listdir",
+			"def _listdir_without_procfs(path='.'):",
+			"    if os.fspath(path) == '/proc':",
+			`        ${listing}`,
+			"    return _listdir(path)",
+			"os.listdir = _listdir_without_procfs",
+			"_exists = os.path.exists",
+			"os.path.exists = lambda path: os.fspath(path) != '/bin/ps' and _exists(path)",
+			...extra,
+		].join("\n");
+
+		it.skipIf(process.platform !== "linux")(
+			`cancelling %pip stops the installer tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const pids = await cancelInstall(kernel, "%pip install six");
+					expect(pids.filter(isRunning)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		for (const [where, code] of [
+			["", "%pip install six"],
+			[
+				" started off the main thread",
+				// As a `%pip` inside a tool call runs: on another thread, which SIGINT never reaches.
+				[
+					"import contextvars, threading",
+					"worker = threading.Thread(target=contextvars.copy_context().run, args=(__omp_magic, 'pip', 'install six'))",
+					"worker.start()",
+					"worker.join()",
+				].join("\n"),
+			],
+			[
+				" with SIGTERM blocked",
+				"import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n%pip install six",
+			],
+		] as const) {
+			it.skipIf(process.platform !== "linux")(
+				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
+				async () => {
+					using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
+					const { kernel } = await startPiplessKernel(tempDir.path(), {
+						ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+						sitecustomize: noProcfs,
+					});
+					const started = Promise.withResolvers<number[]>();
+					let streamed = "";
+					const pending = executePythonWithKernel(kernel, code, {
+						onChunk: chunk => {
+							streamed += chunk;
+							const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+							if (match) started.resolve([Number(match[1]), Number(match[2])]);
+						},
+					});
+					const pids = await started.promise;
+					await kernel.shutdown();
+					await pending;
+					expect(pids.filter(isRunning)).toEqual([]);
+				},
+				30_000,
+			);
+		}
+
+		it.skipIf(process.platform !== "linux")(
+			`kernel shutdown after %pip stops what the installer left running when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-leftover-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					// Leaves a helper running, its output redirected, and exits.
+					ensurepipMain: [
+						"import os, subprocess",
+						`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+						'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					].join("\n"),
+					sitecustomize: noProcfs,
+				});
+				let streamed = "";
+				await executePythonWithKernel(kernel, "%pip install six", {
+					onChunk: chunk => {
+						streamed += chunk;
+					},
+				});
+				const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+				expect(match).not.toBeNull();
+				await kernel.shutdown();
+				expect([Number(match?.[1]), Number(match?.[2])].filter(isRunning)).toEqual([]);
+			},
+			30_000,
+		);
+	}
 
 	it.skipIf(process.platform === "win32")(
 		"cancelling %pip while uv installs pip stops uv and what it spawned",

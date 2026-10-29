@@ -1329,11 +1329,30 @@ def _has_pip() -> bool:
         return False
 
 
+def _procfs_usable() -> bool:
+    # /proc can be missing, unreadable or an empty unmounted directory (some
+    # containers and chroots); a mounted procfs lists this process. One
+    # inherited from a parent PID namespace lists outer pids, which can collide
+    # with ours (init is 1 in both) but never match its parents to our children:
+    # its /proc/self is this process under another pid.
+    try:
+        if str(os.getpid()) not in os.listdir("/proc"):
+            return False
+        with open("/proc/self/stat", "rb") as stat:
+            return int(stat.read().split(b" ", 1)[0]) == os.getpid()
+    except (OSError, ValueError):
+        return False
+
+
 def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
     if sys.platform.startswith("linux"):
-        for entry in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return children
+        for entry in entries:
             if not entry.isdigit():
                 continue
             try:
@@ -1360,11 +1379,9 @@ def _child_pids() -> dict[int, list[int]]:
     return children
 
 
-def _kill_process_tree(proc: subprocess.Popen) -> None:
+def _kill_process_tree(proc: subprocess.Popen, own_group: bool) -> None:
     # Installers spawn their own children (ensurepip runs pip in one, source
     # builds run backends and compilers), so killing `proc` alone is not enough.
-    # The tree stays in the kernel's process group so kernel shutdown still
-    # reaches it.
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
@@ -1373,6 +1390,13 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             stderr=subprocess.DEVNULL,
         )
         proc.kill()
+        proc.wait()
+        return
+    if own_group:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.wait()
         return
     # Stop each process before listing its children, so nothing can spawn
@@ -1401,6 +1425,19 @@ def _run_installer(
     on_text: Callable[[str], None] | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
+    # The installer's tree normally stays in the kernel's process group, so
+    # kernel shutdown still reaches it, and cancelling walks it. Without procfs
+    # nothing on Linux can list processes (ps reads /proc too), so there the
+    # installer leads a group of its own to kill instead, and a SIGTERM to the
+    # kernel (what shutdown sends) takes that group down first. Only the main
+    # thread can install that handler, and only it is cancelled by SIGINT, so an
+    # installer started elsewhere (a `%pip` inside a tool call) stays in the
+    # kernel's group.
+    own_group = (
+        sys.platform.startswith("linux")
+        and threading.current_thread() is threading.main_thread()
+        and not _procfs_usable()
+    )
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1408,14 +1445,42 @@ def _run_installer(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
+        start_new_session=own_group,
     )
+    previous_sigterm: Any = None
+    sigterm_was_blocked = False
+    if own_group:
+
+        def on_sigterm(signum: int, frame: Any) -> None:
+            # No proc.wait() here: the interrupted frame may hold its lock.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        previous_sigterm = signal.signal(signal.SIGTERM, on_sigterm)
+        # A cell may have blocked SIGTERM; shutdown's must still reach the handler.
+        sigterm_was_blocked = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     try:
         _stream_process_output(proc, on_text)
         return proc.wait()
     except BaseException:
         # Cancelling the cell interrupts only the kernel: stop the installer too.
-        _kill_process_tree(proc)
+        _kill_process_tree(proc, own_group)
         raise
+    finally:
+        if own_group:
+            # Shutdown's group sweep cannot reach anything the installer left
+            # running in its own group, so that goes with the installer.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if sigterm_was_blocked:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
 
 
 def _bootstrap_pip() -> int:
