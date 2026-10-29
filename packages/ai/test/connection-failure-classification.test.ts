@@ -202,22 +202,25 @@ describe("connection-failure classification", () => {
 	});
 
 	it.each([
-		["a code the Codex loop replays", "Codex error event (code=model_error, message=stream failed)", true],
+		// The shape `formatCodexFailure` persists: the event's message, then its
+		// machine metadata in parentheses.
+		["a code the Codex loop replays", "Codex error event: stream failed (code=model_error)", true],
 		[
-			"prose the Codex loop replays under an unknown code",
-			"Codex error event (code=api_error, message=The server had an internal error)",
+			"prose the Codex loop replays under a code it does not know",
+			"Codex error event: The server had an internal error (code=api_error)",
 			true,
 		],
+		["a wire death under a code the loop declines", "Codex error event: read ECONNRESET (code=api_error)", false],
 		[
-			"a wire death under a code the loop declines",
-			"Codex error event (code=api_error, message=read ECONNRESET)",
+			"a wire death under a code whose own spelling reads as retryable prose",
+			"Codex error event: read ECONNRESET (code=service_unavailable)",
 			false,
 		],
 		["a message carrying no event marker", "read ECONNRESET", false],
 	])("reads %s correctly as replay provenance", (_label, errorMessage, replayed) => {
 		// Turn recovery reads this to tell a failure a provider loop already
 		// replayed from one it made a single request for; the marker alone says
-		// only which event it was.
+		// only which event it was, and the code token is not prose.
 		expect(AIError.isReplayedProviderFailureEventText(errorMessage)).toBe(replayed);
 	});
 });

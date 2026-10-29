@@ -259,27 +259,36 @@ export const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 
 /** The `(code=…)` marker a provider's formatted failure event leaves behind, e.g. `(code=model_error)`. */
-const PROVIDER_FAILURE_EVENT_CODE_RE = /\(code=([^,)]+)/;
+const PROVIDER_FAILURE_EVENT_CODE_RE = /\bcode=([^,)\s]+)/;
+/** Every `code=…` assignment, for removing the machine token before prose is read. */
+const PROVIDER_FAILURE_EVENT_CODE_GLOBAL_RE = /\bcode=[^,)\s]+/g;
 
 /**
  * Whether a persisted failure-event message names a failure the provider's
  * own loop replayed before surfacing it.
  *
  * A provider that emits a structured failure event decides its replay from
- * the event, not from prose, so the text alone cannot say whether a request
- * was made once. The marker says which event it was; this answers whether
- * that event is one the loop retries. A marker whose code and prose the loop
- * declines (`api_error` carrying `read ECONNRESET`) reached the caller on its
- * first and only request.
+ * the event, not from the prose around it, so the text alone cannot say
+ * whether a request was made once. The marker says which event it was; this
+ * answers whether that event is one the loop retries. A marker whose code and
+ * prose the loop declines (`api_error` carrying `read ECONNRESET`) reached
+ * the caller on its first and only request.
+ *
+ * The prose test runs with the `code=…` token removed, because the loop reads
+ * the event's message field and this reads the sentence the two were
+ * formatted into: left in, a code spelled `service_unavailable` or
+ * `temporary_outage` would answer the prose question by itself and call a
+ * wire death replayed.
  */
 export function isReplayedProviderFailureEventText(text: string): boolean {
 	const code = PROVIDER_FAILURE_EVENT_CODE_RE.exec(text)?.[1]?.trim().toLowerCase();
 	if (code === undefined) return false;
+	if (CODEX_RETRYABLE_EVENT_CODES.has(code)) return true;
+	const prose = text.replace(PROVIDER_FAILURE_EVENT_CODE_GLOBAL_RE, "");
 	return (
-		CODEX_RETRYABLE_EVENT_CODES.has(code) ||
-		CODEX_RETRYABLE_EVENT_MESSAGE.test(text) ||
-		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
-		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text)
+		CODEX_RETRYABLE_EVENT_MESSAGE.test(prose) ||
+		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(prose) ||
+		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(prose)
 	);
 }
 

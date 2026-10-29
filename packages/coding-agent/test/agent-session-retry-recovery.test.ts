@@ -52,9 +52,9 @@ const ENVOY_CONNECTION_TIMEOUT =
 /** An HTTP/2 peer reset as a gateway forwards it — a cut stream with no status line. */
 const HTTP2_STREAM_RESET = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
 /** A Codex failure event whose code and prose its own loop declines to replay. */
-const CODEX_UNREPLAYED_WIRE_EVENT = "Codex error event (code=api_error, message=read ECONNRESET)";
+const CODEX_UNREPLAYED_WIRE_EVENT = "Codex error event: read ECONNRESET (code=api_error)";
 /** A Codex failure event its loop replays before surfacing it. */
-const CODEX_REPLAYED_EVENT = "Codex error event (code=model_error, message=stream failed)";
+const CODEX_REPLAYED_EVENT = "Codex error event: stream failed (code=model_error)";
 
 function emptyUsage(): Usage {
 	return {
