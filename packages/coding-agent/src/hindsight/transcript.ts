@@ -12,7 +12,7 @@
 
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "../session/session-entries";
-import { type HindsightMessage, hasSubstantiveContent } from "./content";
+import { compactHandoffForRecall, type HindsightMessage, hasSubstantiveContent } from "./content";
 
 export interface ReadonlySessionManagerLike {
 	getEntries(): SessionEntry[];
@@ -36,6 +36,38 @@ export function extractMessages(sessionManager: ReadonlySessionManagerLike): Hin
 	const messages: HindsightMessage[] = [];
 
 	for (const entry of sessionManager.getEntries()) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		const role = msg.role;
+		if (role !== "user" && role !== "assistant") continue;
+
+		const text = role === "user" ? extractUserText(msg) : extractAssistantText(msg as AssistantMessage);
+		if (!hasSubstantiveContent(text)) continue;
+		messages.push({ role, content: text, timestamp: entry.timestamp });
+	}
+
+	return messages;
+}
+
+/**
+ * Extract plain-text conversation messages for recall query composition.
+ *
+ * Unlike `extractMessages` (which is used for retention and `countUserTurns`
+ * and must skip compaction entries), this includes `compaction` entries as
+ * compacted user context so a post-compaction continuation prompt ("continue")
+ * can still recall against the handoff's `## Goal` and `## Progress`.
+ */
+export function extractMessagesForRecall(sessionManager: ReadonlySessionManagerLike): HindsightMessage[] {
+	const messages: HindsightMessage[] = [];
+
+	for (const entry of sessionManager.getEntries()) {
+		if (entry.type === "compaction") {
+			const compacted = compactHandoffForRecall(entry.summary).trim();
+			if (hasSubstantiveContent(compacted)) {
+				messages.push({ role: "user", content: compacted, timestamp: entry.timestamp });
+			}
+			continue;
+		}
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 		const role = msg.role;

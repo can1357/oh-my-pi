@@ -6,6 +6,7 @@ import type * as MnemopiCoreNs from "@oh-my-pi/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@oh-my-pi/pi-mnemopi/core";
 import { logger, prompt, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
 import {
+	compactHandoffForRecall,
 	composeRecallQuery,
 	prepareEmbeddableRetentionTranscript,
 	prepareRetentionTranscript,
@@ -13,7 +14,7 @@ import {
 	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
 } from "../hindsight/content";
-import { countUserTurns, extractMessages } from "../hindsight/transcript";
+import { countUserTurns, extractMessages, extractMessagesForRecall } from "../hindsight/transcript";
 import {
 	findPersistedRecall,
 	type MemoryRecallChangesDetails,
@@ -647,7 +648,7 @@ export class MnemopiSessionState {
 			};
 		}
 		const truncated = withLoopPhase("mnemopi.recall", () => {
-			const history = extractMessages(this.session.sessionManager);
+			const history = extractMessagesForRecall(this.session.sessionManager);
 			const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 			const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 			return truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
@@ -807,7 +808,7 @@ export class MnemopiSessionState {
 		let context = persisted?.text;
 		let record: PersistedRecall | undefined;
 		if (persisted === undefined) {
-			const messages = withLoopPhase("mnemopi.recall", () => extractMessages(this.session.sessionManager));
+			const messages = withLoopPhase("mnemopi.recall", () => extractMessagesForRecall(this.session.sessionManager));
 			const lastUser = messages.findLast(message => message.role === "user");
 			if (!lastUser) return;
 			const truncated = withLoopPhase("mnemopi.recall", () => {
@@ -1233,9 +1234,15 @@ function factSourceRow(memory: Mnemopi, fact: MnemopiStoredMemoryRow): MnemopiSt
 function flattenAgentMessages(messages: AgentMessage[]): Array<{ role: "user" | "assistant"; content: string }> {
 	const out: Array<{ role: "user" | "assistant"; content: string }> = [];
 	for (const message of messages) {
-		if (!("role" in message) || (message.role !== "user" && message.role !== "assistant")) continue;
+		if (!("role" in message)) continue;
+		if (message.role === "compactionSummary") {
+			const compacted = compactHandoffForRecall(message.summary).trim();
+			if (compacted) out.push({ role: "user", content: compacted });
+			continue;
+		}
+		if (message.role !== "user" && message.role !== "assistant") continue;
 		const content = message.role === "user" ? userText(message.content) : assistantText(message.content);
-		if (content.trim()) out.push({ role: message.role, content });
+		if (content.trim()) out.push({ role: "user" === message.role ? "user" : "assistant", content });
 	}
 	return out;
 }

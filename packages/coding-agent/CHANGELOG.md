@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed recall query composition to retain prior user or compaction handoff context when the latest prompt is a short continuation reply ([#17239](https://github.com/can1357/oh-my-pi/pull/17239) by [@GTanger](https://github.com/GTanger)).
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
 ## [18.14.0] - 2026-10-29

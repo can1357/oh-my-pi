@@ -19,7 +19,7 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { countUserTurns, extractMessages } from "./transcript";
+import { countUserTurns, extractMessages, extractMessagesForRecall } from "./transcript";
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
 export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
@@ -473,7 +473,7 @@ export class HindsightSessionState {
 			};
 		}
 
-		const history = extractMessages(this.session.sessionManager);
+		const history = extractMessagesForRecall(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
