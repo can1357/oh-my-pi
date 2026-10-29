@@ -9,9 +9,9 @@
  * original path before any component opens it for writing — a `.jsonl.gz` is
  * never handed to the session writer.
  *
- * The archive root is routinely a symlink onto another filesystem (it is one
- * on the machine this was written for), so every walk follows symlinks and
- * nothing here renames or hard-links across the two roots.
+ * The archive root is routinely a symlink onto another filesystem, so every
+ * walk follows symlinks and nothing here renames or hard-links across the two
+ * roots.
  *
  * A restore moves a session between the two trees in two steps (transcript,
  * then artifact tree), which is also what the archive phase does in reverse,

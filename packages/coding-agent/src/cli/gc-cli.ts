@@ -425,10 +425,9 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 }
 
 /**
- * `followSymlinks` throughout: a transcript placed in a session directory as
- * a symlink (offloaded to another disk behind a same-path link) is a
- * transcript like any other, and a blob it references must not be swept
- * because the walk could not see it.
+ * `followSymlinks` throughout: a transcript placed in a session directory as a
+ * symlink is a transcript like any other, and a blob it references must not be
+ * swept because the walk could not see it.
  */
 async function scanSessionTree(glob: Bun.Glob, root: string): Promise<string[]> {
 	try {
@@ -961,10 +960,10 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
  * archive that cannot be read is not an archive, and a run that reports
  * success must not be the thing that lost the session.
  *
- * A transcript is routinely a symlink to a file held elsewhere (transcripts
- * offloaded to another disk behind same-path links). The compressed copy
- * holds the content either way, and the link goes; the file it names is left
- * alone and returned, so the caller can report a copy omp no longer uses.
+ * A transcript can be a symlink, as `FileSessionStorage.listFilesSync`
+ * already treats one as a transcript like any other. The compressed archive
+ * holds its content either way. Removing the link leaves the file it names
+ * alone and returns it so the caller can report a copy omp no longer uses.
  * omp deletes nothing outside its own storage: that target may be a file its
  * owner keeps, or a second session's link to the same bytes, and a cleanup
  * that can delete an unrelated file is worse than the defect it cleans up
