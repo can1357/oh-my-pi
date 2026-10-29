@@ -82,6 +82,7 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
+import { isArchivedSessionPath, restoreArchivedSession } from "./session-archive";
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
@@ -2372,7 +2373,20 @@ export class SessionManager {
 		this.#sessionClaim?.release?.();
 		this.#sessionClaim = undefined;
 
-		const resolvedSessionFile = path.resolve(sessionFile);
+		// `gc --archive` leaves cold transcripts gzipped outside the sessions
+		// tree. Bring one back to its own path before anything reads or appends
+		// to it: the writer appends raw JSONL, so a `.jsonl.gz` must never
+		// become this manager's session file.
+		const requestedFile = path.resolve(sessionFile);
+		let resolvedSessionFile = requestedFile;
+		if (isArchivedSessionPath(requestedFile)) {
+			resolvedSessionFile = (await restoreArchivedSession(requestedFile)).sessionPath;
+			// `SessionManager.open` derived the session dir from the archive path.
+			// Follow the transcript home, or /new and /branch would write there.
+			if (this.#sessionDir === path.dirname(requestedFile)) {
+				this.#sessionDir = path.dirname(resolvedSessionFile);
+			}
+		}
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		const sourceSize =
 			loaded.sourceSize !== undefined

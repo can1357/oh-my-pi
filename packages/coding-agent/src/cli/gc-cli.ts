@@ -4,7 +4,6 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
-import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
 	formatBytes,
@@ -16,7 +15,6 @@ import {
 	getModelDbPath,
 	getReportsDir,
 	getSessionsDir,
-	getStatsDbPath,
 	getTerminalSessionsDir,
 	hashPath,
 	normalizePathForComparison,
@@ -29,6 +27,17 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
+import {
+	findArchivedSessionFiles,
+	getArchivedSessionsDir,
+	inflateArchivedBytes,
+	inflateArchivedTranscript,
+	isArchivedSessionPath,
+	listArchivedSessionFiles,
+	liveSessionPathForArchive,
+	restoreArchivedSessionLocked,
+} from "../session/session-archive";
+import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
@@ -59,14 +68,13 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const SESSION_STAGING_GLOB = new Bun.Glob("**/.*.jsonl.*.tmp");
+const SESSION_STAGING_GLOB = new Bun.Glob("**/.*.tmp");
 const ANY_FILE_GLOB = new Bun.Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
 const SESSION_SUFFIX = ".jsonl";
 const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
-const GC_LOCK_BREAKER_SUFFIX = ".break";
 /** Bytes sampled to rule out a session header before streaming an artifact. */
 const HEADER_SNIFF_BYTES = 4096;
 /**
@@ -86,6 +94,8 @@ export interface GcCommandFlags {
 	wal?: boolean;
 	stale?: boolean;
 	compress?: boolean;
+	/** Session id prefix or archive path to bring back out of the archive. */
+	restore?: string;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -114,13 +124,30 @@ export interface ArchiveGcResult {
 	keptNewestPerCwd: number;
 	wouldArchive: number;
 	archived: number;
-	historyRowsDeleted: number;
-	statsRowsDeleted: number;
-	ftsRebuilt: boolean;
 	/** Session staging temps past the write grace, left by a killed or crashed writer. */
 	wouldDeleteTemps: number;
 	deletedTemps: number;
 	tempBytes: number;
+	/** Links inside an artifact tree whose target was already gone, so the archive could not hold their bytes. */
+	brokenLinks: number;
+	/**
+	 * Files a symlinked transcript pointed at. Their bytes are in the archive
+	 * now, and omp no longer uses them, but they are outside its storage so it
+	 * does not delete them.
+	 */
+	orphanedTargets: string[];
+	errors: string[];
+}
+
+export interface RestoreGcResult {
+	/** What the caller asked for: a session id prefix or an archive path. */
+	query: string;
+	archivePath?: string;
+	sessionPath?: string;
+	bytes: number;
+	artifactsRestored: boolean;
+	/** What restoring the transcript does not bring back, in words a caller can print. */
+	notRestored: string[];
 	errors: string[];
 }
 
@@ -190,6 +217,7 @@ export interface GcResult {
 	stale?: StaleGcResult;
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
+	restore?: RestoreGcResult;
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
@@ -228,6 +256,10 @@ interface ResolvedGcOptions {
 	runWal: boolean;
 	runStale: boolean;
 	runCompress: boolean;
+	/** Set by `--restore`; it runs alone, since no sweep may race a restore. */
+	restoreTarget?: string;
+	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
+	explicitPhases: string[];
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -236,23 +268,10 @@ interface ResolvedGcOptions {
 	compressAfterDays: number;
 }
 
-interface SqliteRunResult {
-	changes?: number | bigint;
-}
-
 interface WalCheckpointRow {
 	busy?: number | bigint | null;
 	log?: number | bigint | null;
 	checkpointed?: number | bigint | null;
-}
-
-interface GcLockSnapshot {
-	dev: number;
-	ino: number;
-	size: number;
-	mtimeMs: number;
-	ctimeMs: number;
-	text: string;
 }
 
 function normalizeNumberSetting(value: unknown, defaultValue: number): number {
@@ -295,6 +314,10 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
+		restoreTarget: flags.restore?.trim() || undefined,
+		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
+			phase => flags[phase] === true,
+		),
 		runBlobs: selected ? flags.blobs === true : read(cfgGcBlobs),
 		runArchive: selected ? flags.archive === true : read(cfgGcArchive),
 		runWal: selected ? flags.wal === true : read(cfgGcWal),
@@ -334,22 +357,13 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.stale?.errors ?? []).map(error => `stale: ${error}`),
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
+		...(result.restore?.errors ?? []).map(error => `restore: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 	];
 }
 
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
-}
-
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function codeOf(error: unknown): string | undefined {
-	return typeof error === "object" && error !== null && "code" in error
-		? String((error as { code?: unknown }).code)
-		: undefined;
 }
 
 async function pathExists(target: string): Promise<boolean> {
@@ -358,15 +372,6 @@ async function pathExists(target: string): Promise<boolean> {
 		return true;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
-}
-
-async function statIfPresent(target: string) {
-	try {
-		return await fs.stat(target);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return null;
 		throw error;
 	}
 }
@@ -408,37 +413,35 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 	}
 }
 
-async function collectJsonlFiles(root: string): Promise<string[]> {
+/**
+ * `followSymlinks` throughout: a transcript placed in a session directory as
+ * a symlink (offloaded to another disk behind a same-path link) is a
+ * transcript like any other, and a blob it references must not be swept
+ * because the walk could not see it.
+ */
+async function scanSessionTree(glob: Bun.Glob, root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true }), name =>
+			path.join(root, name),
+		);
 		files.sort();
 		return files;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
+}
+
+async function collectJsonlFiles(root: string): Promise<string[]> {
+	return scanSessionTree(JSONL_GLOB, root);
 }
 
 async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
+	return scanSessionTree(JSONL_GZ_GLOB, root);
 }
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
+	return scanSessionTree(JSONL_BACKUP_GLOB, root);
 }
 
 async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
@@ -920,81 +923,58 @@ function sessionArtifactsPath(sessionPath: string): string {
 	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
-interface SessionLineageHeader {
-	id: string;
-	parentSession?: string;
-	previousSessionFiles: string[];
-}
-
-class SessionLineageHeaderReader {
-	header: SessionLineageHeader | undefined;
-	done = false;
-	#sawTitleSlot = false;
-
-	read(line: string): void {
-		if (this.done) return;
-		line = line.trim();
-		if (!line) return;
-		try {
-			const record = JSON.parse(line) as {
-				type?: unknown;
-				id?: unknown;
-				parentSession?: unknown;
-				previousSessionFiles?: unknown;
-			};
-			if (!this.#sawTitleSlot && record.type === "title") {
-				this.#sawTitleSlot = true;
-				return;
-			}
-			this.done = true;
-			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
-			this.header = {
-				id: record.id,
-				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
-				previousSessionFiles: Array.isArray(record.previousSessionFiles)
-					? record.previousSessionFiles.filter(
-							(previousSessionFile): previousSessionFile is string =>
-								typeof previousSessionFile === "string" && previousSessionFile.length > 0,
-						)
-					: [],
-			};
-		} catch {
-			this.done = true;
-		}
+/** SHA-256 and byte count of a stream, used to prove an archive inflates to its source. */
+async function digestStream(stream: AsyncIterable<Uint8Array>): Promise<{ hash: string; bytes: number }> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	let bytes = 0;
+	for await (const chunk of stream) {
+		hasher.update(chunk);
+		bytes += chunk.byteLength;
 	}
+	return { hash: hasher.digest("hex"), bytes };
 }
 
-async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
-	const decoder = new TextDecoder();
-	const reader = new SessionLineageHeaderReader();
-	for await (const line of readLines(Bun.file(file).stream())) {
-		reader.read(decoder.decode(line));
-		if (reader.done) break;
-	}
-	return reader.header;
-}
-
-async function scanArchivedSession(
-	file: string,
-	identities?: Record<StatsEntryTable, StatsEntryIdentity[]>,
-): Promise<SessionLineageHeader | undefined> {
-	const decoder = new TextDecoder();
-	const reader = new SessionLineageHeaderReader();
-	// Drain even after the header: a late gzip error must invalidate the archive.
-	await scanSessionLinesIfPresent(file, line => {
-		if (reader.done && !identities) return;
-		const text = decoder.decode(line);
-		reader.read(text);
-		if (identities) addSessionStatsIdentity(text, identities);
+/** SHA-256 and byte count of what an archived transcript inflates to. */
+async function digestArchivedSessionFile(file: string): Promise<{ hash: string; bytes: number }> {
+	let digest: { hash: string; bytes: number } | undefined;
+	await pipeline(Bun.file(file).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
+		digest = await digestStream(source as AsyncIterable<Uint8Array>);
 	});
-	return reader.header;
+	if (!digest) throw new Error(`archive produced no bytes: ${file}`);
+	return digest;
 }
 
-async function gzipSessionFile(source: string, destination: string): Promise<void> {
+/**
+ * Compress `source` into `destination`, and drop the source only once the
+ * archive has been read back and proved to inflate to the same bytes. An
+ * archive that cannot be read is not an archive, and a run that reports
+ * success must not be the thing that lost the session.
+ *
+ * A transcript is routinely a symlink to a file held elsewhere (transcripts
+ * offloaded to another disk behind same-path links). The compressed copy
+ * holds the content either way, and the link goes; the file it names is left
+ * alone and returned, so the caller can report a copy omp no longer uses.
+ * omp deletes nothing outside its own storage: that target may be a file its
+ * owner keeps, or a second session's link to the same bytes, and a cleanup
+ * that can delete an unrelated file is worse than the defect it cleans up
+ * after.
+ *
+ * Once the source is gone the archive is the only copy, so from that point
+ * on a later failure never removes it.
+ */
+async function gzipSessionFile(source: string, destination: string): Promise<{ orphanedTarget?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+	// Only the transcript's own link counts. `realpath` would also resolve a
+	// symlinked sessions directory and report every transcript under it as an
+	// orphan, drowning the lines that name a real one.
+	const sourceReal = (await fs.lstat(source).catch(() => undefined))?.isSymbolicLink()
+		? await fs.realpath(source).catch(() => source)
+		: source;
+	let sourceGone = false;
 	let renamed = false;
 	try {
+		const expected = await digestStream(Bun.file(source).stream());
 		await pipeline(
 			Bun.file(source).stream(),
 			createGzip({ level: 9 }),
@@ -1002,45 +982,119 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 		);
 		await fs.rename(tempPath, destination);
 		renamed = true;
+		const stored = await digestArchivedSessionFile(destination);
+		if (stored.hash !== expected.hash) {
+			throw new Error(
+				`archive verification failed for ${source}: ${expected.bytes} bytes in, ${stored.bytes} bytes back`,
+			);
+		}
 		await fs.unlink(source);
+		sourceGone = true;
+		return { orphanedTarget: sourceReal === source ? undefined : sourceReal };
 	} catch (error) {
 		await fs.rm(tempPath, { force: true });
-		if (renamed) await fs.rm(destination, { force: true });
+		if (renamed && !sourceGone) await fs.rm(destination, { force: true });
 		throw error;
 	}
 }
 
+/** Undo one `gzipSessionFile`: put the transcript back and drop the archive copy. */
 async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
+	await inflateArchivedTranscript(source, destination);
+	await fs.unlink(source);
+}
+
+/**
+ * Copy an artifact tree into the archive with symlinks resolved into real
+ * files, then drop the source. The archive must hold the bytes: a link into
+ * a tree that is relocated or cleaned later archives a session that cannot
+ * come back. `fs.rename` is not an option either — the archive root is
+ * routinely a symlink onto another filesystem. `force` lets a run finish a
+ * tree that a killed run left half-copied.
+ *
+ * A link whose target is already gone is skipped and counted: dereferencing
+ * it throws, and one broken link must not make a session unarchivable
+ * forever. A failure part-way removes what it had copied, so a retry never
+ * finds a stray tree in the archive with no transcript beside it.
+ */
+async function moveArtifactsTree(source: string, destination: string): Promise<{ brokenLinks: number }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+	let brokenLinks = 0;
 	try {
-		await pipeline(Bun.file(source).stream(), createGunzip(), (await fs.open(tempPath, "w")).createWriteStream());
-		await fs.rename(tempPath, destination);
-		await fs.unlink(source);
+		await fs.cp(source, destination, {
+			recursive: true,
+			dereference: true,
+			force: true,
+			filter: async entry => {
+				const link = await fs.lstat(entry).catch(() => undefined);
+				if (!link?.isSymbolicLink()) return true;
+				if (await pathExists(entry)) return true;
+				brokenLinks += 1;
+				return false;
+			},
+		});
 	} catch (error) {
-		await fs.rm(tempPath, { force: true });
+		await fs.rm(destination, { recursive: true, force: true });
 		throw error;
+	}
+	await fs.rm(source, { recursive: true, force: true });
+	return { brokenLinks };
+}
+
+/**
+ * Whether `destination` already holds exactly what archiving `source` would
+ * write — the signature of a run killed between the archive landing and the
+ * transcript being dropped. Finishing that move is what keeps one session
+ * from wedging every later run on `archive destination exists`.
+ */
+async function archiveAlreadyHolds(source: string, destination: string): Promise<boolean> {
+	try {
+		const live = await digestStream(Bun.file(source).stream());
+		const stored = await digestArchivedSessionFile(destination);
+		return live.hash === stored.hash;
+	} catch {
+		return false;
 	}
 }
 
-async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<void> {
+/**
+ * Move one session into the archive: the transcript compressed, then its
+ * artifact tree. Returns the symlink target the transcript named, if any,
+ * which is now a copy omp no longer uses.
+ *
+ * A destination that already holds this very transcript is a move a killed
+ * run did not finish, and is finished here rather than reported forever.
+ */
+async function moveSessionWithArtifacts(
+	candidate: ArchiveCandidate,
+): Promise<{ orphanedTarget?: string; brokenLinks: number }> {
 	const sourceSession = candidate.session.path;
 	const destSession = candidate.destinationPath;
 	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
 	const sourceArtifacts = sessionArtifactsPath(sourceSession);
 	const destArtifacts = sessionArtifactsPath(destSession);
-	if (await pathExists(destSession)) throw new Error(`archive destination exists: ${destSession}`);
 	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
-	if ((await pathExists(sourceArtifacts)) && (await pathExists(destArtifacts))) {
-		throw new Error(`archive artifacts destination exists: ${destArtifacts}`);
+	const alreadyArchived = (await pathExists(destSession)) && (await archiveAlreadyHolds(sourceSession, destSession));
+	if ((await pathExists(destSession)) && !alreadyArchived) {
+		throw new Error(`archive destination holds a different session: ${destSession}`);
 	}
 
 	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
+	let orphanedTarget: string | undefined;
+	let brokenLinks = 0;
 	try {
-		await gzipSessionFile(sourceSession, destSession);
+		if (alreadyArchived) {
+			// The archive is verified identical, so dropping the transcript only
+			// finishes what the killed run had already proved safe.
+			const link = await fs.lstat(sourceSession).catch(() => undefined);
+			orphanedTarget = link?.isSymbolicLink() ? await fs.realpath(sourceSession).catch(() => undefined) : undefined;
+			await fs.unlink(sourceSession);
+		} else {
+			orphanedTarget = (await gzipSessionFile(sourceSession, destSession)).orphanedTarget;
+		}
 		moved.push({ source: sourceSession, destination: destSession, compressed: true });
 		if (await pathExists(sourceArtifacts)) {
-			await movePath(sourceArtifacts, destArtifacts);
+			brokenLinks = (await moveArtifactsTree(sourceArtifacts, destArtifacts)).brokenLinks;
 			moved.push({ source: sourceArtifacts, destination: destArtifacts });
 		}
 	} catch (error) {
@@ -1057,6 +1111,7 @@ async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<vo
 		}
 		throw error;
 	}
+	return { orphanedTarget, brokenLinks };
 }
 
 function sqliteNumber(value: number | bigint | null | undefined): number {
@@ -1065,688 +1120,18 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 	return 0;
 }
 
-// Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
-// connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
-// to delete or replace a file that is still open.
-function tableExists(db: Database, table: string): boolean {
-	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
-	const row = stmt.get(table) as { present?: number } | null;
-	return row?.present === 1;
-}
-
-function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
-	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
-		const hasRecaps = tableExists(db, "session_recaps");
-		const hasTitles = tableExists(db, "session_titles");
-		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = hasHistory && tableExists(db, "history_fts");
-		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps and titles are session-scoped side output with no life beyond their session.
-		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
-		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
-		let deleted = 0;
-		const tx = db.transaction((ids: string[]) => {
-			for (const id of ids) {
-				deleteRecapsStmt?.run(id);
-				deleteTitlesStmt?.run(id);
-				if (!deleteStmt) continue;
-				const result = deleteStmt.run(id) as SqliteRunResult;
-				deleted += sqliteNumber(result.changes);
-			}
-			if (deleted > 0 && hasFts) db.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
-		});
-		tx(sessionIds);
-		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
-	} finally {
-		db.close();
-	}
-}
-
-async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
-	const ids = new Set<string>();
-	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
-		const id = (await scanArchivedSession(file))?.id;
-		if (id) ids.add(id);
-	}
-	return [...ids].sort();
-}
-
-async function cleanupHistoryRowsForArchivedSessions(
-	options: ResolvedGcOptions,
-	archiveRoot: string,
-	archivedSessionIds: string[],
-	result: ArchiveGcResult,
-): Promise<void> {
-	const dbPath = getHistoryDbPath(options.agentDir);
-	if (!(await pathExists(dbPath))) return;
-
-	const cleanupIds = new Set(archivedSessionIds);
-	try {
-		for (const id of await collectArchivedSessionIds(archiveRoot)) cleanupIds.add(id);
-	} catch (error) {
-		result.errors.push(`history cleanup scan: ${errorMessage(error)}`);
-	}
-
-	try {
-		const cleanup = deleteHistoryRowsForSessions(dbPath, [...cleanupIds]);
-		result.historyRowsDeleted = cleanup.deleted;
-		result.ftsRebuilt = cleanup.ftsRebuilt;
-	} catch (error) {
-		result.errors.push(`history cleanup: ${errorMessage(error)}`);
-	}
-}
-
-const STATS_SESSION_TABLES = ["messages", "user_messages", "tool_calls", "file_offsets"] as const;
-const STATS_ENTRY_TABLES = ["messages", "user_messages", "tool_calls"] as const;
-type StatsEntryTable = (typeof STATS_ENTRY_TABLES)[number];
-
-const STATS_IDENTITY_COLUMNS: Record<StatsEntryTable, readonly string[]> = {
-	messages: ["entry_id", "timestamp"],
-	user_messages: ["entry_id", "timestamp"],
-	tool_calls: ["entry_id", "timestamp", "tool_call_id"],
-};
-
-interface StatsSession {
-	path: string;
-	id: string;
-	parentSession?: string;
-	historicalPaths: string[];
-	identities: Record<StatsEntryTable, StatsEntryIdentity[]>;
-}
-
-interface StatsLineageNode extends StatsSession {
-	statsPaths: Set<string>;
-	identityKeys: Set<string>;
-}
-
-interface StatsEntryIdentity {
-	entryId: string;
-	timestamp: number;
-	toolCallId: string;
-}
-
-interface StatsTransferTarget {
-	path: string;
-	identities: Record<StatsEntryTable, StatsEntryIdentity[]>;
-}
-
-interface StatsCleanupPlan {
-	sessionPaths: string[];
-	retainedSessions: StatsLineageNode[];
-	transfers: StatsTransferTarget[];
-	archivedIdentityKeys: Set<string>;
-	preserveAll: boolean;
-}
-
-interface StatsCleanupContext {
-	plans: StatsCleanupPlan[];
-	incompleteRetainedSessions: StatsLineageNode[];
-}
-
-function createStatsIdentities(): Record<StatsEntryTable, StatsEntryIdentity[]> {
-	return {
-		messages: [],
-		user_messages: [],
-		tool_calls: [],
-	};
-}
-
-function statsIdentityKey(table: StatsEntryTable, identity: StatsEntryIdentity): string {
-	return `${table}\0${identity.entryId}\0${identity.timestamp}\0${identity.toolCallId}`;
-}
-
-function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentity[]>): Set<string> {
-	const keys = new Set<string>();
-	for (const table of STATS_ENTRY_TABLES) {
-		for (const identity of identities[table]) keys.add(statsIdentityKey(table, identity));
-	}
-	return keys;
-}
-
-function tableHasColumn(db: Database, table: string, column: string): boolean {
-	using stmt = db.prepare(`PRAGMA table_info(${table})`);
-	const rows = stmt.all() as Array<{ name?: string | null }>;
-	return rows.some(row => row.name === column);
-}
-
-function collectStoredStatsSessionPaths(db: Database): string[] {
-	const sessionPaths = new Set<string>();
-	for (const table of STATS_SESSION_TABLES) {
-		if (!tableExists(db, table) || !tableHasColumn(db, table, "session_file")) continue;
-		using stmt = db.prepare(`SELECT DISTINCT session_file FROM ${table}`);
-		const rows = stmt.all() as Array<{
-			session_file?: string | null;
-		}>;
-		for (const row of rows) {
-			if (typeof row.session_file === "string") sessionPaths.add(row.session_file);
-		}
-	}
-	return [...sessionPaths];
-}
-
 /**
- * `/move` preserves the session filename and artifacts-directory basename.
- * Recover the top-level path represented by any main or nested stats row so
- * one archived logical session can reconcile every historical location.
- */
-function logicalSessionRootForStatsPath(statsPath: string, sessionPath: string): string | undefined {
-	const sessionFilename = path.basename(sessionPath);
-	if (path.basename(statsPath) === sessionFilename) return statsPath;
-
-	const artifactsDirname = sessionFilename.slice(0, -SESSION_SUFFIX.length);
-	let directory = path.dirname(path.resolve(statsPath));
-	while (true) {
-		if (path.basename(directory) === artifactsDirname) return `${directory}${SESSION_SUFFIX}`;
-		const parent = path.dirname(directory);
-		if (parent === directory) return undefined;
-		directory = parent;
-	}
-}
-
-function sessionPathEncodesId(sessionPath: string, sessionId: string): boolean {
-	const stem = path.basename(sessionPath, SESSION_SUFFIX);
-	return stem === sessionId || stem.endsWith(`_${sessionId}`);
-}
-
-function managedHistoricalSessionPaths(
-	header: SessionLineageHeader,
-	currentSessionPath: string,
-	sessionsRoot: string,
-): string[] {
-	const root = path.resolve(sessionsRoot);
-	const filename = path.basename(currentSessionPath);
-	const paths = new Set<string>();
-	for (const previousSessionFile of header.previousSessionFiles) {
-		if (!path.isAbsolute(previousSessionFile) || path.basename(previousSessionFile) !== filename) continue;
-		const resolved = path.resolve(previousSessionFile);
-		const relative = path.relative(root, resolved);
-		if (
-			!relative ||
-			relative === ".." ||
-			relative.startsWith(`..${path.sep}`) ||
-			path.isAbsolute(relative) ||
-			!resolved.endsWith(SESSION_SUFFIX)
-		) {
-			continue;
-		}
-		paths.add(resolved);
-	}
-	return [...paths];
-}
-
-function resolveLogicalSessionMatch(
-	statsPath: string,
-	nodes: StatsLineageNode[],
-): { node: StatsLineageNode; logicalRoot: string } | undefined {
-	const matches: Array<{ node: StatsLineageNode; logicalRoot: string }> = [];
-	for (const node of nodes) {
-		const logicalRoot = logicalSessionRootForStatsPath(statsPath, node.path);
-		if (logicalRoot) matches.push({ node, logicalRoot });
-	}
-	const exact = matches.filter(match => path.resolve(match.logicalRoot) === path.resolve(match.node.path));
-	if (exact.length === 1) return exact[0];
-	if (exact.length > 1) return undefined;
-
-	const known = matches.filter(match =>
-		[...match.node.statsPaths].some(statsPath => path.resolve(statsPath) === path.resolve(match.logicalRoot)),
-	);
-	if (known.length === 1) return known[0];
-	if (known.length > 1) return undefined;
-
-	const idMatches = matches.filter(match => sessionPathEncodesId(match.logicalRoot, match.node.id));
-	return idMatches.length === 1 ? idMatches[0] : undefined;
-}
-
-/**
- * Resolve retained peers through `parentSession`, which is historically either
- * a session id or an absolute path. Ambiguous aliases are deliberately left
- * unresolved so cleanup fails safe instead of transferring across sessions.
- */
-function buildStatsCleanupPlans(
-	archivedSessions: StatsSession[],
-	retainedSessions: StatsSession[],
-	dbPath: string,
-): StatsCleanupContext {
-	const archivedNodes: StatsLineageNode[] = archivedSessions.map(session => ({
-		...session,
-		statsPaths: new Set([session.path, ...session.historicalPaths]),
-		identityKeys: statsIdentityKeys(session.identities),
-	}));
-	const retainedNodes: StatsLineageNode[] = retainedSessions.map(session => ({
-		...session,
-		statsPaths: new Set([session.path, ...session.historicalPaths]),
-		identityKeys: statsIdentityKeys(session.identities),
-	}));
-	const nodes = [...archivedNodes, ...retainedNodes];
-
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		for (const storedPath of collectStoredStatsSessionPaths(db)) {
-			const match = resolveLogicalSessionMatch(storedPath, nodes);
-			if (match) match.node.statsPaths.add(match.logicalRoot);
-		}
-	} finally {
-		db.close();
-	}
-
-	for (const child of nodes) {
-		if (
-			!child.parentSession ||
-			(!path.isAbsolute(child.parentSession) && !child.parentSession.endsWith(SESSION_SUFFIX))
-		) {
-			continue;
-		}
-		const match = resolveLogicalSessionMatch(child.parentSession, nodes);
-		if (match) match.node.statsPaths.add(match.logicalRoot);
-	}
-
-	const archivedPathClaimCounts = new Map<string, number>();
-	for (const archived of archivedNodes) {
-		for (const statsPath of archived.statsPaths) {
-			const key = path.resolve(statsPath);
-			archivedPathClaimCounts.set(key, (archivedPathClaimCounts.get(key) ?? 0) + 1);
-		}
-	}
-	const ambiguousArchivedPathKeys = new Set(
-		[...archivedPathClaimCounts].filter(([, count]) => count > 1).map(([key]) => key),
-	);
-
-	const aliases = new Map<string, StatsLineageNode | null>();
-	const identityKeysByNode = new Map<StatsLineageNode, Set<string>>();
-	for (const node of nodes) {
-		const keys = new Set([
-			`id:${node.id}`,
-			...[...node.statsPaths].map(statsPath => `path:${path.resolve(statsPath)}`),
-		]);
-		identityKeysByNode.set(node, keys);
-		for (const key of keys) {
-			if (!aliases.has(key)) {
-				aliases.set(key, node);
-			} else if (aliases.get(key) !== node) {
-				aliases.set(key, null);
-			}
-		}
-	}
-
-	const incompleteLineage = new Set<StatsLineageNode>();
-	const lineageKeysByNode = new Map<StatsLineageNode, Set<string>>();
-	for (const node of nodes) {
-		const lineageKeys = new Set(identityKeysByNode.get(node));
-		let current: StatsLineageNode | null = node;
-		const seen = new Set<StatsLineageNode>();
-		while (current?.parentSession) {
-			if (seen.has(current)) {
-				incompleteLineage.add(node);
-				break;
-			}
-			seen.add(current);
-			const parentReference = current.parentSession;
-			const parentKey =
-				path.isAbsolute(parentReference) || parentReference.endsWith(SESSION_SUFFIX)
-					? `path:${path.resolve(parentReference)}`
-					: `id:${parentReference}`;
-			lineageKeys.add(parentKey);
-			const parent = aliases.get(parentKey);
-			if (!parent) {
-				incompleteLineage.add(node);
-				break;
-			}
-			for (const key of identityKeysByNode.get(parent) ?? []) lineageKeys.add(key);
-			current = parent;
-		}
-		lineageKeysByNode.set(node, lineageKeys);
-	}
-
-	const retainedPathKeys = new Set(
-		retainedNodes.flatMap(retained => [...retained.statsPaths].map(statsPath => path.resolve(statsPath))),
-	);
-	const plans = archivedNodes.map(archived => {
-		const archivedLineage = lineageKeysByNode.get(archived) ?? new Set<string>();
-		return {
-			sessionPaths: [...archived.statsPaths].filter(statsPath => {
-				const key = path.resolve(statsPath);
-				return !retainedPathKeys.has(key) && !ambiguousArchivedPathKeys.has(key);
-			}),
-			retainedSessions: retainedNodes.filter(retained => {
-				if (incompleteLineage.has(retained)) return false;
-				const retainedLineage = lineageKeysByNode.get(retained);
-				return retainedLineage ? [...retainedLineage].some(key => archivedLineage.has(key)) : false;
-			}),
-			transfers: [],
-			archivedIdentityKeys: archived.identityKeys,
-			preserveAll: false,
-		};
-	});
-	return {
-		plans,
-		incompleteRetainedSessions: retainedNodes.filter(retained => incompleteLineage.has(retained)),
-	};
-}
-
-function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTable, StatsEntryIdentity[]>): void {
-	if (line.length === 0) return;
-	try {
-		const record: unknown = JSON.parse(line);
-		if (
-			!record ||
-			typeof record !== "object" ||
-			!("type" in record) ||
-			record.type !== "message" ||
-			!("id" in record) ||
-			typeof record.id !== "string" ||
-			record.id.length === 0 ||
-			!("message" in record) ||
-			!record.message ||
-			typeof record.message !== "object"
-		) {
-			return;
-		}
-		const message = record.message;
-		if (!("role" in message)) return;
-		const parsedEntryTimestamp =
-			"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
-		if (message.role === "user") {
-			identities.user_messages.push({
-				entryId: record.id,
-				timestamp: Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0,
-				toolCallId: "",
-			});
-			return;
-		}
-		if (message.role !== "assistant") return;
-		const timestamp =
-			"timestamp" in message && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-				? message.timestamp
-				: Number.isFinite(parsedEntryTimestamp)
-					? parsedEntryTimestamp
-					: 0;
-		identities.messages.push({ entryId: record.id, timestamp, toolCallId: "" });
-		if (!("content" in message) || !Array.isArray(message.content)) return;
-		for (const block of message.content) {
-			if (
-				block &&
-				typeof block === "object" &&
-				"type" in block &&
-				block.type === "toolCall" &&
-				"id" in block &&
-				typeof block.id === "string"
-			) {
-				identities.tool_calls.push({ entryId: record.id, timestamp, toolCallId: block.id });
-			}
-		}
-	} catch {
-		// Stats parsing is also lenient: a malformed line cannot own a retained row.
-	}
-}
-
-async function collectSessionStatsIdentities(
-	sessionPath: string,
-): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> {
-	const identities = createStatsIdentities();
-	const decoder = new TextDecoder();
-	for await (const line of readLines(Bun.file(sessionPath).stream())) {
-		addSessionStatsIdentity(decoder.decode(line), identities);
-	}
-	return identities;
-}
-
-async function populateStatsTransferTargets(context: StatsCleanupContext): Promise<void> {
-	const identitiesBySession = new Map<string, Promise<Record<StatsEntryTable, StatsEntryIdentity[]>>>();
-	const identitiesFor = (session: StatsLineageNode): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> => {
-		let identities = identitiesBySession.get(session.path);
-		if (!identities) {
-			identities = collectSessionStatsIdentities(session.path);
-			identitiesBySession.set(session.path, identities);
-		}
-		return identities;
-	};
-
-	const incompleteIdentityKeys = new Set<string>();
-	let hasUnidentifiableIncompleteSession = false;
-	for (const retained of context.incompleteRetainedSessions) {
-		const keys = statsIdentityKeys(await identitiesFor(retained));
-		if (keys.size === 0) hasUnidentifiableIncompleteSession = true;
-		for (const key of keys) incompleteIdentityKeys.add(key);
-	}
-
-	for (const plan of context.plans) {
-		if (context.incompleteRetainedSessions.length > 0) {
-			plan.preserveAll =
-				hasUnidentifiableIncompleteSession ||
-				plan.archivedIdentityKeys.size === 0 ||
-				[...plan.archivedIdentityKeys].some(key => incompleteIdentityKeys.has(key));
-		}
-		for (const retained of plan.retainedSessions) {
-			plan.transfers.push({ path: retained.path, identities: await identitiesFor(retained) });
-		}
-	}
-}
-
-/**
- * Rekey copied entry rows to the newest retained lineage peer before pruning.
- * The retained file's own offset is never rewritten: it already describes that
- * file's byte position, while every archived historical offset is deleted.
- */
-function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]): number {
-	if (plans.length === 0) return 0;
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		const sessionTables = STATS_SESSION_TABLES.filter(
-			table => tableExists(db, table) && tableHasColumn(db, table, "session_file"),
-		);
-		const entryTables = STATS_ENTRY_TABLES.filter(
-			table =>
-				sessionTables.includes(table) &&
-				STATS_IDENTITY_COLUMNS[table].every(column => tableHasColumn(db, table, column)),
-		);
-
-		db.run(`
-			CREATE TEMP TABLE gc_retained_entries (
-				table_name TEXT NOT NULL,
-				entry_id TEXT NOT NULL,
-				timestamp INTEGER NOT NULL,
-				tool_call_id TEXT NOT NULL,
-				target_session_file TEXT NOT NULL,
-				PRIMARY KEY (table_name, entry_id, timestamp, tool_call_id)
-			)
-		`);
-		using statements = new DisposableStack();
-		const clearRetainedEntries = statements.use(db.prepare("DELETE FROM gc_retained_entries"));
-		const insertRetainedEntry = statements.use(
-			db.prepare(`
-			INSERT OR IGNORE INTO gc_retained_entries (
-				table_name, entry_id, timestamp, tool_call_id, target_session_file
-			) VALUES (?, ?, ?, ?, ?)
-		`),
-		);
-		const transferStatements = entryTables.map(table => {
-			const toolCallMatch =
-				table === "tool_calls" ? `retained.tool_call_id = ${table}.tool_call_id` : "retained.tool_call_id = ''";
-			const identityMatch = `
-				retained.table_name = '${table}'
-				AND retained.entry_id = ${table}.entry_id
-				AND retained.timestamp = ${table}.timestamp
-				AND ${toolCallMatch}
-			`;
-			return statements.use(
-				db.prepare(`
-				UPDATE OR IGNORE ${table}
-				SET session_file = (
-					SELECT retained.target_session_file
-					FROM gc_retained_entries AS retained
-					WHERE ${identityMatch}
-				)
-				WHERE session_file = ?
-					AND EXISTS (
-						SELECT 1
-						FROM gc_retained_entries AS retained
-						WHERE ${identityMatch}
-					)
-			`),
-			);
-		});
-		const deletionStatements = sessionTables.map(table => ({
-			table,
-			statement: statements.use(
-				db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`),
-			),
-		}));
-		let deleted = 0;
-		const tx = db.transaction((cleanupPlans: StatsCleanupPlan[]) => {
-			for (const plan of cleanupPlans) {
-				if (plan.preserveAll) continue;
-				clearRetainedEntries.run();
-				for (const target of plan.transfers) {
-					for (const table of entryTables) {
-						for (const identity of target.identities[table]) {
-							insertRetainedEntry.run(
-								table,
-								identity.entryId,
-								identity.timestamp,
-								identity.toolCallId,
-								target.path,
-							);
-						}
-					}
-				}
-				for (const sessionPath of new Set(plan.sessionPaths)) {
-					for (const statement of transferStatements) statement.run(sessionPath);
-				}
-				for (const sessionPath of new Set(plan.sessionPaths)) {
-					const nestedPrefix = `${sessionArtifactsPath(sessionPath)}${path.sep}`;
-					for (const { table, statement } of deletionStatements) {
-						const requiresTransfer =
-							plan.retainedSessions.length > 0 &&
-							table !== "file_offsets" &&
-							!entryTables.some(entryTable => entryTable === table);
-						if (requiresTransfer) continue;
-						const result = statement.run(sessionPath, nestedPrefix) as SqliteRunResult;
-						deleted += sqliteNumber(result.changes);
-					}
-				}
-			}
-		});
-		tx(plans);
-		return deleted;
-	} finally {
-		db.close();
-	}
-}
-
-async function collectArchivedStatsSessions(
-	archiveRoot: string,
-	sessionsRoot: string,
-	onError: (file: string, error: unknown) => void,
-): Promise<StatsSession[]> {
-	const sessions: StatsSession[] = [];
-	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
-		const relative = path.relative(archiveRoot, file);
-		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
-		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
-		try {
-			const identities = createStatsIdentities();
-			const header = await scanArchivedSession(file, identities);
-			if (!header) throw new Error("archive is missing a valid session header");
-			sessions.push({
-				path: sourcePath,
-				id: header.id,
-				parentSession: header.parentSession,
-				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
-				identities,
-			});
-		} catch (error) {
-			onError(file, error);
-		}
-	}
-	return sessions;
-}
-
-function statsDbPath(options: ResolvedGcOptions): string {
-	return path.resolve(options.agentDir) === path.resolve(getAgentDir())
-		? getStatsDbPath()
-		: path.join(options.agentDir, "stats.db");
-}
-
-async function cleanupStatsRowsForArchivedSessions(
-	options: ResolvedGcOptions,
-	archiveRoot: string,
-	newlyArchivedSessions: SessionInfo[],
-	result: ArchiveGcResult,
-): Promise<void> {
-	const dbPath = statsDbPath(options);
-	if (!(await pathExists(dbPath))) return;
-	const sessionsRoot = getSessionsDir(options.agentDir);
-
-	const archivedByPath = new Map<string, StatsSession>();
-	for (const session of newlyArchivedSessions) {
-		archivedByPath.set(path.resolve(session.path), {
-			path: session.path,
-			id: session.id,
-			parentSession: session.parentSessionPath,
-			historicalPaths: [],
-			identities: createStatsIdentities(),
-		});
-	}
-
-	let retainedSessions: SessionInfo[];
-	try {
-		for (const session of await collectArchivedStatsSessions(archiveRoot, sessionsRoot, (file, error) => {
-			result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
-		})) {
-			archivedByPath.set(path.resolve(session.path), session);
-		}
-	} catch (error) {
-		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
-	}
-	try {
-		retainedSessions = await listActiveSessions(sessionsRoot);
-	} catch (error) {
-		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
-		return;
-	}
-
-	try {
-		await withStatsSyncLock(dbPath, async () => {
-			const retainedStatsSessions = await Promise.all(
-				retainedSessions.map(async session => {
-					const header = await readSessionLineageHeader(session.path);
-					if (!header || header.id !== session.id) {
-						throw new Error(`session header changed during stats cleanup: ${session.path}`);
-					}
-					return {
-						path: session.path,
-						id: session.id,
-						parentSession: header.parentSession,
-						historicalPaths: managedHistoricalSessionPaths(header, session.path, sessionsRoot),
-						identities: createStatsIdentities(),
-					};
-				}),
-			);
-			const context = buildStatsCleanupPlans([...archivedByPath.values()], retainedStatsSessions, dbPath);
-			await populateStatsTransferTargets(context);
-			result.statsRowsDeleted = reconcileStatsRowsForSessions(dbPath, context.plans);
-		});
-	} catch (error) {
-		result.errors.push(`stats cleanup: ${errorMessage(error)}`);
-	}
-}
-
-/**
- * Staging temps ({@link SESSION_STAGING_RE}) of `.jsonl` transcripts under
- * `sessionsRoot`, plus those beside exact session files recorded elsewhere
- * (`--session` paths, collab replicas).
+ * Staging temps ({@link SESSION_STAGING_RE}) anywhere under `sessionsRoot`,
+ * plus those beside exact session files recorded elsewhere (`--session`
+ * paths, collab replicas). A transcript is not the only file published this
+ * way: restoring an archived session stages every artifact it brings back,
+ * and a killed run leaves those behind too.
  */
 async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFiles: string[]): Promise<string[]> {
 	const files = new Map<string, string>();
 	try {
 		for await (const name of SESSION_STAGING_GLOB.scan({ cwd: sessionsRoot, dot: true })) {
-			if (!SESSION_STAGING_RE.exec(path.basename(name))?.[1]?.endsWith(SESSION_SUFFIX)) continue;
+			if (!SESSION_STAGING_RE.test(path.basename(name))) continue;
 			const file = path.join(sessionsRoot, name);
 			files.set(normalizePathForComparison(file), file);
 		}
@@ -1810,12 +1195,11 @@ async function runArchiveGc(
 		keptNewestPerCwd: 0,
 		wouldArchive: 0,
 		archived: 0,
-		historyRowsDeleted: 0,
-		statsRowsDeleted: 0,
-		ftsRebuilt: false,
 		wouldDeleteTemps: 0,
 		deletedTemps: 0,
 		tempBytes: 0,
+		brokenLinks: 0,
+		orphanedTargets: [],
 		errors: [],
 	};
 	const candidates: ArchiveCandidate[] = [];
@@ -1856,26 +1240,38 @@ async function runArchiveGc(
 		candidates.push({ ...destination, session });
 	}
 
-	result.wouldArchive = candidates.length;
 	// Before archiving moves transcripts away from the temps staged beside them.
 	await sweepSessionStagingFiles(options, sessionsRoot, registeredSessionPaths, result);
-	if (!options.apply) return result;
 
-	const archivedSessionIds: string[] = [];
-	const archivedSessions: SessionInfo[] = [];
+	// An archived session keeps every row that describes it. Its prompt-history,
+	// title and recap rows exist nowhere else, and its stats rows are only
+	// re-derivable once the transcript is back in the sessions tree, so a
+	// command that moves a session it is keeping must not delete them.
 	for (const candidate of candidates) {
+		// A session a live process still owns is left alone, the way
+		// `--compress` does it: the five-minute write grace alone would archive
+		// a session under its writer and lose the turn it was about to append.
+		// The dry run takes the lease too, so `wouldArchive` counts what
+		// `--apply` would really take.
+		let tree: { leases: FileLockHandle[]; transcripts: Set<string> } | null = null;
 		try {
-			await moveSessionWithArtifacts(candidate);
+			tree = await tryAcquireSessionTreeLeases(candidate.session, await collectSessionFiles(candidate.session));
+			if (tree === null) {
+				result.skippedActive += 1;
+				continue;
+			}
+			result.wouldArchive += 1;
+			if (!options.apply) continue;
+			const { orphanedTarget, brokenLinks } = await moveSessionWithArtifacts(candidate);
 			result.archived += 1;
-			archivedSessionIds.push(candidate.session.id);
-			archivedSessions.push(candidate.session);
+			result.brokenLinks += brokenLinks;
+			if (orphanedTarget) result.orphanedTargets.push(orphanedTarget);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
+		} finally {
+			for (const held of tree?.leases ?? []) held.release();
 		}
 	}
-
-	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
-	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
 	return result;
 }
 
@@ -2101,183 +1497,6 @@ async function runWalGc(options: ResolvedGcOptions): Promise<WalGcResult> {
 	};
 }
 
-function gcLockPid(lockText: string): number | undefined {
-	const pid = Number.parseInt(lockText.split(/\r?\n/, 1)[0] ?? "", 10);
-	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-function processExists(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		const code = codeOf(error);
-		if (code === "ESRCH" || code === "EINVAL") return false;
-		return true;
-	}
-}
-
-function gcLockStatSnapshot(stat: {
-	dev: number;
-	ino: number;
-	size: number;
-	mtimeMs: number;
-	ctimeMs: number;
-}): Omit<GcLockSnapshot, "text"> {
-	return {
-		dev: stat.dev,
-		ino: stat.ino,
-		size: stat.size,
-		mtimeMs: stat.mtimeMs,
-		ctimeMs: stat.ctimeMs,
-	};
-}
-
-function sameGcLockStat(left: Omit<GcLockSnapshot, "text">, right: Omit<GcLockSnapshot, "text">): boolean {
-	return (
-		left.dev === right.dev &&
-		left.ino === right.ino &&
-		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
-	);
-}
-
-async function readGcLockSnapshot(lockPath: string): Promise<GcLockSnapshot | null> {
-	const stat = await statIfPresent(lockPath);
-	if (!stat) return null;
-
-	let lockText = "";
-	try {
-		lockText = await Bun.file(lockPath).text();
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return null;
-		throw error;
-	}
-
-	const afterStat = await statIfPresent(lockPath);
-	if (!afterStat) return null;
-	const before = gcLockStatSnapshot(stat);
-	const after = gcLockStatSnapshot(afterStat);
-	if (!sameGcLockStat(before, after)) return null;
-	return { ...after, text: lockText };
-}
-
-async function gcLockSnapshotStillCurrent(lockPath: string, snapshot: GcLockSnapshot): Promise<boolean> {
-	const stat = await statIfPresent(lockPath);
-	return stat ? sameGcLockStat(snapshot, gcLockStatSnapshot(stat)) : false;
-}
-
-function shouldBreakGcLock(snapshot: GcLockSnapshot): boolean {
-	const pid = gcLockPid(snapshot.text);
-	if (pid) return !processExists(pid);
-
-	const createdAtMs = Date.parse(snapshot.text.split(/\r?\n/, 2)[1] ?? "");
-	const ageFromMs = Number.isFinite(createdAtMs) ? createdAtMs : snapshot.mtimeMs;
-	return Date.now() - ageFromMs > GC_WRITE_GRACE_MS;
-}
-
-async function removeStaleGcLock(lockPath: string): Promise<boolean> {
-	const snapshot = await readGcLockSnapshot(lockPath);
-	if (!snapshot) return false;
-	if (!shouldBreakGcLock(snapshot)) return false;
-	if (!(await gcLockSnapshotStillCurrent(lockPath, snapshot))) return false;
-	try {
-		await fs.unlink(lockPath);
-		return true;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
-}
-
-async function openNewGcLock(lockPath: string): Promise<fs.FileHandle | null> {
-	try {
-		return await fs.open(lockPath, "wx");
-	} catch (error) {
-		if (codeOf(error) === "EEXIST") return null;
-		throw error;
-	}
-}
-
-async function releaseGcLockFile(lockPath: string, handle: fs.FileHandle): Promise<void> {
-	try {
-		await handle.close();
-	} catch {
-		// Best effort: stale sidecar locks are recoverable by PID/timestamp.
-	}
-	try {
-		await fs.unlink(lockPath);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return;
-	}
-}
-
-async function openGcBreakerLock(lockPath: string): Promise<{ path: string; handle: fs.FileHandle }> {
-	const breakerPath = `${lockPath}${GC_LOCK_BREAKER_SUFFIX}`;
-	for (let attempt = 0; attempt < 2; attempt += 1) {
-		const handle = await openNewGcLock(breakerPath);
-		if (handle) {
-			try {
-				await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`);
-				return { path: breakerPath, handle };
-			} catch (error) {
-				await releaseGcLockFile(breakerPath, handle);
-				throw error;
-			}
-		}
-		if (!(await removeStaleGcLock(breakerPath))) throw new Error(`GC already running: ${lockPath}`);
-	}
-	throw new Error(`GC already running: ${lockPath}`);
-}
-
-async function openGcLock(lockPath: string): Promise<fs.FileHandle> {
-	const direct = await openNewGcLock(lockPath);
-	if (direct) return direct;
-
-	const breaker = await openGcBreakerLock(lockPath);
-	try {
-		const raced = await openNewGcLock(lockPath);
-		if (raced) return raced;
-		if (!(await removeStaleGcLock(lockPath))) throw new Error(`GC already running: ${lockPath}`);
-		const takeover = await openNewGcLock(lockPath);
-		if (takeover) return takeover;
-		throw new Error(`GC already running: ${lockPath}`);
-	} finally {
-		await releaseGcLockFile(breaker.path, breaker.handle);
-	}
-}
-
-async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
-	const lockPath = path.join(agentDir, "gc.lock");
-	await fs.mkdir(agentDir, { recursive: true });
-	const handle = await openGcLock(lockPath);
-	let result: T | undefined;
-	let runError: unknown;
-	try {
-		await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`);
-		result = await fn(lockPath);
-	} catch (error) {
-		runError = error;
-	}
-	let closeError: unknown;
-	try {
-		await handle.close();
-	} catch (error) {
-		closeError = error;
-	}
-	let unlinkError: unknown;
-	try {
-		await fs.unlink(lockPath);
-	} catch (error) {
-		if (codeOf(error) !== "ENOENT") unlinkError = error;
-	}
-	if (runError) throw runError;
-	if (closeError) throw closeError;
-	if (unlinkError) throw unlinkError;
-	return result as T;
-}
-
 function renderText(result: GcResult): string {
 	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
 	if (result.stale) {
@@ -2294,16 +1513,30 @@ function renderText(result: GcResult): string {
 		if (result.blobs.errors.length > 0) lines.push(`blob errors: ${result.blobs.errors.length}`);
 	}
 	if (result.archive) {
-		lines.push(
-			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
-		);
+		lines.push(`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived`);
+		for (const target of result.archive.orphanedTargets) {
+			lines.push(`archived by content, its link target left in place: ${target}`);
+		}
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.wouldDeleteTemps > 0) {
 			lines.push(
 				`session staging temps: ${result.archive.deletedTemps}/${result.archive.wouldDeleteTemps} files, ${formatBytes(result.archive.tempBytes)}`,
 			);
 		}
+		if (result.archive.brokenLinks > 0) {
+			lines.push(`links inside artifact trees whose target was gone: ${result.archive.brokenLinks}`);
+		}
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
+	}
+	if (result.restore) {
+		const restore = result.restore;
+		if (restore.sessionPath) {
+			const verb = result.apply ? "restored" : "would restore";
+			const artifacts = restore.artifactsRestored ? " with its artifacts" : "";
+			lines.push(`restore: ${verb} ${restore.archivePath} to ${restore.sessionPath}${artifacts}`);
+		}
+		for (const note of restore.notRestored) lines.push(`not restored: ${note}`);
+		if (restore.errors.length > 0) lines.push(`restore errors: ${restore.errors.length}`);
 	}
 	if (result.compress) {
 		const compress = result.compress;
@@ -2333,15 +1566,107 @@ function renderText(result: GcResult): string {
 	return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Bring one archived session back to the sessions tree, and say what coming
+ * back does not include. A person should not have to reconstruct the original
+ * path and run `gunzip` by hand — and a hand-run `gunzip -c … > …` truncates
+ * its destination when the archive turns out to be short.
+ */
+async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<RestoreGcResult> {
+	const result: RestoreGcResult = { query, bytes: 0, artifactsRestored: false, notRestored: [], errors: [] };
+	let matches: string[];
+	try {
+		matches = isArchivedSessionPath(query)
+			? [path.resolve(query)]
+			: await findArchivedSessionFiles(query, options.agentDir);
+	} catch (error) {
+		result.errors.push(errorMessage(error));
+		return result;
+	}
+	if (matches.length === 0) {
+		const archived = await listArchivedSessionFiles(options.agentDir);
+		result.errors.push(
+			`no archived session matches "${query}" among ${archived.length} in ${getArchivedSessionsDir(options.agentDir)}`,
+		);
+		return result;
+	}
+	if (matches.length > 1) {
+		result.errors.push(
+			`"${query}" matches ${matches.length} archived sessions; name one of them:\n${matches.map(file => `  ${file}`).join("\n")}`,
+		);
+		return result;
+	}
+	const archiveFile = matches[0];
+	if (!(await pathExists(archiveFile))) {
+		result.errors.push(`no such archive file: ${archiveFile}`);
+		return result;
+	}
+	result.archivePath = archiveFile;
+	const sessionPath = liveSessionPathForArchive(archiveFile, options.agentDir);
+	if (!options.apply) {
+		// Say now what --apply would refuse, instead of promising a restore.
+		if (!sessionPath) {
+			result.errors.push(
+				`"${archiveFile}" is not in ${getArchivedSessionsDir(options.agentDir)}; inflate it yourself with \`gunzip\``,
+			);
+			return result;
+		}
+		if (await pathExists(sessionPath)) {
+			result.errors.push(`a session file already exists at ${sessionPath}; nothing would be restored`);
+			return result;
+		}
+		try {
+			// A dry run that cannot read the archive must say so, not promise a
+			// restore that `--apply` then fails.
+			await inflateArchivedBytes(archiveFile);
+		} catch (error) {
+			result.errors.push(`${archiveFile} cannot be read: ${errorMessage(error)}`);
+			return result;
+		}
+		result.sessionPath = sessionPath;
+		return result;
+	}
+	try {
+		// This command already holds the gc lock for the whole run.
+		const restored = await restoreArchivedSessionLocked(archiveFile, options.agentDir);
+		result.sessionPath = restored.sessionPath;
+		result.bytes = restored.bytes;
+		result.artifactsRestored = restored.artifactsRestored;
+		// An artifact tree left behind is a half-restored session, not a note.
+		result.errors.push(...restored.notRestored.map(note => `could not restore ${note}`));
+	} catch (error) {
+		result.errors.push(errorMessage(error));
+		return result;
+	}
+	// Facts about what a transcript can and cannot carry. This build deletes
+	// no rows when it archives; an older one did, and only the stats rows of
+	// those come back.
+	result.notRestored.push(
+		"prompt history, the session title and recaps: they are not in the transcript, so if an older `gc --archive` deleted this session's rows nothing rebuilds them",
+		"stats rows: `omp stats` re-reads the restored transcript and puts them back",
+	);
+	return result;
+}
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
+	if (options.restoreTarget !== undefined && options.explicitPhases.length > 0) {
+		// Saying nothing about phases it dropped is how a command reports success
+		// for work it never did.
+		throw new Error(`--restore runs alone; drop ${options.explicitPhases.map(flag => `--${flag}`).join(" ")}`);
+	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
 		// Stale cleanup may prune a missing first-save target's registry marker.
 		const registeredSessionPaths = options.runArchive
 			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
 			: [];
+		// A restore runs alone: no sweep may race a session coming back.
+		if (options.restoreTarget !== undefined) {
+			next.restore = await runRestoreGc(options, options.restoreTarget);
+			return next;
+		}
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);

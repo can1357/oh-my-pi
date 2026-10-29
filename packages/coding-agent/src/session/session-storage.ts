@@ -16,6 +16,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { inflateArchivedBytes, isArchivedSessionPath } from "./session-archive";
 import { isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
@@ -1104,7 +1105,9 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
-	readText(path: string): Promise<string> {
+	async readText(path: string): Promise<string> {
+		// A `gc --archive` copy is a single gzip member; nothing can read it end-first.
+		if (isArchivedSessionPath(path)) return utf8Decoder.decode(await inflateArchivedBytes(path));
 		return Bun.file(path).text();
 	}
 
@@ -1113,6 +1116,16 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		// A gzip member cannot be read end-first, so an archived transcript is
+		// inflated whole and then windowed. Only the listing of an archive hits
+		// this; the live tree keeps the two bounded reads.
+		if (isArchivedSessionPath(path)) {
+			const bytes = await inflateArchivedBytes(path);
+			const head = utf8Decoder.decode(bytes.subarray(0, prefixBytes));
+			const tail =
+				suffixBytes > 0 ? utf8Decoder.decode(bytes.subarray(Math.max(0, bytes.length - suffixBytes))) : "";
+			return [head, tail];
+		}
 		return peekFileEnds(path, prefixBytes, suffixBytes, (head, tail) => [
 			utf8Decoder.decode(head),
 			utf8Decoder.decode(tail),

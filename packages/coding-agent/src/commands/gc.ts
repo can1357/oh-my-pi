@@ -21,6 +21,9 @@ export default class Gc extends Command {
 		compress: Flags.boolean({
 			description: "Store idle sessions with filesystem compression in place (APFS, NTFS)",
 		}),
+		restore: Flags.string({
+			description: "Bring an archived session back by id prefix or archive path (runs alone)",
+		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
 		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
@@ -43,6 +46,7 @@ export default class Gc extends Command {
 				wal: flags.wal,
 				stale: flags.stale,
 				compress: flags.compress,
+				restore: flags.restore,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

@@ -9,6 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { findArchivedSessionFiles } from "./session-archive";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -58,7 +59,8 @@ export interface SessionInfo {
 
 export interface ResolvedSessionMatch {
 	session: SessionInfo;
-	scope: "local" | "global";
+	/** `archive`: the match is a `gc --archive` copy and is restored when opened. */
+	scope: "local" | "global" | "archive";
 }
 
 /** Lightweight metadata for a recent session, used in welcome/picker UI. */
@@ -1472,9 +1474,29 @@ export async function resolveResumableSession(
 
 	const globalSessions = await listAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
+	if (globalMatch) {
+		return { session: globalMatch, scope: "global" };
 	}
 
-	return { session: globalMatch, scope: "global" };
+	// `gc --archive` moves cold transcripts out of the sessions tree. They stay
+	// resumable: the match is restored to its original path when it is opened.
+	const [archiveFile] = await findArchivedSessionFiles(sessionArg);
+	if (!archiveFile) return undefined;
+	const [archived] = await collectSessionsFromFiles([archiveFile], storage, true);
+	// A damaged archive must not read as "no such session": the file is right
+	// there under the id the caller named. Hand back what its name says and
+	// let opening it report why it cannot be read.
+	const stem = path.basename(archiveFile, ".jsonl.gz");
+	const session = archived ?? {
+		path: archiveFile,
+		id: stem.slice(stem.lastIndexOf("_") + 1) || sessionArg,
+		cwd: "",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 0,
+		size: 0,
+		firstMessage: "",
+		allMessagesText: "",
+	};
+	return { session, scope: "archive" };
 }

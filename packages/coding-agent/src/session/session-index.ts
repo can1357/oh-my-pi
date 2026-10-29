@@ -6,12 +6,13 @@
  *   the recent-session fallback scan. Lets the welcome "Recent sessions" list
  *   resolve names from a stat + lookup instead of content-scanning every session
  *   file in the project directory (multi-hundred-ms on dirs with thousands of
- *   sessions). A title has no life beyond its session; `omp gc` drops rows of
- *   archived sessions.
+ *   sessions). A title outlives nothing but its session, and an archived
+ *   session is one a resume brings back, so these rows stay.
  * - `session_recaps`: append-only journal of idle recaps
  *   ({@link SessionManager.recordRecap}). Recaps are side-channel output that
  *   never enters the session JSONL or LLM context; this table is their only
- *   durable record. `omp gc` drops rows of archived sessions.
+ *   durable record, so nothing rebuilds a row that is deleted — including for
+ *   a session that is only archived.
  *
  * Holds its own lazily-opened connection instead of {@link HistoryStorage}'s
  * path-pinned singleton: the db path is re-resolved on every call so

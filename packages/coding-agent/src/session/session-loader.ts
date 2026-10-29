@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
+import { isArchivedSessionPath } from "./session-archive";
 import {
 	BlobStore,
 	isBlobRef,
@@ -499,8 +500,14 @@ export async function loadEntriesFromFileStream(
 export function parseSessionEntries(content: string): FileEntry[] {
 	return parseSessionContent(content).entries;
 }
-function shouldStreamEntries(storage: SessionStorage, size: number): boolean {
-	return storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES;
+/**
+ * The streaming path reads raw bytes straight off the file, so an archived
+ * (gzipped) transcript always takes the whole-text path, which inflates it.
+ */
+function shouldStreamEntries(storage: SessionStorage, filePath: string, size: number): boolean {
+	return (
+		storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES && !isArchivedSessionPath(filePath)
+	);
 }
 
 async function loadWithKnownSize(
@@ -509,7 +516,7 @@ async function loadWithKnownSize(
 	size: number,
 	options?: { throwIfMissing?: boolean },
 ): Promise<{ loaded: SessionLoadResult; sourceSize: number }> {
-	if (shouldStreamEntries(storage, size)) {
+	if (shouldStreamEntries(storage, filePath, size)) {
 		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing });
 		const sourceSize = loaded.sourceSize ?? 0;
 		return { loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded, sourceSize };
@@ -601,7 +608,7 @@ export async function visitEntriesFromFile(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<void> {
 	const size = storage.statSync(filePath).size;
-	if (shouldStreamEntries(storage, size)) {
+	if (shouldStreamEntries(storage, filePath, size)) {
 		let sawFirstEntry = false;
 		await visitEntriesFromFileStream(filePath, entry => {
 			if (!sawFirstEntry) {
