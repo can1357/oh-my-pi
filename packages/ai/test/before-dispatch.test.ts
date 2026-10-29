@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as duoWorkflow from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, completeSimple, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -271,5 +272,39 @@ describe("beforeDispatch", () => {
 		]);
 
 		expect(settled).toBe("held and refused");
+	});
+
+	// `gitlab-duo-agent` dispatched outside `withProviderInFlightLimit` and
+	// healed leaked thinking itself, so it was the one request on the wire the
+	// chokepoint never saw.
+	test("holds the gitlab-duo-agent dispatch, which bypassed the chokepoint", async () => {
+		const order: string[] = [];
+		const duoSpy = spyOn(duoWorkflow, "streamGitLabDuoWorkflow").mockImplementation((() => {
+			order.push("dispatch");
+			const events = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				events.push({ type: "start", partial: reply() });
+				events.push({ type: "done", reason: "stop", message: reply() });
+			});
+			return events;
+		}) as never);
+		try {
+			const duoModel = {
+				...model(),
+				api: "gitlab-duo-agent" as Api,
+				provider: "gitlab-duo-agent",
+			} as Model<Api>;
+			const stream = streamSimple(duoModel, context(), {
+				apiKey: "duo-token",
+				beforeDispatch: () => {
+					order.push("hold");
+				},
+			});
+			await stream.result();
+		} finally {
+			duoSpy.mockRestore();
+		}
+
+		expect(order).toEqual(["hold", "dispatch"]);
 	});
 });

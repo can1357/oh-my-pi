@@ -1470,10 +1470,12 @@ function streamSimpleRequest<TApi extends Api>(
 
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
-		// Does not route through withProviderInFlightLimit, so heal explicitly.
+		// This one stayed outside `withProviderInFlightLimit` and healed leaked
+		// thinking itself. A caller's hold lives in that wrapper, so the
+		// exception would have been the one dispatch on the wire it never saw;
+		// the wrapper heals the same way, so nothing else changes here.
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			healLeakedThinking(
-				model,
+			withProviderInFlightLimit(model, opts, () =>
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
 					apiKey,
