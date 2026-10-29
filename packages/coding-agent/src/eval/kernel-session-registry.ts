@@ -152,6 +152,13 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	/**
+	 * The session key each explicit owner acquired last. A superseded kernel is
+	 * only reclaimed once every owner registered against it has moved on, and
+	 * `ownerIds` alone cannot say that: an id attached at one key stays there
+	 * for the session's life.
+	 */
+	const ownerKeys = new Map<string, string>();
 	const reaper = new SupersededKernelReaper<TSession>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
@@ -185,6 +192,9 @@ export function createKernelSessionRegistry<
 		cwd: string,
 		options: TOptions,
 	): Promise<TSession> {
+		// Where this owner is working now: every key it is not at is one it has
+		// moved away from, which is what arms a reclaim.
+		if (options.kernelOwnerId !== undefined) ownerKeys.set(options.kernelOwnerId, sessionKey);
 		const existing = sessions.get(sessionKey);
 		if (existing) {
 			attachSessionOwner(existing, sessionId, options.kernelOwnerId);
@@ -347,25 +357,32 @@ export function createKernelSessionRegistry<
 	}
 
 	/**
-	 * Shut down the kernels this owner left behind under other session keys.
+	 * Shut down, after an idle grace, the kernels this owner left behind under
+	 * other session keys.
 	 *
 	 * A retained kernel is keyed by (eval session id, cwd, interpreter), so an
 	 * owner that changes directory, switches interpreter, or whose eval session
-	 * id gains its on-disk session file, acquires a *new* kernel and strands the
-	 * previous runner. Nothing ever reclaimed the stranded one: it kept its
-	 * whole heap — tens of gigabytes in the report this fixes — until the host
-	 * process exited, and a `reset` only ever restarted the key the caller asked
-	 * for, so the survivor outlived the restart it was supposed to die in.
+	 * id gains its on-disk session file acquires a *new* kernel and strands the
+	 * previous runner.
 	 *
-	 * Three things make a session off limits, because killing a kernel someone
-	 * still wants costs more than the memory this reclaims:
+	 * A session is armed once every agent registered against it has run its
+	 * latest cell under some other key ({@link everyOwnerMovedAway}); arming on
+	 * the scanning owner alone would leave a kernel two agents share alive for
+	 * the life of the host, since neither rotation ever drops an id from
+	 * {@link SessionOwners.ownerIds}.
 	 *
-	 * - another agent is registered against it;
+	 * Two things make an armed session off limits when the grace expires,
+	 * because killing a kernel someone still wants costs more than the memory
+	 * this reclaims:
+	 *
 	 * - a caller holds it ({@link KernelSession.activeUses}): a cell between
 	 *   acquiring the session and writing its first frame, or a borrower such as
 	 *   a subagent that can call the kernel's tools;
 	 * - its runner still owes a frame, which covers a cell already running,
 	 *   including a backgrounded one.
+	 *
+	 * Both hold only for now, so the reclaim they stop is armed again rather
+	 * than dropped: the owner that walked away may never run another cell.
 	 *
 	 * Without an explicit `kernelOwnerId` the registry cannot tell two callers
 	 * apart — {@link attachSessionOwner} records the first of them and ignores
@@ -380,18 +397,19 @@ export function createKernelSessionRegistry<
 		for (const [key, session] of Array.from(sessions.entries())) {
 			if (key === sessionKey) continue;
 			// Armed on ownership alone. A session busy right now is still one its
-			// owner has walked away from, and the fire-time guard below is what
-			// decides; arming only when it is idle would leave a kernel whose
+			// owners have walked away from, and the fire-time guards below are
+			// what decide; arming only when it is idle would leave a kernel whose
 			// owner never runs another cell unreclaimed for the life of the host.
-			if (!ownedAloneBy(key, session, ownerId)) continue;
+			if (!isSupersededFor(key, session, ownerId)) continue;
 			reaper.schedule(session, async () => {
 				// Re-checked at the far end of the grace: a cell, a borrow or
 				// another agent may have taken the kernel in the meantime.
-				if (!isReclaimable(key, session, ownerId)) return;
+				if (!isSupersededFor(key, session, ownerId)) return "settled";
+				if (session.activeUses > 0 || session.kernel.hasPendingWork()) return "deferred";
 				descriptor.invalidateSession?.(session);
 				if (sessions.get(key) === session) sessions.delete(key);
 				const result = await settleShutdown(session, false);
-				if (result.status === "fulfilled" && result.value?.confirmed !== false) return;
+				if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
 				logger.warn(`${descriptor.languageLabel} kernel left behind by its session did not confirm exit`, {
 					sessionId: session.sessionId,
 					sessionKey: key,
@@ -400,20 +418,34 @@ export function createKernelSessionRegistry<
 				});
 				// Put it back so a later dispose retries, matching disposeAll.
 				if (!sessions.has(key)) sessions.set(key, session);
+				return "settled";
 			});
 		}
 	}
 
-	/** Whether `session` under `key` is still this owner's alone. */
-	function ownedAloneBy(key: string, session: TSession, ownerId: string): boolean {
+	/**
+	 * Whether `session` under `key` is one this owner shares with nobody who is
+	 * still working there, and may therefore be armed or shut down.
+	 */
+	function isSupersededFor(key: string, session: TSession, ownerId: string): boolean {
 		if (sessions.get(key) !== session) return false;
-		return session.ownerIds.size === 1 && session.ownerIds.has(ownerId);
+		if (!session.ownerIds.has(ownerId)) return false;
+		return everyOwnerMovedAway(key, session);
 	}
 
-	/** Whether this owner's superseded `session` may be shut down right now. */
-	function isReclaimable(key: string, session: TSession, ownerId: string): boolean {
-		if (!ownedAloneBy(key, session, ownerId)) return false;
-		return session.activeUses === 0 && !session.kernel.hasPendingWork();
+	/**
+	 * Whether every agent registered against `session` has since run a cell
+	 * under another key. A fallback owner is a session id the registry invented
+	 * for a caller that gave none, and two such callers are indistinguishable,
+	 * so a session carrying one is never reclaimed.
+	 */
+	function everyOwnerMovedAway(key: string, session: TSession): boolean {
+		if (session.hasFallbackOwner || session.ownerIds.size === 0) return false;
+		for (const owner of session.ownerIds) {
+			if (ownerKeys.get(owner) !== key) continue;
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -440,6 +472,7 @@ export function createKernelSessionRegistry<
 		// A disposal never waits out a grace: the timers go, and the sessions
 		// they were holding are shut down below like any other.
 		reaper.cancelAll();
+		ownerKeys.clear();
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
@@ -477,6 +510,9 @@ export function createKernelSessionRegistry<
 	}
 
 	async function disposeByOwner(ownerId: string): Promise<void> {
+		// This owner is gone, so it is at no key: a kernel it shared stops
+		// waiting on it.
+		ownerKeys.delete(ownerId);
 		const toShutdown: TSession[] = [];
 		for (const session of sessions.values()) {
 			if (session.ownerIds.has(ownerId)) reaper.cancel(session);

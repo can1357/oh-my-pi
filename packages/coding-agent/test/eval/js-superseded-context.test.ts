@@ -108,4 +108,39 @@ describe("superseded JavaScript contexts", () => {
 		expect(await contextId(firstDir.path(), firstKey, owner)).toBe(first);
 		release();
 	}, 60_000);
+
+	it("drops a context two agents shared once both have moved on", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using sharedDir = TempDir.createSync("@js-both-left-a-");
+		using oneDir = TempDir.createSync("@js-both-left-b-");
+		using twoDir = TempDir.createSync("@js-both-left-c-");
+		const sessionId = `js:cwd:${sharedDir.path()}`;
+		const first = await contextId(sharedDir.path(), sessionId, "agent-session:js-left-one");
+		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-left-two")).toBe(first);
+
+		await contextId(oneDir.path(), `js:cwd:${oneDir.path()}`, "agent-session:js-left-one");
+		await contextId(twoDir.path(), `js:cwd:${twoDir.path()}`, "agent-session:js-left-two");
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		// Neither move drops an id from the shared context, so only where each
+		// agent is working now can tell that nobody is left on it.
+		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-left-one")).not.toBe(first);
+	}, 60_000);
+
+	it("drops a borrowed context after the borrow ends, with no further cell there", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using firstDir = TempDir.createSync("@js-rearm-a-");
+		using secondDir = TempDir.createSync("@js-rearm-b-");
+		const owner = "agent-session:js-rearm";
+		const firstKey = `js:cwd:${firstDir.path()}`;
+		const first = await contextId(firstDir.path(), firstKey, owner);
+
+		const release = borrowVmContext(firstKey);
+		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
+		// The grace expires while the borrow holds the context, so that attempt
+		// declines; releasing it is the only thing that happens afterwards.
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		release();
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+	}, 60_000);
 });

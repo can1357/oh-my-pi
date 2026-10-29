@@ -117,6 +117,13 @@ interface StartingJsSession extends SessionOwners {
 }
 
 const sessions = new Map<string, JsSession>();
+/**
+ * The session key each explicit owner acquired last. A superseded context is
+ * only reclaimed once every owner registered against it has moved on, and
+ * `ownerIds` alone cannot say that: an id attached at one key stays there for
+ * the context's life.
+ */
+const ownerKeys = new Map<string, string>();
 const reaper = new SupersededKernelReaper<JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
@@ -232,9 +239,11 @@ export async function executeInVmContext(options: {
  * gains its on-disk session file — acquires a *new* worker and strands the
  * previous one. Nothing reclaimed it: its V8 heap stayed resident until the
  * host process exited, and unlike a Python runner it is a worker thread no
- * process list will ever show. The guards match the Python registry's: another
- * agent registered against it, a caller holding it, or work still in flight
- * all keep it, and each is re-checked when the grace expires.
+ * process list will ever show. The rules match the Python registry's: a
+ * context is armed once every agent registered against it has run its latest
+ * cell elsewhere, a caller holding it or work in flight keeps it alive when
+ * the grace expires, and a reclaim those guards stop is armed again rather
+ * than dropped.
  */
 function reclaimSupersededJsSessions(sessionKey: string, ownerId: string | undefined): void {
 	// Without an explicit owner the registry records only the first caller and
@@ -242,27 +251,44 @@ function reclaimSupersededJsSessions(sessionKey: string, ownerId: string | undef
 	if (ownerId === undefined) return;
 	for (const [key, session] of Array.from(sessions.entries())) {
 		if (key === sessionKey) continue;
-		// Armed on ownership alone; the fire-time guard decides. See the Python
+		// Armed on ownership alone; the fire-time guards decide. See the Python
 		// registry's `reclaimSupersededSessions` for why a busy session is armed.
-		if (!ownedAloneBy(key, session, ownerId)) continue;
+		if (!isSupersededFor(key, session, ownerId)) continue;
 		reaper.schedule(session, async () => {
-			if (!isJsSessionReclaimable(key, session, ownerId)) return;
+			if (!isSupersededFor(key, session, ownerId) || session.state !== "alive") return "settled";
+			if (session.activeUses > 0) return "deferred";
+			if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) {
+				return "deferred";
+			}
 			await killSessionFor(session, new ToolError("JS context left behind by its session"), { force: false });
+			return "settled";
 		});
 	}
 }
 
-/** Whether `session` under `key` is still this owner's alone. */
-function ownedAloneBy(key: string, session: JsSession, ownerId: string): boolean {
+/**
+ * Whether `session` under `key` is one this owner shares with nobody who is
+ * still working there, and may therefore be armed or shut down.
+ */
+function isSupersededFor(key: string, session: JsSession, ownerId: string): boolean {
 	if (sessions.get(key) !== session) return false;
-	return session.ownerIds.size === 1 && session.ownerIds.has(ownerId);
+	if (!session.ownerIds.has(ownerId)) return false;
+	return everyOwnerMovedAway(key, session);
 }
 
-/** Whether this owner's superseded `session` may be shut down right now. */
-function isJsSessionReclaimable(key: string, session: JsSession, ownerId: string): boolean {
-	if (!ownedAloneBy(key, session, ownerId) || session.state !== "alive") return false;
-	if (session.activeUses > 0) return false;
-	return session.pending.size === 0 && session.pendingSnapshots.size === 0 && session.pendingShadowRuns.size === 0;
+/**
+ * Whether every agent registered against `session` has since run a cell under
+ * another key. A fallback owner is a session id invented for a caller that
+ * gave none, and two such callers are indistinguishable, so a context carrying
+ * one is never reclaimed.
+ */
+function everyOwnerMovedAway(key: string, session: JsSession): boolean {
+	if (session.hasFallbackOwner || session.ownerIds.size === 0) return false;
+	for (const owner of session.ownerIds) {
+		if (ownerKeys.get(owner) !== key) continue;
+		return false;
+	}
+	return true;
 }
 
 /**
@@ -467,6 +493,7 @@ export async function disposeAllVmContexts(): Promise<void> {
 	// A disposal never waits out a grace: the timers go, and the contexts they
 	// held are killed below like any other.
 	reaper.cancelAll();
+	ownerKeys.clear();
 	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
 	const started = await Promise.allSettled(pending);
@@ -487,6 +514,9 @@ export async function disposeAllVmContexts(): Promise<void> {
  * owners (e.g. an in-memory session keyed only by cwd) just drop the registration.
  */
 export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+	// This owner is gone, so it is at no key: a context it shared stops waiting
+	// on it.
+	ownerKeys.delete(ownerId);
 	const toKill: JsSession[] = [];
 	for (const session of sessions.values()) {
 		if (session.ownerIds.has(ownerId)) reaper.cancel(session);
@@ -679,6 +709,9 @@ async function acquireSession(
 	timeoutMs?: number,
 	ownerId?: string,
 ): Promise<JsSession> {
+	// Where this owner is working now: every key it is not at is one it has
+	// moved away from, which is what arms a reclaim.
+	if (ownerId !== undefined) ownerKeys.set(ownerId, sessionKey);
 	const existing = sessions.get(sessionKey);
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;

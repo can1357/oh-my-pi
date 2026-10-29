@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- An eval kernel a session moves away from now shuts down after a two-minute idle grace instead of holding memory for the process lifetime; returning within the grace keeps its namespace, while a kernel another agent, a borrower, or a running cell holds is kept ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
+- An eval kernel a session moves away from now shuts down after a two-minute idle grace instead of holding memory for the process lifetime; returning within the grace keeps its namespace, a kernel a borrower or a running cell holds is kept until it is free, and one shared by two agents is kept until both have moved on ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

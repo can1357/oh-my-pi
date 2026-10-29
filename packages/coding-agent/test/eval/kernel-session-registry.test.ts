@@ -705,4 +705,79 @@ describe("kernel session reclamation", () => {
 			await registry.disposeAll();
 		}
 	});
+
+	it("reclaims a kernel that was still busy when its grace expired, with no further cell", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			await registry.executeOnSession("first dir", "/tmp/a", {
+				sessionId: "re-armed:cwd:/tmp/a",
+				kernelOwnerId: "agent-session:one",
+			});
+			const release = registry.borrowSession("/tmp/a", { sessionId: "re-armed:cwd:/tmp/a" });
+			await registry.executeOnSession("second dir", "/tmp/b", {
+				sessionId: "re-armed:cwd:/tmp/b",
+				kernelOwnerId: "agent-session:one",
+			});
+			// The grace expires while the borrow still holds it, so the first
+			// attempt has to decline.
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(0);
+
+			// The borrow ends and the owner never runs another cell: nothing but
+			// a re-armed grace can still reclaim the runner.
+			release();
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("reclaims a kernel two owners share once both have moved away", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			const shared = { sessionId: "both-left:cwd:/tmp/a" };
+			await registry.executeOnSession("first owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:one" });
+			await registry.executeOnSession("second owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:two" });
+			await registry.executeOnSession("first owner moves", "/tmp/b", {
+				sessionId: "both-left:cwd:/tmp/b",
+				kernelOwnerId: "agent-session:one",
+			});
+			await registry.executeOnSession("second owner moves", "/tmp/c", {
+				sessionId: "both-left:cwd:/tmp/c",
+				kernelOwnerId: "agent-session:two",
+			});
+			await settleGrace();
+			// Neither rotation drops an id from the shared session, so only
+			// tracking where each owner is now can tell that nobody is left.
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+			expect(kernels[1]?.alive).toBe(true);
+			expect(kernels[2]?.alive).toBe(true);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("does not reclaim after a dispose that arrives while a busy kernel is deferred", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		await registry.executeOnSession("first dir", "/tmp/a", {
+			sessionId: "disposed-while-busy:cwd:/tmp/a",
+			kernelOwnerId: "agent-session:one",
+		});
+		const release = registry.borrowSession("/tmp/a", { sessionId: "disposed-while-busy:cwd:/tmp/a" });
+		await registry.executeOnSession("second dir", "/tmp/b", {
+			sessionId: "disposed-while-busy:cwd:/tmp/b",
+			kernelOwnerId: "agent-session:one",
+		});
+		await settleGrace();
+		await registry.disposeAll();
+		expect(kernels[0]?.shutdowns).toBe(1);
+		release();
+		// A grace re-armed behind the dispose would shut the same kernel down
+		// twice, and would be a live timer in a registry nobody owns.
+		await settleGrace();
+		expect(kernels[0]?.shutdowns).toBe(1);
+	});
 });
