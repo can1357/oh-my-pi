@@ -2155,9 +2155,10 @@ export class TurnRecovery {
 		if (timeoutSeconds > 0) {
 			// A delay over MAX_TIMER_DELAY_MS does not fit a 32-bit timer and would
 			// fire a millisecond in, so the deadline is re-armed in chunks against a
-			// monotonic target. `sleepLong` chunks the same way but waits on
-			// `scheduler.wait`, which cannot be unref'ed: a month-long deadline would
-			// then hold the process open, which this timer deliberately does not.
+			// monotonic target. `sleepLong` chunks the same way, but awaits
+			// `scheduler.wait` without `{ ref: false }` and takes no argument to pass
+			// one, so a month-long deadline would hold the process open; this timer
+			// deliberately does not.
 			const deadline = performance.now() + timeoutSeconds * 1000;
 			const arm = () => {
 				const remaining = deadline - performance.now();
