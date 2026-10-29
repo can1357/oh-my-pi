@@ -931,6 +931,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			}
 			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
 
+			let sawMessageStop = false;
 			// Track first event for the abort/diagnostic path (currently informational).
 			for await (const message of decodeEventStream(response.body)) {
 				const messageType = message.headers[":message-type"];
@@ -1004,6 +1005,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						break;
 					}
 					case "messageStop": {
+						sawMessageStop = true;
 						const ev = payload as MessageStopEvent;
 						const responseFields = isRecord(ev.additionalModelResponseFields)
 							? ev.additionalModelResponseFields
@@ -1046,6 +1048,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			}
 
 			if (options.signal?.aborted) throw new AIError.AbortError();
+
+			if (!sawMessageStop) {
+				// The body ended before `messageStop`: the connection died mid-generation.
+				// Finalizing the partial message as a clean "stop" would end the turn on a
+				// truncated reply, so fail it as a retryable incomplete stream. Worded like
+				// the other premature-close errors so turn recovery continues a reply that
+				// already rendered.
+				throw new AIError.ProviderResponseError(
+					"Bedrock stream closed before a terminal response event (messageStop) was received",
+					{ provider: model.provider, kind: "incomplete-stream" },
+				);
+			}
 
 			if (output.stopReason === "error" || output.stopReason === "aborted") {
 				throw new AIError.BedrockApiError(output.errorMessage ?? "An unknown error occurred", 0);
