@@ -358,8 +358,8 @@ const RAISE_ROUTE = "Background input and screenshots reach a covered window, so
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
- * The native action `perform(action)` runs, as the key the refusals check and the name native is
- * sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
+ * is sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
  * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
  * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
  * whichever of the element's actions matches with only ASCII letters folded; on this key the
@@ -797,7 +797,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, native, menu));
+		// macOS runs the key the refusals checked; UIA and AT-SPI match their own action names as given.
+		const sent = this.#session.capabilities.backend === "quartz" ? native : action;
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, sent, menu));
 	}
 
 	/**
