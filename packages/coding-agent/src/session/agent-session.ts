@@ -12758,6 +12758,14 @@ export class AgentSession implements SettingsScope {
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				maxTokens: args.maxTokens,
+				// The check below is this turn's last synchronous one, but the
+				// stream still resolves the credential, any command-backed
+				// headers and an in-flight slot before the transport, and it
+				// re-dispatches on its own after a rotation. Hold at the gate
+				// there too, where nothing of this layer's own can follow.
+				beforeDispatch: async () => {
+					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
+				},
 				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},
 			model.provider,
