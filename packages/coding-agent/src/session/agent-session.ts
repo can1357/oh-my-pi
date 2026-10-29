@@ -2000,7 +2000,11 @@ export class AgentSession implements SettingsScope {
 		// queued for its next turn. A `triggerTurn` aside whose send is still in flight
 		// (#admittedTurnRequestingAsides, e.g. image normalization outlasting this run) has no
 		// record queued yet, and counts for the turn it was promised.
-		const canDrain = this.#unsubscribeAgent !== undefined && this.#modeExitDrainSuppressionDepth === 0;
+		// A mode exit (#modeExitDrainSuppressionDepth) suppresses both drains only for the length of
+		// its teardown: runModeExitTeardown re-schedules the queue drain and resumes the stranded
+		// records the moment the depth returns to zero. Work parked behind it is therefore a
+		// continuation, not a stop, and tagging this end terminal would run that turn after it.
+		const canDrain = this.#unsubscribeAgent !== undefined;
 		const queuedContinuation =
 			canDrain &&
 			!this.#queuedMessageDrainBlocked &&

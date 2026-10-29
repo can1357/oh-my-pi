@@ -1571,4 +1571,31 @@ describe("AgentSession triggerTurn aside", () => {
 		expect(requestsContaining(mock, "CARD_DURING_ABORT")).toBe(1);
 		expect(agentEnds).toEqual([false, true]);
 	});
+
+	it("keeps the end of a run inside a mode-exit teardown open for the aside that teardown parks", async () => {
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			await harness.session.sendCustomMessage(card("CARD_AT_MODE_EXIT"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, mock, agentEnds } = harness;
+
+		// Leaving a mode (Vibe, plan) runs its teardown with both drains suppressed. The turn below
+		// ends inside that window, so the aside stranded after its last poll is parked, not dropped:
+		// the teardown resumes it as soon as the suppression lifts.
+		await session.runModeExitTeardown(async () => {
+			await session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+		});
+		await settle(session);
+
+		expect(mock.calls).toHaveLength(2);
+		expect(requestsContaining(mock, "CARD_AT_MODE_EXIT")).toBe(1);
+		// That parked turn runs after the teardown, so the run's own end must not have claimed to
+		// be the last one: a subscriber that stopped waiting there would miss the turn.
+		expect(agentEnds).toEqual([false, true]);
+	});
 });
