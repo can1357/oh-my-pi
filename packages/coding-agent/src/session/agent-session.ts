@@ -1511,6 +1511,43 @@ export class AgentSession implements SettingsScope {
 		else this.#settleCancelledContinuation();
 	}
 
+	/**
+	 * A transition that has disconnected the agent but not yet bumped `#sessionGeneration` owns the
+	 * records left in the IRC queues: its bump discards them ({@link #discardOutgoingIrcRecords})
+	 * and a rollback restores them without draining. Resume once the transition settles, so a
+	 * restored record waits for a turn of its own instead of for the next unrelated prompt. A
+	 * commit leaves no record and no turn, so settle the end an earlier run held open for the turn
+	 * they promised instead; the generation tells the two apart, because a rollback restores it and
+	 * its records still wake.
+	 */
+	#resumeIrcRecordsAfterSessionTransition(sessionGeneration: number): void {
+		void this.waitForSessionTransition()
+			.then(async () => {
+				if (await this.#sessionGenerationChanged(sessionGeneration)) {
+					this.#settleCancelledContinuation();
+					return;
+				}
+				this.#resumeStrandedIrcAsides();
+			})
+			.catch(error => logger.warn("IRC record resume after a session transition failed", { error: String(error) }));
+	}
+
+	/**
+	 * Hands one aside record to a transition that has disconnected the agent, from any
+	 * {@link #dispatchCustomMessage} branch that can no longer deliver it itself. The
+	 * `triggerTurn` marker travels with it: without it a restored record is an ordinary aside,
+	 * which plan mode or an earlier interrupt's suppression folds instead of giving it the turn it
+	 * was promised ({@link #strandedRecordWakes}).
+	 */
+	#parkAsideForSessionTransition(
+		record: AgentMessage,
+		options: { triggerTurn: boolean; userInterruptCount: number; sessionGeneration: number },
+	): void {
+		if (options.triggerTurn) this.#turnRequestingAsides.set(record, options.userInterruptCount);
+		this.#irc.queueAside([record]);
+		this.#resumeIrcRecordsAfterSessionTransition(options.sessionGeneration);
+	}
+
 	/** Folds the records ahead of the first one that starts a turn (#strandedRecordWakes) into
 	 *  context and returns that record with every record after it, for one turn: records keep the
 	 *  order IrcBridge queued them in. Returns nothing to wake when no record starts a turn. */
@@ -1708,23 +1745,7 @@ export class AgentSession implements SettingsScope {
 				if (this.#unsubscribeAgent === undefined) {
 					if (this.#workPoolYieldItems.length > 0) this.#irc.queueDeferredWake(records);
 					else this.#irc.queueAside(records);
-					// The transition owns the queue from here: a commit clears it, and a rollback
-					// restores it and reconnects without draining it. Resume once the transition
-					// settles so a restored record waits for a turn of its own, not for the next
-					// unrelated prompt. A commit leaves no record and no turn, so settle the end
-					// this run held open instead; the generation tells the two apart, because a
-					// rollback restores it and its records still wake.
-					void this.waitForSessionTransition()
-						.then(async () => {
-							if (await this.#sessionGenerationChanged(sessionGeneration)) {
-								this.#settleCancelledContinuation();
-								return;
-							}
-							this.#resumeStrandedIrcAsides();
-						})
-						.catch(error =>
-							logger.warn("IRC wake resume after a session transition failed", { error: String(error) }),
-						);
+					this.#resumeIrcRecordsAfterSessionTransition(sessionGeneration);
 					return;
 				}
 				// The checks below are synchronous and atomic with the dispatch:
@@ -1968,10 +1989,13 @@ export class AgentSession implements SettingsScope {
 		// after the loop's final queue/aside poll. Such a tail arrival is a real
 		// continuation, not a terminal stop: mark this end non-terminal so
 		// subscribers wait through the queued steer/follow-up or stranded IRC wake.
-		// An abort flushes here before its own `finally` drain, which still delivers
-		// a queued steer (interrupt-and-send), so queued work counts during an abort
-		// too. Stranded IRC counts only for the records the settle drain will wake
-		// (#strandedRecordWakes): plan mode and a user interrupt fold the rest into
+		// An abort flushes here before its own `finally` drain, which delivers a queued steer
+		// (interrupt-and-send) and wakes the stranded records #strandedRecordWakes decides for,
+		// so both count during an abort: a send that reaches the session while the abort unwinds
+		// (an extension timer, an `agent_end` handler, an SDK caller) carries the interrupt count
+		// abort() took before its awaits, so the drain starts the turn that send asked for.
+		// Stranded IRC counts only for the records the settle drain will
+		// wake (#strandedRecordWakes): plan mode and a user interrupt fold the rest into
 		// context instead of waking, and an ACP client that owns the turn lifecycle keeps them
 		// queued for its next turn. A `triggerTurn` aside whose send is still in flight
 		// (#admittedTurnRequestingAsides, e.g. image normalization outlasting this run) has no
@@ -1990,7 +2014,6 @@ export class AgentSession implements SettingsScope {
 			this.#hasAdmittedAsideTurn();
 		const ircContinuation =
 			canDrain &&
-			!this.#abortInProgress &&
 			!this.#isDisposed &&
 			((!this.#acpDefersAgentInitiatedTurns() &&
 				this.#irc.somePending(record => this.#strandedRecordWakes(record))) ||
@@ -10457,18 +10480,12 @@ export class AgentSession implements SettingsScope {
 			// (#discardOutgoingIrcRecords), a rollback restores it, and the resume below gives a
 			// restored record a turn of its own.
 			if (this.isSessionTransitioning) {
-				if (options.triggerTurn) this.#turnRequestingAsides.set(normalizedAppMessage, userInterruptCount);
-				this.#irc.queueAside([normalizedAppMessage]);
+				this.#parkAsideForSessionTransition(normalizedAppMessage, {
+					triggerTurn: options.triggerTurn === true,
+					userInterruptCount,
+					sessionGeneration,
+				});
 				admission?.settle();
-				void this.waitForSessionTransition()
-					.then(async () => {
-						if (await this.#sessionGenerationChanged(sessionGeneration)) {
-							this.#settleCancelledContinuation();
-							return;
-						}
-						this.#resumeStrandedIrcAsides();
-					})
-					.catch(error => logger.warn("Aside resume after a session transition failed", { error: String(error) }));
 				return false;
 			}
 			// Past the awaits above the record lands below, where agent_end can see it (same as the
@@ -10529,13 +10546,19 @@ export class AgentSession implements SettingsScope {
 			// confirmation) returns before any dispatch. The message asked for a turn and the user
 			// stopped it, which is the documented fold: keep it instead of dropping it. A session
 			// change takes it with the outgoing transcript, as above (a rolled-back switch restores
-			// the generation, so wait that out first). A transition that has disconnected the agent
-			// but not yet cleared the queues leaves it in the aside queue, which the transition
-			// clears on commit and restores on rollback.
+			// the generation, so wait that out first).
 			if (!outcome.sessionClaimed && !(await this.#sessionGenerationChanged(sessionGeneration))) {
-				if (this.#unsubscribeAgent === undefined) this.#irc.queueAside([normalizedAppMessage]);
-				else this.#recordWithoutTurn([normalizedAppMessage]);
-				// No turn remains to publish the end the promise kept open; the queued branch above
+				// A transition that has disconnected the agent but not yet cleared the queues takes
+				// this record the way the transition branch above hands one over: it clears the
+				// queue on commit and restores it on rollback, and the park resumes it there.
+				if (this.#unsubscribeAgent === undefined) {
+					this.#parkAsideForSessionTransition(normalizedAppMessage, {
+						triggerTurn: options.triggerTurn === true,
+						userInterruptCount,
+						sessionGeneration,
+					});
+				} else this.#recordWithoutTurn([normalizedAppMessage]);
+				// No turn remains to publish the end the promise kept open; the parked branch above
 				// leaves a record that still wakes, which the helper checks before publishing.
 				this.#settleCancelledContinuation();
 			}

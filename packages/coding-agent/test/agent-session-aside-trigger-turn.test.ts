@@ -1449,4 +1449,126 @@ describe("AgentSession triggerTurn aside", () => {
 		await settle(session);
 		expect(requestsContaining(mock, "CARD_FROM_HOOK")).toBe(1);
 	});
+
+	it("gets its turn when a rolled-back switch restores the record its cancelled preflight parked", async () => {
+		const { session, mock } = await createHarness();
+		// Plan mode proves the parked record still carries its turn request: an aside without one
+		// folds into context here.
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		const preflightReached = Promise.withResolvers<void>();
+		const releasePreflight = Promise.withResolvers<void>();
+		let holdPreflight = true;
+		const preflightSpy = spyOn(TurnRecovery.prototype, "maybeApplyUsageAwareFallback").mockImplementation(
+			async () => {
+				if (!holdPreflight) return false;
+				holdPreflight = false;
+				preflightReached.resolve();
+				await releasePreflight.promise;
+				return false;
+			},
+		);
+		const switchPaused = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		session.setSessionBeforeSwitchReconciler(async () => {
+			switchPaused.resolve();
+			await releaseSwitch.promise;
+		});
+		const setSessionFileSpy = spyOn(SessionManager.prototype, "setSessionFile").mockImplementation(async () => {
+			throw new Error("forced switch failure");
+		});
+		let switched: Promise<boolean> | undefined;
+		const sent = session.sendCustomMessage(card("CARD_IN_PREFLIGHT_SWITCH"), {
+			deliverAs: "aside",
+			triggerTurn: true,
+		});
+		try {
+			await preflightReached.promise;
+			// The switch disconnects the agent and its internal abort cancels the preflight; it
+			// then pauses before it snapshots the IRC queues and bumps the generation.
+			switched = session.switchSession(path.join(tempDir.path(), "target.jsonl"));
+			await switchPaused.promise;
+			releasePreflight.resolve();
+			expect(await sent).toBe(false);
+
+			releaseSwitch.resolve();
+			await expect(switched).rejects.toThrow("forced switch failure");
+			await settle(session);
+		} finally {
+			releasePreflight.resolve();
+			releaseSwitch.resolve();
+			preflightSpy.mockRestore();
+			setSessionFileSpy.mockRestore();
+			session.setSessionBeforeSwitchReconciler(null);
+			await switched?.catch(() => {});
+			await sent.catch(() => {});
+		}
+
+		// The rollback restored the record into the live session: it gets the turn it was
+		// promised, with no further prompt from anyone.
+		expect(mock.calls).toHaveLength(1);
+		expect(requestsContaining(mock, "CARD_IN_PREFLIGHT_SWITCH")).toBe(1);
+	});
+
+	interface HeldAbortCleanup {
+		/** Settles once an abort has counted the user interrupt and not yet flushed the run's end. */
+		reached: Promise<void>;
+		release(): void;
+		restore(): void;
+	}
+
+	/** Holds the first abort in `SessionMaintenance.abortCompaction()`, which `abort()` awaits
+	 *  after `#userInterruptCount++` and before `#resetInFlight()` flushes the deferred `agent_end`.
+	 *  That window is where a background send reaches the session while the interrupt is in flight. */
+	function holdAbortCleanup(): HeldAbortCleanup {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		const spy = spyOn(SessionMaintenance.prototype, "abortCompaction").mockImplementation(() => {
+			if (!held) return undefined;
+			held = false;
+			reached.resolve();
+			return release.promise;
+		});
+		return { reached: reached.promise, release: () => release.resolve(), restore: () => spy.mockRestore() };
+	}
+
+	it("keeps the end of the run an Esc stopped open for one sent while that abort unwinds", async () => {
+		const { session, mock, agentEnds } = await createHarness();
+		const streamReached = Promise.withResolvers<void>();
+		const releaseStream = Promise.withResolvers<void>();
+		mock.push(async () => {
+			streamReached.resolve();
+			await releaseStream.promise;
+			return { content: ["Interrupted."] };
+		});
+		const abortCleanup = holdAbortCleanup();
+		let aborted: Promise<void> | undefined;
+		try {
+			const run = session.prompt("LIVE_RUN");
+			await streamReached.promise;
+			aborted = session.abort({ reason: USER_INTERRUPT_LABEL });
+			releaseStream.resolve();
+			await abortCleanup.reached;
+
+			// The interrupt is counted, so this send is not the one the user stopped: the
+			// post-abort drain owes it a turn.
+			expect(
+				await session.sendCustomMessage(card("CARD_DURING_ABORT"), { deliverAs: "aside", triggerTurn: true }),
+			).toBe(false);
+			abortCleanup.release();
+			await aborted;
+			await run;
+			await settle(session);
+		} finally {
+			releaseStream.resolve();
+			abortCleanup.release();
+			abortCleanup.restore();
+			await aborted?.catch(() => {});
+		}
+
+		// The stopped run's end is published before that turn starts, so it must say a
+		// continuation follows; the turn then settles it.
+		expect(requestsContaining(mock, "CARD_DURING_ABORT")).toBe(1);
+		expect(agentEnds).toEqual([false, true]);
+	});
 });
