@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
+	childDirNames,
 	childKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
@@ -290,6 +291,10 @@ export class IndexedSessionStorage implements SessionStorage {
 			out.push(key);
 		}
 		return out;
+	}
+
+	listDirsSync(dir: string): string[] {
+		return childDirNames(path.resolve(dir), this.#index.keys());
 	}
 
 	exists(path: string): Promise<boolean> {

@@ -7,6 +7,7 @@ import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage, type SessionStorageStat } from "../session/session-storage";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
@@ -48,12 +49,20 @@ interface PersistedTranscript {
 /** Size and mtime of a transcript when a ref's history was last read from it; an unchanged transcript is not read again. */
 const historyStamps = new WeakMap<AgentRef, string>();
 
-async function transcriptStamp(sessionFile: string): Promise<string | undefined> {
+function transcriptStamp(sessionFile: string, storage: SessionStorage): string | undefined {
+	const stat = transcriptStat(sessionFile, storage);
+	return stat && `${stat.size}:${stat.mtimeMs}`;
+}
+
+/**
+ * Size, mtime and (on a file backend) birth time of a transcript, read from
+ * the storage that holds it. A vanished transcript reads as `undefined`, as
+ * before; a real storage fault propagates so the roster latch drops.
+ */
+function transcriptStat(sessionFile: string, storage: SessionStorage): SessionStorageStat | undefined {
 	try {
-		const stat = await fs.promises.stat(sessionFile);
-		return `${stat.size}:${stat.mtimeMs}`;
+		return storage.statSync(sessionFile);
 	} catch (error) {
-		// A vanished transcript reads as empty history, as before.
 		if (isFilesystemError(error)) throw error;
 		return undefined;
 	}
@@ -162,6 +171,7 @@ function isFilesystemError(error: unknown): boolean {
 async function readPersistedAgentHistory(
 	transcript: PersistedTranscript,
 	shouldContinue: () => boolean,
+	storage: SessionStorage,
 ): Promise<AgentHistorySummary> {
 	const parents = new Map<string, string | undefined>();
 	const assistantById = new Map<string, AssistantMetrics>();
@@ -224,6 +234,7 @@ async function readPersistedAgentHistory(
 			// (lower-bound) cost/tokens rather than freezing `hub list`.
 			{
 				shouldContinue,
+				storage,
 				maxRecords: isAdvisorTranscriptName(path.basename(transcript.sessionFile))
 					? MAX_ADVISOR_HISTORY_LINES
 					: undefined,
@@ -330,6 +341,24 @@ function nestedPatchFilesFor(dir: string, transcriptName: string, entries: reado
 }
 
 /**
+ * Directory entries beside a session's transcripts, for the sidecars that are
+ * local files whatever the session storage (kill tombstones, isolation-run
+ * patches). A directory that does not exist — the ordinary case for a session
+ * whose transcripts are rows and which wrote no artifact — lists as empty;
+ * any other fault propagates so the roster latch drops and the next call
+ * retries.
+ */
+async function localDirEntries(dir: string): Promise<fs.Dirent[]> {
+	try {
+		return await fs.promises.readdir(dir, { withFileTypes: true });
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return [];
+		throw error;
+	}
+}
+
+/**
  * Read only the small session prefix needed by the Hub. A subagent's first
  * `session_init` is written before its conversation, so this never walks a
  * multi-megabyte historical transcript just to populate one roster row.
@@ -337,18 +366,14 @@ function nestedPatchFilesFor(dir: string, transcriptName: string, entries: reado
 async function readPersistedAgentMetadata(
 	sessionFile: string,
 	nestedPatchPaths: readonly string[] = [],
+	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<PersistedAgentMetadata> {
-	// Settle immediately instead of leaving a rejecting promise pending while
-	// the transcript stream runs: a stat fault (EACCES/EMFILE/EIO) must not
-	// surface as an unhandled rejection if the stream errors first or takes
-	// long. ENOENT stays the tolerated optional-file race (a transcript listed
-	// by readdir can vanish before its metadata is read); the fault is captured
-	// and rethrown only after the stream has settled, so the roster latch drops
-	// and the next call retries.
-	const stat: Promise<{ file?: fs.Stats; error?: unknown }> = fs.promises.stat(sessionFile).then(
-		file => ({ file }),
-		error => (isFilesystemError(error) ? { error } : { file: undefined }),
-	);
+	// Read before the transcript, so a storage fault (EACCES/EMFILE/EIO, or an
+	// unreachable session database) drops the roster latch and the next call
+	// retries. A vanished transcript stays the tolerated race — one listed by
+	// the scan can be deleted before its metadata is read — and degrades to an
+	// incomplete record.
+	const stat = transcriptStat(sessionFile, storage);
 	const artifactBase = sessionFile.slice(0, -".jsonl".length);
 	const outputPath = `${artifactBase}.md`;
 	const patchPath = `${artifactBase}.patch`;
@@ -405,26 +430,24 @@ async function readPersistedAgentMetadata(
 				};
 				return false;
 			},
-			{ maxRecords: MAX_METADATA_LINES },
+			{ maxRecords: MAX_METADATA_LINES, storage },
 		);
 	} catch (error) {
 		// Malformed and truncated records are skipped in-band by the stream
-		// visitor, so the only errors reaching this catch are filesystem
-		// faults. ENOENT races degrade to an incomplete record; transient
-		// faults (EACCES/EMFILE/EIO) surface so the roster latch drops and the
-		// next call retries. A readable transcript with a malformed metadata
-		// prefix still yields what it can.
+		// visitor, so the only errors reaching this catch are storage faults.
+		// ENOENT races degrade to an incomplete record; transient faults
+		// (EACCES/EMFILE/EIO) surface so the roster latch drops and the next
+		// call retries. A readable transcript with a malformed metadata prefix
+		// still yields what it can.
 		if (isFilesystemError(error)) throw error;
 	}
-	const [statResult, [hasOutput, hasPatch]] = await Promise.all([stat, artifactFiles]);
-	// A transient stat fault surfaces now that both reads have settled; ENOENT
-	// already degraded to an undefined file above.
-	if (statResult.error !== undefined) throw statResult.error;
-	const file = statResult.file;
+	const [hasOutput, hasPatch] = await artifactFiles;
 	return {
 		activity,
-		createdAt: createdAt ?? file?.birthtimeMs,
-		lastActivity: file?.mtimeMs,
+		// A key-indexed store records no birth time, so a transcript there
+		// dates itself by its own header timestamp.
+		createdAt: createdAt ?? stat?.birthtimeMs,
+		lastActivity: stat?.mtimeMs,
 		incomplete: !hasSessionInit && !hasConversation,
 		history: {
 			...history,
@@ -435,7 +458,11 @@ async function readPersistedAgentMetadata(
 	};
 }
 
-async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: () => boolean): Promise<Set<string>> {
+async function readPersistedVibeChildIds(
+	sessionFile: string,
+	shouldContinue: () => boolean,
+	storage: SessionStorage,
+): Promise<Set<string>> {
 	const ids = new Set<string>();
 	try {
 		await visitEntriesFromFileStream(
@@ -443,7 +470,7 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 			entry => {
 				for (const id of persistedVibeChildIds([entry])) ids.add(id);
 			},
-			{ shouldContinue },
+			{ shouldContinue, storage },
 		);
 		return ids;
 	} catch (error) {
@@ -511,7 +538,11 @@ function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>
 	return true;
 }
 
-async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | null): Promise<string | undefined> {
+function resolveRootSessionFile(
+	registry: AgentRegistry,
+	storage: SessionStorage,
+	hint?: string | null,
+): string | undefined {
 	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
 	const candidate =
 		typeof hint === "string" && hint.endsWith(".jsonl")
@@ -526,7 +557,7 @@ async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | n
 	// top-level siblings invisible to deep children.
 	for (;;) {
 		const parentFile: string = `${path.dirname(current)}.jsonl`;
-		if (parentFile === current || !(await Bun.file(parentFile).exists())) return current;
+		if (parentFile === current || !storage.existsSync(parentFile)) return current;
 		current = parentFile;
 	}
 }
@@ -571,10 +602,11 @@ export function isCurrentSessionRosterRef(
 export async function ensurePersistedRoster(
 	registry: AgentRegistry,
 	sessionFileHint?: string | null,
+	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<string | undefined> {
 	let root: string | undefined;
 	try {
-		root = await resolveRootSessionFile(registry, sessionFileHint);
+		root = resolveRootSessionFile(registry, storage, sessionFileHint);
 	} catch (error) {
 		logger.warn("Persisted agent roster root resolution failed; using in-memory peers", {
 			error: rosterScanError(error),
@@ -631,7 +663,7 @@ export async function ensurePersistedRoster(
 	const latch: PersistedRosterLatch = { pending: undefined!, settled: false, owned: new Map() };
 	const tail = taggedRegistry[kPersistedRosterScanTail] ?? Promise.resolve();
 	const scan = tail.then(() =>
-		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned }),
+		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned, storage }),
 	);
 	taggedRegistry[kPersistedRosterScanTail] = scan.then(
 		() => {},
@@ -676,6 +708,8 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		/** Storage holding the transcripts; defaults to the configured one. */
+		storage?: SessionStorage;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
@@ -683,8 +717,9 @@ export async function registerPersistedSubagents(
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
 	// The main transcript can be large: read it once, and only for a transcript the registry does not hold yet.
+	const storage = options.storage ?? defaultSessionStorage();
 	let vibeOwnedIds: Promise<Set<string>> | undefined;
-	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue));
+	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue, storage));
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
 	await registerPersistedSubagentsFromDir(
@@ -695,6 +730,7 @@ export async function registerPersistedSubagents(
 		transcripts,
 		shouldContinue,
 		sessionFile,
+		storage,
 		options.owned,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
@@ -707,9 +743,9 @@ export async function registerPersistedSubagents(
 			if (!transcript) return;
 			const ref = registry.get(transcript.id);
 			if (!ref || ref.sessionFile !== transcript.sessionFile) continue;
-			const stamp = await transcriptStamp(transcript.sessionFile);
+			const stamp = transcriptStamp(transcript.sessionFile, storage);
 			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
-			const history = await readPersistedAgentHistory(transcript, shouldContinue);
+			const history = await readPersistedAgentHistory(transcript, shouldContinue, storage);
 			if (!shouldContinue()) return;
 			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
 				historyStamps.set(ref, stamp);
@@ -727,41 +763,42 @@ async function registerPersistedSubagentsFromDir(
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
+	storage: SessionStorage,
 	owned?: Map<string, string>,
 ): Promise<void> {
 	if (!shouldContinue()) return;
-	let entries: fs.Dirent[];
-	try {
-		entries = await fs.promises.readdir(dir, { withFileTypes: true });
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") return;
-		throw error;
-	}
+	// Transcripts come from the storage that holds them, not from the local
+	// directory: under `session.storage: sql` a resumed session's subagent
+	// transcripts are rows, and the artifacts directory holds only their
+	// sidecars. Name order makes the restored roster deterministic.
+	const names = storage
+		.listFilesSync(dir, "*.jsonl")
+		.map(file => path.basename(file))
+		.filter(name => !name.includes(".bak"))
+		.sort();
+	if (names.length === 0) return;
+	const childDirectories = new Set(storage.listDirsSync(dir));
+	// Nested-repo patches are local artifacts whatever the session storage, so
+	// they are read from the directory beside the transcripts.
+	const localEntries = await localDirEntries(dir);
 	if (!shouldContinue()) return;
-	const childDirectories = new Set<string>();
-	for (const entry of entries) {
-		if (entry.isDirectory()) childDirectories.add(entry.name);
-	}
 	let entriesSinceYield = 0;
-	for (const entry of entries) {
+	for (const name of names) {
 		if (!shouldContinue()) return;
 		if (++entriesSinceYield >= 16) {
 			entriesSinceYield = 0;
 			await Bun.sleep(0);
 		}
 		if (!shouldContinue()) return;
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.includes(".bak")) continue;
-		const sessionFile = path.join(dir, entry.name);
+		const sessionFile = path.join(dir, name);
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only
 		// transcript, but it never joins agent-facing rosters and is not revivable.
-		if (isAdvisorTranscriptName(entry.name)) {
+		if (isAdvisorTranscriptName(name)) {
 			const owner = parentId ?? MAIN_AGENT_ID;
 			// `__advisor.jsonl` → the default advisor (no slug); `__advisor.<slug>.jsonl`
 			// → a named advisor, keyed and labeled by its slug.
-			const slug =
-				entry.name === ADVISOR_TRANSCRIPT_FILENAME ? "" : entry.name.slice("__advisor.".length, -".jsonl".length);
+			const slug = name === ADVISOR_TRANSCRIPT_FILENAME ? "" : name.slice("__advisor.".length, -".jsonl".length);
 			const advisorId = slug ? `${owner}/advisor:${slug}` : `${owner}/advisor`;
 			const displayName = slug ? `advisor:${slug}` : "advisor";
 			const existing = registry.get(advisorId);
@@ -769,7 +806,7 @@ async function registerPersistedSubagentsFromDir(
 			// user task literally named `<owner>/advisor`): leave it, skip the advisor.
 			if (existing && existing.kind !== "advisor") continue;
 			if (existing?.sessionFile !== sessionFile) {
-				const metadata = await readPersistedAgentMetadata(sessionFile);
+				const metadata = await readPersistedAgentMetadata(sessionFile, [], storage);
 				if (!shouldContinue()) return;
 				// The id is reused across `/new`; refresh it to the current session's file.
 				if (existing) registry.unregister(advisorId);
@@ -804,7 +841,7 @@ async function registerPersistedSubagentsFromDir(
 			}
 			continue;
 		}
-		const id = entry.name.slice(0, -6);
+		const id = name.slice(0, -6);
 		const existing = registry.get(id);
 		if (existing?.sessionFile !== sessionFile && (await vibeOwned()).has(id)) continue;
 		let tombstoned = false;
@@ -837,7 +874,11 @@ async function registerPersistedSubagentsFromDir(
 			}
 		} else {
 			const expected = existing ?? null;
-			const metadata = await readPersistedAgentMetadata(sessionFile, nestedPatchFilesFor(dir, entry.name, entries));
+			const metadata = await readPersistedAgentMetadata(
+				sessionFile,
+				nestedPatchFilesFor(dir, name, localEntries),
+				storage,
+			);
 			if (!shouldContinue()) return;
 			// Metadata reads yield. A spawn may claim the id while this scan is
 			// inspecting the file; never replace that live generation with a
@@ -887,6 +928,7 @@ async function registerPersistedSubagentsFromDir(
 				transcripts,
 				shouldContinue,
 				rootSessionFile,
+				storage,
 				owned,
 			);
 		}

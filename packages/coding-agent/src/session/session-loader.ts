@@ -119,6 +119,14 @@ export interface VisitEntriesFromFileStreamOptions {
 	 * callers derive the exact snapshot size without re-stating the file.
 	 */
 	onBytesConsumed?: (bytes: number) => void;
+	/**
+	 * Storage holding the transcript. Only a file backend streams; a
+	 * key-indexed one (`session.storage: sql`) has no stream to open, so its
+	 * record is read whole and fed through the same parser. Defaults to the
+	 * configured storage, which is what a resumed session's own transcripts
+	 * live in.
+	 */
+	storage?: SessionStorage;
 }
 
 /** Controls how a missing session file is handled. */
@@ -191,13 +199,22 @@ const SESSION_HEADER_FIRST_READ = 16 * 1024;
 const HEADER_INCOMPLETE = Symbol("header-incomplete");
 
 /**
- * The session id in `filePath`'s header, or `undefined` when there is no file
- * there or it does not start with a valid session header. Reads
- * {@link SESSION_HEADER_FIRST_READ} bytes, and up to
- * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them.
+ * The session id in `filePath`'s header, or `undefined` when the storage holds
+ * nothing there or it does not start with a valid session header. A file
+ * backend reads {@link SESSION_HEADER_FIRST_READ} bytes, and up to
+ * {@link SESSION_HEADER_READ_LIMIT} only when the first record runs past them;
+ * a key-indexed backend reads the same prefix window through the storage.
  */
-export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+export async function readSessionHeaderId(
+	filePath: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<string | undefined> {
 	try {
+		if (!(storage instanceof FileSessionStorage)) {
+			const [prefix] = await storage.readTextSlices(filePath, SESSION_HEADER_READ_LIMIT, 0);
+			const id = sessionHeaderIdFromPrefix(new TextEncoder().encode(prefix), true);
+			return id === HEADER_INCOMPLETE ? undefined : id;
+		}
 		const id = await peekFile(filePath, SESSION_HEADER_FIRST_READ, prefix =>
 			sessionHeaderIdFromPrefix(prefix, prefix.length < SESSION_HEADER_FIRST_READ),
 		);
@@ -241,6 +258,22 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
 	const entry = tryParseJson<FileEntry>(text.slice(0, end)) ?? undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
+}
+
+/**
+ * The transcript's bytes, as chunks. A file backend streams them, so a
+ * multi-megabyte transcript is never held whole; a key-indexed backend
+ * (`session.storage: sql`) stores the transcript as one record with no stream
+ * to open, so its content arrives as a single chunk — the same read
+ * {@link loadSessionFile} already performs on those backends. A missing
+ * transcript raises ENOENT from either source, which the caller tolerates.
+ */
+async function* transcriptByteChunks(filePath: string, storage: SessionStorage): AsyncGenerator<Uint8Array> {
+	if (storage instanceof FileSessionStorage) {
+		yield* Bun.file(filePath).stream();
+		return;
+	}
+	yield new TextEncoder().encode(await storage.readText(filePath));
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -397,7 +430,7 @@ export async function visitEntriesFromFileStream(
 		// delivering its bytes (macOS) or ignores the bound and streams the whole
 		// file (Windows).
 		let unread = maxBytes;
-		for await (const streamed of Bun.file(filePath).stream()) {
+		for await (const streamed of transcriptByteChunks(filePath, options.storage ?? defaultSessionStorage())) {
 			if (stopped) break;
 			const chunk = streamed.byteLength > unread ? streamed.subarray(0, unread) : streamed;
 			unread -= chunk.byteLength;

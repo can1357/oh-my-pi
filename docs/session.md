@@ -610,7 +610,6 @@ The root command (interactive, print, RPC and ACP modes, and `omp join`) resolve
    - `omp session lease` and RPC `get_session_lease` probe the file ownership lease. A SQL-backed session never takes that lease, so both report every SQL-stored session as free. `omp session pack`, `unpack`, and `moved` work only on session files on disk.
    - Resume forks a session that `omp session moved` marked as moved away (`forkIfMovedAway`). Only a session file can carry that mark, so a SQL-stored session always resumes in place.
    - The resume picker's F2 rename reads and locks the session file on disk. Under `sql` it fails ("Failed to rename session") for every session except the one open in the current process.
-   - `/seance` looks up its source session in the JSONL tree, so it does not find a SQL-stored session.
 
 ### SQL session storage
 

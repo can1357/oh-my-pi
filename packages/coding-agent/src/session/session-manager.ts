@@ -384,13 +384,14 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
  * any nested artifact — must resolve back up to the top-level session so
  * `--continue` resumes the real conversation instead of a subagent transcript.
  */
-function resolveBreadcrumbToInteractiveRoot(sessionFile: string): string {
+function resolveBreadcrumbToInteractiveRoot(sessionFile: string, storage: SessionStorage): string {
 	let current = path.resolve(sessionFile);
 	// Walk up while the containing dir is itself a session's artifacts dir
-	// (`<dir>.jsonl` exists). Capped to defend against pathological layouts.
+	// (`<dir>.jsonl` is held by the storage). Capped to defend against
+	// pathological layouts.
 	for (let depth = 0; depth < 8; depth++) {
 		const parentSessionFile = `${path.dirname(current)}.jsonl`;
-		if (!fs.existsSync(parentSessionFile)) return current;
+		if (!storage.existsSync(parentSessionFile)) return current;
 		current = parentSessionFile;
 	}
 	return current;
@@ -3505,12 +3506,13 @@ export class SessionManager {
 		title: string,
 		options?: { cwd?: string },
 	): Promise<string | null> {
-		const storage = new FileSessionStorage();
+		const storage = defaultSessionStorage();
 		// The header id is what the lease is keyed on; a null claim means
-		// another live process owns the session, so leave it alone.
-		const sessionId = await readSessionHeaderId(sessionPath);
+		// another live process owns the session, so leave it alone. A backend
+		// with no process-owned lock (a shared table) has no lease to take.
+		const sessionId = await readSessionHeaderId(sessionPath, storage);
 		if (!sessionId) return null;
-		const probe = storage.claimSession(sessionId, sessionPath);
+		const probe = storage.claimSession ? storage.claimSession(sessionId, sessionPath) : () => {};
 		if (!probe) return null;
 		let manager: SessionManager | undefined;
 		try {
@@ -4569,7 +4571,7 @@ export class SessionManager {
 
 			// Recover stale crumbs: a subagent open (pre-fix) may have pointed this
 			// terminal's breadcrumb at an artifact child; resume the parent instead.
-			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
+			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile, storage);
 			const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 			if (breadcrumbCwd === resolvedCwd) {
 				if (!sessionDir || pathIsWithin(dir, breadcrumb.sessionFile)) {

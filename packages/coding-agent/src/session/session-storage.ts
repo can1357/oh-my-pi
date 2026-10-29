@@ -64,6 +64,12 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/**
+	 * Creation time, when the backend records one. File storage reports the
+	 * filesystem's; key-indexed backends store no birth time and omit it, so
+	 * callers fall back to the transcript's own header timestamp.
+	 */
+	birthtimeMs?: number;
 }
 
 export interface SessionStorageWriter {
@@ -199,6 +205,15 @@ export interface SessionStorage {
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
+	/**
+	 * Names of the directories holding session files directly inside `dir` —
+	 * the directory half of {@link listFilesSync}. A recursive transcript walk
+	 * (a session's subagent tree) needs both, and only the backend knows how
+	 * its keys nest: file backends read the directory, key-indexed backends
+	 * derive the names from the keys below `dir`. A missing or unreadable
+	 * `dir` lists as empty rather than throwing.
+	 */
+	listDirsSync(dir: string): string[];
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
@@ -1078,20 +1093,35 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime, birthtimeMs: stats.birthtimeMs };
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
 			// Bun.Glob walks no symlink unless asked, and a transcript placed in
 			// a session directory as one — a launcher's, a supervisor's — is a
-			// transcript like any other (#15878)
-			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
+			// transcript like any other (#15878). `dot` likewise: a transcript
+			// whose agent id starts with a dot is a transcript, and a key-indexed
+			// backend lists it, so the two backends must agree.
+			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true, dot: true })).map(name =>
 				path.join(dir, name),
 			);
 		} catch {
 			return [];
 		}
+	}
+
+	listDirsSync(dir: string): string[] {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		// Real directories only: a transcript stem such as "." or ".." would
+		// revisit an ancestor, and a symlinked directory can loop back into the
+		// tree a walk is descending.
+		return entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
 	}
 
 	async exists(path: string): Promise<boolean> {
@@ -1486,6 +1516,32 @@ export function childKeyName(resolvedDir: string, key: string, segments: number)
 }
 
 /**
+ * The directory names that `keys` imply directly inside `resolvedDir` (a
+ * `path.resolve`d directory): the first segment of every key that sits at
+ * least two levels inside it. Key-indexed storages hold no directory entries,
+ * so a directory exists exactly while a key lives below it — which is what
+ * makes a subagent tree walkable on those backends.
+ */
+export function childDirNames(resolvedDir: string, keys: Iterable<string>): string[] {
+	const names = new Set<string>();
+	for (const key of keys) {
+		let child = path.dirname(key);
+		for (;;) {
+			const parent = path.dirname(child);
+			if (parent === child) break;
+			const name = path.basename(child);
+			if (!name || name.includes("/") || name.includes("\\")) break;
+			if (path.resolve(parent) === resolvedDir) {
+				names.add(name);
+				break;
+			}
+			child = parent;
+		}
+	}
+	return [...names];
+}
+
+/**
  * Match a slash-joined path remainder against a pattern of the same shape
  * (a single segment such as `"*.jsonl"`, or a wildcard project directory
  * followed by `"*.jsonl"` for the one-level cross-project case). Segment
@@ -1762,6 +1818,10 @@ export class MemorySessionStorage implements SessionStorage {
 			files.push(key);
 		}
 		return files;
+	}
+
+	listDirsSync(dir: string): string[] {
+		return childDirNames(path.resolve(dir), this.#files.keys());
 	}
 
 	exists(path: string): Promise<boolean> {
