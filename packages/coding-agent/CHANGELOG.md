@@ -31,6 +31,9 @@
 - Resuming an archived session waits for a running `omp gc` instead of failing, and a damaged archive is reported as unreadable rather than as a session that does not exist ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --blobs` no longer deletes a blob that only a symlinked transcript references ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --apply` now reclaims the half-written archive a killed `gc --archive` left in the archive root ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp --resume <id>` of an archived session opens the file its conversation went on in, instead of the archived copy ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp --fork <archived-id>`, `omp render`, `omp session pack`/`moved` and `omp anonymize` read an archived session with its subagent transcripts and tool output, and a session whose artifact tree could not come back reports that instead of opening without it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore ""` is refused instead of running the configured phases, and the `--restore` dry run reports the artifact recovery `--apply` would finish rather than an error ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
