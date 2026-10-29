@@ -313,6 +313,50 @@ describe("native online STT worker", () => {
 		});
 		expect(offlineDecode).toHaveBeenCalledTimes(1);
 	});
+
+	it("stops scheduling previews when offline inference is slower than the preview cadence", async () => {
+		let elapsedMs = 0;
+		spyOn(performance, "now").mockImplementation(() => elapsedMs);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let first = true;
+		spyOn(offlineRecognizer, "decodeAsync").mockImplementation(async stream => {
+			if (first) {
+				first = false;
+				entered.resolve();
+				await release.promise;
+			}
+			return { text: stream.samples.length > 0 ? "hello" : "" };
+		});
+		const h = harness();
+		h.send({ type: "stream_start", id: "slow", modelKey: offlineKey });
+		const speech = new Float32Array(16_000 * 0.6).fill(0.1);
+		h.send({ type: "stream_audio", id: "slow", audio: speech });
+		await entered.promise;
+		elapsedMs = 500;
+		release.resolve();
+		await h.waitFor("partial", "slow");
+		h.send({ type: "stream_audio", id: "slow", audio: speech });
+		await nextTurn();
+		expect(h.events.filter(event => event.type === "partial")).toHaveLength(1);
+		h.send({ type: "stream_stop", id: "slow" });
+		expect(await h.waitFor("stream_done", "slow")).toEqual({ type: "stream_done", id: "slow", text: "hello" });
+	});
+	it("retains live previews for an offline model that decodes within the interval", async () => {
+		spyOn(offlineRecognizer, "decodeAsync").mockImplementation(async stream => ({
+			text: stream.samples.length > 0 ? "hello" : "",
+		}));
+		const h = harness();
+		h.send({ type: "stream_start", id: "fast", modelKey: offlineKey });
+		const speech = new Float32Array(16_000 * 0.6).fill(0.1);
+		h.send({ type: "stream_audio", id: "fast", audio: speech });
+		await h.waitFor("partial", "fast");
+		h.send({ type: "stream_audio", id: "fast", audio: speech });
+		await nextTurn();
+		expect(h.events.filter(event => event.type === "partial")).toHaveLength(2);
+		h.send({ type: "stream_stop", id: "fast" });
+		expect(await h.waitFor("stream_done", "fast")).toEqual({ type: "stream_done", id: "fast", text: "hello" });
+	});
 });
 
 describe("online stream terminal boundaries", () => {

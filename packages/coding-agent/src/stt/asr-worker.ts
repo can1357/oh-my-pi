@@ -27,7 +27,7 @@ import {
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
-import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
+import { DEFAULT_ENDPOINTER_CONFIG, type EndpointerEvent, StreamEndpointer } from "./endpointer";
 import {
 	getSttModelSpec,
 	type SherpaSttModelSpec,
@@ -641,8 +641,14 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 			if (session.pendingPartial) {
 				const audio = session.pendingPartial;
 				session.pendingPartial = null;
+				const startedAt = performance.now();
 				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
 				if (session.cancelled) return;
+				// A preview that takes longer than its interval cannot keep pace with incoming audio.
+				if (performance.now() - startedAt >= DEFAULT_ENDPOINTER_CONFIG.partialIntervalMs) {
+					session.endpointer.disablePartials();
+					session.pendingPartial = null;
+				}
 				// Skip a now-stale preview if a segment finalized mid-decode.
 				if (text.length > 0 && session.segmentQueue.length === 0) {
 					transport.send({ type: "partial", id: session.id, text });

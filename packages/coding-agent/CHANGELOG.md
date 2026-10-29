@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Local dictation stops costly live previews when the speech model cannot keep up, so final transcripts no longer wait behind repeated previews ([#17410](https://github.com/can1357/oh-my-pi/issues/17410)).
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
