@@ -2658,16 +2658,18 @@ export class ProcessTerminal implements Terminal {
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
 	/**
-	 * With the output pump, a backlog bound at or below
-	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:
-	 * both consumers (the render gate and the stall watchdog) act only on a
-	 * backlog above that level, so the bound already decides them and spares a
-	 * native read on every frame.
+	 * With the output pump the bound left by the last enqueue can only be stale
+	 * high — the pump thread does nothing but drain — and nothing refreshes it
+	 * until the next write. A caller waiting for the terminal to have the
+	 * frame (`TUI.renderNowAccepted`, so `/pause` opens the gate only once the
+	 * screen is current) must see the backlog reach zero, and after the last
+	 * frame there is no next write, so any positive bound is re-read from the
+	 * pump. A zero bound needs no read: only a write can lift it.
 	 */
 	get pendingOutputBytes(): number {
 		const pump = this.#outputPump;
 		if (pump) {
-			if (this.#pumpBacklogBound > STDOUT_BACKLOG_CLEAR_BYTES) this.#pumpBacklogBound = pump.pending();
+			if (this.#pumpBacklogBound > 0) this.#pumpBacklogBound = pump.pending();
 			return this.#pumpBacklogBound;
 		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
