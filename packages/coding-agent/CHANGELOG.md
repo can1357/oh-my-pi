@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
