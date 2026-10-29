@@ -13,6 +13,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { UNNAMED_USER_WAIT_PROMPT } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -274,6 +275,23 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(computerTurnInFlight(owner)).toBe(2);
 		await target.abort();
 		await running;
+	});
+
+	it("publishes a named wait for an SDK caller that passes no prompt", async () => {
+		// `waitForUser` is public API, so a caller written against its
+		// one-argument form still compiles; the frame it publishes must still
+		// carry a `prompt`, which a strict wire decoder requires.
+		const target = createSession([{ content: ["done"] }]);
+		const prompts: string[] = [];
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "user_wait_start") prompts.push(event.prompt);
+		});
+		const open = Promise.withResolvers<void>();
+		const wait = target.waitForUser(() => open.promise);
+		open.resolve();
+		await wait;
+		unsubscribe();
+		expect(prompts).toEqual([UNNAMED_USER_WAIT_PROMPT]);
 	});
 
 	it("marks no turn in a subagent, so its runs keep the grace period", async () => {

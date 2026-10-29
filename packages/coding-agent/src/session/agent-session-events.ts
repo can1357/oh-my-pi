@@ -116,5 +116,12 @@ export type AgentSessionEvent =
 	| { type: "user_wait_start"; prompt: string }
 	| { type: "user_wait_end" };
 
+/**
+ * What `user_wait_start` carries when the caller named nothing: an SDK caller
+ * on the one-argument `waitForUser` still produces a valid frame, and the
+ * surfaces that report run state still say a person is owed an answer.
+ */
+export const UNNAMED_USER_WAIT_PROMPT = "a dialog waiting for you";
+
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

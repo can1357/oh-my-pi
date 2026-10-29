@@ -288,7 +288,11 @@ import {
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
-import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import {
+	type AgentSessionEvent,
+	type AgentSessionEventListener,
+	UNNAMED_USER_WAIT_PROMPT,
+} from "./agent-session-events";
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
@@ -1378,12 +1382,16 @@ export class AgentSession implements SettingsScope {
 	 * `user_wait_start`/`user_wait_end` so every surface that shows run state —
 	 * the terminal title a tmux pane shows, the OSC 7501 record, an RPC host —
 	 * reports a session waiting for a person instead of one still working.
+	 * It is optional because this method is public API: an SDK caller written
+	 * against the one-argument signature keeps compiling, and its wait is
+	 * published under {@link UNNAMED_USER_WAIT_PROMPT} rather than as a frame
+	 * with no `prompt`, which a strict wire decoder would reject.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>, prompt: string): Promise<T> {
+	async waitForUser<T>(dialog: () => Promise<T>, prompt?: string): Promise<T> {
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
-			this.#emit({ type: "user_wait_start", prompt });
+			this.#emit({ type: "user_wait_start", prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT });
 		}
 		try {
 			return await dialog();
