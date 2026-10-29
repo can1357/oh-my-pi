@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
@@ -70,7 +70,6 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
-- Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
