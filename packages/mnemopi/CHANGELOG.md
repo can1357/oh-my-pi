@@ -121,6 +121,13 @@
 
 - Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
 - Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+### Added
+
+- Added the `e7` facts scope migration (`core/migrations/e7-facts-scope.ts`), which adds `scope TEXT DEFAULT 'session'` to the `facts` table on existing banks. It is idempotent (guarded by `PRAGMA table_info(facts)`) and supports dry-run and backup, matching `e6`.
+
+### Fixed
+
+- Shipped the `facts.scope` column that beam recall already probes for (`factsHaveScopeColumn` / `factVisibilityWhere` in `core/beam/recall.ts`) but that the schema never created, so extracted facts were permanently same-session-only. `initBeam` now adds the column idempotently on open; newly extracted durable facts are stored with `scope='global'` so they are recallable across sessions. Pre-existing fact rows keep the `session` default — no retroactive widening.
 
 ## [18.0.11] - 2026-08-29
 

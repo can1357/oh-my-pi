@@ -303,6 +303,7 @@ export class EpisodicGraph {
 			CREATE TABLE IF NOT EXISTS facts (
 				fact_id TEXT PRIMARY KEY,
 				session_id TEXT DEFAULT 'default',
+				scope TEXT DEFAULT 'session',
 				subject TEXT NOT NULL,
 				predicate TEXT NOT NULL,
 				object TEXT NOT NULL,
@@ -312,6 +313,12 @@ export class EpisodicGraph {
 				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 			)
 		`);
+		// `facts` may predate the column on banks where this graph store created
+		// it before the beam schema shipped scope; add it idempotently.
+		const factColumns = this.db.query("PRAGMA table_info(facts)").all() as { name: string }[];
+		if (!factColumns.some(column => column.name === "scope")) {
+			this.db.run("ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT 'session'");
+		}
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");
@@ -403,10 +410,12 @@ export class EpisodicGraph {
 		return row === null ? null : rowToGist(row);
 	}
 	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
+		// Extracted durable facts are stored with scope='global' so they stay
+		// recallable across sessions; pre-existing rows keep the 'session' default.
 		this.db.run(
 			`INSERT OR REPLACE INTO facts
-				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')`,
 			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
 		);
 	}

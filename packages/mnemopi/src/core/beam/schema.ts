@@ -346,6 +346,7 @@ export function initBeam(db: Database): void {
 		CREATE TABLE IF NOT EXISTS facts (
 			fact_id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL,
+			scope TEXT DEFAULT 'session',
 			subject TEXT NOT NULL,
 			predicate TEXT NOT NULL,
 			object TEXT NOT NULL,
@@ -360,6 +361,10 @@ export function initBeam(db: Database): void {
 		"CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_msg_id)",
 	]);
+	// Existing banks predate the column; the read side (factVisibilityWhere in
+	// recall.ts) already probes for it. Pre-existing rows keep the 'session'
+	// default — no retroactive widening to 'global'.
+	addColumnIfMissing(db, "facts", "scope", "TEXT DEFAULT 'session'");
 	db.run(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
 			subject, predicate, object, content='facts'

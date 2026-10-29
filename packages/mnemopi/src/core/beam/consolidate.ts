@@ -283,10 +283,14 @@ function insertFactRows(
 	);
 
 	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
+	// Extracted durable facts are the long-lived tier: they are stored with
+	// scope='global' so they stay recallable across sessions. Session-scoped
+	// conversation already lives in working_memory, and pre-existing fact rows
+	// keep the column's 'session' default (no retroactive widening).
 	beam.db.run(
 		`INSERT OR IGNORE INTO facts
-		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')`,
 		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance],
 	);
 }
