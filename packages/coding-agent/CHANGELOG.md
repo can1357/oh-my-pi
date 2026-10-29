@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `bash` output that prints file lines with their numbers (`grep -n`, `rg -n`, `cat -n`, `nl`) now ends with those files' edit tags, so `edit` can change the printed lines without a `read` first ([#16576](https://github.com/can1357/oh-my-pi/pull/16576) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
