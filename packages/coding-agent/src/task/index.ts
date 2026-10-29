@@ -906,7 +906,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			perCallModelEnabled: perCallModel,
 			perCallModelFallbacks: cfgTaskPerCallModelFallbacks.get(this.session.settings.grantAuthority()) === "runtime",
-			perCallModelAdvertisement: perCallModel ? getPerCallModelAdvertisement(this.session.settings) : undefined,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(this.session.settings, this.session.getActiveModel?.())
+				: undefined,
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),

@@ -408,7 +408,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 			perCallModel,
 			perCallModelFallbacks: cfgTaskPerCallModelFallbacks.get(session.settings.grantAuthority()) === "runtime",
-			perCallModelAdvertisement: perCallModel ? getPerCallModelAdvertisement(session.settings) : undefined,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.())
+				: undefined,
 			toolNames: session.getEvalBridgeToolNames?.(),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};

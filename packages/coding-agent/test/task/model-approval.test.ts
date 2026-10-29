@@ -403,7 +403,31 @@ const rows: Row[] = [
 
 describe("per-call model advertisement", () => {
 	it("advertises no built-in role defaults", () => {
-		expect(getPerCallModelAdvertisement(Settings.isolated())).toEqual({ roles: [], allowlist: [] });
+		expect(getPerCallModelAdvertisement(Settings.isolated())).toEqual({
+			roles: [],
+			allowlist: [],
+			parentModelWithheld: false,
+		});
+	});
+
+	it("withholds the own-model clause when the parent's routing cannot be written as one selector", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "mock/target" } });
+		const routed = buildModel({
+			id: "multi-route",
+			name: "multi-route",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+			compat: { openRouterRouting: { only: ["anthropic", "google-vertex"] } },
+		});
+		expect(getPerCallModelAdvertisement(settings, routed).parentModelWithheld).toBe(true);
+		expect(getPerCallModelAdvertisement(settings, target).parentModelWithheld).toBe(false);
+		expect(getPerCallModelAdvertisement(settings).parentModelWithheld).toBe(false);
 	});
 
 	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
@@ -423,13 +447,14 @@ describe("per-call model advertisement", () => {
 			},
 			"task.perCallModelAllow": ["mock/target", " mock/target ", "unavailable/model@upstream"],
 		});
+		// The allowlist narrows the advertisement: a role is listed only while an entry could admit it.
 		expect(getPerCallModelAdvertisement(settings)).toEqual({
 			roles: [
-				{ role: "smol", patterns: ["anthropic/claude-haiku-4-5"] },
 				{ role: "slow", patterns: ["unavailable/model@upstream:high"] },
-				{ role: "custom", patterns: ["anthropic/*", "mock/target"] },
+				{ role: "custom", patterns: ["mock/target"] },
 			],
 			allowlist: ["mock/target", "unavailable/model@upstream"],
+			parentModelWithheld: false,
 		});
 	});
 
@@ -448,6 +473,7 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(child)).toEqual({
 			roles: [{ role: "smol", patterns: ["mock/edited"] }],
 			allowlist: ["mock/edited"],
+			parentModelWithheld: false,
 		});
 
 		const host = root.overlay({
@@ -455,11 +481,9 @@ describe("per-call model advertisement", () => {
 			"task.perCallModelAllow": ["host/model"],
 		});
 		expect(getPerCallModelAdvertisement(host)).toEqual({
-			roles: [
-				{ role: "slow", patterns: ["host/model"] },
-				{ role: "smol", patterns: ["mock/edited"] },
-			],
+			roles: [{ role: "slow", patterns: ["host/model"] }],
 			allowlist: ["host/model"],
+			parentModelWithheld: false,
 		});
 	});
 });
