@@ -125,7 +125,6 @@ import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
-	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
@@ -525,6 +524,7 @@ import {
 	cfgPowerSleepPrevention,
 	cfgPrewalkAutoTarget,
 	cfgPrewalkEnabled,
+	cfgPrewalkInto,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
@@ -2981,7 +2981,7 @@ export class AgentSession implements SettingsScope {
 
 	/** Resolve the configured startup/new-session handoff using the settings-change selection path. */
 	#resolveDefaultPrewalk(): Prewalk | undefined {
-		const resolved = this.#resolvePrewalkTarget(DEFAULT_PREWALK_TARGET);
+		const resolved = this.#resolvePrewalkTarget(cfgPrewalkInto.get(this.settings));
 		if (typeof resolved !== "string") return resolved;
 		this.emitNotice("warning", `Prewalk not armed: ${resolved}.`, "prewalk");
 		return undefined;

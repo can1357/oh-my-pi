@@ -2,16 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `TaskItem.model` and `TaskParams.model` now document that the per-call model for an ordinary agent may be a configured `@role` or an ordered list of exact ids and roles, not only one exact id; the `string | string[]` type is unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Moved `PINNED_HUD_TOGGLE_ID` to the coding agent's task output manager so reserving subagent IDs no longer loads the interactive editor.
 - Updated `StatusLineHost.resetExpiryNotice` to receive the session and manage warning deduplication; custom status-line components must use the new signature.
 - Removed `ToolExecutionHandle.setToolActivityVisible`; tool-activity visibility is now controlled by transcript components, while reply blocks remain visible by default.
 - Removed the `@oh-my-pi/pi-tui/theme/defaults` export. Bundled palettes are now available through `getBuiltinThemes()` from `theme/defaults.json`.
-
-### Changed
-
-- `TaskItem.model` and `TaskParams.model` now document that the per-call model for an ordinary agent may be a configured `@role` or an ordered list of exact ids and roles, not only one exact id; the `string | string[]` type is unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
