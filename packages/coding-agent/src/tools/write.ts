@@ -58,6 +58,7 @@ import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
@@ -222,6 +223,14 @@ const writeSchema = type({
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
+ * A `read` notice that its projection is incomplete: a truncation notice, or the column-cap
+ * notice of a page whose long lines are shown cut (`[Some lines truncated to 768 chars. …]`).
+ */
+function isReadProjectionNotice(line: string): boolean {
+	return isReadTruncationNotice(line) || isColumnTruncationNotice(line);
+}
+
+/**
  * Offset of the last non-blank line of LF-only `text` when that line is a `read`
  * truncation notice, else -1. Walks lines backward from the end instead of splitting.
  */
@@ -230,7 +239,7 @@ function readTruncationNoticeStart(text: string): number {
 	while (end > 0) {
 		const start = text.lastIndexOf("\n", end - 1) + 1;
 		const line = text.slice(start, end);
-		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		if (line.trim().length > 0) return isReadProjectionNotice(line) ? start : -1;
 		end = start - 1;
 	}
 	return -1;
@@ -263,7 +272,7 @@ function endsWithReadTruncationNotice(content: string): boolean {
 		if (ch === 0x0a || ch === 0x0d) break;
 		end++;
 	}
-	return isReadTruncationNotice(content.slice(start, end));
+	return isReadProjectionNotice(content.slice(start, end));
 }
 
 async function readCurrentWriteSource(

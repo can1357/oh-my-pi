@@ -13,7 +13,7 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
-import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgReadDefaultLimit, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
@@ -142,6 +142,8 @@ describe("write tool read projection guard", () => {
 		const original = `${"x".repeat(50 * 1024 + 10)}\n`;
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir);
+		// Uncapped: with the column cap on, the line is shown cut instead (next test).
+		cfgToolsOutputMaxColumns.set(session.settings, 0);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-line", { path: `${filePath}:1-1` }),
 		);
@@ -152,6 +154,30 @@ describe("write tool read projection guard", () => {
 			new WriteTool(session).execute("write-line", { path: filePath, content: projection }),
 		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a projection whose long line was shown cut to the column cap", async () => {
+		const filePath = path.join(tmpDir, "wide.txt");
+		const original = `short\n${"x".repeat(60 * 1024)}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-wide", { path: filePath }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-wide", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("writes a file whose last line only starts like the column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		await Bun.write(filePath, "header\nbody line\n");
+		const content = "header\n[Some lines truncated to explain the format\n";
+		await new WriteTool(createSession(tmpDir)).execute("write-notes", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
 	});
 
 	it("rejects actual bounded archive-member output without changing the archive", async () => {
