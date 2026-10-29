@@ -663,7 +663,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**

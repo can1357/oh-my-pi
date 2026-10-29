@@ -1,5 +1,6 @@
 import type { ModelIdentity } from "./compat/types";
 import type { Effort } from "./effort";
+import type { DatedCostCard } from "./pricing";
 
 // Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
 // `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
@@ -1702,6 +1703,8 @@ export interface Model<TApi extends Api = Api> {
 	factoryDroidRoutingSource?: "configured_order";
 	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
 	factoryDroidCredits?: number;
+	/** Factory Droid dated `credit-rates` cards, ascending; `getFactoryDroidCreditRate` picks the one due now. */
+	factoryDroidCreditCards?: readonly DatedCostCard[];
 	/** Canonical organization resolved during Factory discovery. */
 	factoryDroidOrgId?: string;
 	cost: ModelCost;

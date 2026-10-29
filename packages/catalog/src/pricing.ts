@@ -148,15 +148,15 @@ export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
 }
 
 /**
- * The latest `effectiveRates` card of a materialized schedule due at
- * `timestamp`, or undefined before the first one (or without a schedule).
+ * The dated card due at `timestamp`: the one with the latest `effectiveFrom`
+ * at or before it, in any order, or undefined before the first card.
  */
-export function dueEffectiveRate(
-	schedule: TimeBasedCost | undefined,
+export function dueDatedCard<T extends { effectiveFrom: number }>(
+	cards: readonly T[],
 	timestamp: number,
-): EffectiveTokenCost | undefined {
-	let due: EffectiveTokenCost | undefined;
-	for (const candidate of schedule?.effectiveRates ?? []) {
+): T | undefined {
+	let due: T | undefined;
+	for (const candidate of cards) {
 		if (candidate.effectiveFrom <= timestamp && (due === undefined || candidate.effectiveFrom > due.effectiveFrom)) {
 			due = candidate;
 		}
@@ -164,21 +164,38 @@ export function dueEffectiveRate(
 	return due;
 }
 
+/**
+ * The latest `effectiveRates` card of a materialized schedule due at
+ * `timestamp`, or undefined before the first one (or without a schedule).
+ */
+export function dueEffectiveRate(
+	schedule: TimeBasedCost | undefined,
+	timestamp: number,
+): EffectiveTokenCost | undefined {
+	return dueDatedCard(schedule?.effectiveRates ?? [], timestamp);
+}
+
 const TOKEN_COST_LEGS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 const DATED_CARD_KEYS: readonly string[] = ["effectiveFrom", ...TOKEN_COST_LEGS];
 
-/** A `cost-patch`/`cost-fallback` dated card: the legs it overwrites from `effectiveFrom` (Unix ms). */
+/**
+ * A dated `effective-rates` card of a `cost-patch`, `cost-fallback` or
+ * `credit-rates` rule: the legs it overwrites from `effectiveFrom` (Unix ms).
+ */
 export interface DatedCostCard extends Partial<TokenCost> {
 	effectiveFrom: number;
 }
 
 /**
- * Parse the compiled `effective-rates` block of a `cost-patch` or
- * `cost-fallback` payload into dated cards, ascending by date. Throws on a
- * malformed card, so a typo in a rule fails the build instead of silently
- * leaving the old price in force.
+ * Parse the compiled `effective-rates` block of a `cost-patch`,
+ * `cost-fallback` or Factory Droid `credit-rates` payload into dated cards,
+ * ascending by date. Throws on a malformed card, so a typo in a rule fails the
+ * build instead of silently leaving the old price in force.
  */
-export function parseDatedCostCards(costAxis: unknown, axis: "cost-patch" | "cost-fallback"): DatedCostCard[] {
+export function parseDatedCostCards(
+	costAxis: unknown,
+	axis: "cost-patch" | "cost-fallback" | "credit-rates",
+): DatedCostCard[] {
 	const effectiveRates = isRecord(costAxis) ? costAxis.effectiveRates : undefined;
 	if (effectiveRates === undefined) return [];
 	if (!isRecord(effectiveRates)) throw new Error(`Invalid ${axis} effective-rates: expected named objects`);
@@ -235,10 +252,7 @@ export function datedCost(base: TokenCost, cards: readonly DatedCostCard[], now 
  * `cost` unchanged before the first card.
  */
 export function applyDueDatedCostCard(cost: TokenCost, cards: readonly DatedCostCard[], now = Date.now()): void {
-	let due: DatedCostCard | undefined;
-	for (const card of cards) {
-		if (card.effectiveFrom <= now) due = card;
-	}
+	const due = dueDatedCard(cards, now);
 	if (due === undefined) return;
 	for (const leg of TOKEN_COST_LEGS) {
 		const value = due[leg];

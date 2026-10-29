@@ -282,6 +282,9 @@ export function buildFactoryDroidModel(
 		...factoryDroidRegionalLimits(policy, resolveFactoryDroidInferenceRegion(options)),
 		...(options.orgId ? { factoryDroidOrgId: options.orgId } : {}),
 		...(policy.creditRates ? { factoryDroidCredits: policy.creditRates.input } : {}),
+		...(policy.creditRates?.effectiveRates
+			? { factoryDroidCreditCards: policy.creditRates.effectiveRates.map(card => ({ ...card })) }
+			: {}),
 		...(options.apiProviders?.length ? { factoryDroidApiProviders: [...options.apiProviders] } : {}),
 	};
 	const resolved = resolveModelPolicy(model);

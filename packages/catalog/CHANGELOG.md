@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Factory Droid's dated credit rates: the credit rate follows Factory's promotions, discounted from a promotion's start and back to the base rate at its end, using the same dated rate cards as dollar prices (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
