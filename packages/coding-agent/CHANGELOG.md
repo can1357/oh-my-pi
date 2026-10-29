@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Fixed the legacy Pi virtual module failing to build in an npm install that keeps the bundled Pi packages nested; it is now anchored to the installed package, so its imports resolve through that package's own dependency graph ([#15208](https://github.com/can1357/oh-my-pi/issues/15208), [#16412](https://github.com/can1357/oh-my-pi/pull/16412) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
@@ -70,7 +70,6 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
-- Fixed the legacy Pi virtual module failing to build in an npm install that keeps the bundled Pi packages nested; it is now anchored to the installed package, so its imports resolve through that package's own dependency graph ([#15208](https://github.com/can1357/oh-my-pi/issues/15208), [#16412](https://github.com/can1357/oh-my-pi/pull/16412) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
