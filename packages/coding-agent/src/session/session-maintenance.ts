@@ -1256,37 +1256,40 @@ export class SessionMaintenance {
 			const compactionSettings = this.#compactionSettings;
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
-			let selectedMethod: CompactionMethod | undefined;
-			for (let index = methodOffset; index < methods.length; index++) {
-				const method = methods[index];
-				if (method === "remote") {
-					if (canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method))) {
-						selectedMethod = method;
-						selectedMethodIndex = index;
-						break;
-					}
-					continue;
+			const runsManually = (method: CompactionMethod): boolean => {
+				switch (method) {
+					case "remote":
+						return canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method));
+					case "snapcompact":
+						return (
+							explicitSnapcompact ||
+							(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
+						);
+					case "soft":
+						return true;
+					case "handoff":
+					case "shake":
+						return false;
 				}
-				if (method === "snapcompact") {
-					if (
-						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
-					) {
-						selectedMethod = method;
-						selectedMethodIndex = index;
-						break;
-					}
-					continue;
-				}
-				if (method === "soft") {
-					selectedMethod = method;
-					selectedMethodIndex = index;
-					break;
-				}
-			}
+			};
+			selectedMethodIndex = methods.findIndex((method, index) => index >= methodOffset && runsManually(method));
+			const selectedMethod = methods[selectedMethodIndex];
 			if (!selectedMethod) {
 				throw new Error("No configured compaction method can run manually.");
 			}
+			// `/compact snapcompact` pins the order to snapcompact alone, so its
+			// blockers name what the user can run instead.
+			const snapcompactFailure = (reason: string): Error => {
+				if (!explicitSnapcompact) return new Error(reason);
+				const fallback = resolveCompactionMethodOrder(compactionSettings.methodOrder).find(
+					method => method !== "snapcompact" && runsManually(method),
+				);
+				return new Error(
+					fallback
+						? `${reason}. Run /compact to fall back to ${fallback} compaction.`
+						: `${reason}. Run /compact soft to summarize with the active model instead.`,
+				);
+			};
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
 			const availableModels = this.#host.modelRegistry.getAvailable();
@@ -1368,8 +1371,7 @@ export class SessionMaintenance {
 				const reason = this.#model.input.includes("image")
 					? `${this.#model.id}'s provider strips image input`
 					: `${this.#model.id} is text-only`;
-				this.#host.emitNotice("warning", `snapcompact needs a vision-capable model (${reason})`, "compaction");
-				throw new Error(`snapcompact cannot run locally: ${reason}.`);
+				throw snapcompactFailure(`snapcompact needs a vision-capable model (${reason})`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
@@ -1384,13 +1386,8 @@ export class SessionMaintenance {
 				const renderScan = snapcompact.scanRenderability(probeText, { shape: snapcompactShape });
 				if (!renderScan.isSafe) {
 					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%).`,
-						"compaction",
-					);
-					throw new Error(
-						`snapcompact cannot render this conversation locally: unsupported characters for selected snapcompact font (${percent}%).`,
+					throw snapcompactFailure(
+						`snapcompact cannot render this conversation: unsupported characters for selected snapcompact font (${percent}%)`,
 					);
 				}
 			}
@@ -1413,12 +1410,7 @@ export class SessionMaintenance {
 					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 						model: this.#model?.id,
 					});
-					this.#host.emitNotice(
-						"warning",
-						"snapcompact: kept history alone exceeds the context budget.",
-						"compaction",
-					);
-					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
+					throw snapcompactFailure("snapcompact cannot run: kept history alone exceeds the context budget");
 				} else {
 					const shape = snapcompactShape;
 					if (!shape) {
@@ -1445,14 +1437,7 @@ export class SessionMaintenance {
 							framePayloadBytes,
 							budget: frameByteBudget,
 						});
-						this.#host.emitNotice(
-							"warning",
-							"snapcompact produced too much standing image payload.",
-							"compaction",
-						);
-						throw new Error(
-							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
-						);
+						throw snapcompactFailure("snapcompact produced too much standing image payload for one request");
 					}
 					const ctxWindow = this.#model?.contextWindow ?? 0;
 					const budget =
@@ -1477,19 +1462,13 @@ export class SessionMaintenance {
 							projected: projectedForReduction,
 							reductionBaseline,
 						});
-						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
-						throw new Error("snapcompact would not reduce context locally.");
+						throw snapcompactFailure("snapcompact would not reduce context");
 					}
 					if (projected > budget) {
 						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.#model?.id,
 						});
-						this.#host.emitNotice(
-							"warning",
-							"snapcompact could not bring the context under the limit.",
-							"compaction",
-						);
-						throw new Error("snapcompact could not bring the context under the limit locally.");
+						throw snapcompactFailure("snapcompact could not bring the context under the limit");
 					}
 				}
 			}
@@ -1612,7 +1591,7 @@ export class SessionMaintenance {
 			) {
 				this.#host.emitNotice(
 					"warning",
-					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
+					`${methods[selectedMethodIndex]} compaction failed (${err.message}); trying the next preferred method`,
 					"compaction",
 				);
 				try {

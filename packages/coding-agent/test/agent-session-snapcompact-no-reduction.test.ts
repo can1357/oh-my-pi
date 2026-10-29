@@ -139,7 +139,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 		});
 
 		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			"snapcompact would not reduce context locally.",
+			"snapcompact would not reduce context",
 		);
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
@@ -515,6 +515,28 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 			"snapcompact would not reduce context",
 		);
 		expect(latestArchiveFrames(session, previousId)).toBeUndefined();
+	});
+
+	it("names snapcompact's refusal when plain /compact falls back to the next method", async () => {
+		const { session } = await createArchivedSession(PREVIOUS_FRAMES + 2, {
+			"compaction.methodOrder": ["snapcompact", "soft"],
+		});
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "llm summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "compaction") notices.push(event.message);
+		});
+
+		const result = await session.compact();
+
+		expect(result.summary).toBe("llm summary");
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("snapcompact would not reduce context");
 	});
 
 	it("commits an idle snapcompact whose archive is smaller than the one it replaces", async () => {
