@@ -45,6 +45,19 @@ const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
+/**
+ * How long a flushed CSI introducer waits for its body before it is released
+ * to the input handler as a key. Without a bound, a stray `\x1b[` (Alt+[ on a
+ * legacy encoder, or Esc followed by `[`) would fuse with a keystroke made
+ * arbitrarily later and rewrite it.
+ */
+const CSI_INTRODUCER_GRACE_MS = 150;
+/**
+ * How long a report body applied without its `t` waits for that delayed
+ * terminator. Inside the window a lone `t` is treated as the terminator;
+ * after it, `t` is a real keystroke again.
+ */
+const INBAND_TERMINATOR_GRACE_MS = 300;
 
 /**
  * Terminal → program TSP messages through a Windows ConPTY: its input parser
@@ -966,6 +979,20 @@ export class ProcessTerminal implements Terminal {
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
 	#inBandResizeBuffer = "";
+	/**
+	 * A CSI introducer (`\x1b[`) flushed alone by the StdinBuffer. Held so the
+	 * next event is parsed as its parameter body instead of being typed into
+	 * the composer (see the prepend in the stdin sequence handler).
+	 */
+	#csiIntroducerBuffer = "";
+	/** Release timer for a held introducer whose body never arrives. */
+	#csiIntroducerTimer?: Timer;
+	/**
+	 * Timestamp of a DEC 2048 report body applied without its `t` terminator.
+	 * iTerm2 writes the body and the terminator in separate chunks; a `t`
+	 * arriving right after an implicitly completed body is that terminator.
+	 */
+	#pendingInBandTerminatorAt = 0;
 	#reportedColumns?: number;
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
@@ -1389,6 +1416,11 @@ export class ProcessTerminal implements Terminal {
 		// ignore per spec (#4748): capture the leading digits of each field and
 		// skip the subparameter tail instead of dropping the whole report.
 		const inBandResizePattern = /^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?t$/;
+		// The same body without its `t` terminator. iTerm2 writes the body and
+		// the terminator as separate chunks, and the body alone is unambiguous:
+		// no key reply carries a `48;` selector plus four numeric fields.
+		const inBandResizeBodyPattern =
+			/^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?$/;
 
 		this.#stdinSequenceHandler = (sequence: string) => {
 			const decoder = this.#win32InputDecoder;
@@ -1401,6 +1433,7 @@ export class ProcessTerminal implements Terminal {
 				// of their own and would otherwise be appended to that fragment.
 				this.#privateCsiResponseBuffer = "";
 				this.#inBandResizeBuffer = "";
+				this.#clearCsiIntroducer();
 				this.#osc11ResponseBuffer = "";
 				this.#osc99ResponseBuffer = "";
 				this.#glyphProtocolReplyBuffer = "";
@@ -1412,6 +1445,60 @@ export class ProcessTerminal implements Terminal {
 						WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
 					);
 				}
+				return;
+			}
+			// iTerm2 writes a report body and its `t` terminator in separate
+			// chunks. When a body was applied without its terminator (see the
+			// body match below), the imminent lone `t` is that terminator and
+			// must not reach the composer.
+			if (sequence === "t" && this.#pendingInBandTerminatorAt !== 0 && !this.#inBandResizeBuffer) {
+				const elapsed = Date.now() - this.#pendingInBandTerminatorAt;
+				this.#pendingInBandTerminatorAt = 0;
+				if (elapsed < INBAND_TERMINATOR_GRACE_MS) return;
+			}
+			// A pty read can bundle a CSI with the next escape sequence
+			// (`\x1b[48;…2912\x1b[`): the reassemblers below take one sequence per
+			// event, so split at the embedded ESC and dispatch both halves in
+			// order. A CSI can never contain a raw ESC, and X10 mouse bodies
+			// (bytes >= 0x20) cannot either, so this is always a sequence
+			// boundary.
+			const embeddedEsc = sequence.indexOf("\x1b", 1);
+			if (embeddedEsc > 0 && sequence.startsWith("\x1b[")) {
+				this.#stdinSequenceHandler?.(sequence.slice(0, embeddedEsc));
+				this.#stdinSequenceHandler?.(sequence.slice(embeddedEsc));
+				return;
+			}
+			// A StdinBuffer flush can end immediately after the CSI introducer:
+			// the body then arrives in the next read as bare printable bytes — a
+			// DEC 2048 resize report torn this way during a busy resize or a
+			// terminal teardown types `48;rows;cols;hPx;wPx` into the composer.
+			// Hold the introducer and prepend it to the next event so the
+			// completed sequence reaches whichever reassembler owns it: the
+			// in-band report buffer below, private-CSI probe reassembly, or the
+			// input handler for a genuine key (`\x1b[A`). A fresh ESC-led event
+			// interrupts the held head — it is a sequence of its own.
+			if (this.#csiIntroducerBuffer) {
+				this.#clearCsiIntroducer();
+				if (!sequence.startsWith("\x1b")) sequence = `\x1b[${sequence}`;
+			}
+			if (sequence === "\x1b[" && this.#inBandResizeActive) {
+				// A complete body held from the previous read is waiting on its
+				// late `t`; apply it now. A mere partial is dead once a new
+				// introducer interrupts it.
+				if (this.#inBandResizeBuffer) {
+					const heldBody = this.#inBandResizeBuffer.match(inBandResizeBodyPattern);
+					this.#inBandResizeBuffer = "";
+					if (heldBody) {
+						this.#pendingInBandTerminatorAt = Date.now();
+						this.#handleInBandResizeReport(heldBody[1]!, heldBody[2]!, heldBody[3]!, heldBody[4]!);
+					}
+				}
+				// A new ESC interrupts any private-CSI partial the same way, so
+				// holding unconditionally cannot lose a reply and keeps a report
+				// body from leaking behind the pending partial.
+				this.#privateCsiResponseBuffer = "";
+				this.#csiIntroducerBuffer = sequence;
+				this.#armCsiIntroducerRelease();
 				return;
 			}
 			// Fast path for plain-text bytes: every escape-probe regex below
@@ -1495,6 +1582,24 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer = isInBandResizePartial ? sequence : "";
 				if (isInBandResizePartial) return;
 			} else if (this.#inBandResizeBuffer || isInBandResizePartial) {
+				// A held body with all four fields is a complete report only
+				// waiting on its late `t`. Any other continuation ends it: apply
+				// the report and reprocess the event instead of merging a
+				// keystroke into the report body.
+				const heldBody = this.#inBandResizeBuffer.match(inBandResizeBodyPattern);
+				if (
+					heldBody &&
+					sequence !== "t" &&
+					!sequence.startsWith("\x1b") &&
+					!sequence.startsWith(";") &&
+					!/^\d/.test(sequence)
+				) {
+					this.#inBandResizeBuffer = "";
+					this.#pendingInBandTerminatorAt = Date.now();
+					this.#handleInBandResizeReport(heldBody[1]!, heldBody[2]!, heldBody[3]!, heldBody[4]!);
+					this.#stdinSequenceHandler?.(sequence);
+					return;
+				}
 				this.#inBandResizeBuffer += sequence;
 				if (this.#inBandResizeBuffer.length > 256) {
 					this.#inBandResizeBuffer = "";
@@ -1521,6 +1626,8 @@ export class ProcessTerminal implements Terminal {
 			// handler so the renderer reflows.
 			const resizeMatch = sequence.match(inBandResizePattern);
 			if (resizeMatch) {
+				// The explicit terminator arrived; a later lone `t` is a keystroke.
+				this.#pendingInBandTerminatorAt = 0;
 				this.#handleInBandResizeReport(resizeMatch[1]!, resizeMatch[2]!, resizeMatch[3]!, resizeMatch[4]!);
 				return;
 			}
@@ -2229,6 +2336,26 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite(`\x1b[?${mode}l`);
 	}
 
+	/** Arm the release of a held CSI introducer that no body follows. */
+	#armCsiIntroducerRelease(): void {
+		clearTimeout(this.#csiIntroducerTimer);
+		this.#csiIntroducerTimer = setTimeout(() => {
+			this.#csiIntroducerTimer = undefined;
+			const held = this.#csiIntroducerBuffer;
+			this.#csiIntroducerBuffer = "";
+			if (held && this.#active && this.#inputHandler) this.#inputHandler(held);
+		}, CSI_INTRODUCER_GRACE_MS);
+	}
+
+	/** Drop a held introducer (and its release timer) without delivering it. */
+	#clearCsiIntroducer(): void {
+		if (this.#csiIntroducerTimer) {
+			clearTimeout(this.#csiIntroducerTimer);
+			this.#csiIntroducerTimer = undefined;
+		}
+		this.#csiIntroducerBuffer = "";
+	}
+
 	/**
 	 * Enable DEC 2048 in-band resize notifications. The terminal emits an initial
 	 * report immediately, seeding reported geometry and cell dimensions.
@@ -2347,6 +2474,10 @@ export class ProcessTerminal implements Terminal {
 		} finally {
 			process.stdin.removeListener("data", onData);
 			this.#inputHandler = previousHandler;
+			// A report head captured while no handler could claim its body is
+			// stale once the TTY is handed back.
+			this.#clearCsiIntroducer();
+			this.#pendingInBandTerminatorAt = 0;
 		}
 	}
 
@@ -2446,6 +2577,8 @@ export class ProcessTerminal implements Terminal {
 		this.#tspCallbacks = [];
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
+		this.#clearCsiIntroducer();
+		this.#pendingInBandTerminatorAt = 0;
 		this.#da1SentinelOwners.length = 0;
 		this.#privateModeCallbacks = [];
 		this.#privateModeSupport.clear();
