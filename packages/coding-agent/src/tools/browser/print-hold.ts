@@ -195,10 +195,13 @@ export class PrintHold {
 		await this.#apply(Date.now() + timeoutMs + USER_DRIVEN_RELEASE_MS);
 	}
 
-	/** A browser the user drives gets its page's `print()` back shortly after the call, or after the tab's setup. */
-	endCall(): void {
-		if (this.#scope === "tab") return;
-		void this.#apply(Date.now() + USER_DRIVEN_RELEASE_MS).catch(() => undefined);
+	/**
+	 * A browser the user drives gets its page's `print()` back shortly after the call, or after the tab's setup.
+	 * Resolves once the page has the release, or once a dialog stops the page.
+	 */
+	endCall(): Promise<void> {
+		if (this.#scope === "tab") return Promise.resolve();
+		return this.#apply(Date.now() + USER_DRIVEN_RELEASE_MS).catch(() => undefined);
 	}
 
 	/** The line for the call's output when the page called `print()` since the last notice. */
