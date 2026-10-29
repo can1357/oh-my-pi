@@ -184,4 +184,40 @@ describe("connection-failure classification", () => {
 		expect(AIError.is(assembled, AIError.Flag.AuthFailed)).toBe(true);
 		expect(AIError.is(assembled, AIError.Flag.Connection)).toBe(false);
 	});
+
+	it.each([
+		["a forwarded nghttp2 internal error", "Stream closed with error code NGHTTP2_INTERNAL_ERROR", true],
+		[
+			"a forwarded nghttp2 refused stream",
+			"Connect error failed_precondition: Error: Stream closed with error code NGHTTP2_REFUSED_STREAM",
+			true,
+		],
+		["a Go h2 stream error frame", "stream error: stream ID 7; INTERNAL_ERROR; received from peer", true],
+		["a model reporting an internal error", "500 Internal Server Error: internal error while generating", false],
+	])("reads %s correctly", (_label, errorMessage, connection) => {
+		// An HTTP/2 peer reset is a cut stream with no status line of its own,
+		// and these are the spellings turn recovery already treats as transport
+		// resets; a model's own "internal error" prose is not one.
+		expect(flagsOfMessage(errorMessage).connection).toBe(connection);
+	});
+
+	it.each([
+		["a code the Codex loop replays", "Codex error event (code=model_error, message=stream failed)", true],
+		[
+			"prose the Codex loop replays under an unknown code",
+			"Codex error event (code=api_error, message=The server had an internal error)",
+			true,
+		],
+		[
+			"a wire death under a code the loop declines",
+			"Codex error event (code=api_error, message=read ECONNRESET)",
+			false,
+		],
+		["a message carrying no event marker", "read ECONNRESET", false],
+	])("reads %s correctly as replay provenance", (_label, errorMessage, replayed) => {
+		// Turn recovery reads this to tell a failure a provider loop already
+		// replayed from one it made a single request for; the marker alone says
+		// only which event it was.
+		expect(AIError.isReplayedProviderFailureEventText(errorMessage)).toBe(replayed);
+	});
 });

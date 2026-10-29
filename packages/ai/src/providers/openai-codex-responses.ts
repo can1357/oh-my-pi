@@ -284,17 +284,6 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FI
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
-// The native-lane steering rejection is replayable: the session stops steering
-// first, so the replay cannot trip it again.
-const CODEX_RETRYABLE_EVENT_CODES = new Set([
-	"model_error",
-	"server_error",
-	"internal_error",
-	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
-]);
-const CODEX_RETRYABLE_EVENT_MESSAGE =
-	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
-
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 /** WebSocket frames cannot carry per-request HTTP headers; codex-rs mirrors the lite marker into `client_metadata` under this key. */
@@ -5189,13 +5178,13 @@ export function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>):
 	}
 	const error = event.error ?? event.response?.error;
 	const code = error?.code ?? error?.type ?? event.code;
-	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code.toLowerCase())) {
+	if (code && AIError.CODEX_RETRYABLE_EVENT_CODES.has(code.toLowerCase())) {
 		return true;
 	}
 	const message = error?.message ?? event.message ?? event.response?.message;
 	return (
 		!!message &&
-		(CODEX_RETRYABLE_EVENT_MESSAGE.test(message) ||
+		(AIError.CODEX_RETRYABLE_EVENT_MESSAGE.test(message) ||
 			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(message) ||
 			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(message))
 	);

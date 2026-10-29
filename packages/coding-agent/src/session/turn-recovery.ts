@@ -110,8 +110,6 @@ const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 /** Retry attempts a statusless wire failure keeps on the same model before the fallback chain is consulted. */
 const CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS = 2;
-/** Marker a provider's formatted failure event leaves on the persisted message, e.g. `(code=model_error)`. */
-const PROVIDER_FAILURE_EVENT_CODE_RE = /\(code=[^)]+\)/;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -1781,7 +1779,11 @@ export class TurnRecovery {
 	 *   undefined` and nothing replay-unsafe has streamed (`anthropic.ts`,
 	 *   `canRetryProviderFailure`), the OpenAI pre-output retry only while
 	 *   `!committed` (`empty-completion-retry.ts`), and `fetchWithRetry` only
-	 *   before a response body exists at all.
+	 *   before a response body exists at all. A block the stream opened counts
+	 *   even while it is still empty: `content_block_start` is where the
+	 *   Anthropic loop sets `firstTokenTime` and `streamedReplayUnsafeContent`
+	 *   and pushes the empty block, so a cut between that frame and the first
+	 *   delta leaves an empty block behind and no replay below at all.
 	 * - **The wording is one no provider loop retries.** Their gate is
 	 *   `AIError.isProviderRetryableError`; a diagnostic it rejects — an in-band
 	 *   `TransferEncodingError`, `premature close`, `read ECONNRESET`, `write
@@ -1841,10 +1843,10 @@ export class TurnRecovery {
 		if (
 			message.content.some(
 				block =>
-					(block.type === "thinking" && block.thinking.trim().length > 0) ||
+					block.type === "thinking" ||
 					block.type === "redactedThinking" ||
 					block.type === "toolCall" ||
-					(block.type === "text" && block.text.trim().length > 0),
+					block.type === "text",
 			)
 		) {
 			return true;
@@ -1853,12 +1855,12 @@ export class TurnRecovery {
 		// provider loop would have replayed. Two things have to be true.
 		//
 		// A provider that emits a structured failure event decides its own
-		// replay from that event's code, not from the text
-		// (`openai-codex-responses` keys on `CODEX_RETRYABLE_EVENT_CODES` and
-		// retries up to five times while nothing has streamed), so a message
-		// carrying a `(code=…)` marker has already been through such a loop
-		// whatever the prose around it says.
-		if (PROVIDER_FAILURE_EVENT_CODE_RE.test(message.errorMessage ?? "")) return false;
+		// replay from that event rather than from the prose around it, and
+		// leaves a `(code=…)` marker on the message it persists. The marker
+		// alone proves only which event it was: `AIError` owns the codes and
+		// wording that provider's loop actually replays, and only those mean a
+		// loop has already run.
+		if (AIError.isReplayedProviderFailureEventText(message.errorMessage ?? "")) return false;
 		// Otherwise the text is all there is, and every loop that reads text
 		// gates on `AIError.isProviderRetryableError`: a diagnostic it rejects
 		// (an in-band `TransferEncodingError`, `premature close`, `read

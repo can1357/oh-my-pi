@@ -49,6 +49,12 @@ const PROVIDER_CONNECTION_ERROR = "Connection error.";
  */
 const ENVOY_CONNECTION_TIMEOUT =
 	"upstream connect error or disconnect/reset before headers. reset reason: connection timeout";
+/** An HTTP/2 peer reset as a gateway forwards it — a cut stream with no status line. */
+const HTTP2_STREAM_RESET = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
+/** A Codex failure event whose code and prose its own loop declines to replay. */
+const CODEX_UNREPLAYED_WIRE_EVENT = "Codex error event (code=api_error, message=read ECONNRESET)";
+/** A Codex failure event its loop replays before surfacing it. */
+const CODEX_REPLAYED_EVENT = "Codex error event (code=model_error, message=stream failed)";
 
 function emptyUsage(): Usage {
 	return {
@@ -787,6 +793,60 @@ describe("AgentSession retry recovery", () => {
 		expect(requestedModels).toEqual([primary, fallback]);
 		expect(fallbackEvents).toHaveLength(1);
 		successfulAssistantEntry(sessionManager, "recovered on fallback");
+	});
+
+	it("holds the chain when the stream opened a block and died before its first delta", async () => {
+		// `content_block_start` is where the Anthropic loop sets `firstTokenTime`
+		// and pushes the still-empty block, so a cut right after that frame is
+		// one no layer below replayed — even though the block carries no text.
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			{ content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+		successfulAssistantEntry(sessionManager, "recovered on the same model");
+	});
+
+	it("holds the chain for an HTTP/2 peer reset that streamed reasoning", async () => {
+		// A forwarded `NGHTTP2_INTERNAL_ERROR` is a cut stream with no status
+		// line, the same family as the resets turn recovery already recognises.
+		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: HTTP2_STREAM_RESET,
+			},
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+	});
+
+	it("holds the chain for a contentless failure event the provider loop declined to replay", async () => {
+		// `api_error` is not a code the Codex loop retries, and `read ECONNRESET`
+		// is not prose it retries either, so this request was made once.
+		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: CODEX_UNREPLAYED_WIRE_EVENT },
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+	});
+
+	it("advances the chain for a contentless failure event the provider loop replayed", async () => {
+		// `model_error` is in that loop's retryable set, so the request has
+		// already been made several times; holding would run the loop again.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: CODEX_REPLAYED_EVENT },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
 	});
 
 	it("advances the fallback chain at once for an account-policy denial worded as a wire failure", async () => {

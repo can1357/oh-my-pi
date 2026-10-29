@@ -239,6 +239,51 @@ export function isCodexSteerRejection(message: { api?: Api; errorMessage?: strin
 }
 
 /**
+ * Failure-event codes the Codex response loop replays on its own budget
+ * before it ever surfaces the event (`openai-codex-responses`). Owned here
+ * rather than beside that loop because turn recovery has to read the same
+ * decision back off the persisted message text, and a second copy would
+ * drift from the one the loop actually uses.
+ */
+export const CODEX_RETRYABLE_EVENT_CODES: ReadonlySet<string> = new Set([
+	"model_error",
+	"server_error",
+	"internal_error",
+	// The native-lane steering rejection is replayable: the session stops
+	// steering first, so the replay cannot trip it again.
+	CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
+]);
+
+/** Failure-event prose that same loop replays when the code says nothing. */
+export const CODEX_RETRYABLE_EVENT_MESSAGE =
+	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
+
+/** The `(code=…)` marker a provider's formatted failure event leaves behind, e.g. `(code=model_error)`. */
+const PROVIDER_FAILURE_EVENT_CODE_RE = /\(code=([^,)]+)/;
+
+/**
+ * Whether a persisted failure-event message names a failure the provider's
+ * own loop replayed before surfacing it.
+ *
+ * A provider that emits a structured failure event decides its replay from
+ * the event, not from prose, so the text alone cannot say whether a request
+ * was made once. The marker says which event it was; this answers whether
+ * that event is one the loop retries. A marker whose code and prose the loop
+ * declines (`api_error` carrying `read ECONNRESET`) reached the caller on its
+ * first and only request.
+ */
+export function isReplayedProviderFailureEventText(text: string): boolean {
+	const code = PROVIDER_FAILURE_EVENT_CODE_RE.exec(text)?.[1]?.trim().toLowerCase();
+	if (code === undefined) return false;
+	return (
+		CODEX_RETRYABLE_EVENT_CODES.has(code) ||
+		CODEX_RETRYABLE_EVENT_MESSAGE.test(text) ||
+		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
+		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text)
+	);
+}
+
+/**
  * Transport-failure wording that marks an error transient. Covers
  * diagnostics forwarded verbatim by gateways/proxies in other runtimes, e.g.
  * undici's "other side closed" and Go's `net.ErrClosed` ("use of closed
@@ -669,9 +714,18 @@ function hasCapacityEvidence(text: string, reason?: RateLimitReason): boolean {
  * replayed by `fetchWithRetry` on its own budget. A bare mention of the
  * transfer-encoding header is a request fault, not a cut body, so only the
  * error spelling matches.
+ *
+ * The HTTP/2 arm covers the three reset spellings this repo already treats as
+ * transport resets elsewhere — the `NGHTTP2_INTERNAL_ERROR` /
+ * `NGHTTP2_REFUSED_STREAM` wording a gateway forwards, the bare
+ * `HTTP2StreamReset` token, and Go's `stream error: stream ID 7;
+ * INTERNAL_ERROR` — each a stream the peer reset with no status line of its
+ * own. `INTERNAL_ERROR` is matched only inside that `stream error:` frame, so
+ * a model's own "internal error" prose is not a cut stream. A GOAWAY still
+ * has no observed wording here and stays out.
  */
 const CONNECTION_FAILURE_PATTERN =
-	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)/i;
+	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)|\bNGHTTP2_(?:INTERNAL_ERROR|REFUSED_STREAM)\b|stream error:[^;]*;\s*(?:INTERNAL_ERROR|REFUSED_STREAM)\b/i;
 
 /**
  * undici's whole diagnostic for a response body that ended early is the bare
