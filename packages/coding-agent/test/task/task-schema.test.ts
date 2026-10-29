@@ -316,7 +316,7 @@ describe("task spawn validation", () => {
 		const text = await description("on");
 		expect(text).toContain("`model`: one exact");
 		expect(text).toContain(
-			"Approved roles: `@smol` (`anthropic/claude-haiku-4-5`), `@slow` (`openai/gpt-5.5`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
+			"Approved roles: `@slow` (`openai/gpt-5.5`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
 		);
 		expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
 		expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
