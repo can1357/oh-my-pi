@@ -87,7 +87,7 @@ class CdpConnection {
 	autoAttach = false;
 	/** Minted pseudo-sessions owned by this connection. */
 	readonly sessions = new Map<string, SessionRef>();
-	/** Tabs this connection claimed as drive targets (`OMP.claimTarget` / `Target.createTarget`). */
+	/** Tabs this connection claimed as drive targets (`/cdp?claim=` / `Target.createTarget`). */
 	readonly claims = new Set<string>();
 	/** Real child session id → the session it was announced on; its events and detach go there. */
 	readonly childParents = new Map<string, string>();
@@ -274,6 +274,8 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
+/** Chrome's refusal while another extension's frame (a password manager's inline menu) is in the tab. */
+const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -794,11 +796,24 @@ export class RelayBridge {
 
 	// ---- downstream (puppeteer) lifecycle -------------------------------------
 
-	/** Register a downstream CDP websocket; returns the connection id. */
-	cdpConnected(socket: RelaySocket): number {
+	/**
+	 * Register a downstream CDP websocket; returns the connection id. `claim` is the target the connecting omp tab
+	 * worker drives (`/cdp?claim=`), claimed before puppeteer sends anything to it.
+	 */
+	cdpConnected(socket: RelaySocket, claim?: string): number {
 		const conn = new CdpConnection(++this.#connSeq, socket);
 		this.#conns.set(conn.id, conn);
 		this.#log("cdp client connected", { conn: conn.id });
+		const parsed = claim ? parseTargetId(claim) : null;
+		const tab = parsed ? this.#tabs.get(parsed.key) : undefined;
+		if (tab) {
+			// Chrome refused the tab over another extension's frame; claimed, the extension may now empty it. Cleared
+			// before the claim, which groups only an eligible tab.
+			const foreignFrameRefusal = tab.refusal !== undefined && FOREIGN_FRAME_REFUSAL.test(tab.refusal);
+			if (foreignFrameRefusal) tab.refusal = undefined;
+			this.#claimTab(conn, tab.tabKey);
+			if (foreignFrameRefusal && !tab.announced && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
+		}
 		return conn.id;
 	}
 
@@ -1040,8 +1055,9 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return true;
 		}
-		// Relay-private claim: the omp tab worker marks the page it was spawned
-		// to drive. Never forwarded — real Chrome rejects the unknown method.
+		// Relay-private claim the omp tab worker sends on the page it adopted. A worker of this version claims at
+		// connect already (`/cdp?claim=`); one of an older version, sharing this relay, claims only here. Never
+		// forwarded — real Chrome rejects the unknown method.
 		if (msg.method === "OMP.claimTarget") {
 			this.#claimTab(conn, tabKey);
 			this.#reply(conn, msg, {});
@@ -1681,7 +1697,11 @@ export class RelayBridge {
 					} catch (err) {
 						this.#log("tab grouping failed", { error: err instanceof Error ? err.message : String(err) });
 					} finally {
-						for (const tab of tabs) tab.grouping = false;
+						for (const tab of tabs) {
+							tab.grouping = false;
+							// The claim may have gone while the RPC was in flight (its client closed): undo the grouping.
+							if (tab.grouped && !this.#groupWorthy(tab)) this.#syncTabGrouping(tab);
+						}
 					}
 				}
 			}
@@ -1982,7 +2002,12 @@ export class RelayBridge {
 			reject(new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
-		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
+		// Only in a tab omp drives may the extension empty another extension's frames to get past Chrome's refusal.
+		const sent =
+			req.op === "attach" || req.op === "send"
+				? { ...req, clearForeignFrames: this.#claimed(tabKeyOf(inst.code, req.tabId)) }
+				: req;
+		inst.socket.send(JSON.stringify({ t: "rpc", id, ...sent } satisfies RelayToExtMessage));
 		// A pending call defers an extension update (see #reloadBlocker): retry it once the call and its cleanup settle.
 		void promise
 			.catch(() => undefined)

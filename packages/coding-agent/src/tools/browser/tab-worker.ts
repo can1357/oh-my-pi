@@ -1858,9 +1858,10 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Tell the omp browser relay this worker drives the adopted page, so the
-	 * relay adds it to the per-window "omp" tab group. Best-effort: plain CDP
-	 * backends (real Chrome, cmux) reject the relay-private method.
+	 * Tell the omp browser relay this worker drives the adopted page, so the relay adds it to the per-window "omp"
+	 * tab group. The supervisor's connect URL claims it already (`?claim=`); an older relay still serving this
+	 * machine ignores that and learns of the claim only here. Best-effort: plain CDP backends (real Chrome, cmux)
+	 * reject the relay-private method.
 	 */
 	async #claimRelayTarget(page: Page): Promise<void> {
 		let session: CDPSession | undefined;

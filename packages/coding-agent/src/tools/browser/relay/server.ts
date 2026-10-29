@@ -7,7 +7,7 @@
  *   is connected, 503 with a {@link RelayUnavailableInfo} body before that
  *   (`waitForRelayExtension` decides from it whether polling is worthwhile).
  * - `GET /json` / `/json/list` → attachable page targets (debugging aid).
- * - `WS /cdp` → downstream CDP clients (puppeteer).
+ * - `WS /cdp` → downstream CDP clients (puppeteer); an omp tab worker adds `?claim=<targetId>` for the tab it drives.
  * - `WS /ext` → the Chrome extension (token-gated when configured).
  *
  * Binds loopback only: anything that can reach this port can drive the
@@ -89,6 +89,8 @@ interface SocketData {
 	connId?: number;
 	/** The Chrome extension id an `ext` upgrade's `Origin` named. */
 	extensionId?: string;
+	/** The target a connecting omp tab worker drives (`/cdp?claim=`). */
+	claim?: string;
 }
 
 type RelayWebSocket = Bun.ServerWebSocket<SocketData>;
@@ -136,7 +138,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				// Browsers set Origin on websocket upgrades; native CDP clients
 				// don't. Reject any Origin so a web page can't drive the relay.
 				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
-				const data: SocketData = { role: "cdp" };
+				const data: SocketData = { role: "cdp", claim: url.searchParams.get("claim") ?? undefined };
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
@@ -183,7 +185,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (ws.data.role === "ext") {
 					bridge.extConnected(ws, ws.data.extensionId);
 				} else {
-					ws.data.connId = bridge.cdpConnected(ws);
+					ws.data.connId = bridge.cdpConnected(ws, ws.data.claim);
 				}
 			},
 			message(ws: RelayWebSocket, message: string | Buffer): void {
