@@ -4124,12 +4124,13 @@ describe("computer background fallback", () => {
 			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "no raise is needed" },
 			{
 				code: 'await (await desktop.ref("e1")).perform("AXRaise")',
-				call: "perform:axraise",
+				call: "perform:AXRaise",
 				route: "no raise is needed",
 			},
 			{
 				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
-				call: "perform:axraise",
+				// Off macOS native is sent the name as given: UIA and AT-SPI match their own names.
+				call: "perform: Raise ",
 				route: "no raise is needed",
 			},
 			{
@@ -4199,7 +4200,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("test.editor");',
 			].join("\n");
 			expect((await run(native, code, "refuse")).ok).toBe(true);
-			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:axpress", "open:test.editor:-"]);
+			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:press", "open:test.editor:-"]);
 		});
 
 		it("checks and sends the same option value when a getter changes between reads", async () => {
@@ -4339,7 +4340,7 @@ describe("computer background fallback", () => {
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
-			expect(elsewhere.calls).toEqual(["perform:axopen"]);
+			expect(elsewhere.calls).toEqual(["perform:AXOpen"]);
 		});
 
 		describe("macOS calls that open a menu", () => {
@@ -4521,7 +4522,7 @@ describe("computer background fallback", () => {
 					`${el}.press({ menu: ["New Folder"] });`,
 				].join("\n");
 				expect((await run(elsewhere, menu, "refuse")).ok).toBe(true);
-				expect(elsewhere.calls).toEqual(["click:42:-", "perform:axshowmenu", "perform:press"]);
+				expect(elsewhere.calls).toEqual(["click:42:-", "perform:AXShowMenu", "perform:press"]);
 			});
 
 			describe("popup buttons and menu buttons", () => {
