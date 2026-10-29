@@ -145,10 +145,16 @@ fn a_locale_only_the_shell_exports_is_honoured() {
 	}
 	fs::create_dir_all(dir.path().join("src")).unwrap();
 	fs::write(dir.path().join("src/ünï.txt"), b"x\n").unwrap();
-	let env = [("LC_ALL", "en_US"), ("LOCPATH", locales.to_str().unwrap())];
-	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst/"], "", dir.path(), &env);
-	assert_eq!(code, 0, "{}", cap.err());
-	assert!(cap.out().contains("ünï.txt"), "{}", cap.out());
+	// Absolute, then relative: a relative search path resolves against the
+	// *shell's* working directory (`cd /tmp/job; LOCPATH=locales rsync …`),
+	// which is this run's `cwd` and not the one the test process sits in.
+	for path in [locales.to_str().unwrap(), "locales"] {
+		let dest = format!("dst-{}/", path.replace('/', "_"));
+		let env = [("LC_ALL", "en_US"), ("LOCPATH", path)];
+		let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", &dest], "", dir.path(), &env);
+		assert_eq!(code, 0, "{path}: {}", cap.err());
+		assert!(cap.out().contains("ünï.txt"), "{path}: {}", cap.out());
+	}
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.

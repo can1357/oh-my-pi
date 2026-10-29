@@ -40,8 +40,13 @@ pub(crate) fn side_charset(spec: &[u8], am_server: bool) -> &[u8] {
 /// object, so an alias whose name carries no codeset (a generated bare
 /// `en_US`, `ISO-8859-1`) reads as the charset it really has, and a name libc
 /// cannot load reads as the C locale's ASCII, which is what `setlocale`
-/// leaves behind when it fails.
-pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
+/// leaves behind when it fails. `child` carries the shell's working directory
+/// and environment for the locales only it can see (see
+/// [`crate::locale::loaded_codeset`]).
+pub(crate) fn locale_charset(
+	env: &dyn Fn(&str) -> Option<String>,
+	child: Option<&crate::host::ChildEnv>,
+) -> String {
 	let value = ["LC_ALL", "LC_CTYPE", "LANG"]
 		.iter()
 		.find_map(|key| env(key).filter(|v| !v.is_empty()));
@@ -49,9 +54,11 @@ pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
 		return ascii_codeset().to_owned();
 	};
 	#[cfg(unix)]
-	return crate::locale::loaded_codeset(&value, env).unwrap_or_else(|| ascii_codeset().to_owned());
+	return crate::locale::loaded_codeset(&value, env, child)
+		.unwrap_or_else(|| ascii_codeset().to_owned());
 	#[cfg(not(unix))]
 	{
+		let _ = child;
 		if value == "C" || value == "POSIX" {
 			return ascii_codeset().to_owned();
 		}
@@ -413,11 +420,11 @@ mod tests {
 	fn charset_comes_from_the_loaded_locale() {
 		for name in ["C.utf8", "C.UTF-8", "en_US.utf8"] {
 			if crate::locale::locale_loadable(name, libc::LC_CTYPE_MASK) {
-				let charset = locale_charset(&|k: &str| (k == "LC_ALL").then(|| name.to_owned()));
+				let charset = locale_charset(&|k: &str| (k == "LC_ALL").then(|| name.to_owned()), None);
 				assert_eq!(charset, "UTF-8", "{name}");
 			}
 		}
-		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()));
+		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()), None);
 		assert_eq!(c, ascii_codeset());
 	}
 
@@ -431,16 +438,16 @@ mod tests {
 		let env = |pairs: &'static [(&'static str, &'static str)]| {
 			move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_owned())
 		};
-		assert_eq!(locale_charset(&env(&[])), ascii_codeset());
-		assert_eq!(locale_charset(&env(&[("LANG", "C")])), ascii_codeset());
-		assert_eq!(locale_charset(&env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")])), ascii_codeset());
-		let unknown = locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")]));
+		assert_eq!(locale_charset(&env(&[]), None), ascii_codeset());
+		assert_eq!(locale_charset(&env(&[("LANG", "C")]), None), ascii_codeset());
+		assert_eq!(locale_charset(&env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")]), None), ascii_codeset());
+		let unknown = locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")]), None);
 		#[cfg(unix)]
 		assert_eq!(unknown, ascii_codeset());
 		#[cfg(not(unix))]
 		assert_eq!(unknown, "UTF-8");
 		if let Some(installed) = utf8_locale_name() {
-			let charset = locale_charset(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()));
+			let charset = locale_charset(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()), None);
 			assert!(matches!(MsgCharset::for_locale(&charset), MsgCharset::Utf8), "{charset}");
 		}
 	}

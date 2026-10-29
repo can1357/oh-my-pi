@@ -561,7 +561,7 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 /// The charset the shell's locale lets printed messages carry (upstream
 /// setup_iconv's `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`).
 fn msg_charset(io: &HostIo) -> MsgCharset {
-	MsgCharset::for_locale(&iconv::locale_charset(&|key: &str| io.getenv(key)))
+	MsgCharset::for_locale(&iconv::locale_charset(&|key: &str| io.getenv(key), Some(&io.child)))
 }
 
 /// A logger for diagnostics before the run's own logger exists. Upstream
@@ -1677,7 +1677,7 @@ impl ClientRun<'_> {
 		}
 		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 			(Some(spec), true) => {
-				let locale = iconv::locale_charset(&getenv);
+				let locale = iconv::locale_charset(&getenv, Some(&self.io.child));
 				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(&locale)) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
@@ -2065,7 +2065,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 		(Some(spec), true) => {
-			let locale = iconv::locale_charset(&getenv);
+			let locale = iconv::locale_charset(&getenv, Some(&io.child));
 			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(&locale)) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {

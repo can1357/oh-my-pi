@@ -96,20 +96,29 @@ const LOCALE_PATH_VARS: [&str; 2] = ["LOCPATH", "PATH_LOCALE"];
 /// the system cannot load the name, which is what `setlocale` does there —
 /// it fails and leaves the C locale in place.
 ///
-/// `env` is the shell's environment. While its locale search path matches the
-/// process's, the answer comes from `newlocale` here; when the shell exports
-/// a different one, it comes from `locale charmap` run with that environment,
-/// because libc takes the search path from the environment only (`newlocale`
-/// and `setlocale` both refuse a path-shaped locale name) and setting it
-/// around the call would be a process-wide write other threads can read.
+/// `env` is the shell's environment and `child` its child-process settings
+/// ([`ChildEnv`], which carries the shell's working directory). While the
+/// shell's locale search path matches the process's and is absolute, the
+/// answer comes from `newlocale` here; otherwise it comes from `locale
+/// charmap` run as a child of the shell, because libc takes the search path
+/// from the environment only (`newlocale` and `setlocale` both refuse a
+/// path-shaped locale name), setting it around the call would be a
+/// process-wide write other threads can read, and a relative search path
+/// resolves against the working directory, which is the shell's and not this
+/// process's.
 #[cfg(unix)]
-pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+pub(crate) fn loaded_codeset(
+	locale: &str,
+	env: &dyn Fn(&str) -> Option<String>,
+	child: Option<&crate::host::ChildEnv>,
+) -> Option<String> {
 	let shell_path = LOCALE_PATH_VARS.map(|name| env(name).filter(|value| !value.is_empty()));
-	let ours_differs = LOCALE_PATH_VARS.iter().zip(&shell_path).any(|(name, shell)| {
-		*shell != std::env::var(name).ok().filter(|value| !value.is_empty())
+	let needs_shell = LOCALE_PATH_VARS.iter().zip(&shell_path).any(|(name, shell)| {
+		let relative = shell.as_ref().is_some_and(|value| !value.starts_with('/'));
+		relative || *shell != std::env::var(name).ok().filter(|value| !value.is_empty())
 	});
-	if ours_differs {
-		if let Some(codeset) = codeset_from_locale_command(locale, &shell_path) {
+	if needs_shell {
+		if let Some(codeset) = codeset_from_locale_command(locale, &shell_path, child) {
 			return Some(codeset);
 		}
 	}
@@ -137,18 +146,33 @@ fn loaded_codeset_here(locale: &str) -> Option<String> {
 }
 
 /// `locale charmap` under the shell's locale environment: the POSIX way to ask
-/// libc for the codeset of a locale an environment makes visible. A locale it
-/// cannot load leaves the C locale, whose charmap it prints, which is the
-/// answer that locale deserves. `None` when no `locale` command answers.
+/// libc for the codeset of a locale an environment makes visible. It runs
+/// through [`ChildEnv::command`], so it starts in the shell's working
+/// directory with the shell's environment, the way the reference binary does;
+/// without one it falls back to a bare child carrying only the locale
+/// variables. A locale it cannot load leaves the C locale, whose charmap it
+/// prints, which is the answer that locale deserves. `None` when no `locale`
+/// command answers.
 #[cfg(unix)]
-fn codeset_from_locale_command(locale: &str, path: &[Option<String>; 2]) -> Option<String> {
-	let mut command = std::process::Command::new("locale");
-	command.arg("charmap").env_clear().env("LC_ALL", locale);
-	for (name, value) in LOCALE_PATH_VARS.iter().zip(path) {
-		if let Some(value) = value {
-			command.env(name, value);
-		}
-	}
+fn codeset_from_locale_command(
+	locale: &str,
+	path: &[Option<String>; 2],
+	child: Option<&crate::host::ChildEnv>,
+) -> Option<String> {
+	let mut command = match child {
+		Some(child) => child.command("locale").ok()?,
+		None => {
+			let mut command = std::process::Command::new("locale");
+			command.env_clear();
+			for (name, value) in LOCALE_PATH_VARS.iter().zip(path) {
+				if let Some(value) = value {
+					command.env(name, value);
+				}
+			}
+			command
+		},
+	};
+	command.arg("charmap").env("LC_ALL", locale);
 	let output = command.output().ok()?;
 	if !output.status.success() {
 		return None;
