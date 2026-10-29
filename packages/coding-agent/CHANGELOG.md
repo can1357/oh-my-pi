@@ -22,6 +22,7 @@
 - On the Anthropic API, the newest message now keeps all its images up to the 128 MB request limit, past the 120 MB image budget ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
