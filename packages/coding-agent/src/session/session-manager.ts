@@ -28,6 +28,7 @@ import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
+import { artifactCopyMode } from "./artifact-link-policy";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -170,9 +171,56 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 }
 
 /**
+ * Reproduce the artifacts directory `from` at `to`, hard-linking every entry
+ * {@link artifactCopyMode} proves write-once and copying the rest. Never
+ * overwrites: an entry already at the destination (a session that moved and
+ * kept working) wins over the source's.
+ *
+ * `relative` is the entry's path below the artifacts root, which is what the
+ * policy reads: the depth rule lives there, not in this walk.
+ *
+ * An entry the source lost while the walk ran (its session reaped it, a tool
+ * replaced it) is skipped with a debug line, so one vanished file cannot cost
+ * the destination everything after it.
+ */
+async function reproduceArtifactTree(from: string, to: string, relative = ""): Promise<void> {
+	const entries = await fs.promises.readdir(from, { withFileTypes: true });
+	await fs.promises.mkdir(to, { recursive: true });
+	for (const entry of entries) {
+		const source = path.join(from, entry.name);
+		const destination = path.join(to, entry.name);
+		const entryPath = relative ? `${relative}/${entry.name}` : entry.name;
+		try {
+			if (entry.isDirectory()) {
+				await reproduceArtifactTree(source, destination, entryPath);
+				continue;
+			}
+			if (entry.isFile() && artifactCopyMode(entryPath) === "link") {
+				try {
+					await fs.promises.link(source, destination);
+					continue;
+				} catch (error) {
+					// The destination won (EEXIST), or the link is impossible here
+					// (EXDEV, a filesystem without links, a source already gone).
+					if (isEexist(error)) continue;
+				}
+			}
+			// `cp` of one entry, not a tree: it also carries symlinks and anything
+			// else a session's artifacts directory may hold.
+			await fs.promises.cp(source, destination, { force: false, errorOnExist: false });
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.debug("Session artifact vanished while it was being copied", { source, destination });
+		}
+	}
+}
+
+/**
  * Copy a session's artifact directory to another session, matching interactive
  * `/fork`. Never overwrites: a destination file written while the copy runs
  * (a session that already moved and kept working) wins over the source's copy.
+ * Write-once artifacts are hard-linked rather than duplicated — see
+ * {@link artifactCopyMode} for what that means and why the rest is copied.
  * Failures are logged, never thrown.
  */
 export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
@@ -188,15 +236,7 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
 	try {
 		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
-			// Create the destination first and merge into it: Bun's `cp` fails with
-			// EEXIST when another writer (the moved session's artifact manager,
-			// `local://`) creates the directory while the copy is starting.
-			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
-				recursive: true,
-				force: false,
-				errorOnExist: false,
-			});
+			await reproduceArtifactTree(sourceArtifactsDir, destinationArtifactsDir);
 		}
 	} catch (error) {
 		if (!isEnoent(error)) {
@@ -858,6 +898,10 @@ export interface SessionPersistenceNotice {
 	from: string;
 	/** The fresh sibling it saves to from now on: same directory, a new session id whose `parentSession` is the old one. */
 	to: string;
+	/** The id this session answered to until now; under `"open-elsewhere"` another live process still does. */
+	previousSessionId: string;
+	/** The id it answers to from now on. */
+	sessionId: string;
 }
 
 /**
@@ -1262,6 +1306,59 @@ export class SessionManager {
 	}
 
 	/**
+	 * Leave the session just loaded with the live process that owns it and
+	 * carry on as a fork of it: a new id in a sibling file whose header points
+	 * back through `parentSession` only. No `continuationOf`, unlike
+	 * {@link #moveOffSessionFile}: the owner is still running under its own id,
+	 * so a later resume of its file must land on it and not follow this copy.
+	 *
+	 * Called while the transcript is being adopted, before anything has
+	 * published the loaded id, so nothing outside ever sees this process answer
+	 * to the owner's session. Returns what was left behind.
+	 */
+	#adoptLoadedSessionAsFork(): { sessionId: string; sessionFile: string } {
+		const from = this.#sessionFile as string;
+		const previousSessionId = this.#sessionId;
+		const timestamp = nowIso();
+		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
+		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		const {
+			type: _type,
+			id: _id,
+			timestamp: _timestamp,
+			parentSession: _parent,
+			continuationOf: _of,
+			...carried
+		} = this.#header;
+		this.#header = {
+			type: "session",
+			id: this.#sessionId,
+			timestamp,
+			parentSession: previousSessionId,
+			...carried,
+			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
+		};
+		this.#closeWriterEventually();
+		this.#sessionFile = to;
+		this.#expectedDiskSize = null;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#forceFileCreation = true;
+		this.#artifactManager = null;
+		this.#artifactManagerSessionFile = null;
+		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
+		this.#rememberBreadcrumb(this.#cwd, to);
+		this.#claimSession();
+		logger.info("Resumed a session another omp process owns; continuing in a fork", {
+			source: from,
+			sessionId: previousSessionId,
+			fork: to,
+		});
+		return { sessionId: previousSessionId, sessionFile: from };
+	}
+
+	/**
 	 * Leave `#sessionFile` untouched and continue as a fresh session in a
 	 * sibling file. It gets a new session id whose header points back through
 	 * `parentSession` and keeps the provider prompt-cache key, as {@link fork}
@@ -1312,7 +1409,7 @@ export class SessionManager {
 		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
-		this.#notifyPersistenceNotice({ reason, from, to });
+		this.#notifyPersistenceNotice({ reason, from, to, previousSessionId, sessionId: this.#sessionId });
 		return to;
 	}
 
@@ -2354,16 +2451,25 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/**
+	 * Switch to a different session file (resume / branch).
+	 *
+	 * With `forkIfOwnedElsewhere`, a file another live omp process owns is left
+	 * to it and this session carries on as a fork of it — reported in the
+	 * result — instead of answering to the owner's id until the first write.
+	 */
+	async setSessionFile(
+		sessionFile: string,
+		options?: { forkIfOwnedElsewhere?: boolean },
+	): Promise<{ forkedFrom?: { sessionId: string; sessionFile: string } }> {
+		return await this.#setSessionFile(sessionFile, undefined, options);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
-	): Promise<void> {
+		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions; forkIfOwnedElsewhere?: boolean },
+	): Promise<{ forkedFrom?: { sessionId: string; sessionFile: string } }> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -2403,7 +2509,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
-			return;
+			return {};
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
@@ -2447,6 +2553,14 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+
+		// Before anything publishes the loaded id: the owner keeps it, this
+		// session takes one of its own. Checked last so the fork carries the
+		// whole adopted state.
+		if (options?.forkIfOwnedElsewhere && this.#persist && this.#sessionOwnedElsewhere()) {
+			return { forkedFrom: this.#adoptLoadedSessionAsFork() };
+		}
+		return {};
 	}
 
 	/**

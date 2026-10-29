@@ -709,7 +709,9 @@ export async function forkIfMovedAway(manager: SessionManager, sessionDir?: stri
 /**
  * Whether another live omp process holds the ownership lease of session `id`
  * at `file`. Claims nothing of its own: a free lease is taken and dropped in
- * the same breath, so opening a session still never counts as owning it.
+ * the same breath, so opening a session still never counts as owning it. A
+ * file whose header no longer reads as `id` also answers true: it is not this
+ * session's journal to continue either way.
  */
 function ownedByAnotherProcess(id: string, file: string): boolean {
 	const release = new FileSessionStorage().claimSession(id, file);
@@ -751,10 +753,28 @@ export async function forkIfOwnedElsewhere(manager: SessionManager, sessionDir?:
 
 /**
  * Every resume guard, in the order a startup resume needs them: a copy whose
- * conversation moved to another machine continues as a fork ({@link
- * forkIfMovedAway}) before the ownership check, so the fork — not the stale
- * copy — is what the lease is tested for.
+ * conversation moved to another machine is stale whoever holds its lease, so
+ * {@link forkIfMovedAway} answers first and its fork — on an id nobody owns —
+ * passes the ownership check unchanged.
  */
 export async function adoptResumedSession(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
 	return await forkIfOwnedElsewhere(await forkIfMovedAway(manager, sessionDir), sessionDir);
+}
+
+/**
+ * Record, in `manager`'s own transcript, that it carries on from a session
+ * another live omp process still owns. The in-session `/resume` path forks
+ * inside its existing manager ({@link SessionManager.setSessionFile}), so it
+ * cannot use {@link forkIfOwnedElsewhere}, but the agent must be told the same
+ * thing.
+ */
+export async function noteResumedOwnedElsewhere(
+	manager: SessionManager,
+	forkedFrom: { sessionId: string; sessionFile: string },
+): Promise<void> {
+	await appendTransferNotice(manager, {
+		kind: "owned-elsewhere",
+		source: forkedFrom.sessionFile,
+		sessionId: forkedFrom.sessionId,
+	});
 }

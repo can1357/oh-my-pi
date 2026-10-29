@@ -177,6 +177,7 @@ const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 const SESSION_IDENTITY_EVENTS: Record<string, true> = {
 	session_start: true,
 	session_switch: true,
+	session_moved: true,
 	session_branch: true,
 };
 

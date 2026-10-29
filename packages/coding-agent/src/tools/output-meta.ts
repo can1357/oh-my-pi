@@ -592,7 +592,7 @@ async function spillLargeResultToArtifact(
 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
 
 	// Save the full output as an artifact so the elided bytes stay recoverable.
-	// In a persistent session this hits `Bun.write`, which can throw (disk full,
+	// In a persistent session this writes a file, which can throw (disk full,
 	// permissions). The spill wraps arbitrary tools (built-in, MCP, extension,
 	// RPC-host); a save failure must never convert a successful call into an
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror

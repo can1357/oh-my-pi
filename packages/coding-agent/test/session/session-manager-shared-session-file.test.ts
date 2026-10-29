@@ -192,7 +192,9 @@ describe("SessionManager on a session file another omp process writes", () => {
 		expect(owner.getSessionFile()).toBe(original);
 		expect(path.dirname(sibling)).toBe(path.dirname(original));
 		expect(sessionFilesIn(tempDir.path())).toEqual([original, sibling].sort());
-		expect(otherState.notices).toEqual([{ reason: "open-elsewhere", from: original, to: sibling }]);
+		expect(otherState.notices.map(notice => ({ reason: notice.reason, from: notice.from, to: notice.to }))).toEqual([
+			{ reason: "open-elsewhere", from: original, to: sibling },
+		]);
 		expect(otherState.errors).toEqual([]);
 		expect(ownerNotices).toEqual([]);
 		expect(ownerErrors).toEqual([]);
@@ -242,7 +244,9 @@ describe("SessionManager on a session file another omp process writes", () => {
 				link(original, alias);
 				const { savedTo, notices } = await resumeAndAppend(alias, tempDir.path());
 				if (!savedTo) throw new Error("Expected the resumed session to save somewhere");
-				expect(notices).toEqual([{ reason: "open-elsewhere", from: alias, to: savedTo }]);
+				expect(notices.map(notice => ({ reason: notice.reason, from: notice.from, to: notice.to }))).toEqual([
+					{ reason: "open-elsewhere", from: alias, to: savedTo },
+				]);
 				expect(await userTurnsIn(savedTo, tempDir.path())).toContain("resumed here");
 			} finally {
 				await other.close();
@@ -455,6 +459,41 @@ describe("SessionManager on a session file another omp process writes", () => {
 			}
 			// The owner keeps its id, its file, and everything in it.
 			expect(await readSessionHeaderId(original)).toBe(originalId);
+			expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "owner 1"]);
+		} finally {
+			await owner.close();
+		}
+	}, 30_000);
+
+	it("forks in place when a running session resumes a file its owner still holds", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const originalId = await readSessionHeaderId(original);
+		if (!originalId) throw new Error("Expected a session header");
+
+		const { other: owner } = await OtherProcess.resume(tempDir, original);
+		try {
+			await owner.run("append owner 1");
+
+			// `/resume` inside a live session: one manager, a different file.
+			const resuming = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+			await resuming.ensureOnDisk();
+			const { forkedFrom } = await resuming.setSessionFile(original, { forkIfOwnedElsewhere: true });
+			const fork = resuming.getSessionFile();
+			if (!fork) throw new Error("Expected the resumed session to have a file");
+			try {
+				expect(forkedFrom).toEqual({ sessionId: originalId, sessionFile: original });
+				expect(resuming.getSessionId()).not.toBe(originalId);
+				expect(fork).not.toBe(original);
+				resuming.appendMessage(userTurn("resumed here"));
+				await resuming.flush();
+				const header = await sessionHeaderIn(fork);
+				expect(header.parentSession).toBe(originalId);
+				expect(header.continuationOf).toBeUndefined();
+				expect(await userTurnsIn(fork, tempDir.path())).toEqual(["before", "owner 1", "resumed here"]);
+			} finally {
+				await resuming.close();
+			}
 			expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "owner 1"]);
 		} finally {
 			await owner.close();

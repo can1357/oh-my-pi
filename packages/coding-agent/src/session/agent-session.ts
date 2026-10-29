@@ -477,6 +477,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { noteResumedOwnedElsewhere } from "./session-transfer";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -2103,6 +2104,26 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		// A move-off changes this session's id without anyone asking. Until it was
+		// announced, the only trace an extension could see was the id differing
+		// from the one it last read, which reads exactly like a fork — and a
+		// consumer that carries identity across sessions then carries it away
+		// from a session that is still running (2026-10-29: eight live sessions
+		// lost their Envoy role to a copy of themselves this way).
+		this.sessionManager.onPersistenceNotice(notice => {
+			const runner = this.#extensionRunner;
+			if (!runner) return;
+			runner
+				.emit({
+					type: "session_moved",
+					reason: notice.reason,
+					previousSessionId: notice.previousSessionId,
+					sessionId: notice.sessionId,
+					previousSessionFile: notice.from,
+					sessionFile: notice.to,
+				})
+				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }));
+		});
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -13035,8 +13056,14 @@ export class AgentSession implements SettingsScope {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			await this.sessionManager.setSessionFile(sessionPath);
+			// A session another live omp process is writing is not ours to
+			// continue: take a fork of it instead of its id (same reasoning as
+			// the startup resume guard in session-transfer.ts).
+			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, {
+				forkIfOwnedElsewhere: true,
+			});
 			this.#bash.markSessionTransition(bashTransition);
+			if (forkedFrom) await noteResumedOwnedElsewhere(this.sessionManager, forkedFrom);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {

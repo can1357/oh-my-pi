@@ -39,6 +39,7 @@ import type {
 	SessionCompactingEvent,
 	SessionCompactingResult,
 	SessionEvent,
+	SessionMovedEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	SessionSwitchEvent,
@@ -270,6 +271,7 @@ export type {
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
+	SessionMovedEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	SessionSwitchEvent,
@@ -472,6 +474,7 @@ export interface HookAPI {
 	on(event: "session_start", handler: HookHandler<SessionStartEvent>): void;
 	on(event: "session_before_switch", handler: HookHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>): void;
 	on(event: "session_switch", handler: HookHandler<SessionSwitchEvent>): void;
+	on(event: "session_moved", handler: HookHandler<SessionMovedEvent>): void;
 	on(event: "session_before_branch", handler: HookHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>): void;
 	on(event: "session_branch", handler: HookHandler<SessionBranchEvent>): void;
 	on(

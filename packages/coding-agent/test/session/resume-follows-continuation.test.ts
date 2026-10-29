@@ -212,7 +212,11 @@ async function continueElsewhere(
 	await manager.close();
 	const sibling = manager.getSessionFile();
 	if (!sibling) throw new Error("Expected the session to save somewhere");
-	expect(notices).toEqual([{ reason: "open-elsewhere", from: sessionFile, to: sibling }]);
+	// Which files the conversation moved between; the ids the notice also
+	// carries have their own coverage in session-moved-event.test.ts.
+	expect(notices.map(notice => ({ reason: notice.reason, from: notice.from, to: notice.to }))).toEqual([
+		{ reason: "open-elsewhere", from: sessionFile, to: sibling },
+	]);
 	return sibling;
 }
 

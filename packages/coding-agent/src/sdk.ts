@@ -1517,6 +1517,9 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 		api.on("session_switch", async (event, ctx) =>
 			runOnSession({ reason: "switch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
+		api.on("session_moved", async (event, ctx) =>
+			runOnSession({ reason: "moved", previousSessionFile: event.previousSessionFile }, ctx),
+		);
 		api.on("session_branch", async (event, ctx) =>
 			runOnSession({ reason: "branch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
