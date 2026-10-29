@@ -20,8 +20,14 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
-import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	nonRetryableMCPTransportError,
+	normalizeMCPTransportError,
+} from "../errors";
 import { RequestIdAllocator } from "../request-id";
+import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 import { isThenable } from "../../utils/ipc";
 
@@ -399,8 +405,8 @@ interface FrameSink {
 export function writeFrame(stdin: FrameSink, frame: string): boolean {
 	try {
 		const wrote = stdin.write(frame);
-		const flushed = stdin.flush();
 		if (isThenable(wrote)) wrote.then(undefined, () => {});
+		const flushed = stdin.flush();
 		if (isThenable(flushed)) flushed.then(undefined, () => {});
 		return true;
 	} catch {
@@ -549,6 +555,7 @@ export class StdioTransport implements MCPTransport {
 		{
 			resolve: (value: unknown) => void;
 			reject: (error: Error) => void;
+			onProgress?: MCPRequestOptions["onProgress"];
 		}
 	>();
 	#connected = false;
@@ -652,7 +659,7 @@ export class StdioTransport implements MCPTransport {
 						exitCode === null || exitCode === undefined
 							? "MCP subprocess closed stdout before responding"
 							: `MCP subprocess exited with code ${exitCode} before responding`,
-					retryable: true,
+					retryable: false,
 					code: exitCode ?? undefined,
 				});
 			}
@@ -700,7 +707,6 @@ export class StdioTransport implements MCPTransport {
 			const response = message as JsonRpcResponse;
 			const pending = this.#pendingRequests.get(response.id);
 			if (pending) {
-				this.#pendingRequests.delete(response.id);
 				if (response.error) {
 					pending.reject(createMCPJsonRpcError("stdio", response.error));
 				} else {
@@ -713,6 +719,11 @@ export class StdioTransport implements MCPTransport {
 		// Notification: has method but no id
 		if ("method" in message) {
 			const notification = message as { method: string; params?: unknown };
+			routeProgressNotification(
+				notification.method,
+				notification.params,
+				token => this.#pendingRequests.get(token)?.onProgress,
+			);
 			this.onNotification?.(notification.method, notification.params);
 		}
 	}
@@ -740,23 +751,25 @@ export class StdioTransport implements MCPTransport {
 		writeFrame(this.#process.stdin, `${JSON.stringify(response)}\n`);
 	}
 
-	#handleClose(error?: Error): void {
+	#handleClose(error?: MCPTransportError): void {
 		if (!this.#connected) return;
 		this.#connected = false;
 
-		const closeError =
-			error ??
-			new MCPTransportError({
-				transport: "stdio",
-				stage: "receive",
-				failure: "closed",
-				message: "Transport closed",
-				retryable: true,
-			});
+		const closeError = error
+			? nonRetryableMCPTransportError(error)
+			: new MCPTransportError({
+					transport: "stdio",
+					stage: "receive",
+					failure: "closed",
+					message: "Transport closed",
+					retryable: false,
+				});
+		// request() records and writes each frame synchronously; a synchronous
+		// write throw removes its entry, so every remaining request was handed
+		// to the subprocess.
 		for (const [, pending] of this.#pendingRequests) {
 			pending.reject(closeError);
 		}
-		this.#pendingRequests.clear();
 
 		this.onClose?.();
 	}
@@ -781,7 +794,7 @@ export class StdioTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
@@ -792,12 +805,15 @@ export class StdioTransport implements MCPTransport {
 			return Promise.reject(reason);
 		}
 
+		const stdin = this.#process.stdin;
+		const message = `${JSON.stringify(request)}\n`;
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let timer: NodeJS.Timeout | undefined;
 		let settled = false;
+		let sent = false;
 
-		const cleanup = () => {
-			if (settled) return;
+		const settle = (error?: Error, value?: unknown): boolean => {
+			if (settled) return false;
 			settled = true;
 			if (timer) {
 				clearTimeout(timer);
@@ -807,50 +823,64 @@ export class StdioTransport implements MCPTransport {
 				signal.removeEventListener("abort", onAbort);
 			}
 			this.#pendingRequests.delete(id);
+			if (error) reject(error);
+			else resolve(value as T);
+			return true;
+		};
+
+		const sendCancellation = (reason: string) => {
+			if (!sent || method === "initialize" || !this.#connected || this.#process?.stdin !== stdin) return;
+			writeFrame(
+				stdin,
+				`${JSON.stringify({
+					jsonrpc: "2.0",
+					method: "notifications/cancelled",
+					params: { requestId: id, reason },
+				})}\n`,
+			);
 		};
 
 		const onAbort = () => {
-			cleanup();
 			const reason = signal?.reason instanceof Error ? signal.reason : new Error("Aborted");
-			reject(reason);
+			if (settle(reason)) sendCancellation("Request cancelled by the client");
 		};
 
-		if (signal) {
-			signal.addEventListener("abort", onAbort, { once: true });
-		}
-
 		this.#pendingRequests.set(id, {
+			onProgress: options?.onProgress,
 			resolve: (value: unknown) => {
-				cleanup();
-				resolve(value as T);
+				settle(undefined, value);
 			},
 			reject: (error: Error) => {
-				cleanup();
-				reject(error);
+				settle(error);
 			},
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
 			timer = setTimeout(() => {
-				cleanup();
-				reject(
-					new MCPTransportError({
-						transport: "stdio",
-						stage: "receive",
-						failure: "timeout",
-						message: `Request timeout after ${timeout}ms`,
-						retryable: false,
-					}),
-				);
+				if (
+					settle(
+						new MCPTransportError({
+							transport: "stdio",
+							stage: "receive",
+							failure: "timeout",
+							message: `Request timeout after ${timeout}ms`,
+							retryable: false,
+						}),
+					)
+				) {
+					sendCancellation(`Request timed out after ${timeout}ms`);
+				}
 			}, timeout);
 		}
 
-		const stdin = this.#process.stdin;
-		const message = `${JSON.stringify(request)}\n`;
+		if (signal) {
+			signal.addEventListener("abort", onAbort, { once: true });
+		}
+
 		const failFromSend = (error: unknown) => {
 			if (settled) return;
-			cleanup();
-			reject(normalizeMCPTransportError(error, { transport: "stdio", stage: "send" }));
+			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
+			settle(sent ? nonRetryableMCPTransportError(normalized) : normalized);
 		};
 		try {
 			// Never `await` write/flush. Bun's FileSink returns a pending Promise
@@ -863,6 +893,7 @@ export class StdioTransport implements MCPTransport {
 			// into `reject()` while leaving the returned promise free to settle
 			// from the response, timer, abort signal, or read-loop transport-close.
 			const wrote = stdin.write(message);
+			sent = true;
 			if (isThenable(wrote)) wrote.then(undefined, failFromSend);
 			const flushed = stdin.flush();
 			if (isThenable(flushed)) flushed.then(undefined, failFromSend);

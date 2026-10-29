@@ -14,8 +14,8 @@ const MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
-// Meta documents the `max` tier for Muse Spark 1.3 (standard) only.
-const MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
+// Meta documents the `max` tier for Muse Spark 1.3 (standard and contributor) and Muse Wonder.
+const MUSE_MAX_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 };
@@ -45,11 +45,12 @@ describe("Meta Model API provider", () => {
 			input: ["text", "image"],
 			contextWindow: 1_048_576,
 			maxTokens: 131_072,
-			thinking: MUSE_SPARK_MAX_THINKING,
+			thinking: MUSE_MAX_THINKING,
 		});
 		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
 			name: "Muse Spark 1.3 (C)",
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+			thinking: MUSE_MAX_THINKING,
 		});
 		// Image/voice SKUs on the same roster are not chat models.
 		expect(byId.has("muse-image-1.0")).toBe(false);
@@ -121,6 +122,31 @@ describe("Muse Code subscription provider", () => {
 		]);
 	});
 
+	test("prices every Muse Wonder tier, including subscription-only ones, instead of $0", async () => {
+		// Muse Code's `/v1/models` lists these ids with no metadata. Standard
+		// tiers record Wonder's list price; contributor tiers record the
+		// measured subscription-meter burn, which is lower.
+		const standard = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+		const contributor = { input: 1.6, output: 8, cacheRead: 0.08, cacheWrite: 0 };
+		const expectedCost: Record<string, typeof standard> = {
+			"muse-wonder-1.0": standard,
+			"muse-wonder-1.0-contributor": contributor,
+			"muse-wonder-full-1.0": standard,
+			"muse-wonder-full-1.0-contributor": contributor,
+		};
+		const ids = Object.keys(expectedCost);
+		const options = museCodeModelManagerOptions({
+			apiKey: "LLM|subscription-key",
+			fetch: async () => modelListResponse(ids),
+		});
+		const discovered = (await options.fetchDynamicModels?.()) ?? [];
+		const byId = new Map(discovered.map(spec => [spec.id, buildModel(spec)]));
+		expect([...byId.keys()].sort()).toEqual([...ids].sort());
+		for (const id of ids) {
+			expect(byId.get(id)).toMatchObject({ cost: expectedCost[id], reasoning: true, thinking: MUSE_MAX_THINKING });
+		}
+	});
+
 	test("selects the compact edit prompt only for the subscription tier", () => {
 		const subscriber = buildModel(museCodeModels.find(model => model.id === "muse-spark-1.3-contributor")!);
 		expect(subscriber.editPromptVariant).toBe("compact");
@@ -153,22 +179,19 @@ describe("Muse Code subscription provider", () => {
 		expect(getBundledModel("meta", "muse-spark-1.3-contributor")?.applyPatchToolType).toBeUndefined();
 	});
 
-	test("exposes the max tier on bundled 1.3 standard rows only", () => {
+	test("exposes the max tier on bundled 1.3 standard and contributor rows only", () => {
 		for (const provider of ["muse-code", "meta"] as const) {
-			expect(getBundledModel(provider, "muse-spark-1.3")?.thinking?.efforts).toEqual([
-				Effort.Minimal,
-				Effort.Low,
-				Effort.Medium,
-				Effort.High,
-				Effort.XHigh,
-				Effort.Max,
-			]);
-			for (const id of [
-				"muse-spark-1.1",
-				"muse-spark-1.2",
-				"muse-spark-1.2-contributor",
-				"muse-spark-1.3-contributor",
-			]) {
+			for (const id of ["muse-spark-1.3", "muse-spark-1.3-contributor"]) {
+				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
+					Effort.Minimal,
+					Effort.Low,
+					Effort.Medium,
+					Effort.High,
+					Effort.XHigh,
+					Effort.Max,
+				]);
+			}
+			for (const id of ["muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.2-contributor"]) {
 				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
 					Effort.Minimal,
 					Effort.Low,

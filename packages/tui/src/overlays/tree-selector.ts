@@ -2,7 +2,8 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
 	Container,
-	fuzzyMatch,
+	FuzzyQuery,
+	FuzzyText,
 	Input,
 	matchesKey,
 	Spacer,
@@ -53,9 +54,10 @@ import { shortenPath } from "../render/render-utils";
 import { canonicalizeMessage } from "../chat/thinking-display";
 import { resolveAssistantErrorPresentation } from "../chat/transcript-render-helpers";
 import { OverlayPanel, PanelDivider } from "../chrome/overlay-box";
-import { TreeView, type TreeRow } from "../components/tree-view";
+import { TreeView, type TreeAncestor, type TreeRow } from "../components/tree-view";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
-import { boundKeys, editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import { boundKeys, editorKey, editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import { getKeybindings } from "../keybindings";
 import type { TspPickerItem, TspPickerProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { ThemeColor } from "../theme/schema";
 import { col, keyed, node, span, text } from "../native/describe";
@@ -203,6 +205,7 @@ class TreeList implements Component {
 	#roots: TreeSelectorNode[] = [];
 	#rootIds: Set<string> = new Set();
 	#nodeById: Map<string, TreeSelectorNode> = new Map();
+	#parentById: Map<string, string | null> = new Map();
 	#filterMode: FilterMode;
 	/** The search field; its value is the fuzzy query. */
 	readonly searchInput = new Input();
@@ -210,6 +213,8 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#containsActive: Map<TreeSelectorNode, boolean> = new Map();
+	/** Prepared search text per node; rebuilt when the node's label changes. */
+	#searchTextCache = new WeakMap<TreeSelectorNode, { label: string | undefined; text: FuzzyText }>();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -233,6 +238,14 @@ class TreeList implements Component {
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
 	#pickerOrder: { rows: readonly TreeRow<TreeSelectorNode, string>[]; order: string[] } | undefined;
+	/** Branch-navigation targets for one filtered rows snapshot; filtering replaces the rows array. */
+	#branchTargets:
+		| {
+				rows: readonly TreeRow<TreeSelectorNode, string>[];
+				targets: readonly TreeSelectorNode[];
+				targetIndexByRootId: ReadonlyMap<string, number>;
+		  }
+		| undefined;
 	#previewMemo: { node: TreeSelectorNode | undefined; labels: number; preview: NativeChild[] } | undefined;
 
 	constructor(
@@ -253,6 +266,7 @@ class TreeList implements Component {
 			getChildren: node => this.#orderedChildren(node),
 			getChildDepth: (_node, row, children) =>
 				children.length > 1 || (this.#multipleRoots && row.parentKey === undefined) ? row.depth + 1 : row.depth,
+			compactSameDepthAncestors: true,
 			theme,
 			filter: this.#buildFilter(),
 			maxRows: maxVisibleLines,
@@ -289,8 +303,9 @@ class TreeList implements Component {
 		this.#containsActive.clear();
 		this.#nodeById.clear();
 		this.#activePathIds.clear();
+		this.#parentById.clear();
 
-		const parentIds = new Map<string, string | null>();
+		const parentIds = this.#parentById;
 		const allNodes: TreeSelectorNode[] = [];
 		const visitStack: TreeSelectorNode[] = [...roots];
 		while (visitStack.length > 0) {
@@ -363,6 +378,100 @@ class TreeList implements Component {
 		return [...children].sort((a, b) => Number(this.#containsActive.get(b)) - Number(this.#containsActive.get(a)));
 	}
 
+	/** Visible branch targets in rendered order, keyed by every raw branch head. */
+	#visibleBranchProjection(rows: readonly TreeRow<TreeSelectorNode, string>[]): {
+		targets: readonly TreeSelectorNode[];
+		targetIndexByRootId: ReadonlyMap<string, number>;
+	} {
+		const visibleIndex = new Map<string, number>();
+		for (let index = 0; index < rows.length; index++) visibleIndex.set(rows[index]!.key, index);
+		const nodes: TreeSelectorNode[] = [];
+		const stack = [...this.#roots].reverse();
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			nodes.push(node);
+			const children = this.#orderedChildren(node);
+			for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
+		}
+
+		// One bottom-up pass makes filtered-head promotion O(nodes), rather than
+		// rescanning a branch subtree for every fork.
+		const firstVisibleById = new Map<string, TreeSelectorNode>();
+		for (let index = nodes.length - 1; index >= 0; index--) {
+			const node = nodes[index]!;
+			let target = visibleIndex.has(node.entry.id) ? node : undefined;
+			if (!target) {
+				for (const child of this.#orderedChildren(node)) {
+					target = firstVisibleById.get(child.entry.id);
+					if (target) break;
+				}
+			}
+			if (target) firstVisibleById.set(node.entry.id, target);
+		}
+
+		const byTargetId = new Map<string, { rootIds: string[]; target: TreeSelectorNode }>();
+		const addFork = (branches: readonly TreeSelectorNode[]) => {
+			if (branches.length < 2) return;
+			for (const branch of branches) {
+				const target = firstVisibleById.get(branch.entry.id);
+				if (!target) continue;
+				const existing = byTargetId.get(target.entry.id);
+				if (existing) existing.rootIds.push(branch.entry.id);
+				else byTargetId.set(target.entry.id, { rootIds: [branch.entry.id], target });
+			}
+		};
+		addFork(this.#roots);
+		for (const node of nodes) addFork(this.#orderedChildren(node));
+
+		const ordered = [...byTargetId.values()].sort(
+			(a, b) => visibleIndex.get(a.target.entry.id)! - visibleIndex.get(b.target.entry.id)!,
+		);
+		const targetIndexByRootId = new Map<string, number>();
+		for (let index = 0; index < ordered.length; index++) {
+			for (const rootId of ordered[index]!.rootIds) targetIndexByRootId.set(rootId, index);
+		}
+		return { targets: ordered.map(entry => entry.target), targetIndexByRootId };
+	}
+
+	/** Raw branch root containing `entryId` at its nearest ancestor fork. */
+	#nearestBranchRootId(entryId: string): string | undefined {
+		let branchId = entryId;
+		let parentId = this.#parentById.get(branchId);
+		while (parentId !== undefined) {
+			const siblings = parentId === null ? this.#roots : this.#orderedChildren(this.#nodeById.get(parentId)!);
+			if (siblings.length > 1) return branchId;
+			if (parentId === null) break;
+			branchId = parentId;
+			parentId = this.#parentById.get(parentId);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Move through every visible branch in rendered order, crossing nested fork
+	 * depths. Raw ancestry identifies branch membership; visibility only chooses
+	 * the first selectable descendant when a branch head is filtered.
+	 */
+	#moveBranch(direction: -1 | 1): void {
+		const selected = this.#tree.selectedItem;
+		if (!selected) return;
+		// Projection is O(nodes); reuse it across presses until filtering replaces the rows.
+		const rows = this.#tree.rows;
+		if (this.#branchTargets?.rows !== rows) this.#branchTargets = { rows, ...this.#visibleBranchProjection(rows) };
+		const { targets, targetIndexByRootId } = this.#branchTargets;
+
+		if (targets.length === 0) return;
+		const currentRootId = this.#nearestBranchRootId(selected.entry.id);
+		const currentIndex = currentRootId === undefined ? -1 : (targetIndexByRootId.get(currentRootId) ?? -1);
+		const nextIndex =
+			currentIndex < 0
+				? direction > 0
+					? 0
+					: targets.length - 1
+				: (currentIndex + direction + targets.length) % targets.length;
+		this.#tree.setSelectedKey(targets[nextIndex]!.entry.id);
+	}
+
 	#applyFilter(): void {
 		// TreeView retains the nearest visible selection (including an anchor
 		// through empty filter results) when the predicate is replaced.
@@ -373,7 +482,11 @@ class TreeList implements Component {
 	#buildFilter(): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
 		const filterMode = this.#filterMode;
 		const leafId = this.currentLeafId;
-		const searchTokens = this.getSearchQuery().toLowerCase().split(/\s+/).filter(Boolean);
+		const searchTokens = this.getSearchQuery()
+			.toLowerCase()
+			.split(/\s+/)
+			.filter(Boolean)
+			.map(token => new FuzzyQuery(token));
 		return node => {
 			const entry = node.entry;
 			const isCurrentLeaf = entry.id === leafId;
@@ -435,12 +548,21 @@ class TreeList implements Component {
 
 			// Apply fuzzy search filter
 			if (searchTokens.length > 0) {
-				const nodeText = this.#getSearchableText(node);
-				return searchTokens.every(token => fuzzyMatch(token, nodeText).matches);
+				const nodeText = this.#getFuzzyText(node);
+				return searchTokens.every(token => token.match(nodeText).matches);
 			}
 
 			return true;
 		};
+	}
+
+	/** Prepared fuzzy text for a node's searchable content, built once per label. */
+	#getFuzzyText(node: TreeSelectorNode): FuzzyText {
+		const cached = this.#searchTextCache.get(node);
+		if (cached !== undefined && cached.label === node.label) return cached.text;
+		const text = new FuzzyText(this.#getSearchableText(node));
+		this.#searchTextCache.set(node, { label: node.label, text });
+		return text;
 	}
 
 	/** Get searchable text content from a node */
@@ -877,23 +999,26 @@ class TreeList implements Component {
 		// Linear rows reuse their branch head's depth. Existing sibling
 		// gutters remain visible; terminal gutters remain terminated.
 
+		// Branch points that can draw a gutter, indexed by rendered level: the
+		// ancestor list is as deep as the conversation, so it is scanned once
+		// per row rather than once per prefix cell.
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+		const gutterByLevel: (TreeAncestor<string> | undefined)[] = new Array(renderedIndent);
+		for (const ancestor of row.ancestors) {
+			if (ancestor.siblingCount <= 1) continue;
+			if (this.#multipleRoots && this.#rootIds.has(ancestor.key)) continue;
+			const level = ancestor.depth - 1 - scrollOffset;
+			if (level >= 0 && level < renderedIndent && gutterByLevel[level] === undefined) {
+				gutterByLevel[level] = ancestor;
+			}
+		}
 		// Build prefix char by char, placing gutters and connector at their positions
 		const totalChars = renderedIndent * 3;
 		const prefixChars: string[] = [];
 		for (let i = 0; i < totalChars; i++) {
 			const level = Math.floor(i / 3);
-			const originalDepth = level + scrollOffset;
 			const posInLevel = i % 3;
-
-			// An ancestor branch point draws its gutter at its own depth minus
-			// one — the level its connector occupied. Session roots never emit
-			// gutters; their connectors are suppressed.
-			const gutterAncestor = row.ancestors.find(
-				ancestor =>
-					ancestor.depth - 1 === originalDepth &&
-					ancestor.siblingCount > 1 &&
-					!(this.#multipleRoots && this.#rootIds.has(ancestor.key)),
-			);
+			const gutterAncestor = gutterByLevel[level];
 			if (gutterAncestor) {
 				// Gutters follow standard tree semantics: `│` only while more
 				// siblings continue below, space below a `└─`.
@@ -1036,12 +1161,12 @@ class TreeList implements Component {
 	}
 
 	#extractContent(content: unknown): string {
-		return this.#joinTextContent(content).slice(0, SEARCH_TEXT_LIMIT);
+		return this.#joinTextContent(content, SEARCH_TEXT_LIMIT);
 	}
 
-	/** Concatenate every text block (or return a string as-is) with no length cap. */
-	#joinTextContent(content: unknown): string {
-		if (typeof content === "string") return content;
+	/** Concatenate text blocks, stopping as soon as `limit` characters exist. */
+	#joinTextContent(content: unknown, limit = Number.POSITIVE_INFINITY): string {
+		if (typeof content === "string") return content.length > limit ? content.slice(0, limit) : content;
 		if (Array.isArray(content)) {
 			let result = "";
 			for (const c of content) {
@@ -1054,6 +1179,7 @@ class TreeList implements Component {
 					typeof c.text === "string"
 				) {
 					result += c.text;
+					if (result.length >= limit) return result.slice(0, limit);
 				}
 			}
 			return result;
@@ -1189,6 +1315,10 @@ class TreeList implements Component {
 					(node.entry.message.role === "user" || node.entry.message.role === "assistant"),
 				1,
 			);
+		} else if (getKeybindings().matches(keyData, "app.tree.previousBranch")) {
+			this.#moveBranch(-1);
+		} else if (getKeybindings().matches(keyData, "app.tree.nextBranch")) {
+			this.#moveBranch(1);
 		} else if (matchesKey(keyData, "home")) {
 			this.#tree.setSelectionIndex(0);
 		} else if (matchesKey(keyData, "end")) {
@@ -1377,6 +1507,10 @@ export class TreeSelectorComponent extends OverlayPanel {
 		this.#treeContainer.addChild(this.#treeList);
 
 		this.#labelInputContainer = new Container();
+		// Either action may be unbound; hint only the keys that still do something.
+		const branchKeys = [editorKey("app.tree.previousBranch"), editorKey("app.tree.nextBranch")]
+			.filter(Boolean)
+			.join("/");
 
 		this.addChild(new Spacer(1));
 		this.addChild(
@@ -1386,6 +1520,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 					[
 						`${formatKeyHint("enter")}: switch.`,
 						`${formatKeyHints(["alt+up", "alt+down"])}: previous/next turn.`,
+						...(branchKeys ? [`${branchKeys}: previous/next branch.`] : []),
 						`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} (${formatKeyHints(["left", "right"])}): page.`,
 						`${formatKeyHints(["home", "end"])}: first/last item.`,
 						`${formatKeyHint("shift+enter")}: summarize & switch.`,
@@ -1542,6 +1677,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 			hintsRow([
 				{ keys: ["enter"], label: "switch" },
 				{ keys: ["alt+up", "alt+down"], label: "previous/next turn" },
+				actionHint(["app.tree.previousBranch", "app.tree.nextBranch"], "previous/next branch"),
 				actionHint(["tui.select.pageUp", "tui.select.pageDown"], "page"),
 				{ keys: ["home", "end"], label: "first/last" },
 				{ keys: ["shift+enter"], label: "summarize & switch" },

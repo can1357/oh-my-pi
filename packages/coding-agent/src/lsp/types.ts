@@ -17,7 +17,7 @@ export const lspSchema = type({
 	"timeout?": type.number
 		.atLeast(TOOL_TIMEOUTS.lsp.min)
 		.atMost(TOOL_TIMEOUTS.lsp.max)
-		.describe("Timeout in seconds (default 20; range 5–300)."),
+		.describe("Timeout in seconds; raises or lowers the default (range 5–300)."),
 	payload: "string?",
 });
 
@@ -370,7 +370,7 @@ export interface ServerConfig {
 // Transport
 // =============================================================================
 
-/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux socket adapter). */
+/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux link adapter). */
 export interface LspWriteSink {
 	write(data: string | Uint8Array): number | Promise<number>;
 	flush(): number | void | Promise<number | void>;
@@ -378,7 +378,7 @@ export interface LspWriteSink {
 
 /**
  * Byte transport carrying one LSP JSON-RPC link. Structurally satisfied by
- * `ptree.ChildProcess<"pipe">` (local server spawn) and by the socket adapter
+ * `ptree.ChildProcess<"pipe">` (local server spawn) and by the IPC link adapter
  * in `mux/daemon.ts` (broker-shared server). `exited` may reject (ptree kill).
  */
 export interface LspTransport {
@@ -406,6 +406,10 @@ export interface OpenFile {
 	 * reconcile treats the document as dirty and resyncs from disk.
 	 */
 	syncedHash?: number | bigint;
+	/** When an OMP operation last used this document; long-unused documents close before the next open. */
+	lastUsedAt: number;
+	/** When OMP last reopened this document (an idle close, or a diagnostics reopen); absent for a first open. */
+	reopenedAt?: number;
 }
 
 export interface PendingRequest {
@@ -423,7 +427,14 @@ export interface LspServerCapabilities {
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
 	diagnosticProvider?: boolean | Record<string, unknown>;
+	workspace?: { workspaceFolders?: { supported?: boolean; changeNotifications?: boolean | string } };
 	[key: string]: unknown;
+}
+
+/** Last busy and idle build-status notifications for a document, as client-wide sequence numbers. */
+export interface DocumentBuildStatus {
+	busySeq: number;
+	idleSeq: number;
 }
 
 export interface LspClient {
@@ -434,11 +445,25 @@ export interface LspClient {
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
+	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
+	publishesDocumentVersions?: boolean;
+	/**
+	 * Build state per document from clangd's `textDocument/clangd.fileStatus`, present once the
+	 * server sent one. Lets a diagnostics wait tell a finished rebuild from one still running.
+	 */
+	buildStatus?: Map<string, DocumentBuildStatus>;
+	/** Orders build-status notifications across documents. */
+	buildStatusSeq?: number;
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
+	/**
+	 * Documents OMP closed and will reopen (for idleness, or mid diagnostics reopen),
+	 * with the last version the server saw. A reopen resumes past that version; absent
+	 * until the client closes one.
+	 */
+	idleClosedFiles?: Map<string, number>;
 	pendingRequests: Map<number | string, PendingRequest>;
-	messageBuffer: Uint8Array;
 	isReading: boolean;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
 	status: "connecting" | "ready" | "error";

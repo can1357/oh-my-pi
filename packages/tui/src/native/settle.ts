@@ -1,8 +1,9 @@
 /**
  * Settling: the frame provider marks finalized transcript blocks so the
- * native reconciler stops keeping their description (spec §12 "Settling and
- * program memory"). A settled block stays editable: a later change is sent as
- * targeted ops by id, followed by a fresh `settle` hint.
+ * native reconciler stops keeping their description (Tern SDK,
+ * `protocol/operations.md`, "Settling"). A settled block stays editable: a
+ * later change is sent as targeted ops by id, followed by a fresh `settle`
+ * hint.
  */
 import type { Component } from "../tui";
 

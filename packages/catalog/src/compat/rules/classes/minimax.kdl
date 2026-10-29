@@ -7,6 +7,16 @@ class "minimax" {
 	}
 	// Replaces the MiniMax lineage branch in both OpenAI baselines.
 	reasoning-deltas-may-be-cumulative #true
+	// Replaces the identity default: M2/M3 thinking rides Anthropic adaptive
+	// thinking on every Messages route, custom provider ids included.
+	on-api "anthropic-messages" {
+		family "m2" {
+			thinking-mode "anthropic-adaptive"
+		}
+		family "m3" {
+			thinking-mode "anthropic-adaptive"
+		}
+	}
 	on "aimlapi" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" "novita" "nvidia" \
 		"opencode-go" "opencode-zen" "together" "venice" "wafer-serverless" "zenmux" {
 		family "m3" {
@@ -30,11 +40,21 @@ class "minimax" {
 	// upstream metadata, not the model ceiling (documented: 1M in / 128K out).
 	// Exact selectors are case-sensitive, so both served spellings are listed:
 	// MiniMax hosts publish `MiniMax-M3`, Charm Hyper publishes `minimax-m3`.
-	on "charm-hyper" "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+	on "charm-hyper" "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" "sambanova" {
 		models "MiniMax-M3" "minimax-m3" {
 			limits-patch {
 				context-window 1000000
 				max-tokens 128000
+			}
+		}
+	}
+	// MiniMax's standard API doubles every rate above 512K input tokens;
+	// subscription hosts retain the same rates only as usage estimates.
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3" {
+			long-context-cost {
+				input-threshold 512000
+				multiplier 2.0
 			}
 		}
 	}
@@ -51,7 +71,7 @@ class "minimax" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}
 	}
-	on "minimax" "minimax-cn" "vercel-ai-gateway" {
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" "vercel-ai-gateway" {
 		thinking-mode "anthropic-adaptive"
 		family "m2" {
 			// Replaces the Anthropic-route MiniMax effort remap table.
@@ -71,11 +91,46 @@ class "minimax" {
 			thinking-efforts "low" "medium" "high"
 		}
 	}
+	// MiniMax-M3.1-Flash (and its bundled `-Preview` id) always thinks
+	// (`thinking.type: "disabled"` and effort `none` 400 with error 2013) and
+	// tunes depth through `output_config.effort` from `low` to `max` (the
+	// default when omitted). The identity map replaces the M3 family's
+	// adaptive-tag-only map so each level reaches the wire. Like the M2 family,
+	// thinking cannot be turned off: `thinking-requires-effort` hides the off
+	// level and clamps forced-off requests to the lowest effort instead of
+	// sending `disabled`. The launch id also rejects sampling params
+	// (`temperature`, `top_p`, `top_k`).
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3.1-Flash" "MiniMax-M3.1-Flash-Preview" {
+			thinking-requires-effort #true
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+			thinking-effort-map {
+				low "low"
+				medium "medium"
+				high "high"
+			}
+		}
+		models "MiniMax-M3.1-Flash" {
+			supports-sampling-params #false
+		}
+	}
+	// Token Plan rows ride the Anthropic route; these OpenAI-only wire axes
+	// serve the legacy lightning rows that stay on the OpenAI-compatible one.
 	on "minimax-code" "minimax-code-cn" {
 		supports-reasoning-effort #false
 		supports-store #false
 	}
 	on "minimax-code" "minimax-code-cn" "wafer-serverless" {
 		reasoning-content-field "reasoning_content"
+	}
+	// M3 reasoning reaches omp as its plaintext trace on every host, and
+	// MiniMax asks agents to pass all earlier reasoning back.
+	family "m3" {
+		portable-reasoning #true
+		// residue: M3.1 Flash Preview classifies as family m3 (no revision is
+		// extracted), but it is a different model.
+		models "*m3.1*" {
+			portable-reasoning #false
+		}
 	}
 }

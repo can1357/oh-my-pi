@@ -93,12 +93,14 @@ describe("InteractiveMode MCP connection status", () => {
 		const event = { type: "connecting", serverNames } satisfies McpConnectionStatusEvent;
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 
+		// Kept off native terminals' toasts: one per server change is noise.
 		expect(showStatusSpy).toHaveBeenCalledWith(
 			formatMCPConnectionStatusMessage({
 				pendingServers: serverNames,
 				connectedServers: [],
 				failedServers: [],
 			}),
+			{ toast: false },
 		);
 	});
 
@@ -172,6 +174,7 @@ describe("InteractiveMode MCP connection status", () => {
 
 		expect(showStatusSpy).toHaveBeenLastCalledWith(
 			"Connected: alpha. Failed: broken: bad config. Still connecting: retry…",
+			{ toast: false },
 		);
 	});
 

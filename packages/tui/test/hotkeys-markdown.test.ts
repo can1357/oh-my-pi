@@ -94,4 +94,42 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).not.toContain("Option+");
 		expect(markdown).not.toContain("Cmd+");
 	});
+
+	it("renders the effective push-to-talk remap without borrowing the separate toggle binding", () => {
+		const markdown = buildHotkeysMarkdown({
+			keybindings: {
+				getKeys(action) {
+					if (action === "app.stt.pushToTalk") return ["x", "ctrl+x"];
+					if (action === "app.stt.toggle") return ["alt+h"];
+					return [];
+				},
+				getDisplayString(action) {
+					if (action === "app.stt.pushToTalk") return "X / Ctrl+X";
+					if (action === "app.stt.toggle") return "Alt+H";
+					return "Disabled";
+				},
+				matchesCanonical: () => false,
+			},
+		});
+
+		const pushToTalkRow = markdown.split("\n").find(line => line.includes("Speech-to-text (push-to-talk)")) ?? "";
+		expect(pushToTalkRow).toContain("X / Ctrl+X");
+		expect(pushToTalkRow).not.toContain("Alt+H");
+		expect(markdown).not.toContain("Alt+H");
+	});
+
+	it("renders push-to-talk as disabled when its effective key list is empty", () => {
+		const markdown = buildHotkeysMarkdown({
+			keybindings: {
+				...noForwardDelete,
+				getDisplayString(action) {
+					return action === "app.stt.pushToTalk" ? "" : "Disabled";
+				},
+			},
+		});
+
+		const pushToTalkRow = markdown.split("\n").find(line => line.includes("Speech-to-text (push-to-talk)")) ?? "";
+		expect(pushToTalkRow).toContain("Disabled");
+		expect(pushToTalkRow).not.toContain("Hold");
+	});
 });

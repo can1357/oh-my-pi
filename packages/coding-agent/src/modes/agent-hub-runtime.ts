@@ -1,11 +1,6 @@
 import * as fs from "node:fs";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import {
-	type AgentMetrics,
-	aggregateMetrics,
-	hubFallbackStatsSession,
-	hubRowMetrics,
-} from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
@@ -15,13 +10,20 @@ import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
-import { parseSessionEntries } from "../session/session-loader";
+import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
-	parseEntries: text =>
-		parseSessionEntries(text).filter(entry => entry.type === "message" || entry.type === "model_change"),
+	parseEntries: text => {
+		const entries = parseSessionEntries(text).filter(
+			entry => entry.type === "message" || entry.type === "model_change",
+		);
+		for (const entry of entries) {
+			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+		}
+		return entries;
+	},
 };
 
 /** Host services used by the roster, without exposing runtime implementation to tui. */
@@ -63,9 +65,9 @@ export function sumSubagentTreeCost(args: {
 	refs: readonly AgentRef[];
 	observers: SessionObserverRegistry;
 	rootSessionFile: string | undefined;
-	sessionMetrics: WeakMap<object, { metrics: AgentMetrics | undefined }>;
+	sessionCosts: WeakMap<object, AgentCostSnapshot>;
 }): number {
-	const { observers, rootSessionFile, sessionMetrics } = args;
+	const { observers, rootSessionFile, sessionCosts } = args;
 	const rows: AgentRef[] = [];
 	const observedById = new Map<string, ObservableSession>();
 	for (const ref of args.refs) {
@@ -79,12 +81,5 @@ export function sumSubagentTreeCost(args: {
 		rows.push(ref);
 		if (observed) observedById.set(ref.id, observed);
 	}
-	return aggregateMetrics({
-		rows,
-		observedById,
-		metricsFor: (ref, observed) => hubRowMetrics(ref, observed, sessionMetrics),
-		fallbackStatsSession: hubFallbackStatsSession,
-		sessionMetrics,
-		refreshFallback: true,
-	}).metrics.cost;
+	return aggregateCost({ rows, observedById, sessionCosts });
 }

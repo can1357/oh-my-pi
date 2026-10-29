@@ -77,14 +77,12 @@ impl IsolationBackend for ApfsBackend {
 
 #[cfg(target_os = "macos")]
 mod imp {
-	use std::{
-		fs,
-		path::{Path, PathBuf},
-	};
+	use std::{fs, path::Path};
 
 	use crate::{
 		IsoError, IsoResult,
 		cow::{self, CLONE_NOFOLLOW},
+		tree,
 	};
 
 	/// Classifies a failed `clonefile` of `src` to `dst`.
@@ -100,7 +98,7 @@ mod imp {
 	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
+		let lower = tree::canonical_existing_dir(lower, "clone source", IsoError::other)?;
 		if let Some(parent) = merged.parent() {
 			fs::create_dir_all(parent).map_err(|err| {
 				IsoError::other(format!("unable to create parent of {}: {err}", merged.display()))
@@ -118,7 +116,7 @@ mod imp {
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
+		let lower = tree::canonical_existing_dir(lower, "clone source", IsoError::other)?;
 		if let Some(parent) = merged.parent() {
 			fs::create_dir_all(parent).map_err(|err| {
 				IsoError::other(format!("unable to create parent of {}: {err}", merged.display()))
@@ -182,24 +180,6 @@ mod imp {
 				merged.display()
 			))),
 		}
-	}
-
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		};
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid clone source {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"clone source {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
 	}
 }
 

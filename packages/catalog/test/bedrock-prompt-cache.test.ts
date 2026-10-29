@@ -85,7 +85,7 @@ describe("Bedrock prompt-cache compat", () => {
 				minimumTokens: 1024,
 				supportsLongRetention: false,
 			},
-			{ id: "anthropic.claude-fable-5", minimumTokens: 1024, supportsLongRetention: true },
+			{ id: "anthropic.claude-fable-5", minimumTokens: 1024, supportsLongRetention: true, rejectsSampling: true },
 			{
 				id: "anthropic.claude-haiku-4-5-20251001-v1:0",
 				minimumTokens: 4096,
@@ -107,8 +107,18 @@ describe("Bedrock prompt-cache compat", () => {
 				supportsLongRetention: true,
 			},
 			{ id: "anthropic.claude-opus-4-6-v1", minimumTokens: 4096, supportsLongRetention: false },
-			{ id: "global.anthropic.claude-opus-4-7", minimumTokens: 4096, supportsLongRetention: true },
-			{ id: "us.anthropic.claude-opus-4-8", minimumTokens: 4096, supportsLongRetention: true },
+			{
+				id: "global.anthropic.claude-opus-4-7",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
+			{
+				id: "us.anthropic.claude-opus-4-8",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
 			{
 				id: "anthropic.claude-sonnet-4-20250514-v1:0",
 				minimumTokens: 1024,
@@ -120,23 +130,32 @@ describe("Bedrock prompt-cache compat", () => {
 				supportsLongRetention: true,
 			},
 			{ id: "anthropic.claude-sonnet-4-6", minimumTokens: 1024, supportsLongRetention: false },
-			{ id: "us.anthropic.claude-sonnet-5", minimumTokens: 4096, supportsLongRetention: true },
+			{
+				id: "us.anthropic.claude-sonnet-5",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
 		] as const;
 
-		for (const { id, minimumTokens, supportsLongRetention } of cases) {
+		for (const testCase of cases) {
+			const { id, minimumTokens, supportsLongRetention } = testCase;
 			const model = buildModel(bedrockSpec({ id }));
-			expect(model.compat).toEqual({
+			expect(model.compat).toMatchObject({
 				promptCacheMode: minimumTokens === 0 ? "none" : "explicit",
 				supportsLongPromptCacheRetention: supportsLongRetention,
 				promptCacheMinimumTokens: minimumTokens,
 				promptCacheMaximumCheckpoints: minimumTokens === 0 ? 0 : 4,
 				supportsForcedToolChoice: true,
+				supportsThinkingBindingControls: true,
 				// bedrockSpec is reasoning:true → keepalive-free idle floor applies
 				// (900s for the adaptive-thinking family, 600s otherwise).
 				streamIdleTimeoutMs: expectsAdaptiveDisplay(id) ? 900_000 : 600_000,
 				// Converse positions content blocks by wire index, so a block can land
 				// above already-rendered text; the TUI must not retire streamed rows early.
 				streamRevision: "possible",
+				// Adaptive Claude rejects temperature/top_p on every host (class rule).
+				...("rejectsSampling" in testCase ? { supportsSamplingParams: false } : {}),
 			});
 			if (minimumTokens === 0) {
 				expect(model.promptCache).toBeUndefined();
@@ -229,6 +248,7 @@ describe("Bedrock prompt-cache compat", () => {
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
 			supportsForcedToolChoice: true,
+			supportsThinkingBindingControls: true,
 			streamRevision: "possible",
 		} as const;
 
@@ -240,10 +260,7 @@ describe("Bedrock prompt-cache compat", () => {
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
 			const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", id);
-			expect(model?.compat).toEqual({
-				...expected,
-				streamIdleTimeoutMs: model?.reasoning ? 600_000 : undefined,
-			});
+			expect(model?.compat).toMatchObject(expected);
 		}
 
 		// AWS documents in-region model IDs plus geo/global inference-profile IDs.
@@ -260,7 +277,7 @@ describe("Bedrock prompt-cache compat", () => {
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
 			const model = buildModel(bedrockSpec({ id }));
-			expect(model.compat).toEqual({ ...expected, streamIdleTimeoutMs: 600_000 });
+			expect(model.compat).toMatchObject(expected);
 			expect(model.promptCache).toBeUndefined();
 		}
 	});

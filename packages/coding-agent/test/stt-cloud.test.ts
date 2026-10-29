@@ -103,6 +103,7 @@ describe("STTController cloud transcription", () => {
 		expect(callOptions.signal).toBeInstanceOf(AbortSignal);
 
 		const wav = request.audio;
+		if (!(wav instanceof Uint8Array)) throw new Error("expected encoded WAV bytes");
 		const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
 		expect(new TextDecoder().decode(wav.subarray(0, 4))).toBe("RIFF");
 		expect(view.getUint32(4, true)).toBe(wav.byteLength - 8);
@@ -124,6 +125,32 @@ describe("STTController cloud transcription", () => {
 		expect(options.onStateChange.mock.calls.map(([next]) => next)).toEqual(["recording", "transcribing", "idle"]);
 		expect(options.showStatus).toHaveBeenCalledWith("Transcribing...");
 	});
+
+	it.each([
+		{ manualSubmit: true, submissions: 0, deletions: 0 },
+		{ manualSubmit: undefined, submissions: 1, deletions: 1 },
+	])(
+		"honors the capture submit policy for cloud dictation (manualSubmit=$manualSubmit)",
+		async ({ manualSubmit, submissions, deletions }) => {
+			const model = getBundledModel("openai", "whisper-1");
+			settings.setModelRole("dictation", "openai/whisper-1");
+			cfgSttSubmitTrigger.set(settings, "say-submit");
+			vi.spyOn(transcription, "transcribeAudio").mockResolvedValue({
+				text: "please review this submit.",
+				usage: ZERO_USAGE,
+			});
+			controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: registryFor(model) });
+			const editor = makeEditor();
+
+			await controller.start(editor, { ...makeOptions(), manualSubmit });
+			await controller.stop();
+
+			expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+			expect(editor.submit).toHaveBeenCalledTimes(submissions);
+			expect(editor.deleteBeforeCursor).toHaveBeenCalledTimes(deletions);
+			if (deletions) expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
+		},
+	);
 
 	it("aborts an in-flight cloud request when the controller is disposed", async () => {
 		const model = getBundledModel("openai", "whisper-1");

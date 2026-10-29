@@ -122,6 +122,12 @@ _MODELS_DST = "/tmp/omp-models.yml"
 _CONFIG_DST = "/tmp/omp-config.yml"
 _OUTPUT_FILENAME = "omp.txt"
 
+# omp's daemon broker stops the services the agent started (bash `name` +
+# `ready`) once its last client has been gone for OMP_DAEMON_IDLE_GRACE_MS
+# (default 3 s). The verifier runs after omp exits, in the same container, and
+# grades those services, so keep them alive until the container is torn down.
+_SERVICE_GRACE_ENV = {"OMP_DAEMON_IDLE_GRACE_MS": str(24 * 60 * 60 * 1000)}
+
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
     "amazon-bedrock": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
@@ -604,17 +610,18 @@ class OmpLocal(BaseInstalledAgent):
         # prompt is positional, so close it explicitly; redirect raw JSONL to the
         # mounted agent log dir for populate_context_post_run to parse on the host.
         run = " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
-        # Exec env for the omp run. Direct-auth (no-gateway) mode contributes the
-        # selected providers' keys (via exec env, never argv); forwarded PI_* /
-        # --env knobs apply last so an explicit --env always wins.
-        run_env: dict[str, str] = {}
+        # Exec env for the omp run: the service grace first, then direct-auth
+        # (no-gateway) mode's selected providers' keys (via exec env, never
+        # argv); forwarded PI_* / --env knobs apply last so an explicit --env
+        # always wins.
+        run_env: dict[str, str] = dict(_SERVICE_GRACE_ENV)
         if not self._gateway_on:
             run_env.update(self._collect_provider_keys(provider))
         run_env.update(self._forward_env)
         await self.exec_as_agent(
             environment,
             command=run if self._binary else self._wrap(run),
-            env=run_env or None,
+            env=run_env,
         )
 
     @override

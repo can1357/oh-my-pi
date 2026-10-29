@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -11,7 +11,8 @@ import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/p
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { Container, Input, type TUI } from "@oh-my-pi/pi-tui";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
+import { Container, Input, type KeyId, type TUI } from "@oh-my-pi/pi-tui";
 import type { DictationTarget } from "@oh-my-pi/pi-coding-agent/stt/push-to-talk";
 import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 
@@ -81,7 +82,7 @@ async function records(manager: SessionManager): Promise<readonly BtwHistoryReco
 	return (await BtwHistoryStore.open(artifacts)).getRecords();
 }
 
-async function harness() {
+async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-follow-up-"));
 	const manager = SessionManager.create(directory, directory);
 	const managers = [manager];
@@ -92,6 +93,7 @@ async function harness() {
 		return pending.promise;
 	});
 	const dictationTargets: DictationTarget[] = [];
+	const dictationInputs: DictationTarget[] = [];
 	const session = {
 		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
@@ -107,15 +109,23 @@ async function harness() {
 		} as unknown as TUI,
 		btwContainer: new Container(),
 		session,
+		keybindings: {
+			getKeys(action: string) {
+				return action === "app.stt.pushToTalk" ? [...spaceHoldKeys] : [];
+			},
+		},
 		sessionManager: manager,
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleBtwBranch: vi.fn(async () => {}),
-		dictationSpaceHold: (target: DictationTarget): SpaceHoldHandler => ({
-			enabled: () => true,
-			onStart: () => dictationTargets.push(target),
-			onEnd: () => {},
-		}),
+		dictationSpaceHold: (target: DictationTarget): SpaceHoldHandler => {
+			dictationInputs.push(target);
+			return {
+				enabled: () => true,
+				onStart: () => dictationTargets.push(target),
+				onEnd: () => {},
+			};
+		},
 	} as unknown as InteractiveModeContext;
 	const controller = new BtwController(ctx);
 	cleanups.push(async () => {
@@ -153,10 +163,24 @@ async function harness() {
 		complete,
 		root,
 		dictationTargets,
+		dictationInputs,
 	};
 }
 
 describe("BTW follow-up lifecycle", () => {
+	it("keeps a question's images in BTW history and sends them again with every follow-up", async () => {
+		const h = await harness();
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		await h.controller.start("What is wrong here? [Image #1]", [screenshot]);
+		await h.complete("The button covers the title.");
+		const topic = (await records(h.manager))[0]!;
+		expect(topic.images).toEqual([screenshot]);
+
+		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
+
+		expect(h.requests.at(-1)?.args.history?.[0]?.content).toContainEqual(screenshot);
+	});
+
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {
 		const h = await harness();
 		await h.controller.start("Keep the final answer");
@@ -204,18 +228,18 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		await h.controller.start("Survive a storage error");
 		const failed = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		const storageError = new Error(
 			`\x1b[2JEACCES: open '${os.homedir()}/blocked directory/btw.json'\r\n\t${"detail ".repeat(100)}`,
 		);
 		const shown = vi.spyOn(h.ctx, "showError");
 		let unavailable = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (unavailable && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (unavailable && file.startsWith(h.directory) && file.endsWith(".json")) {
 				failed.resolve();
 				throw storageError;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		try {
 			h.requests.at(-1)!.resolve(answer("Retained answer"));
@@ -365,15 +389,15 @@ describe("BTW follow-up lifecycle", () => {
 		await h.controller.start("Save before moving");
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		let hold = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (hold && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (hold && file.startsWith(h.directory) && file.endsWith(".json")) {
 				hold = false;
 				entered.resolve();
 				await release.promise;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		const flush = h.controller.flush.bind(h.controller);
 		vi.spyOn(h.controller, "flush").mockImplementation(() => flush(25));
@@ -596,8 +620,8 @@ describe("BTW follow-up lifecycle", () => {
 		expect(topics.find(topic => topic.question === "Current topic")?.followUps?.[0]?.answer).toBe("Continued answer");
 	});
 
-	it("dictates a follow-up into the composer when the space bar is held there", async () => {
-		const h = await harness();
+	it("uses the configured remapped hold key in the follow-up composer", async () => {
+		const h = await harness(["x"]);
 		await h.controller.start("Current topic");
 		await h.complete("Current answer");
 		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
@@ -606,17 +630,18 @@ describe("BTW follow-up lifecycle", () => {
 		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW follow-up composer");
 		vi.useFakeTimers();
 		try {
+			panel.handleInput(" ");
 			for (let i = 0; i < SPACE_HOLD_MECHANICAL_RUN + 2; i++) {
 				vi.advanceTimersByTime(30);
-				panel.handleInput(" ");
+				panel.handleInput("x");
 			}
 		} finally {
 			vi.useRealTimers();
 		}
-		// The hold targets the composer, and the spaces typed before it was recognized are tracked back out.
 		const [composer] = h.dictationTargets;
 		if (!(composer instanceof Input)) throw new Error("Expected dictation into the follow-up composer");
-		expect(composer.getValue()).toBe("");
+		expect(composer.getValue()).toBe(" ");
+
 		composer.commitVolatileText("Spoken follow-up");
 		const started = Promise.withResolvers<boolean>();
 		const start = h.controller.startFollowUp.bind(h.controller);
@@ -628,6 +653,31 @@ describe("BTW follow-up lifecycle", () => {
 		panel.handleInput("\r");
 		expect(await started.promise).toBe(true);
 		expect(h.requests.at(-1)!.args.promptText).toContain("Spoken follow-up");
+	});
+
+	it("keeps repeated input as text in the BTW composer when PTT has no bindings", async () => {
+		const h = await harness([]);
+		await h.controller.start("Current topic");
+		await h.complete("Current answer");
+		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
+		expect(h.controller.handleFollowUp()).toBe(true);
+		const panel = overlay.mock.calls.at(-1)?.[0];
+		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW follow-up composer");
+		const [composer] = h.dictationInputs;
+		if (!(composer instanceof Input)) throw new Error("Expected dictation into the follow-up composer");
+
+		vi.useFakeTimers();
+		try {
+			for (let i = 0; i < SPACE_HOLD_MECHANICAL_RUN + 2; i++) {
+				vi.advanceTimersByTime(30);
+				panel.handleInput(" ");
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+
+		expect(composer.getValue()).toBe(" ".repeat(SPACE_HOLD_MECHANICAL_RUN + 2));
+		expect(h.dictationTargets).toEqual([]);
 	});
 
 	it("resumes only the selected chronological conversation, including cancelled partial output, without promoting it into main chat", async () => {
@@ -855,7 +905,10 @@ describe("BTW follow-up lifecycle", () => {
 	});
 });
 
-function composer(onFollowUp: (record: BtwHistoryRecord, question: string) => Promise<boolean>) {
+function composer(
+	onFollowUp: (record: BtwHistoryRecord, question: string) => Promise<boolean>,
+	extra: readonly BtwHistoryRecord[] = [],
+) {
 	const record: BtwHistoryRecord = {
 		id: "composer-root",
 		leafId: "main-leaf",
@@ -869,7 +922,7 @@ function composer(onFollowUp: (record: BtwHistoryRecord, question: string) => Pr
 	const onCopy = vi.fn();
 	const onCancel = vi.fn();
 	const panel = new BtwHistoryPanel({
-		records: [record],
+		records: [record, ...extra],
 		onClose,
 		onCopy,
 		onCancel,
@@ -900,10 +953,26 @@ describe("BTW follow-up composer", () => {
 	});
 
 	it("switches history panes with Ctrl+/ like Tab", () => {
-		const tabbed = composer(vi.fn(async () => true));
+		// A lone record has no list to switch to; panes need a second one.
+		const other: BtwHistoryRecord = {
+			id: "composer-other",
+			leafId: "main-leaf",
+			question: "Other question",
+			answer: "Other answer",
+			status: "complete",
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		const tabbed = composer(
+			vi.fn(async () => true),
+			[other],
+		);
 		tabbed.panel.handleInput("\t");
 		const tabRender = Bun.stripANSI(tabbed.panel.render(120).join("\n"));
-		const slashed = composer(vi.fn(async () => true));
+		const slashed = composer(
+			vi.fn(async () => true),
+			[other],
+		);
 		slashed.panel.handleInput(String.fromCharCode(31));
 		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toBe(tabRender);
 		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toContain("switch pane");
@@ -931,6 +1000,23 @@ describe("BTW follow-up composer", () => {
 		expect(h.onClose).not.toHaveBeenCalled();
 		h.panel.handleInput("\x1b");
 		expect(h.onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("scrolls a long answer while composing a follow-up without touching the draft", () => {
+		const h = composer(vi.fn(async () => true));
+		const answer = Array.from({ length: 80 }, (_, index) => `Answer row ${index + 1}`).join("\n\n");
+		h.panel.update([{ ...h.record, answer }]);
+		h.panel.handleInput("f");
+		h.panel.pasteText("draft");
+		const pinned = Bun.stripANSI(h.panel.render(100).join("\n"));
+		expect(pinned).toContain("Answer row 80");
+		for (let i = 0; i < 10; i++) h.panel.handleInput("\x1b[5~");
+		const scrolled = Bun.stripANSI(h.panel.render(100).join("\n"));
+		expect(scrolled).toMatch(/Answer row 1 /);
+		expect(scrolled).not.toContain("Answer row 80");
+		expect(scrolled).toContain("draft");
+		h.panel.handleInput("\x1b[B");
+		expect(Bun.stripANSI(h.panel.render(100).join("\n"))).not.toBe(scrolled);
 	});
 
 	it("submits once while pending and retains the rejected draft for a successful retry", async () => {

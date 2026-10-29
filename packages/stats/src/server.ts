@@ -14,9 +14,11 @@ import {
 	getRecentErrors,
 	getRecentRequests,
 	getRequestDetails,
+	getTimeRangeConfig,
 	getToolDashboardStats,
 } from "./aggregator";
-import { decodeEmbeddedClientArchive } from "./embedded-client";
+import { initDb } from "./db";
+import { decodeEmbeddedClientArchive, hasEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
 import {
 	cancelFrustrationRun,
@@ -36,17 +38,16 @@ import {
 	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
-import type { LiveStatus } from "./shared-types";
+import { getStatsByModel, getTimeSeries } from "./rollup";
 import {
 	buildSessionTrace,
 	getTraceEntry,
 	listSessionSummaries,
 	TRACE_ETAG_VERSION,
+	type TraceFingerprint,
 	traceFingerprintForEtag,
 	TracePathError,
 } from "./trace";
-
-const EMBEDDED_CLIENT_ARCHIVE = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
 
 const CLIENT_DIR = path.join(import.meta.dir, "client");
 const STATIC_DIR = path.join(import.meta.dir, "..", "dist", "client");
@@ -60,21 +61,24 @@ const IS_BUN_COMPILED =
 // dashboard sources or prebuilt dist/client next to the bundle, so the
 // embedded archive is the only viable asset source.
 const IS_PREBUILT = IS_BUN_COMPILED || Boolean(process.env.PI_BUNDLED || Bun.env.PI_BUNDLED);
-const USE_EMBEDDED_CLIENT = EMBEDDED_CLIENT_ARCHIVE !== null || IS_PREBUILT;
+// Sniff the base64 gzip magic instead of decoding: importing this module (every
+// TUI start) must not pay for a multi-megabyte archive nobody may serve.
+const USE_EMBEDDED_CLIENT = hasEmbeddedClientArchive(embeddedClientArchiveTxt) || IS_PREBUILT;
 
 let embeddedClientFilesPromise: Promise<Map<string, Blob>> | null = null;
 
 async function getEmbeddedClientFiles(): Promise<Map<string, Blob>> {
 	if (embeddedClientFilesPromise) return embeddedClientFilesPromise;
 
-	if (!EMBEDDED_CLIENT_ARCHIVE) {
+	const archive = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
+	if (!archive) {
 		throw new Error(
 			"Embedded stats client bundle missing. Rebuild the omp binary or npm bundle with embedded stats assets.",
 		);
 	}
 
 	// Keep bundled assets in memory so OS temporary-file cleanup cannot break a live dashboard.
-	embeddedClientFilesPromise = new Bun.Archive(EMBEDDED_CLIENT_ARCHIVE).files().then(files => {
+	embeddedClientFilesPromise = new Bun.Archive(archive).files().then(files => {
 		for (const [name, file] of files) {
 			// Archive entries are untyped blobs; infer MIME types just as disk-backed Bun files do.
 			files.set(name, new File([file], name, { type: Bun.file(name).type }));
@@ -241,8 +245,9 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/stats/models") {
-		const stats = await getDashboardStats(range);
-		return Response.json(stats.byModel);
+		// Also the port-conflict identity probe: keep it to the one query it serves.
+		await initDb();
+		return Response.json(getStatsByModel(getTimeRangeConfig(range).cutoff));
 	}
 
 	if (path === "/api/stats/folders") {
@@ -251,8 +256,8 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/stats/timeseries") {
-		const stats = await getDashboardStats(range);
-		return Response.json(stats.timeSeries);
+		await initDb();
+		return Response.json(getTimeSeries(getTimeRangeConfig(range)));
 	}
 
 	if (path.startsWith("/api/request/")) {
@@ -293,14 +298,15 @@ export async function handleApi(req: Request): Promise<Response> {
 			// The fingerprint covers child transcripts, so a subagent-only
 			// append changes the ETag and never 304s stale.
 			const clientEtag = req.headers.get("if-none-match");
+			let fingerprint: TraceFingerprint | undefined;
 			if (clientEtag) {
-				const fingerprint = await traceFingerprintForEtag(file);
+				fingerprint = await traceFingerprintForEtag(file);
 				if (fingerprint !== undefined) {
-					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint}"`;
+					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint.rootMtimeMs}:${fingerprint.childFingerprint}"`;
 					if (clientEtag === etag) return new Response(null, { status: 304 });
 				}
 			}
-			const trace = await buildSessionTrace(file);
+			const trace = await buildSessionTrace(file, fingerprint);
 			const etag = `"${TRACE_ETAG_VERSION}:${trace.etag}"`;
 			if (clientEtag === etag) return new Response(null, { status: 304 });
 			return Response.json(trace, { headers: { ETag: etag } });
@@ -383,7 +389,7 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 			if (path === "/api/events") {
 				// Long-lived stream: exempt from the idle timeout.
 				server.timeout(req, 0);
-				return liveEventStream(dashboardHeaders);
+				return liveEventStream(dashboardHeaders, req.signal);
 			}
 
 			try {
@@ -423,8 +429,9 @@ const EVENT_HEARTBEAT_MS = 15_000;
 /**
  * Server-sent events of {@link LiveStatus}: the current status immediately,
  * then every change (sync progress, data version bumps, indexing backlog).
+ * Disconnects unsubscribe, so ingest winds down once no page is listening.
  */
-function liveEventStream(headers: Record<string, string>): Response {
+function liveEventStream(headers: Record<string, string>, signal: AbortSignal): Response {
 	const live = statsLive();
 	// Ingest starts when the first page connects, not when the server binds.
 	live.start();
@@ -432,19 +439,26 @@ function liveEventStream(headers: Record<string, string>): Response {
 	let cleanup = () => {};
 	const stream = new ReadableStream<Uint8Array>({
 		start(controller) {
-			const send = (status: LiveStatus) => {
-				controller.enqueue(encoder.encode(`data: ${JSON.stringify(status)}\n\n`));
+			const write = (chunk: string) => {
+				try {
+					controller.enqueue(encoder.encode(chunk));
+				} catch {
+					// Stream already closed: the client left without a cancel.
+					cleanup();
+				}
 			};
-			send(live.status());
-			const unsubscribe = live.subscribe(send);
-			const heartbeat = setInterval(
-				() => controller.enqueue(encoder.encode(": keep-alive\n\n")),
-				EVENT_HEARTBEAT_MS,
-			);
+			write(`data: ${JSON.stringify(live.status())}\n\n`);
+			const unsubscribe = live.subscribe((_status, frame) => write(`data: ${frame}\n\n`));
+			const heartbeat = setInterval(() => write(": keep-alive\n\n"), EVENT_HEARTBEAT_MS);
+			const onAbort = () => cleanup();
 			cleanup = () => {
+				cleanup = () => {};
 				unsubscribe();
 				clearInterval(heartbeat);
+				signal.removeEventListener("abort", onAbort);
 			};
+			if (signal.aborted) cleanup();
+			else signal.addEventListener("abort", onAbort, { once: true });
 		},
 		cancel() {
 			cleanup();
@@ -460,19 +474,18 @@ function liveEventStream(headers: Record<string, string>): Response {
 	});
 }
 
-/**
- * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
- */
+/** A dashboard this process started or found; `port` is where it listens, which may differ from the one requested. */
 export interface StatsServerHandle {
 	hostname: string;
 	port: number;
 	stop: () => void;
 }
 
-// Dashboards this process already bound, keyed by requested `hostname:port`.
-// A second in-process start (e.g. `/trace` twice in one session) must return
-// the live handle: probing our own port can time out under load and would
-// then dead-end in the reclaim path's self-PID guard.
+// Dashboards this process already bound, keyed by requested and bound
+// `hostname:port`. A second in-process start (e.g. `/trace` twice in one
+// session, or a caller passing back a fallback port) must return the live
+// handle: probing our own port can time out under load and would then start
+// yet another dashboard on a fallback port.
 const activeServers = new Map<string, StatsServerHandle>();
 /** Dashboards bound by this process (any port); background ingest stops when the last one does. */
 let liveServers = 0;
@@ -482,30 +495,34 @@ export interface StartServerOptions {
 	judge?: StatsJudgeProvider;
 }
 
+/**
+ * Start the dashboard on `port`, or reuse the current dashboard already serving it.
+ * An older dashboard there is stopped and replaced; any other holder (a foreign
+ * program, or a dashboard too busy to answer the identity probe) is left running
+ * and the dashboard binds an ephemeral port instead.
+ */
 export async function startServer(
 	port = 3847,
 	hostname = STATS_DASHBOARD_HOSTNAME,
 	options: StartServerOptions = {},
 ): Promise<StatsServerHandle> {
 	if (options.judge) setStatsJudgeProvider(options.judge);
-	const activeKey = `${hostname}:${port}`;
+	const requestedKey = `${hostname}:${port}`;
 	if (port !== 0) {
-		const active = activeServers.get(activeKey);
+		const active = activeServers.get(requestedKey);
 		if (active) return active;
 	}
 	await ensureClientBuild();
-	const preparation = await prepareStatsPort(port, hostname);
-	if (preparation === "reuse") {
-		return { hostname, port, stop: () => {} };
-	}
 	const register = (server: Server<undefined>): StatsServerHandle => {
 		liveServers++;
 		let stopped = false;
+		const boundPort = server.port ?? port;
+		const keys = port === 0 ? [`${hostname}:${boundPort}`] : [requestedKey, `${hostname}:${boundPort}`];
 		const handle: StatsServerHandle = {
 			hostname,
-			port: server.port ?? port,
+			port: boundPort,
 			stop: () => {
-				activeServers.delete(activeKey);
+				for (const key of keys) activeServers.delete(key);
 				server.stop(true);
 				if (stopped) return;
 				stopped = true;
@@ -513,26 +530,31 @@ export async function startServer(
 				if (--liveServers === 0) statsLive().stop();
 			},
 		};
-		if (port !== 0) activeServers.set(activeKey, handle);
+		for (const key of keys) activeServers.set(key, handle);
 		return handle;
 	};
 
+	let claim = await prepareStatsPort(port, hostname);
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+		claim = await recoverStatsPort(port, hostname);
+	}
+	if (claim === "reuse") return { hostname, port, stop: () => {} };
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+	}
+	logger.warn("Stats dashboard port is held by another process; serving on an ephemeral port", { hostname, port });
+	return register(createDashboardServer(0, hostname));
+}
+
+/** {@link createDashboardServer}, or null when the port is already in use. */
+function bindDashboardServer(port: number, hostname: string): Server<undefined> | null {
 	try {
-		return register(createDashboardServer(port, hostname));
+		return createDashboardServer(port, hostname);
 	} catch (error) {
-		if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
-
-		const recovery = await recoverStatsPort(port, hostname);
-		if (recovery === "reuse") {
-			return { hostname, port, stop: () => {} };
-		}
-
-		try {
-			return register(createDashboardServer(port, hostname));
-		} catch (retryError) {
-			throw new Error(`Failed to start stats dashboard on ${hostname}:${port} after reclaiming it.`, {
-				cause: retryError,
-			});
-		}
+		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+		throw error;
 	}
 }

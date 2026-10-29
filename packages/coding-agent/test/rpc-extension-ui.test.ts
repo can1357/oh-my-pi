@@ -7,6 +7,7 @@ import {
 	type RpcExtensionUIResponse,
 	requestRpcAskDialog,
 	requestRpcDialog,
+	requestRpcInput,
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 
@@ -175,6 +176,105 @@ await runRpcMode(session, {
 		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
 	}, 30_000);
 
+	/** Spawns an RPC runtime whose extension awaits a `confirm` in `session_start` and has a `/probe` command. */
+	async function spawnStartupDialogRuntime(temp: TempDir) {
+		const fixturePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		await Bun.write(
+			fixturePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+globalThis.fetch = async () => { throw new Error("Offline UI fixture refuses network"); };
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  toolNames: [],
+  enableMCP: false,
+  enableLsp: false,
+  disableExtensionDiscovery: true,
+  settings: Settings.isolated({ "compaction.enabled": false }),
+  extensions: [pi => {
+    pi.registerCommand("probe", {
+      // A command's context is built per call, so it sees whether set_ask_dialog took effect.
+      handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
+    });
+    pi.on("session_start", async (_event, ctx) => {
+      ctx.ui.notify(String(await ctx.ui.confirm("Trust?", "startup")));
+    });
+  }],
+});
+await runRpcMode(session);
+`,
+		);
+		return Bun.spawn([process.execPath, fixturePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 20_000,
+		});
+	}
+
+	it("answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let confirmId: unknown;
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+				confirmId = frame.id;
+				// Held until startup finishes (had one run at once, its response would precede the confirm's
+				// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
+				for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "response" && frame.id === "ask") {
+				seen.push("ask");
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			} else if (frame.type === "response" && typeof frame.id === "string" && /^(s\d|p)$/.test(frame.id)) {
+				seen.push(`${frame.id}:${frame.success}`);
+				// Drain stdout to its end: closing the reader early would break the child's output pipe.
+				if (frame.id === "s3") child.stdin.end();
+			}
+		}
+		await child.exited;
+		// The probe's own frames race the later state responses; every other frame's order is fixed.
+		expect(
+			seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
+			await stderr,
+		).toEqual(["ask", "true", "s1:true", "s2:true", "s3:true"]);
+		expect(seen).toContain("askDialog:function");
+	}, 30_000);
+
+	it("rejects a dialog session_start awaits when stdin closes, so the process still exits", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-eof-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		// Read to the end of stdout: closing it early would fail the child's output, not exercise the EOF.
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (isRecord(frame) && frame.type === "extension_ui_request" && frame.method === "confirm") child.stdin.end();
+		}
+		const exitCode = await child.exited;
+		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
+	}, 30_000);
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -254,7 +354,51 @@ await runRpcMode(session, {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("rejects secret login input without emitting ordinary input while ordinary OAuth input works", async () => {
+	it("emits secret in extension_ui_request when dialogOptions.secret is provided", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+
+		// 1. undefined secret: omitted from wire payload
+		const unmaskedResult = requestRpcInput(pendingRequests, output, "Username", "e.g. alice");
+		const unmaskedRequest = output.mock.calls[0]?.[0];
+		expect(unmaskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "Username",
+			placeholder: "e.g. alice",
+		});
+		expect(unmaskedRequest).not.toHaveProperty("secret");
+		respond(pendingRequests, requireRequest(unmaskedRequest).id, { value: "alice" });
+		await unmaskedResult;
+
+		// 2. secret: true: included in wire payload as secret: true
+		const maskedResult = requestRpcInput(pendingRequests, output, "API Key", undefined, { secret: true });
+		const maskedRequest = output.mock.calls[1]?.[0];
+		expect(maskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "API Key",
+			secret: true,
+		});
+		respond(pendingRequests, requireRequest(maskedRequest).id, { value: "secret-token" });
+		await maskedResult;
+
+		// 3. secret: false: explicitly passed as secret: false
+		const explicitUnmaskedResult = requestRpcInput(pendingRequests, output, "Public Note", undefined, {
+			secret: false,
+		});
+		const explicitUnmaskedRequest = output.mock.calls[2]?.[0];
+		expect(explicitUnmaskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "Public Note",
+			secret: false,
+		});
+		respond(pendingRequests, requireRequest(explicitUnmaskedRequest).id, { value: "hello" });
+		await explicitUnmaskedResult;
+	});
+
+	it("rejects secret login input, completes ordinary OAuth input, and logs the stored account out", async () => {
 		await using temp = await TempDir.create("@rpc-login-");
 		const extensionPath = temp.join("login.mjs");
 		await Bun.write(
@@ -262,8 +406,8 @@ await runRpcMode(session, {
 			`
 export default function(pi) {
   globalThis.fetch = async () => { throw new Error("Offline login fixture refuses network"); };
-  for (const secret of [true, false]) {
-    const id = secret ? "rpc-secret" : "rpc-ordinary";
+  // rpc-alias is a second login for rpc-ordinary's credentials, like openai-codex-device.
+  for (const [id, secret, storeCredentialsAs] of [["rpc-secret", true], ["rpc-ordinary", false], ["rpc-alias", false, "rpc-ordinary"]]) {
     pi.registerProvider(id, {
       baseUrl: "http://127.0.0.1:9/v1",
       api: "openai-completions",
@@ -278,6 +422,7 @@ export default function(pi) {
       }],
       oauth: {
         name: id,
+        storeCredentialsAs,
         login: async callbacks => {
           callbacks.onAuth({ url: "https://example.invalid/authorize" });
           return callbacks.onPrompt({ message: id, ...(secret ? { secret: true } : {}) });
@@ -325,7 +470,13 @@ export default function(pi) {
 		const inputTitles: string[] = [];
 		let secretResponse: unknown;
 		let ordinaryResponse: unknown;
+		let loggedInProvidersResponse: unknown;
+		let noProviderResponse: unknown;
+		let accountsResponse: unknown;
+		let logoutResponse: unknown;
+		let staleLogoutResponse: unknown;
 		let providersResponse: unknown;
+		let loggedOutCredentialId: unknown;
 		const send = async (frame: object) => {
 			child.stdin.write(`${JSON.stringify(frame)}\n`);
 			await child.stdin.flush();
@@ -346,6 +497,34 @@ export default function(pi) {
 					await send({ type: "login", providerId: "rpc-ordinary", id: "ordinary" });
 				} else if (frame.type === "response" && frame.id === "ordinary") {
 					ordinaryResponse = frame;
+					await send({ type: "get_login_providers", id: "loggedIn" });
+				} else if (frame.type === "response" && frame.id === "loggedIn") {
+					loggedInProvidersResponse = frame;
+					await send({ type: "get_logout_accounts", providerId: "rpc-alias", id: "accounts" });
+				} else if (frame.type === "response" && frame.id === "accounts") {
+					accountsResponse = frame;
+					const accounts = isRecord(frame.data) && Array.isArray(frame.data.accounts) ? frame.data.accounts : [];
+					loggedOutCredentialId = isRecord(accounts[0]) ? accounts[0].credentialId : undefined;
+					await send({
+						type: "logout",
+						providerId: "rpc-alias",
+						credentialId: loggedOutCredentialId,
+						id: "logout",
+					});
+				} else if (frame.type === "response" && frame.id === "logout") {
+					logoutResponse = frame;
+					await send({
+						type: "logout",
+						providerId: "rpc-ordinary",
+						credentialId: loggedOutCredentialId,
+						id: "stale",
+					});
+				} else if (frame.type === "response" && frame.id === "stale") {
+					staleLogoutResponse = frame;
+					// Without a provider the credential store would list every provider's accounts.
+					await send({ type: "get_logout_accounts", id: "noProvider" });
+				} else if (frame.type === "response" && frame.id === "noProvider") {
+					noProviderResponse = frame;
 					await send({ type: "get_login_providers", id: "providers" });
 				} else if (frame.type === "response" && frame.id === "providers") {
 					providersResponse = frame;
@@ -368,12 +547,33 @@ export default function(pi) {
 		});
 		expect(inputTitles).toEqual(["rpc-ordinary"]);
 		expect(ordinaryResponse).toMatchObject({ type: "response", command: "login", success: true });
+		expect(loggedInProvidersResponse).toMatchObject({
+			data: {
+				providers: expect.arrayContaining([
+					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+					// The alias stores under rpc-ordinary, so it is authenticated by the same credential.
+					expect.objectContaining({ id: "rpc-alias", authenticated: true }),
+				]),
+			},
+		});
+		expect(accountsResponse).toMatchObject({
+			success: true,
+			data: { accounts: [expect.objectContaining({ provider: "rpc-ordinary", active: true })] },
+		});
+		expect(logoutResponse).toEqual({ id: "logout", type: "response", command: "logout", success: true, data: {} });
+		expect(staleLogoutResponse).toMatchObject({
+			command: "logout",
+			success: false,
+			error: expect.stringContaining("is not stored for rpc-ordinary"),
+		});
+		expect(noProviderResponse).toMatchObject({ command: "get_logout_accounts", success: false });
 		expect(providersResponse).toMatchObject({
 			success: true,
 			data: {
 				providers: expect.arrayContaining([
 					expect.objectContaining({ id: "rpc-secret", authenticated: false }),
-					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+					expect.objectContaining({ id: "rpc-ordinary", authenticated: false }),
+					expect.objectContaining({ id: "rpc-alias", authenticated: false }),
 				]),
 			},
 		});

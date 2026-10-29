@@ -47,6 +47,15 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("alfa beta ");
 		});
 
+		it("deletes the next word on ctrl+delete as xterm sends it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("foo bar baz");
+			editor.handleInput("\x01"); // Ctrl+A
+			for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C"); // After "foo"
+			editor.handleInput("\x1b[3;5~"); // xterm/Tern Ctrl+Delete
+			expect(editor.getText()).toBe("foo baz");
+		});
+
 		it("deletes the next word for Ghostty's physical Option+Forward-Delete wire", () => {
 			setKittyProtocolActive(true);
 			try {

@@ -1,11 +1,9 @@
-use std::marker::PhantomData;
-#[cfg(feature = "napi6")]
-use std::ptr;
+use std::{marker::PhantomData, ptr};
 
 use serde_json::{Map, Number, Value};
 
 use crate::{
-  bindgen_runtime::{Null, Object},
+  bindgen_runtime::{Array, Null, Object},
   check_status, sys, type_of, Env, Error, Result, Status, ValueType,
 };
 
@@ -13,100 +11,274 @@ use crate::{
 use super::BigInt;
 use super::{FromNapiValue, ToNapiValue};
 
+/// Maximum nesting depth allowed when converting between `serde_json::Value`
+/// and JavaScript values. Mirrors `serde_json`'s default recursion limit so a
+/// cyclic or deeply nested value fails with a catchable error instead of
+/// overflowing the native stack.
+const MAX_JSON_DEPTH: u32 = 128;
+
+/// Maximum number of `serde_json::Value` nodes produced or consumed by a
+/// single conversion. A depth limit alone cannot stop a shared-object DAG —
+/// `{a: o, b: o}` nested 60 deep stays under 128 levels but expands to ~2^60
+/// traversals — so the total work is budgeted too.
+const MAX_JSON_NODES: usize = 1_000_000;
+
+fn max_json_depth_error() -> Error {
+  Error::new(
+    Status::InvalidArg,
+    "Exceeded maximum JSON nesting depth".to_owned(),
+  )
+}
+
+fn max_json_nodes_error() -> Error {
+  Error::new(
+    Status::InvalidArg,
+    "Exceeded maximum JSON value count".to_owned(),
+  )
+}
+
+fn consume_json_node(remaining_nodes: &mut usize) -> Result<()> {
+  if *remaining_nodes == 0 {
+    return Err(max_json_nodes_error());
+  }
+  *remaining_nodes -= 1;
+  Ok(())
+}
+
 impl ToNapiValue for &Value {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
-    match val {
-      Value::Null => unsafe { Null::to_napi_value(env, Null) },
-      Value::Bool(b) => unsafe { ToNapiValue::to_napi_value(env, b) },
-      Value::Number(n) => unsafe { ToNapiValue::to_napi_value(env, n) },
-      Value::String(s) => unsafe { ToNapiValue::to_napi_value(env, s) },
-      Value::Array(arr) => unsafe { ToNapiValue::to_napi_value(env, arr) },
-      Value::Object(obj) => unsafe { ToNapiValue::to_napi_value(env, obj) },
+    let mut remaining_nodes = MAX_JSON_NODES;
+    unsafe { value_to_napi_value(env, val, MAX_JSON_DEPTH, &mut remaining_nodes) }
+  }
+}
+
+unsafe fn value_to_napi_value(
+  env: sys::napi_env,
+  val: &Value,
+  remaining_depth: u32,
+  remaining_nodes: &mut usize,
+) -> Result<sys::napi_value> {
+  consume_json_node(remaining_nodes)?;
+  match val {
+    Value::Null => unsafe { Null::to_napi_value(env, Null) },
+    Value::Bool(b) => unsafe { ToNapiValue::to_napi_value(env, b) },
+    Value::Number(n) => unsafe { ToNapiValue::to_napi_value(env, n) },
+    Value::String(s) => unsafe { ToNapiValue::to_napi_value(env, s) },
+    Value::Array(arr) => {
+      if remaining_depth == 0 {
+        return Err(max_json_depth_error());
+      }
+      let js_arr = Array::new(env, arr.len() as u32)?;
+      for (index, element) in arr.iter().enumerate() {
+        let napi_val =
+          unsafe { value_to_napi_value(env, element, remaining_depth - 1, remaining_nodes)? };
+        check_status!(
+          unsafe { sys::napi_set_element(env, js_arr.inner, index as u32, napi_val) },
+          "Failed to set element with index `{}`",
+          index,
+        )?;
+      }
+      Ok(js_arr.inner)
+    }
+    Value::Object(obj) => {
+      if remaining_depth == 0 {
+        return Err(max_json_depth_error());
+      }
+      unsafe { map_to_napi_value(env, obj, remaining_depth, remaining_nodes) }
     }
   }
 }
 
+unsafe fn map_to_napi_value(
+  env: sys::napi_env,
+  val: &Map<String, Value>,
+  remaining_depth: u32,
+  remaining_nodes: &mut usize,
+) -> Result<sys::napi_value> {
+  let obj = Object::new(&Env::from(env))?;
+
+  for (k, v) in val.iter() {
+    let napi_val = unsafe { value_to_napi_value(env, v, remaining_depth - 1, remaining_nodes)? };
+    let mut property_key = ptr::null_mut();
+    check_status!(
+      unsafe {
+        sys::napi_create_string_utf8(env, k.as_ptr().cast(), k.len() as isize, &mut property_key)
+      },
+      "Failed to create property key with `{k}`"
+    )?;
+    check_status!(
+      unsafe { sys::napi_set_property(env, obj.0.value, property_key, napi_val) },
+      "Failed to set property with field `{k}`"
+    )?;
+  }
+
+  Ok(obj.0.value)
+}
+
 impl ToNapiValue for Value {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
-    ToNapiValue::to_napi_value(env, &val)
+    let mut val = std::mem::ManuallyDrop::new(val);
+    let mut remaining_nodes = MAX_JSON_NODES;
+    match unsafe { value_to_napi_value(env, &val, MAX_JSON_DEPTH, &mut remaining_nodes) } {
+      Ok(v) => {
+        // A converted Value never exceeds the depth budget, so the normal
+        // recursive drop cannot overflow the stack.
+        drop(unsafe { std::mem::ManuallyDrop::take(&mut val) });
+        Ok(v)
+      }
+      Err(e) => {
+        drop_serde_value_iteratively(unsafe { std::mem::ManuallyDrop::take(&mut val) });
+        Err(e)
+      }
+    }
+  }
+}
+
+/// Drain a `serde_json::Value` without recursive `Drop` glue, so an
+/// iteratively-constructed tree deeper than the native stack does not
+/// overflow while unwinding a failed conversion.
+fn drop_serde_value_iteratively(root: Value) {
+  let mut stack = vec![root];
+  while let Some(value) = stack.pop() {
+    match value {
+      Value::Array(elements) => stack.extend(elements),
+      Value::Object(map) => stack.extend(map.into_values()),
+      _ => {}
+    }
   }
 }
 
 impl FromNapiValue for Value {
   unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-    let ty = type_of!(env, napi_val)?;
-    let val = match ty {
-      ValueType::Boolean => Value::Bool(unsafe { bool::from_napi_value(env, napi_val)? }),
-      ValueType::Number => Value::Number(unsafe { Number::from_napi_value(env, napi_val)? }),
-      ValueType::String => Value::String(unsafe { String::from_napi_value(env, napi_val)? }),
-      ValueType::Object => {
-        let mut is_arr = false;
-        check_status!(
-          unsafe { sys::napi_is_array(env, napi_val, &mut is_arr) },
-          "Failed to detect whether given js is an array"
-        )?;
-
-        if is_arr {
-          Value::Array(unsafe { Vec::<Value>::from_napi_value(env, napi_val)? })
-        } else {
-          Value::Object(unsafe { Map::<String, Value>::from_napi_value(env, napi_val)? })
-        }
-      }
-      #[cfg(feature = "napi6")]
-      ValueType::BigInt => {
-        let n = unsafe { BigInt::from_napi_value(env, napi_val)? };
-        // negative
-        if n.sign_bit {
-          let (v, lossless) = n.get_i64();
-          if lossless {
-            Value::Number(v.into())
-          } else {
-            Value::String(to_string(env, napi_val)?)
-          }
-        } else {
-          let (_, v, lossless) = n.get_u64();
-          if lossless {
-            Value::Number(v.into())
-          } else {
-            Value::String(to_string(env, napi_val)?)
-          }
-        }
-      }
-      ValueType::Null => Value::Null,
-      ValueType::Function => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "JS functions cannot be represented as a serde_json::Value".to_owned(),
-        ))
-      }
-      ValueType::Undefined => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "undefined cannot be represented as a serde_json::Value".to_owned(),
-        ))
-      }
-      ValueType::Symbol => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "JS symbols cannot be represented as a serde_json::Value".to_owned(),
-        ))
-      }
-      ValueType::External => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "External JS objects cannot be represented as a serde_json::Value".to_owned(),
-        ))
-      }
-      _ => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          "Unknown JS variables cannot be represented as a serde_json::Value".to_owned(),
-        ))
-      }
-    };
-
-    Ok(val)
+    let mut remaining_nodes = MAX_JSON_NODES;
+    unsafe { value_from_napi_value(env, napi_val, MAX_JSON_DEPTH, &mut remaining_nodes) }
   }
+}
+
+unsafe fn value_from_napi_value(
+  env: sys::napi_env,
+  napi_val: sys::napi_value,
+  remaining_depth: u32,
+  remaining_nodes: &mut usize,
+) -> Result<Value> {
+  consume_json_node(remaining_nodes)?;
+  let ty = type_of!(env, napi_val)?;
+  let val = match ty {
+    ValueType::Boolean => Value::Bool(unsafe { bool::from_napi_value(env, napi_val)? }),
+    ValueType::Number => Value::Number(unsafe { Number::from_napi_value(env, napi_val)? }),
+    ValueType::String => Value::String(unsafe { String::from_napi_value(env, napi_val)? }),
+    ValueType::Object => {
+      if remaining_depth == 0 {
+        return Err(max_json_depth_error());
+      }
+      let mut is_arr = false;
+      check_status!(
+        unsafe { sys::napi_is_array(env, napi_val, &mut is_arr) },
+        "Failed to detect whether given js is an array"
+      )?;
+
+      if is_arr {
+        let arr = unsafe { Array::from_napi_value(env, napi_val)? };
+        let mut vec = Vec::with_capacity(arr.len() as usize);
+        for i in 0..arr.len() {
+          let mut element = ptr::null_mut();
+          check_status!(
+            unsafe { sys::napi_get_element(env, arr.inner, i, &mut element) },
+            "Failed to get element with index `{}`",
+            i,
+          )?;
+          vec.push(unsafe {
+            value_from_napi_value(env, element, remaining_depth - 1, remaining_nodes)?
+          });
+        }
+        Value::Array(vec)
+      } else {
+        Value::Object(unsafe {
+          map_from_napi_value(env, napi_val, remaining_depth, remaining_nodes)?
+        })
+      }
+    }
+    #[cfg(feature = "napi6")]
+    ValueType::BigInt => {
+      let n = unsafe { BigInt::from_napi_value(env, napi_val)? };
+      // negative
+      if n.sign_bit {
+        let (v, lossless) = n.get_i64();
+        if lossless {
+          Value::Number(v.into())
+        } else {
+          Value::String(to_string(env, napi_val)?)
+        }
+      } else {
+        let (_, v, lossless) = n.get_u64();
+        if lossless {
+          Value::Number(v.into())
+        } else {
+          Value::String(to_string(env, napi_val)?)
+        }
+      }
+    }
+    ValueType::Null => Value::Null,
+    ValueType::Function => {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "JS functions cannot be represented as a serde_json::Value".to_owned(),
+      ))
+    }
+    ValueType::Undefined => {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "undefined cannot be represented as a serde_json::Value".to_owned(),
+      ))
+    }
+    ValueType::Symbol => {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "JS symbols cannot be represented as a serde_json::Value".to_owned(),
+      ))
+    }
+    ValueType::External => {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "External JS objects cannot be represented as a serde_json::Value".to_owned(),
+      ))
+    }
+    _ => {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "Unknown JS variables cannot be represented as a serde_json::Value".to_owned(),
+      ))
+    }
+  };
+
+  Ok(val)
+}
+
+unsafe fn map_from_napi_value(
+  env: sys::napi_env,
+  napi_val: sys::napi_value,
+  remaining_depth: u32,
+  remaining_nodes: &mut usize,
+) -> Result<Map<String, Value>> {
+  let obj = Object(
+    crate::Value {
+      env,
+      value: napi_val,
+      value_type: ValueType::Object,
+    },
+    PhantomData,
+  );
+
+  let mut map = Map::new();
+  for key in Object::keys(&obj)?.into_iter() {
+    if let Some(val) = obj.get_inner(&key)? {
+      map.insert(key, unsafe {
+        value_from_napi_value(env, val, remaining_depth - 1, remaining_nodes)?
+      });
+    }
+  }
+
+  Ok(map)
 }
 
 #[cfg(feature = "napi6")]
@@ -122,41 +294,42 @@ fn to_string(env: sys::napi_env, napi_val: sys::napi_value) -> Result<String> {
 
 impl ToNapiValue for &Map<String, Value> {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
-    let mut obj = Object::new(&Env::from(env))?;
-
-    for (k, v) in val.into_iter() {
-      obj.set(k, v)?;
-    }
-
-    unsafe { Object::to_napi_value(env, obj) }
+    let mut remaining_nodes = MAX_JSON_NODES;
+    consume_json_node(&mut remaining_nodes)?;
+    unsafe { map_to_napi_value(env, val, MAX_JSON_DEPTH, &mut remaining_nodes) }
   }
 }
 
 impl ToNapiValue for Map<String, Value> {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
-    ToNapiValue::to_napi_value(env, &val)
+    let mut val = std::mem::ManuallyDrop::new(val);
+    let mut remaining_nodes = MAX_JSON_NODES;
+    if let Err(e) = consume_json_node(&mut remaining_nodes) {
+      drop_serde_value_iteratively(Value::Object(unsafe {
+        std::mem::ManuallyDrop::take(&mut val)
+      }));
+      return Err(e);
+    }
+    match unsafe { map_to_napi_value(env, &val, MAX_JSON_DEPTH, &mut remaining_nodes) } {
+      Ok(v) => {
+        drop(unsafe { std::mem::ManuallyDrop::take(&mut val) });
+        Ok(v)
+      }
+      Err(e) => {
+        drop_serde_value_iteratively(Value::Object(unsafe {
+          std::mem::ManuallyDrop::take(&mut val)
+        }));
+        Err(e)
+      }
+    }
   }
 }
 
 impl FromNapiValue for Map<String, Value> {
   unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-    let obj = Object(
-      crate::Value {
-        env,
-        value: napi_val,
-        value_type: ValueType::Object,
-      },
-      PhantomData,
-    );
-
-    let mut map = Map::new();
-    for key in Object::keys(&obj)?.into_iter() {
-      if let Some(val) = obj.get(&key)? {
-        map.insert(key, val);
-      }
-    }
-
-    Ok(map)
+    let mut remaining_nodes = MAX_JSON_NODES;
+    consume_json_node(&mut remaining_nodes)?;
+    unsafe { map_from_napi_value(env, napi_val, MAX_JSON_DEPTH, &mut remaining_nodes) }
   }
 }
 

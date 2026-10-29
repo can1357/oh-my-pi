@@ -8,6 +8,11 @@
  * `package.json#version` into that slot after the build, so a version bump
  * never edits a Rust input and never forces the addon crate to recompile.
  *
+ * Patching a signed Mach-O invalidates the page hashes of its ad-hoc code
+ * signature, which arm64 macOS refuses to load, so the stamp refreshes them in
+ * place ({@link refreshAdhocSignature}) on every host: darwin addons
+ * cross-compiled on Linux are stamped there too.
+ *
  * Usage: bun scripts/stamp-native-version.ts <addon.node>... [--version <v>] [--no-sign]
  * (default version: packages/natives/package.json#version; `--no-sign` leaves
  * Mach-O re-signing to the caller, e.g. Nix's `signIfRequired`).
@@ -42,6 +47,82 @@ function isMachO(bytes: Uint8Array): boolean {
 		magic === 0xcafebabe ||
 		magic === 0xbebafeca
 	);
+}
+
+const MH_MAGIC_64 = 0xfeedfacf;
+const LC_CODE_SIGNATURE = 0x1d;
+const CSMAGIC_EMBEDDED_SIGNATURE = 0xfade0cc0;
+const CSMAGIC_CODEDIRECTORY = 0xfade0c02;
+const CS_ADHOC = 0x2;
+/** CodeDirectory hashType → digest algorithm and stored hash length. */
+const CD_HASHES: Record<number, { algorithm: "sha1" | "sha256"; size: number }> = {
+	1: { algorithm: "sha1", size: 20 },
+	2: { algorithm: "sha256", size: 32 },
+	3: { algorithm: "sha256", size: 20 }, // SHA-256 truncated to 20 bytes
+};
+
+/**
+ * Recompute the code page hashes of a thin 64-bit Mach-O's embedded ad-hoc
+ * signature in place, so it stays valid after the image was patched. Returns
+ * false for an unsigned image (nothing to refresh).
+ *
+ * Only page hashes change: an ad-hoc signature (the linker's, or `codesign -s
+ * -`'s) pins nothing else to the file's bytes, while special slots hash
+ * signature blobs this leaves alone. Throws for fat or 32-bit images, and for
+ * a signature by an identity, whose CMS signature over the code directory
+ * would no longer verify — those must be re-signed with the identity.
+ */
+function refreshAdhocSignature(bytes: Uint8Array): boolean {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (view.getUint32(0, true) !== MH_MAGIC_64) {
+		throw new Error("native version stamp: only thin 64-bit Mach-O images can be re-signed in place");
+	}
+	const ncmds = view.getUint32(16, true);
+	let cursor = 32; // sizeof(mach_header_64)
+	let signature: { offset: number; size: number } | undefined;
+	for (let i = 0; i < ncmds; i++) {
+		const cmd = view.getUint32(cursor, true);
+		if (cmd === LC_CODE_SIGNATURE) {
+			signature = { offset: view.getUint32(cursor + 8, true), size: view.getUint32(cursor + 12, true) };
+		}
+		cursor += view.getUint32(cursor + 4, true);
+	}
+	if (!signature) return false;
+	if (view.getUint32(signature.offset, false) !== CSMAGIC_EMBEDDED_SIGNATURE) {
+		throw new Error("native version stamp: LC_CODE_SIGNATURE does not point at an embedded signature");
+	}
+	const count = view.getUint32(signature.offset + 8, false);
+	let refreshed = false;
+	for (let i = 0; i < count; i++) {
+		const cd = signature.offset + view.getUint32(signature.offset + 16 + i * 8, false);
+		if (view.getUint32(cd, false) !== CSMAGIC_CODEDIRECTORY) continue;
+		if ((view.getUint32(cd + 12, false) & CS_ADHOC) === 0) {
+			throw new Error(
+				"native version stamp: the image is signed by an identity; re-sign it with that identity instead",
+			);
+		}
+		const hashOffset = view.getUint32(cd + 16, false);
+		const nCodeSlots = view.getUint32(cd + 28, false);
+		const codeLimit = view.getUint32(cd + 32, false);
+		const hash = CD_HASHES[view.getUint8(cd + 37)];
+		if (!hash || view.getUint8(cd + 36) !== hash.size) {
+			throw new Error(`native version stamp: unsupported code directory hash type ${view.getUint8(cd + 37)}`);
+		}
+		const pageSize = 2 ** view.getUint8(cd + 39);
+		for (let page = 0; page < nCodeSlots; page++) {
+			const start = page * pageSize;
+			const digest = Bun.CryptoHasher.hash(
+				hash.algorithm,
+				bytes.subarray(start, Math.min(start + pageSize, codeLimit)),
+			).subarray(0, hash.size);
+			const slot = cd + hashOffset + page * hash.size;
+			if (!digest.equals(bytes.subarray(slot, slot + hash.size))) {
+				bytes.set(digest, slot);
+				refreshed = true;
+			}
+		}
+	}
+	return refreshed;
 }
 
 /** Whether `bytes` carries the post-link version stamp slot (addons built before it do not). */
@@ -87,12 +168,9 @@ export function stampNativeBytes(bytes: Buffer, version: string): boolean {
 /**
  * Stamp the addon at `filePath` with `version`, replacing the file atomically.
  *
- * Patching a Mach-O invalidates the linker's ad-hoc code signature, which
- * arm64 macOS refuses to dlopen, so darwin hosts re-sign ad hoc. A non-darwin
- * host cannot re-sign, so it refuses to change a Mach-O (an already-matching
- * stamp is a no-op and passes). `sign: false` skips re-signing on every host
- * for callers that sign the result themselves (the Nix build has no system
- * `codesign` and signs through its own hook).
+ * A signed Mach-O gets its ad-hoc signature refreshed in the same write
+ * ({@link refreshAdhocSignature}); `sign: false` skips that for callers that
+ * sign the result themselves (the Nix build signs through its own hook).
  */
 export async function stampNativeVersion(
 	filePath: string,
@@ -100,26 +178,12 @@ export async function stampNativeVersion(
 	{ sign = true }: { sign?: boolean } = {},
 ): Promise<void> {
 	const bytes = await fs.readFile(filePath);
-	const resign = sign && isMachO(bytes);
 	if (!stampNativeBytes(bytes, version)) return;
-	if (resign && process.platform !== "darwin") {
-		throw new Error(
-			`native version stamp: ${filePath} is a Mach-O image; stamping it requires re-signing, which only a darwin host can do. ` +
-				"Stamp darwin addons on a macOS runner.",
-		);
-	}
+	if (sign && isMachO(bytes)) refreshAdhocSignature(bytes);
 	const stat = await fs.stat(filePath);
 	const tempPath = `${filePath}.stamp.${process.pid}`;
 	try {
 		await fs.writeFile(tempPath, bytes, { mode: stat.mode & 0o777 });
-		if (resign) {
-			const codesign = Bun.spawnSync(["codesign", "-s", "-", "-f", tempPath], { stdout: "pipe", stderr: "pipe" });
-			if (codesign.exitCode !== 0) {
-				throw new Error(
-					`codesign -s - -f ${tempPath} failed (exit ${codesign.exitCode}): ${codesign.stderr.toString().trim()}`,
-				);
-			}
-		}
 		await fs.rename(tempPath, filePath);
 	} catch (err) {
 		await fs.unlink(tempPath).catch(() => {});

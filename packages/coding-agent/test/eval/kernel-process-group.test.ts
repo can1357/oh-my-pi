@@ -47,6 +47,124 @@ describe("isSignalableProcessGroup", () => {
 	});
 });
 
+describe("BaseKernel stdin failures", () => {
+	test("settles an execution with a TransportError and retires the kernel when the stdin write rejects", async () => {
+		const exited = Promise.withResolvers<number>();
+		const proc = {
+			pid: undefined,
+			// A pending pipe write rejects with EPIPE once the runner's stdin is gone, while the process may still live.
+			stdin: {
+				write: () => Promise.reject(new Error("EPIPE: broken pipe, write")),
+				flush: () => undefined,
+				end: () => {},
+			},
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			exited: exited.promise,
+			kill: () => exited.resolve(0),
+		};
+		const kernel = new TestKernel();
+		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
+		try {
+			// No timeoutMs: before the fix this execution never settled.
+			const result = await kernel.execute("print(1)");
+			// Same mapping as a kernel exit: consumers read `error` only when status is "error".
+			expect(result.status).toBe("error");
+			expect(result.cancelled).toBe(true);
+			// Callers warn that completion is uncertain only for kernel-killed results.
+			expect(result.kernelKilled).toBe(true);
+			expect(result.error).toMatchObject({ name: "TransportError", value: "EPIPE: broken pipe, write" });
+			// The broken pipe is terminal: the kernel stops reporting alive (so the session replaces it) and is killed.
+			expect(kernel.isAlive()).toBe(false);
+			expect(await exited.promise).toBe(0);
+		} finally {
+			await kernel.shutdown({ timeoutMs: 50 });
+		}
+	});
+
+	test("retires the kernel when a write fails after its request was already aborted", async () => {
+		const exited = Promise.withResolvers<number>();
+		const write = Promise.withResolvers<number>();
+		const proc = {
+			pid: undefined,
+			stdin: { write: () => write.promise, flush: () => undefined, end: () => {} },
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			exited: exited.promise,
+			kill: () => exited.resolve(0),
+		};
+		const kernel = new TestKernel();
+		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
+		try {
+			const controller = new AbortController();
+			const request = kernel.submitRequest("tool-call", "payload", { signal: controller.signal });
+			controller.abort();
+			expect((await request).cancelled).toBe(true);
+			expect(kernel.isAlive()).toBe(true);
+
+			// The pipe breaks after the caller has gone: the kernel must still be retired.
+			write.reject(new Error("EPIPE: broken pipe, write"));
+			expect(await exited.promise).toBe(0);
+			expect(kernel.isAlive()).toBe(false);
+		} finally {
+			await kernel.shutdown({ timeoutMs: 50 });
+		}
+	});
+
+	test("fails a control request and retires the kernel when its stdin write rejects", async () => {
+		const exited = Promise.withResolvers<number>();
+		const proc = {
+			pid: undefined,
+			stdin: {
+				write: () => Promise.reject(new Error("EPIPE: broken pipe, write")),
+				flush: () => undefined,
+				end: () => {},
+			},
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			exited: exited.promise,
+			kill: () => exited.resolve(0),
+		};
+		const kernel = new TestKernel();
+		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
+		try {
+			// The control timeout is far beyond the test timeout: only the write failure can settle this.
+			await expect(kernel.requestControl("snapshot", undefined, 60_000)).rejects.toThrow("EPIPE");
+			expect(await exited.promise).toBe(0);
+			expect(kernel.isAlive()).toBe(false);
+		} finally {
+			await kernel.shutdown({ timeoutMs: 50 });
+		}
+	});
+
+	test("fails a control request and retires the kernel when its stdin write throws synchronously", async () => {
+		const exited = Promise.withResolvers<number>();
+		const proc = {
+			pid: undefined,
+			stdin: {
+				write: () => {
+					throw new Error("EPIPE: broken pipe, write");
+				},
+				flush: () => undefined,
+				end: () => {},
+			},
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			exited: exited.promise,
+			kill: () => exited.resolve(0),
+		};
+		const kernel = new TestKernel();
+		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
+		try {
+			await expect(kernel.requestControl("snapshot", undefined, 60_000)).rejects.toThrow("EPIPE");
+			expect(await exited.promise).toBe(0);
+			expect(kernel.isAlive()).toBe(false);
+		} finally {
+			await kernel.shutdown({ timeoutMs: 50 });
+		}
+	});
+});
+
 describe("killProcessGroup", () => {
 	test("never signals a degenerate group even when asked to", () => {
 		expect(killProcessGroup(0, "SIGKILL")).toBe(false);

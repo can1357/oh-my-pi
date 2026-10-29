@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
+import yieldDataErrorConflictMessage from "../prompts/tools/yield-data-error-conflict.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ToolSession } from ".";
@@ -163,15 +164,25 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Read the optional `error` argument. Strict-mode providers (OpenAI/Codex) send
- * omitted optionals as `null`; non-strict OpenAI-compatible backends routinely
- * fill the optional string with `""` next to a valid `data` payload. Both mean
- * "no error" — an empty string is never a usable failure reason.
+ * Read the optional `error` argument, trimmed. Strict-mode providers (OpenAI/Codex) send
+ * omitted optionals as `null`; non-strict OpenAI-compatible backends routinely fill the
+ * optional string with `""` (or a filler such as `"unused"`) next to a valid `data`
+ * payload. `null`, `undefined` and blank strings mean "no error". When `hasData` is true,
+ * a known filler string (see {@link PLACEHOLDER_YIELD_ERRORS}) also means "no error"; any
+ * other error next to `data` is returned so the caller rejects the conflict.
+ *
+ * Trimming changes two error-only yields on purpose: `{error:"  boom\n"}` now records
+ * `"boom"`, and `{error:"   "}` without data is an empty result that counts toward the
+ * empty-result retry budget (`#emptyResultFailures`) instead of aborting with an
+ * all-whitespace reason.
  */
-function parseYieldError(value: unknown): string | undefined {
-	if (value === undefined || value === null || value === "") return undefined;
-	if (typeof value === "string") return value;
-	throw new Error("error must be a string");
+function parseYieldError(value: unknown, options: { hasData: boolean }): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string") throw new Error("error must be a string");
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
+	if (options.hasData && isPlaceholderYieldError(trimmed)) return undefined;
+	return trimmed;
 }
 
 /**
@@ -182,6 +193,46 @@ function parseYieldError(value: unknown): string | undefined {
 function formatYieldLabels(labels: readonly string[]): string {
 	if (labels.length === 0) return '""';
 	return labels.map(label => `"${label}"`).join(", ");
+}
+
+/**
+ * Filler strings that non-strict OpenAI-compatible backends put into the optional `error`
+ * field when they have to fill every property next to a valid `data` payload. Consulted
+ * only when `data` is present (see {@link parseYieldError}); an error-only yield keeps its
+ * text as the failure reason. This is not a general error filter: do not grow it to hide
+ * genuine failure messages.
+ */
+const PLACEHOLDER_YIELD_ERRORS = new Set([
+	"ignore",
+	"ignored",
+	"n/a",
+	"none",
+	"not applicable",
+	"null",
+	"placeholder",
+	"undefined",
+	"unused",
+]);
+
+/** Whether an already-trimmed `error` string is one of {@link PLACEHOLDER_YIELD_ERRORS}. Only meaningful next to `data`. */
+function isPlaceholderYieldError(value: string): boolean {
+	return PLACEHOLDER_YIELD_ERRORS.has(value.toLowerCase());
+}
+
+function renderDataErrorConflictMessage(
+	errorMessage: string,
+	yieldType: string | string[] | undefined,
+	workPoolKey?: number,
+): string {
+	return prompt.render(yieldDataErrorConflictMessage, {
+		errorJson: JSON.stringify(errorMessage),
+		failureJson: JSON.stringify(
+			workPoolKey === undefined ? { error: errorMessage } : { key: workPoolKey, error: errorMessage },
+		),
+		typeJson: yieldType === undefined ? undefined : JSON.stringify(yieldType),
+		isWorkPool: workPoolKey !== undefined,
+		workPoolKey,
+	});
 }
 
 /**
@@ -250,6 +301,26 @@ function resolveWorkPoolYieldItem(items: readonly WorkPoolYieldItem[], value: un
 	throw new Error(`key must be one of: ${items.map(candidate => candidate.index).join(", ")}`);
 }
 
+/**
+ * Reject root argument keys `parameters` does not declare, skipping `null` (strict-mode
+ * filler). They are payload the model put beside `data`; dropping them would publish a
+ * success that silently lost part of the result.
+ *
+ * @throws naming every unsupported field and the allowed ones, so the model can resubmit.
+ */
+function assertSupportedRootFields(parameters: TSchema, args: Record<string, unknown>): void {
+	const declared = isPlainRecord(parameters) && isPlainRecord(parameters.properties) ? parameters.properties : {};
+	const unsupported: string[] = [];
+	for (const key in args) {
+		if (args[key] != null && !Object.hasOwn(declared, key)) unsupported.push(key);
+	}
+	if (unsupported.length === 0) return;
+	throw new Error(
+		`yield arguments carry unsupported root field(s) ${formatYieldLabels(unsupported)}; nothing was submitted. ` +
+			`Allowed root fields: ${formatYieldLabels(Object.keys(declared))}. Put the entire output inside \`data\`. ${YIELD_FORMAT_HINT}`,
+	);
+}
+
 function buildYieldParameters(dataSchema: Record<string, unknown>): Record<string, unknown> {
 	// `data` xor `error`, and "omitted data requires a `type`", are enforced in
 	// `execute()` at runtime, NOT in this schema: a top-level combinator
@@ -295,6 +366,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #normalizeData?: (value: unknown) => unknown;
+	readonly #normalizeSection?: (label: string, value: unknown) => unknown;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -325,6 +398,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
+		let normalizeData: ((value: unknown) => unknown) | undefined;
+		let normalizeSection: ((label: string, value: unknown) => unknown) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
@@ -354,6 +429,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (!schemaError && normalizedSchema !== undefined) {
 				const strictProbe = tryEnforceStrictSchema(normalizedSchema);
 				if (strictProbe.strict) {
+					if (validator) {
+						normalizeData = value => validator.normalize(value);
+						normalizeSection = (label, value) => validator.normalizeSection(label, value);
+					}
 					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
 				} else {
 					sanitizedSchema = normalizedSchema;
@@ -389,11 +468,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				looseRecordSchema(`Structured JSON output (schema processing failed: ${errorMsg})`),
 			);
 			validate = undefined;
+			normalizeData = undefined;
+			normalizeSection = undefined;
 			this.#schemaStrict = false;
 		}
 
 		this.#session = session;
 		this.#validate = validate;
+		this.#normalizeData = normalizeData;
+		this.#normalizeSection = normalizeSection;
 		this.#validateSection = validateSection;
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
@@ -437,16 +520,23 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		if (!isPlainRecord(params)) throw new Error("yield arguments must be an object");
 		const raw = params;
 		const workPoolItems = this.#workPoolItems();
+		assertSupportedRootFields(
+			workPoolItems.length > 0 ? wrapWorkPoolYieldParameters(workPoolItems) : this.#parameters,
+			raw,
+		);
 		let workPoolItemId: string | undefined;
 		let yieldType: string | string[] | undefined;
 		// Strict-mode providers send omitted optionals as `null`; treat it as absent.
 		let data: unknown = raw.data === null ? undefined : raw.data;
-		const errorMessage = parseYieldError(raw.error);
+		const errorMessage = parseYieldError(raw.error, { hasData: data !== undefined });
 		if (workPoolItems.length > 0) {
 			const item = resolveWorkPoolYieldItem(workPoolItems, raw.key);
 			workPoolItemId = item.id;
 			if (this.#submittedWorkPoolItems.has(item.id)) {
 				throw new Error(`workpool item ${item.index} was already submitted`);
+			}
+			if (data !== undefined && errorMessage !== undefined) {
+				throw new Error(renderDataErrorConflictMessage(errorMessage, undefined, item.index));
 			}
 			if ((data === undefined) === (errorMessage === undefined)) {
 				throw new Error("workpool yield requires exactly one of data or error");
@@ -462,7 +552,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		const isIncremental = Array.isArray(yieldType) && yieldType.length > 0;
 
 		if (errorMessage !== undefined && data !== undefined) {
-			throw new Error("yield cannot contain both data and error");
+			throw new Error(renderDataErrorConflictMessage(errorMessage, yieldType));
 		}
 		if (errorMessage === undefined && data === undefined && yieldType === undefined) {
 			this.#emptyResultFailures++;
@@ -486,7 +576,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			);
 		}
 
-		const status = errorMessage !== undefined ? "aborted" : "success";
+		const status = errorMessage !== undefined && workPoolItemId === undefined ? "aborted" : "success";
+		if (workPoolItemId !== undefined && errorMessage !== undefined) data = { error: errorMessage };
 		let schemaValidationOverridden = false;
 		let schemaValidationFailureCount = 0;
 		// Unknown incremental labels are a hard contract mismatch with the closed caller
@@ -558,6 +649,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				useLastTurn = false;
 			}
 		}
+		const normalizeData = (value: unknown): unknown =>
+			workPoolItemId !== undefined
+				? value
+				: Array.isArray(yieldType) && yieldType.length === 1
+					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
+					: !isIncremental
+						? (this.#normalizeData?.(value) ?? value)
+						: value;
+		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
@@ -579,9 +679,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// and then warn post-mortem instead of giving a retryable error.
 				const decoded = parseJsonEncodedValue(data);
 				if (decoded.parsed && decoded.value !== null) {
-					const revalidated = validateData(decoded.value);
+					const normalized = normalizeData(decoded.value);
+					const revalidated = validateData(normalized);
 					if (revalidated === undefined || revalidated.success) {
-						data = decoded.value;
+						data = normalized;
 						sectionFailure = revalidated;
 					}
 				}
@@ -614,10 +715,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#emptyResultFailures = 0;
 		if (status === "success" && isIncremental) this.#hasIncrementalSections = true;
 		let workPoolComplete = false;
-		let completedWorkPoolItem: WorkPoolYieldItem | undefined;
+		let submittedWorkPoolItem: WorkPoolYieldItem | undefined;
 		let remainingWorkPoolItems: readonly WorkPoolYieldItem[] = [];
-		if (status === "success" && workPoolItemId !== undefined) {
-			completedWorkPoolItem = workPoolItems.find(item => item.id === workPoolItemId);
+		if (workPoolItemId !== undefined) {
+			submittedWorkPoolItem = workPoolItems.find(item => item.id === workPoolItemId);
 			this.#submittedWorkPoolItems.add(workPoolItemId);
 			remainingWorkPoolItems = workPoolItems.filter(item => !this.#submittedWorkPoolItems.has(item.id));
 			workPoolComplete = remainingWorkPoolItems.length === 0;
@@ -625,10 +726,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		const responseText =
 			status === "aborted"
 				? `Task aborted: ${errorMessage}`
-				: completedWorkPoolItem !== undefined
+				: submittedWorkPoolItem !== undefined
 					? workPoolComplete
-						? `Item ${completedWorkPoolItem.index} submitted. All workpool items are complete; ending this turn.`
-						: `Item ${completedWorkPoolItem.index} submitted. Remaining item(s): ${remainingWorkPoolItems.map(item => item.index).join(", ")}.`
+						? `Item ${submittedWorkPoolItem.index} submitted. All workpool items are complete; ending this turn.`
+						: `Item ${submittedWorkPoolItem.index} submitted. Remaining item(s): ${remainingWorkPoolItems.map(item => item.index).join(", ")}.`
 					: schemaValidationOverridden
 						? `Result submitted (schema validation overridden after ${schemaValidationFailureCount} failed attempt(s)).`
 						: "Result submitted.";

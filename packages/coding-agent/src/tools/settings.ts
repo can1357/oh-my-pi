@@ -305,25 +305,33 @@ export const cfgToolsApproval = register({
 });
 
 // Default tool approval mode (interaction tab, but governs the tool wrapper).
-//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-//   "yolo"       — auto-approves every tier.
+//   "always-ask"        — auto-approves read-tier tools only; prompts for write/exec.
+//   "always-ask-cached" — like always-ask, but file reads and writes can be approved
+//                         for a file or folder, this session or across sessions.
+//   "write"             — auto-approves read and write-tier tools; prompts for exec.
+//   "yolo"              — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
 	type: "enum",
-	values: ["always-ask", "write", "yolo"] as const,
+	values: ["always-ask", "always-ask-cached", "write", "yolo"] as const,
 	default: "yolo",
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
 		label: "Tool Approval",
 		description:
-			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
 				label: "Always ask",
 				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+			},
+			{
+				value: "always-ask-cached",
+				label: "Ask and remember",
+				description:
+					"Ask before reading or writing a file, with answers that remember the file or its folder for this session or every session; require confirmation for exec tools.",
 			},
 			{
 				value: "write",
@@ -338,6 +346,28 @@ export const cfgToolsApprovalMode = register({
 					"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
 			},
 		],
+	},
+});
+
+// Folders where every action asks, in every approval mode and whatever was remembered.
+export const cfgToolsRestrictedFolders = register({
+	id: "tools.restrictedFolders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Restricted Folders",
+		editor: "json",
+		description:
+			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
+		condition: "restrictedFoldersNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.restrictedFolders must be a list of folder paths");
+		}
 	},
 });
 
@@ -615,15 +645,28 @@ export const cfgRatchetEnabled = register({
 	},
 });
 
+export const cfgArchiveEnabled = register({
+	id: "archive.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Archive",
+		description:
+			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",
-	default: "all",
+	default: "active",
 	ui: {
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Display",
-		description: "Composite all displays or select a native display id",
+		description: "Active window's display (active), all displays (all), or a native display id",
 	},
 });
 
@@ -635,7 +678,7 @@ export const cfgComputerMaxWidth = register({
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Screenshot Width",
-		description: "Maximum composite screenshot width in pixels",
+		description: "Maximum screenshot width in pixels",
 	},
 });
 
@@ -647,7 +690,35 @@ export const cfgComputerMaxHeight = register({
 		tab: "tools",
 		group: "Computer",
 		label: "Computer Screenshot Height",
-		description: "Maximum composite screenshot height in pixels",
+		description: "Maximum screenshot height in pixels",
+	},
+});
+
+export const cfgComputerBackgroundFallback = register({
+	id: "computer.backgroundFallback",
+	type: "enum",
+	values: ["takeover", "refuse"] as const,
+	default: "takeover",
+	ui: {
+		tab: "tools",
+		group: "Computer",
+		label: "Computer Background Fallback",
+		description:
+			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
+		options: [
+			{
+				value: "takeover",
+				label: "Takeover",
+				description:
+					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+			},
+			{
+				value: "refuse",
+				label: "Refuse",
+				description:
+					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+			},
+		],
 	},
 });
 
@@ -796,6 +867,19 @@ export const cfgAskEnabled = register({
 	},
 });
 
+export const cfgOutEnabled = register({
+	id: "out.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Out",
+		description:
+			"Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP",
+	},
+});
+
 // Tool execution
 export const cfgToolsIntentTracing = register({
 	id: "tools.intentTracing",
@@ -896,6 +980,35 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+// Print mode is single-shot by default: it disposes after the last prompt, cancelling the
+// run's background jobs. Opting in keeps `-p` alive so each job's async-result wakes the same
+// session, as the TUI does, before exiting (issue #10363).
+export const cfgAsyncPrintWake = register({
+	id: "async.printWake",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wake Print Mode on Job Results",
+		description:
+			"In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs",
+	},
+});
+
+export const cfgAsyncWidgets = register({
+	id: "async.widgets",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Live Job Widgets",
+		description:
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
+	},
+});
+
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",
@@ -905,7 +1018,7 @@ export const cfgToolsXdev = register({
 		group: "Discovery & MCP",
 		label: "xd:// Tools",
 		description:
-			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (filesystem writes stay rejected). Disable to expose every enabled tool top-level.",
+			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
 	},
 });
 
@@ -942,6 +1055,19 @@ export const cfgToolsXdevInlineDevices = register({
 		label: "xd:// Inline Devices",
 		description:
 			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+	},
+});
+
+export const cfgToolsXdevNotices = register({
+	id: "tools.xdevNotices",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "xd:// Mount Notices",
+		description:
+			"Show an `xd://: mounted …` notice when MCP or extension tools are mounted or unmounted. The model still learns of the change with its next prompt.",
 	},
 });
 

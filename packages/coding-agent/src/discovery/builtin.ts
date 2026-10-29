@@ -4,7 +4,7 @@
  * Primary provider for OMP native configs. Supports all capabilities.
  */
 import * as path from "node:path";
-import { getAgentDir, logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
@@ -30,6 +30,9 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	getProjectDiscoveryCeilings,
+	isForeignUserConfigRoot,
+	isUserConfigRoot,
 	loadFilesFromDir,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
@@ -58,10 +61,11 @@ async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; level: "user" | "project" }>> {
 	const result: Array<{ dir: string; level: "user" | "project" }> = [];
 
-	const projectDir = await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
-	if (projectDir) {
-		result.push({ dir: projectDir, level: "project" });
-	}
+	const projectDir =
+		normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home)
+			? null
+			: await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
+	if (projectDir) result.push({ dir: projectDir, level: "project" });
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
 	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
@@ -73,19 +77,34 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
+/** Project ancestors through an inclusive stop directory, but never home or temporary-root ceilings. */
 export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
-	let current = cwd;
+	const ceilings = getProjectDiscoveryCeilings();
+	let current = path.resolve(cwd);
+	const stop = stopAt ? normalizePathForComparison(stopAt) : null;
 	let depth = 0;
 	while (true) {
+		const normalized = normalizePathForComparison(current);
+		if (ceilings.has(normalized)) break;
 		ancestors.push({ dir: current, depth });
-		if (stopAt && current === stopAt) break;
+		if (stop && normalized === stop) break;
 		const parent = path.dirname(current);
 		if (parent === current) break;
 		current = parent;
 		depth++;
 	}
 	return ancestors;
+}
+
+/** Skip user config roots without stopping the project walk at those directories. */
+export async function* getProjectAncestorDirs(ctx: LoadContext): AsyncGenerator<{ dir: string; depth: number }> {
+	const home = normalizePathForComparison(ctx.home);
+	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
+		if (normalizePathForComparison(ancestor.dir) === home || isUserConfigRoot(ancestor.dir)) continue;
+		if (!ctx.repoRoot && (await isForeignUserConfigRoot(ancestor.dir, PATHS.projectDir))) continue;
+		yield ancestor;
+	}
 }
 
 /**
@@ -95,8 +114,7 @@ export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ di
  * project config — that also bypasses an overridden agent dir or profile.
  */
 async function findNearestProjectConfigDir(ctx: LoadContext): Promise<{ dir: string; depth: number } | null> {
-	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
-		if (ancestor.dir === ctx.home) continue;
+	for await (const ancestor of getProjectAncestorDirs(ctx)) {
 		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
 		if (configDir) return { dir: configDir, depth: ancestor.depth };
 	}
@@ -291,15 +309,17 @@ registerProvider<SystemPrompt>(systemPromptCapability.id, {
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	// Walk up from cwd finding .omp/skills/ in ancestors (closest first). Home is
 	// the user config root, never a project (see findNearestProjectConfigDir).
-	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(({ dir }) => dir !== ctx.home);
-	const projectScans = ancestors.map(({ dir }) =>
-		scanSkillsFromDir(ctx, {
-			dir: path.join(dir, PATHS.projectDir, "skills"),
-			providerId: PROVIDER_ID,
-			level: "project",
-			requireDescription: true,
-		}),
-	);
+	const projectScans: Promise<LoadResult<Skill>>[] = [];
+	for await (const { dir } of getProjectAncestorDirs(ctx)) {
+		projectScans.push(
+			scanSkillsFromDir(ctx, {
+				dir: path.join(dir, PATHS.projectDir, "skills"),
+				providerId: PROVIDER_ID,
+				level: "project",
+				requireDescription: true,
+			}),
+		);
+	}
 
 	// User-level scan from ~/.omp/agent/skills/
 	const userScan = scanSkillsFromDir(ctx, {
@@ -712,7 +732,10 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 
 		for (const entry of typeEntries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isFile()) continue;
+			// `readDirEntries` is a plain `readdir(withFileTypes)` and reports a symlink as
+			// a link, not a file, so linking a shared hook into the hooks dir would drop it
+			// silently. Match the extension loader and accept links here.
+			if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
 			const hookPath = path.join(typeDir, entry.name);
 			const baseName = entry.name.includes(".") ? entry.name.slice(0, entry.name.lastIndexOf(".")) : entry.name;

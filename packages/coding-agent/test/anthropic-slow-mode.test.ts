@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { AnthropicSlowModeFailure, AnthropicSlowModeHooks, AnthropicSlowModeSignal, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "../src/config/settings";
-import { type AnthropicSlowModeController, AnthropicSlowModeLanes } from "../src/session/anthropic-slow-mode";
+import {
+	type AnthropicSlowModeController,
+	AnthropicSlowModeLanes,
+	formatUsageLimitLabel,
+} from "../src/session/anthropic-slow-mode";
 import { createSettingsAwareStreamFn } from "../src/session/settings-stream-fn";
 
 const LANE = "cred:1";
@@ -164,10 +168,14 @@ describe("AnthropicSlowModeController", () => {
 		expect(controller.isActive(Date.now() + 7_300_000)).toBe(false);
 	});
 
-	it("reports the remaining allowance in the status label", async () => {
+	it("reports structured low-priority state without host-formatted time", async () => {
 		await hooks().onFailure(wall(nowSec() + 3_600));
 		hooks().observe(signal({ status: "active", budgetUtilization: 0.38 }), LANE);
-		expect(controller.statusLabel()).toContain("62% left");
+		expect(controller.status()).toEqual({
+			stage: "low_priority",
+			resetsAtSec: expect.any(Number),
+			allowanceLeftPercent: 62,
+		});
 	});
 
 	describe("wrap-up allowance", () => {
@@ -179,9 +187,13 @@ describe("AnthropicSlowModeController", () => {
 				...overrides,
 			});
 
-		it("labels the window and hints only when low priority cannot pick the work up", () => {
+		it("reports structured wrap-up state and hints only when low priority cannot pick the work up", () => {
 			hooks().observe(graceSignal(), LANE);
-			expect(controller.statusLabel()).toStartWith("limit reached · wrapping up · resets ");
+			expect(controller.status()).toEqual({
+				stage: "wrap_up",
+				resetsAtSec: expect.any(Number),
+				extraUsage: false,
+			});
 			expect(notices).toHaveLength(1);
 			// `/slow on` and the lane is still offerable: low priority carries on, no hint.
 			expect(controller.wrapUpHintKey(true)).toBeUndefined();
@@ -197,25 +209,25 @@ describe("AnthropicSlowModeController", () => {
 		it("hints even with /slow on past the weekly limit, and never when extra usage follows", () => {
 			hooks().observe(graceSignal({ graceUtilization: { fiveHour: 0, sevenDay: 0.1 } }), LANE);
 			expect(controller.wrapUpHintKey(true)).toBeDefined();
-			expect(controller.statusLabel()).toContain("wrapping up");
+			expect(formatUsageLimitLabel(controller.status())).toContain("wrapping up");
 
 			const extra = new AnthropicSlowModeLanes();
 			extra.hooks({}).observe(graceSignal({ overageAllowed: true }), LANE);
 			expect(extra.lane(LANE).wrapUpHintKey(false)).toBeUndefined();
-			expect(extra.lane(LANE).statusLabel()).toBe("limit reached · wrap-up, then extra usage");
+			expect(formatUsageLimitLabel(extra.lane(LANE).status())).toBe("limit reached · wrap-up, then extra usage");
 		});
 
 		it("closes on a zero reading, and at the wall hands over to low priority", async () => {
 			hooks().observe(graceSignal(), LANE);
 			hooks().observe(graceSignal({ graceUtilization: { fiveHour: 0, sevenDay: 0 } }), LANE);
-			expect(controller.statusLabel()).toBeUndefined();
+			expect(formatUsageLimitLabel(controller.status())).toBeUndefined();
 
 			hooks().observe(graceSignal(), LANE);
 			await hooks().onFailure(wall(nowSec() + 3_600));
 			expect(controller.isActive()).toBe(true);
 			expect(controller.wrapUpHintKey(false)).toBeUndefined();
 			expect(notices.at(-1)).toContain("Wrap-up allowance used — continuing at low priority");
-			expect(controller.statusLabel()).toStartWith("low priority until ");
+			expect(formatUsageLimitLabel(controller.status())).toStartWith("low priority until ");
 		});
 
 		it("with /slow off records the offer without taking the lane or sending the slow header", async () => {
@@ -223,7 +235,7 @@ describe("AnthropicSlowModeController", () => {
 			hooks().observe(graceSignal(), LANE);
 			expect(await off.onFailure(wall(nowSec() + 3_600))).toBeUndefined();
 			expect(controller.isActive()).toBe(false);
-			expect(controller.statusLabel()).toBeUndefined();
+			expect(formatUsageLimitLabel(controller.status())).toBeUndefined();
 			// A later `/slow on` enters the recorded offer right away.
 			expect(controller.accept().kind).toBe("available");
 			expect(off.isActive(LANE)).toBe(false);

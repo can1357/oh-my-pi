@@ -62,11 +62,13 @@ const UTC_DAY_LONG = new Intl.DateTimeFormat(undefined, {
 });
 
 export function CostsRoute({ active, range }: CostsRouteProps) {
-	const query = useQuery(["costs", range], () => getCostDashboardStats(range), { enabled: active });
+	const query = useQuery(["costs", range], ({ signal }) => getCostDashboardStats(range, signal), { enabled: active });
 	const meta = rangeMeta(range);
 	const [split, setSplit] = useState<SplitMode>("model");
 	const [hidden, toggleSeries] = useHiddenSeries();
 	const view = useMemo(() => (query.data ? buildCostsView(query.data, range) : null), [query.data, range]);
+	// Stable columns: a fresh array would make Table re-sort on every render.
+	const columns = useMemo(() => (view ? buildCostColumns(view) : []), [view]);
 	const isEmpty = (data: CostDashboardStats) => data.costSeries.length === 0;
 	const empty = <EmptyState title="No usage in this range" hint="Pick a wider range in the top bar." />;
 
@@ -167,7 +169,7 @@ export function CostsRoute({ active, range }: CostsRouteProps) {
 							<Table
 								rows={view.summary.models}
 								rowKey={row => row.key}
-								columns={buildCostColumns(view)}
+								columns={columns}
 								initialSort={{ key: "cost", dir: "desc" }}
 								limit={20}
 							/>

@@ -11,9 +11,11 @@
  * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
  * program: `r` reply, `e` event (on the pty's input side).
  *
- * The normative spec is `crates/tern/SURFACE_PROTOCOL.md` in the Stencil
- * repository; these types mirror it. Unknown fields and verbs are ignored in
- * both directions, so every addition here is optional.
+ * The normative spec is the Tern SDK's Surface Protocol and Elements reference
+ * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
+ * repository, https://docs.stencil.so/tern/protocol/); these types mirror it.
+ * Unknown fields and verbs are ignored in both directions, so every addition
+ * here is optional.
  */
 
 /** Protocol version this build speaks. */
@@ -26,7 +28,7 @@ export const TSP_DEFAULT_APC_LIMIT = 65_536;
 export const TSP_DEFAULT_CREDITS = 2;
 
 /** One-letter message verb. */
-export type TspVerb = "q" | "o" | "f" | "b" | "t" | "x" | "r" | "e";
+export type TspVerb = "q" | "o" | "f" | "b" | "x" | "r" | "e";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vocabulary
@@ -47,9 +49,11 @@ export const TSP_KINDS = [
 	"ansi",
 	"math",
 	"image",
+	"media",
 	"kv",
 	"table",
 	"tree",
+	"json",
 	"badge",
 	"kbd",
 	"icon",
@@ -146,6 +150,17 @@ export interface TspCommonProps {
 	 * run), `drop` dims what the choice discards.
 	 */
 	mark?: TspMark;
+	/**
+	 * A floating card shown when the pointer rests on the node (~350 ms; ~200 ms
+	 * right after another tooltip or card), anchored below it (above without
+	 * room) and clamped to the window. It stays open while the pointer is over
+	 * the node or the card, closes on leave (short grace), press, key or scroll,
+	 * and replaces the node's `title` tooltip while open. A lone `md` card is a
+	 * wide read-only preview the pointer passes through (open only over the
+	 * node). On an `agent` it opens over the row, not the children. Terminals
+	 * that don't know it ignore it and keep showing `title`.
+	 */
+	hovercard?: TspPropNode;
 }
 
 /** A {@link TspCommonProps.mark}. */
@@ -162,7 +177,7 @@ export interface TspColProps {
 }
 export interface TspRowProps {
 	gap?: TspSpace;
-	align?: "start" | "center" | "baseline" | "end";
+	align?: "start" | "center" | "baseline" | "end" | "stretch";
 	justify?: "start" | "between" | "end";
 	wrap?: boolean;
 }
@@ -209,12 +224,16 @@ export interface TspMarkdownProps {
 }
 export interface TspCodeProps {
 	text?: string;
+	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
 	lang?: string;
+	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
 	path?: string;
 	start?: number;
 	numbers?: boolean;
 	marks?: readonly { line: number; tone: TspTone }[];
 	wrap?: boolean;
+	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
+	preview?: TspPreview;
 }
 export interface TspDiffHunk {
 	oldStart: number;
@@ -225,7 +244,9 @@ export interface TspDiffProps {
 	/** Unified diff text (or give `hunks`). */
 	text?: string;
 	hunks?: readonly TspDiffHunk[];
+	/** The file the diff changes: the terminal picks the grammar from it. Not drawn. */
 	path?: string;
+	/** A language overriding the one `path` gives. */
 	lang?: string;
 	mode?: "unified" | "split" | "auto";
 }
@@ -254,6 +275,20 @@ export interface TspImageProps {
 	h?: number;
 	max?: { w?: TspExtent; h?: TspExtent };
 }
+/**
+ * A file the terminal loads by path and shows in its media viewer (pictures, SVG, 3D models,
+ * PDF/video/audio, else a card). Programs check `cx.supports("media")` first.
+ */
+export interface TspMediaProps {
+	/** The file: absolute, or relative to the pane's working directory. */
+	path: string;
+	/** Git revision to read instead of the disk file: a commit-ish (`HEAD`, a sha) or `:0` for the index. */
+	rev?: string;
+	/** `media` nodes of one surface sharing this name pan and zoom together (before/after compare). */
+	link?: string;
+	/** Size cap; the node otherwise fills its container. */
+	max?: { w?: TspExtent; h?: TspExtent };
+}
 export interface TspKvProps {
 	items: readonly { k: TspText; v: TspText }[];
 	layout?: "grid" | "inline";
@@ -280,6 +315,20 @@ export interface TspTreeNode {
 }
 export interface TspTreeProps {
 	nodes: readonly TspTreeNode[];
+}
+/**
+ * A raw JSON value the terminal draws as an interactive tree: small containers
+ * whole on one row, larger ones folded to a preview that expands on click.
+ * Folding is local to the terminal and sends no events.
+ */
+export interface TspJsonProps {
+	/** Any JSON value; absent reads as null. */
+	value: unknown;
+	/**
+	 * Levels of containers expanded below the top-level entries (default 0:
+	 * the root's entries listed, every container among them folded).
+	 */
+	open?: number;
 }
 export interface TspBadgeProps {
 	text: string;
@@ -350,14 +399,21 @@ export interface TspEditorProps {
 	decor?: readonly TspEditorDecoration[];
 	/** Inline completion suffix drawn after the caret. */
 	ghost?: string;
-	placeholder?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
 	prompt?: TspText;
 	/** Mode label (vim). */
 	mode?: string;
 	/** The text is code in this language (`python`, `bash`): highlighted, in the mono face. */
 	lang?: string;
 	readonly?: boolean;
+	/** Ready to accept an atomic `send` when advertised in `hello.features`.
+	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
+	sendable?: boolean;
 	maxLines?: number;
+	/** The program cannot read input yet: while the field has the focus, the terminal keeps
+	 *  what is typed into it, draws it at the caret, and sends it once this clears. */
+	typeahead?: boolean;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
 export interface TspStatusProps {
@@ -406,7 +462,7 @@ export interface TspPickerItem {
 	detail?: TspText;
 	/** Leading visual: a named icon, a provider/avatar mark, or a status dot. */
 	icon?: string;
-	mark?: { text: string; seed?: string };
+	mark?: TspPickerMark;
 	dot?: TspTone;
 	/** Label is a machine string (model id, path): mono, dim prefix and strong tail by the `/`. */
 	mono?: boolean;
@@ -429,11 +485,22 @@ export interface TspPickerItem {
 	title?: string;
 }
 
+/**
+ * A picker avatar: the `icon` when the terminal has it (`provider:<id>` names a
+ * model provider's logo by its id), else up to two initials of `text` on a
+ * gradient picked by `seed` (default `text`).
+ */
+export interface TspPickerMark {
+	text: string;
+	seed?: string;
+	icon?: string;
+}
+
 /** A right-aligned fact column in a picker. */
 export interface TspPickerColumn {
 	id: string;
 	head?: string;
-	/** `elapsed`: the value is an age in ms at send; Tern clocks it (spec §9). */
+	/** `elapsed`: the value is an age in ms at send; Tern clocks it. */
 	format?: "text" | "num" | "price" | "bar" | "time" | "elapsed" | "dim";
 	/** Lower priorities hide first when narrow. */
 	priority?: number;
@@ -446,7 +513,7 @@ export interface TspPickerScope {
 	id: string;
 	label: TspText;
 	icon?: string;
-	mark?: { text: string; seed?: string };
+	mark?: TspPickerMark;
 	count?: number;
 	/** Group heading this scope sits under (consecutive scopes with the same group share a head). */
 	group?: string;
@@ -630,6 +697,8 @@ export interface TspToolProps {
 	targetKind?: "command" | "path" | "pattern" | "query" | "text";
 	/** Language for `command` highlighting (`bash`, `python`, `js`). */
 	lang?: string;
+	/** The raw command line the head's Copy command button copies; a `command` target sets it implicitly. */
+	command?: string;
 	/** `file://` link for path targets (⌘-click opens). */
 	href?: string;
 	/** Short facts after the target: `+8 −1`, `5 matches · 2 files`, `22 lines`. */
@@ -650,8 +719,11 @@ export interface TspToolProps {
 	frame?: "card" | "inline";
 	collapsible?: boolean;
 	collapsed?: boolean;
-	/** Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output). */
-	preview?: { lines: number } | { tail: number } | "none";
+	/**
+	 * Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output).
+	 * `children`: the collapsed body stays whole and the children's own previews (`ansi`, `code`) clamp instead.
+	 */
+	preview?: { lines: number } | { tail: number } | "none" | "children";
 	/** Actions offered in the head on hover (`copy`, `rerun`, `open`). */
 	tools?: readonly TspPickerAction[];
 }
@@ -755,6 +827,15 @@ export interface TspMeterProps {
 	total?: TspText;
 	size?: "sm" | "md" | "lg";
 }
+/** A horizontal reference line across a bars/spark chart (a target, a baseline). */
+export interface TspChartMark {
+	/** Position in the series' value units. */
+	value: number;
+	tone?: TspTone;
+	/** Tooltip of the line (`target 200 tok/s`). */
+	title?: string;
+}
+
 /** Series data drawn natively: the usage heatmap, app dashboards (§9.2). */
 export interface TspChartProps {
 	kind: "heatmap" | "bars" | "spark";
@@ -766,8 +847,16 @@ export interface TspChartProps {
 	rows?: readonly string[];
 	/** Per-cell tooltips, same shape as `cells` (omit for none). */
 	tips?: readonly (readonly (string | null)[])[];
-	/** bars/spark: one series. */
-	series?: readonly { label?: string; value: number; title?: string }[];
+	/** bars/spark: one series; `tone` fills that one column instead of `token`. */
+	series?: readonly { label?: string; value: number; title?: string; tone?: TspTone }[];
+	/**
+	 * bars/spark: fixed value domain. Without them the low end is 0 and the
+	 * high end the largest series or mark value.
+	 */
+	min?: number;
+	max?: number;
+	/** bars/spark: dashed horizontal reference lines, in value units. */
+	marks?: readonly TspChartMark[];
 	/** Colour token of the fill (`accent`, `statusLineCost`). */
 	token?: string;
 	summary?: TspText;
@@ -790,9 +879,11 @@ export interface TspPropsByKind {
 	ansi: TspAnsiProps;
 	math: TspMathProps;
 	image: TspImageProps;
+	media: TspMediaProps;
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
+	json: TspJsonProps;
 	badge: TspBadgeProps;
 	kbd: TspKbdProps;
 	icon: TspIconProps;
@@ -821,8 +912,22 @@ export interface TspPropsByKind {
 	effort: TspEffortProps;
 }
 
-/** Props of a node of kind `K`: its kind-specific props plus the common ones. */
-export type TspProps<K extends TspKind = TspKind> = TspPropsByKind[K] & TspCommonProps;
+/**
+ * Props of a node of kind `K`: its kind-specific props plus the common ones.
+ * A chart's numeric `min`/`max` (its value domain) take the place of the
+ * common layout `min`/`max` extents.
+ */
+export type TspProps<K extends TspKind = TspKind> = [K] extends ["chart"]
+	? TspChartProps & Omit<TspCommonProps, "min" | "max">
+	: TspPropsByKind[K] & TspCommonProps;
+
+/**
+ * A node tree carried inside a prop (a {@link TspCommonProps.hovercard}): a
+ * wire node without ids, mounted by the terminal on demand. `key` is ignored.
+ */
+export type TspPropNode = {
+	[K in TspKind]: { k: K; p?: TspProps<K>; c?: readonly TspPropNode[]; key?: string };
+}[TspKind];
 
 /** Kinds whose primary text the `text` and `splice` ops address (the `text` prop). */
 export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer"] as const;
@@ -885,24 +990,9 @@ export interface TspClose {
 	keep: boolean;
 }
 
-/**
- * Verb `t`: the program's resolved theme for a surface, sent after `o` and
- * before its first `f`, and again whenever the theme or variant changes.
- * Each variant maps token names to `#rrggbb`; tokens left at the terminal
- * default are omitted. A program with one variant sends only that one.
- */
-export interface TspPalette {
-	/** Surface id. */
-	sf: string;
-	dark?: Readonly<Record<string, string>>;
-	light?: Readonly<Record<string, string>>;
-	/** Theme names behind each variant. */
-	name?: { dark?: string; light?: string };
-}
-
 /** Verb `q`. */
 export type TspQuery =
-	| { q: "hello"; v: readonly number[]; app: string; ver?: string }
+	| { q: "hello"; v: readonly number[]; app: string; ver?: string; features?: readonly string[] }
 	| { q: "blobs"; ids: readonly string[] };
 
 /** Verb `r`. */
@@ -920,6 +1010,8 @@ export type TspReply =
 			cell?: { w: number; h: number };
 			dark?: boolean;
 			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
@@ -954,6 +1046,16 @@ export type TspEvent =
 	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
 	 */
 	| { ev: "undo"; sf: string; id: string }
+	/**
+	 * Submit `text` as one prompt through the addressed composer's ordinary
+	 * submission path, without paste or keyboard simulation. Sent only when
+	 * the program's `hello.features` includes `"send"` and `sf`/`id` identify
+	 * a live editable composer whose `sendable` is exactly true. Writable text
+	 * or keyboard focus alone does not imply submission readiness. Blank text is
+	 * a no-op; an existing draft is retained for local recall, not appended to
+	 * the supplied prompt.
+	 */
+	| { ev: "send"; sf: string; id: string; text: string }
 	/**
 	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
 	 * a `prefs` sheet while the focus is outside it): the program moves its

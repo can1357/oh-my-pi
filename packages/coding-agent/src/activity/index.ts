@@ -69,6 +69,53 @@ function textContent(content: unknown): string {
 	return activityOneLine(parts.join(" "));
 }
 
+function sameRow(a: AgentActivityRow, b: AgentActivityRow): boolean {
+	return (
+		a.id === b.id &&
+		a.agentId === b.agentId &&
+		a.timestamp === b.timestamp &&
+		a.kind === b.kind &&
+		a.title === b.title &&
+		a.summary === b.summary &&
+		a.status === b.status &&
+		a.entryId === b.entryId &&
+		a.toolCallId === b.toolCallId &&
+		a.toolName === b.toolName &&
+		a.from === b.from &&
+		a.to === b.to &&
+		a.replyTo === b.replyTo &&
+		a.source === b.source
+	);
+}
+
+function sameRows(current: readonly AgentActivityRow[] | undefined, next: readonly AgentActivityRow[]): boolean {
+	if (!current) return next.length === 0;
+	if (current.length !== next.length) return false;
+	for (let index = 0; index < next.length; index++) {
+		if (!sameRow(current[index]!, next[index]!)) return false;
+	}
+	return true;
+}
+
+function sameSet<T>(a: ReadonlySet<T> | undefined, b: ReadonlySet<T> | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b || a.size !== b.size) return false;
+	for (const value of a) if (!b.has(value)) return false;
+	return true;
+}
+
+/** Lower-cased search haystack per row; rows' text fields never change after creation. */
+const searchTextCache = new WeakMap<AgentActivityRow, string>();
+
+function searchTextOf(row: AgentActivityRow): string {
+	let text = searchTextCache.get(row);
+	if (text === undefined) {
+		text = `${row.agentId} ${row.title} ${row.summary} ${row.from ?? ""} ${row.to ?? ""}`.toLowerCase();
+		searchTextCache.set(row, text);
+	}
+	return text;
+}
+
 function firstString(value: Record<string, unknown>, ...keys: string[]): string | undefined {
 	for (const key of keys) {
 		const candidate = value[key];
@@ -122,21 +169,40 @@ function toolBlocks(content: unknown): Array<{ id: string; name: string; args: u
 	return calls;
 }
 
-function boundedPush(rows: AgentActivityRow[], row: AgentActivityRow): AgentActivityRow[] {
-	const existing = rows.findIndex(candidate => candidate.id === row.id);
-	if (existing >= 0) rows[existing] = row;
-	else rows.push(row);
-	rows.sort(compareActivityRows);
-	if (rows.length <= MAX_ROWS_PER_AGENT) return [];
-	return rows.splice(0, rows.length - MAX_ROWS_PER_AGENT);
+/**
+ * Insert-or-replace by id without sorting; `#consume` sorts and trims via
+ * {@link trimRows} once per batch and whenever a backlog doubles the bound.
+ */
+function upsertRow(rows: AgentActivityRow[], index: Map<string, number>, row: AgentActivityRow): void {
+	const existing = index.get(row.id);
+	if (existing !== undefined) rows[existing] = row;
+	else {
+		index.set(row.id, rows.length);
+		rows.push(row);
+	}
 }
 
-function pruneToolRows(state: TranscriptState, evicted: readonly AgentActivityRow[]): void {
-	if (evicted.length === 0) return;
+function trimRows(state: TranscriptState): void {
+	state.rows.sort(compareActivityRows);
+	if (state.rows.length <= MAX_ROWS_PER_AGENT) return;
+	state.rows.splice(0, state.rows.length - MAX_ROWS_PER_AGENT);
 	const retained = new Set(state.rows.map(row => row.id));
 	for (const [toolCallId, row] of state.toolRows) {
 		if (!retained.has(row.id)) state.toolRows.delete(toolCallId);
 	}
+}
+
+/** Row position by id, rebuilt after {@link trimRows} reorders the rows. */
+function rowIndex(rows: readonly AgentActivityRow[]): Map<string, number> {
+	const index = new Map<string, number>();
+	for (let position = 0; position < rows.length; position++) index.set(rows[position]!.id, position);
+	return index;
+}
+
+interface QueryCacheEntry {
+	revision: number;
+	query: AgentActivityQuery;
+	rows: AgentActivityRow[];
 }
 
 export class AgentActivityIndex {
@@ -144,6 +210,11 @@ export class AgentActivityIndex {
 	#liveRows = new Map<string, AgentActivityRow[]>();
 	#listeners = new Set<() => void>();
 	#remote: AgentActivityRemote | undefined;
+	/** Bumped on every change; keys the merged-row and query caches. */
+	#revision = 0;
+	#mergedRevision = -1;
+	#merged = new Map<string, AgentActivityRow[]>();
+	#queryCache: QueryCacheEntry | undefined;
 
 	constructor(options?: { remote?: AgentActivityRemote }) {
 		this.#remote = options?.remote;
@@ -155,9 +226,8 @@ export class AgentActivityIndex {
 	}
 
 	setLive(agentId: string, rows: readonly AgentActivityRow[]): void {
+		if (sameRows(this.#liveRows.get(agentId), rows)) return;
 		const next = [...rows];
-		const current = this.#liveRows.get(agentId);
-		if (JSON.stringify(current) === JSON.stringify(next)) return;
 		if (next.length > 0) this.#liveRows.set(agentId, next);
 		else this.#liveRows.delete(agentId);
 		this.#notify();
@@ -178,22 +248,51 @@ export class AgentActivityIndex {
 	}
 
 	recent(agentId: string, limit = 12): AgentActivityRow[] {
+		return this.#mergedRows(agentId).slice(-Math.max(0, limit));
+	}
+
+	/** Persisted rows merged with live rows, sorted; memoized per revision. Callers must not mutate. */
+	#mergedRows(agentId: string): AgentActivityRow[] {
+		if (this.#mergedRevision !== this.#revision) {
+			this.#merged.clear();
+			this.#mergedRevision = this.#revision;
+		}
+		let merged = this.#merged.get(agentId);
+		if (merged) return merged;
 		const persisted = this.#states.get(agentId)?.rows ?? [];
 		const live = this.#liveRows.get(agentId) ?? [];
-		const liveKeys = new Set(live.map(row => `${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
-		const merged = persisted.filter(row => !liveKeys.has(`${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
-		merged.push(...live);
-		merged.sort(compareActivityRows);
-		return merged.slice(-Math.max(0, limit));
+		if (live.length === 0) {
+			merged = persisted.slice();
+		} else {
+			const liveKeys = new Set(live.map(row => `${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
+			merged = persisted.filter(row => !liveKeys.has(`${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
+			merged.push(...live);
+			merged.sort(compareActivityRows);
+		}
+		this.#merged.set(agentId, merged);
+		return merged;
 	}
 
 	query(query: AgentActivityQuery = {}): AgentActivityRow[] {
+		const cached = this.#queryCache;
+		if (
+			cached &&
+			cached.revision === this.#revision &&
+			cached.query.search === query.search &&
+			cached.query.limit === query.limit &&
+			cached.query.before?.timestamp === query.before?.timestamp &&
+			cached.query.before?.id === query.before?.id &&
+			sameSet(cached.query.agentIds, query.agentIds) &&
+			sameSet(cached.query.kinds, query.kinds)
+		) {
+			return cached.rows.slice();
+		}
 		const search = query.search?.trim().toLowerCase();
 		const rows: AgentActivityRow[] = [];
 		const ids = new Set([...this.#states.keys(), ...this.#liveRows.keys()]);
 		for (const agentId of ids) {
 			if (query.agentIds && !query.agentIds.has(agentId)) continue;
-			for (const row of this.recent(agentId, MAX_ROWS_PER_AGENT)) {
+			for (const row of this.#mergedRows(agentId).slice(-MAX_ROWS_PER_AGENT)) {
 				if (query.kinds && !query.kinds.has(row.kind)) continue;
 				if (query.before) {
 					const afterCursor =
@@ -201,19 +300,25 @@ export class AgentActivityIndex {
 						(row.timestamp === query.before.timestamp && row.id >= query.before.id);
 					if (afterCursor) continue;
 				}
-				if (
-					search &&
-					!`${row.agentId} ${row.title} ${row.summary} ${row.from ?? ""} ${row.to ?? ""}`
-						.toLowerCase()
-						.includes(search)
-				)
-					continue;
+				if (search && !searchTextOf(row).includes(search)) continue;
 				rows.push(row);
 			}
 		}
 		rows.sort(compareActivityRows);
 		const limit = Math.max(0, Math.min(MAX_QUERY_LIMIT, query.limit ?? DEFAULT_QUERY_LIMIT));
-		return rows.slice(-limit);
+		const result = rows.slice(-limit);
+		// Snapshot the filter sets: callers may reuse and mutate them.
+		this.#queryCache = {
+			revision: this.#revision,
+			query: {
+				...query,
+				agentIds: query.agentIds && new Set(query.agentIds),
+				kinds: query.kinds && new Set(query.kinds),
+				before: query.before && { ...query.before },
+			},
+			rows: result,
+		};
+		return result.slice();
 	}
 
 	clear(): void {
@@ -236,6 +341,7 @@ export class AgentActivityIndex {
 			stat.size < state.offset ||
 			(stat.size === state.offset && stat.mtimeMs !== state.mtimeMs)
 		) {
+			const hadRows = (state?.rows.length ?? 0) > 0;
 			state = {
 				path: sessionFile,
 				offset: Math.max(0, stat.size - INITIAL_TAIL_BYTES),
@@ -245,6 +351,8 @@ export class AgentActivityIndex {
 				toolRows: new Map(),
 			};
 			this.#states.set(agentId, state);
+			// The rotated transcript's rows are gone even if the new one yields none.
+			if (hadRows) this.#notify();
 		}
 		if (stat.size === state.offset && stat.mtimeMs === state.mtimeMs) return;
 		const start = state.offset;
@@ -285,8 +393,11 @@ export class AgentActivityIndex {
 		if (result.newSize < state.offset) {
 			state.offset = Math.max(0, result.newSize - INITIAL_TAIL_BYTES);
 			state.pending = "";
+			const hadRows = state.rows.length > 0;
 			state.rows = [];
 			state.toolRows.clear();
+			// The truncated transcript's rows are gone even if the new tail yields none.
+			if (hadRows) this.#notify();
 			try {
 				result = await this.#remote?.readTranscript(agentId, state.offset);
 			} catch {
@@ -309,6 +420,7 @@ export class AgentActivityIndex {
 		const lines = text.split("\n");
 		state.pending = complete ? "" : (lines.pop() ?? "");
 		let changed = false;
+		let index = rowIndex(state.rows);
 		for (const line of lines) {
 			if (!line.trim()) continue;
 			let entry: Record<string, unknown> | undefined;
@@ -324,20 +436,17 @@ export class AgentActivityIndex {
 			if (message.role === "assistant") {
 				const response = textContent(message.content);
 				if (response) {
-					pruneToolRows(
-						state,
-						boundedPush(state.rows, {
-							id: `${agentId}:response:${entry.id}`,
-							agentId,
-							timestamp,
-							kind: "response",
-							title: "Response",
-							summary: response,
-							status: message.isError ? "error" : "success",
-							entryId: entry.id,
-							source: "transcript",
-						}),
-					);
+					upsertRow(state.rows, index, {
+						id: `${agentId}:response:${entry.id}`,
+						agentId,
+						timestamp,
+						kind: "response",
+						title: "Response",
+						summary: response,
+						status: message.isError ? "error" : "success",
+						entryId: entry.id,
+						source: "transcript",
+					});
 					changed = true;
 				}
 				for (const call of toolBlocks(message.content)) {
@@ -355,8 +464,13 @@ export class AgentActivityIndex {
 						source: "transcript",
 					};
 					state.toolRows.set(call.id, row);
-					pruneToolRows(state, boundedPush(state.rows, row));
+					upsertRow(state.rows, index, row);
 					changed = true;
+				}
+				// A backlog may hold far more rows than are kept: trim as it grows, not once at the end.
+				if (state.rows.length >= MAX_ROWS_PER_AGENT * 2) {
+					trimRows(state);
+					index = rowIndex(state.rows);
 				}
 				continue;
 			}
@@ -365,15 +479,18 @@ export class AgentActivityIndex {
 				if (!row) continue;
 				row.status = message.isError ? "error" : "success";
 				row.timestamp = Math.max(row.timestamp, timestamp);
-				if (!state.rows.includes(row)) pruneToolRows(state, boundedPush(state.rows, row));
+				if (!index.has(row.id)) upsertRow(state.rows, index, row);
 				state.toolRows.delete(message.toolCallId);
 				changed = true;
 			}
 		}
-		if (changed) this.#notify();
+		if (!changed) return;
+		trimRows(state);
+		this.#notify();
 	}
 
 	#notify(): void {
+		this.#revision++;
 		for (const listener of this.#listeners) listener();
 	}
 }

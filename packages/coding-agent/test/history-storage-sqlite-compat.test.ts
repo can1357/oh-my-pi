@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { readTableSql } from "./helpers/sqlite-inspect";
@@ -188,4 +189,133 @@ it("collapses preexisting whitespace-padded duplicates on open, keeping the late
 	});
 	// FTS was rebuilt after the delete+update, so no stale index rows remain.
 	expect(storage.search("tidy", 10).map(entry => entry.sessionId)).toEqual(["new-session"]);
+});
+
+// #13926: report failed persistence once per outage without changing the log-only promise contract.
+it("reports failed writes once per outage and permits persistence after recovery", async () => {
+	tempDir = TempDir.createSync("@omp-history-storage-write-failure-");
+	const dbPath = tempDir.join("history.db");
+	const storage = HistoryStorage.open(dbPath);
+	const peer = new Database(dbPath);
+	const reportFailure = vi.fn();
+	const reportSuccess = vi.fn();
+	storage.setErrorListener(reportFailure);
+	storage.setAddListener(reportSuccess);
+	try {
+		peer.run(
+			"CREATE TRIGGER reject_prompt BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT, 'write rejected'); END",
+		);
+		await storage.add("lost while locked", "/project", "session");
+		await storage.add("lost again while locked", "/project", "session");
+		expect(reportFailure).toHaveBeenCalledTimes(1);
+		expect(reportFailure).toHaveBeenCalledWith(expect.any(Error));
+		expect(reportSuccess).not.toHaveBeenCalled();
+		peer.run("DROP TRIGGER reject_prompt");
+		expect(storage.getRecent(10)).toEqual([]);
+
+		await storage.add("lost while locked", "/project", "session");
+		expect(reportSuccess).toHaveBeenCalledTimes(1);
+		peer.run("CREATE TRIGGER reject_again BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT, 'write rejected'); END");
+		await storage.add("lost after recovery", "/project", "session");
+		expect(reportFailure).toHaveBeenCalledTimes(2);
+		expect(reportSuccess).toHaveBeenCalledTimes(1);
+		peer.run("DROP TRIGGER reject_again");
+		HistoryStorage.close();
+		const reopened = HistoryStorage.open(dbPath);
+		expect(reopened.search("locked", 10)).toMatchObject([
+			{ prompt: "lost while locked", cwd: "/project", sessionId: "session", useCount: 1 },
+		]);
+	} finally {
+		if (peer.inTransaction) peer.run("ROLLBACK");
+		peer.close();
+	}
+});
+
+// A damaged page cross-linked into `history` decoded BLOBs as prompts, and the
+// first Up arrow crashed the editor with `text.replace is not a function`.
+it("recalls and searches only text prompts when a row decodes as a BLOB", async () => {
+	tempDir = TempDir.createSync("@omp-history-storage-blob-");
+	const dbPath = tempDir.join("history.db");
+	await HistoryStorage.open(dbPath).add("readable prompt", "/project", "session");
+	HistoryStorage.close();
+	const raw = new Database(dbPath);
+	raw.run("INSERT INTO history (prompt, created_at) VALUES (x'72656164', 4102444800)");
+	raw.run("INSERT INTO history (prompt, created_at, use_count) VALUES ('readable counter', 4102444800, x'01')");
+	raw.close();
+
+	const storage = HistoryStorage.open(dbPath);
+	expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["readable prompt"]);
+	expect(storage.search("read", 10).map(entry => entry.prompt)).toEqual(["readable prompt"]);
+	// An intact store with odd values is filtered, not quarantined.
+	expect(fs.readdirSync(tempDir.path()).filter(name => name.includes(".corrupt-"))).toEqual([]);
+});
+
+it("quarantines a store whose newest rows are unreadable and keeps every readable prompt, title, and recap", async () => {
+	tempDir = TempDir.createSync("@omp-history-storage-salvage-");
+	const dbPath = tempDir.join("history.db");
+	HistoryStorage.open(dbPath);
+	HistoryStorage.close();
+	const prompt = (id: number) => `prompt-${String(id).padStart(4, "0")}-${"x".repeat(180)}`;
+	const seed = new Database(dbPath);
+	// Zero freed space so each prompt's marker appears only on the leaf that holds it.
+	seed.run("PRAGMA secure_delete = ON");
+	seed.run(`
+CREATE TABLE session_titles (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE session_recaps (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, cwd TEXT NOT NULL, recap TEXT NOT NULL, created_at INTEGER NOT NULL);
+INSERT INTO session_titles VALUES ('session-a', 'Title A', 1700000000);
+INSERT INTO session_recaps (session_id, cwd, recap, created_at) VALUES ('session-a', '/project', 'Recap A', 1700000000);
+	`);
+	const insert = seed.prepare("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?, ?)");
+	seed.transaction(() => {
+		for (let id = 1; id <= 200; id++) insert.run(id, prompt(id), 1_700_000_000 + id, "/project", "session-a");
+	})();
+	insert.finalize();
+	seed.run("PRAGMA wal_checkpoint(TRUNCATE)");
+	const pageSize = seed.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	seed.close();
+
+	// Destroy the table leaf holding the newest prompts, which recall reads first.
+	// The UNIQUE index stores prompts too; table leaves carry b-tree page type 0x0d.
+	const bytes = fs.readFileSync(dbPath);
+	const pageOf = (id: number) => {
+		for (
+			let at = bytes.indexOf(prompt(id).slice(0, 12));
+			at !== -1;
+			at = bytes.indexOf(prompt(id).slice(0, 12), at + 1)
+		) {
+			const page = Math.floor(at / pageSize);
+			if (bytes[page * pageSize] === 0x0d) return page;
+		}
+		throw new Error(`no table leaf holds prompt ${id}`);
+	};
+	const damagedPage = pageOf(200);
+	const lost = new Set(Array.from({ length: 200 }, (_, index) => index + 1).filter(id => pageOf(id) === damagedPage));
+	expect(lost.size).toBeLessThan(50);
+	const fd = fs.openSync(dbPath, "r+");
+	fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, damagedPage * pageSize);
+	fs.closeSync(fd);
+
+	const storage = HistoryStorage.open(dbPath);
+	const expected = Array.from({ length: 200 }, (_, index) => 200 - index)
+		.filter(id => !lost.has(id))
+		.map(prompt);
+	expect(storage.getRecent(1000).map(entry => entry.prompt)).toEqual(expected);
+	expect(storage.search("prompt 0001", 10).map(entry => entry.prompt)).toEqual([prompt(1)]);
+	await storage.add("after recovery", "/project", "session-b");
+	expect(storage.getRecent(1)[0]).toMatchObject({ prompt: "after recovery", id: 201 });
+	HistoryStorage.close();
+
+	expect(fs.readdirSync(tempDir.path()).some(name => /^history\.db\.corrupt-[^.]+$/.test(name))).toBe(true);
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		expect(db.query("SELECT session_id, title FROM session_titles").all()).toEqual([
+			{ session_id: "session-a", title: "Title A" },
+		]);
+		expect(db.query("SELECT session_id, cwd, recap FROM session_recaps").all()).toEqual([
+			{ session_id: "session-a", cwd: "/project", recap: "Recap A" },
+		]);
+		expect(db.query<{ quick_check: string }, []>("PRAGMA quick_check").get()?.quick_check).toBe("ok");
+	} finally {
+		db.close();
+	}
 });

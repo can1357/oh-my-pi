@@ -2,6 +2,7 @@
 
 provider "amazon-bedrock" {
 	default-model "us.anthropic.claude-opus-5-5"
+	image-count-budget 90
 
 	// The Converse assembler positions content blocks by wire index
 	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
@@ -36,8 +37,6 @@ provider "amazon-bedrock" {
 	}
 	class "openai" {
 		thinking-mode "effort"
-		// OpenAI models reject Converse image blocks nested inside toolResult content.
-		requires-tool-result-image-hoisting #true
 	}
 	class "deepseek" {
 		requires-reasoning-content-for-all-assistant-turns #true
@@ -51,14 +50,65 @@ provider "amazon-bedrock" {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
-		// Opaque application-inference-profile ARNs carry no vendor signal, so an
-		// OpenAI-backed profile classifies here and would otherwise nest images in
-		// toolResult content and hit the same rejection. Hoisting is accepted by
-		// every Converse model measured, so it is the safe default for unknowns.
-		requires-tool-result-image-hoisting #true
+	}
+	// AWS documents compact-2026-09-04 for native Runtime APIs, not Converse.
+	// Expose this only as a side-compaction capability; ordinary turns
+	// continue to use the model's bedrock-converse-stream API. These revisions
+	// are limited to the Bedrock model cards that name the new beta:
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-7.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-8.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html
+	// The haiku/sonnet/opus families are Anthropic-only (taxonomy/anthropic.kdl).
+	on-api "bedrock-converse-stream" {
+		family "haiku" {
+			revision ">=4.5 <4.6" {
+				supports-server-compaction #true
+			}
+			revision ">=5.5 <5.6" {
+				supports-server-compaction #true
+			}
+		}
+		family "sonnet" {
+			revision ">=5 <5.1" {
+				supports-server-compaction #true
+			}
+			revision ">=5.5 <5.6" {
+				supports-server-compaction #true
+			}
+		}
+		family "opus" {
+			revision ">=4.7 <4.9" {
+				supports-server-compaction #true
+			}
+			revision ">=5 <5.1" {
+				supports-server-compaction #true
+			}
+			revision ">=5.5 <5.6" {
+				supports-server-compaction #true
+			}
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "moonshot.kimi-k2-thinking" {
+		thinking-requires-effort #true
+	}
+	// residue: the inference-profile prefixes leave the K3 rows in the
+	// "unknown" class, so an exact selector is the only match. K3 reasons via
+	// OpenAI-style reasoning_effort (low/high/max, default max), matching
+	// Moonshot's official API and every other provider's K3 entry. Verified
+	// live via Converse on global.moonshotai.kimi-k3: identical prompt yields
+	// ~1K output tokens at "high" vs ~2.4K at "max" (invalid values are
+	// accepted silently and behave like the max default).
+	models "*.moonshotai.kimi-k3" {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "max"
+		thinking-default-level "max"
 		thinking-requires-effort #true
 	}
 	// The Qwen rows arrive with maxTokens copied from the upstream context

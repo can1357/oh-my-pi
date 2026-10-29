@@ -13,7 +13,15 @@
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
  */
-import { RelayBridge } from "./bridge";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { RelayBridge, type RelayBridgeExtensionUpdater } from "./bridge";
+import {
+	defaultRelayExtensionDir,
+	installedRelayExtensionVersion,
+	unpackedExtensionId,
+	writeRelayExtension,
+} from "./extension-files";
+import { isOlderOmpVersion } from "./protocol";
 
 /** Options for {@link startRelayServer}. */
 export interface RelayServerOptions {
@@ -22,16 +30,51 @@ export interface RelayServerOptions {
 	token?: string;
 	/** Group tabs the agent actively drives under one per-window Chrome tab group (default on); `false` disables. */
 	group?: boolean | { title: string; color: string };
+	/**
+	 * The extension copy this relay keeps current: an older extension Chrome loaded from here is rewritten and
+	 * reloaded (default: `omp browser-relay install`'s directory).
+	 */
+	extensionDir?: string;
 	log?: (message: string, data?: Record<string, unknown>) => void;
 }
 
+/**
+ * Updates the extension when Chrome loaded it from `dir`: an extension loaded from elsewhere (`install --dir`, a
+ * development build) is not this relay's to rewrite, and files a newer omp wrote are left for that omp's relay.
+ * Calls run one at a time: Chrome profiles that load the same folder share its files, and a later call finds them
+ * already current.
+ */
+function extensionUpdaterFor(dir: string): RelayBridgeExtensionUpdater {
+	let queue: Promise<unknown> = Promise.resolve();
+	const update = async (extensionId: string) => {
+		if ((await unpackedExtensionId(dir)) !== extensionId) return false;
+		if (isOlderOmpVersion(VERSION, await installedRelayExtensionVersion(dir))) return false;
+		await writeRelayExtension(dir, VERSION);
+		return true;
+	};
+	return extensionId => {
+		const result = queue.then(() => update(extensionId));
+		queue = result.catch(() => {});
+		return result;
+	};
+}
+
+/** `chrome-extension://<id>` → `<id>`; anything else → undefined. */
+const EXTENSION_ORIGIN = /^chrome-extension:\/\/([a-p]{32})$/;
+
 /** Body of the 503 `/json/version` answer while no extension is connected. */
 export interface RelayUnavailableInfo {
+	/** Version of the OMP binary serving this relay. */
+	ompRelayVersion: string;
 	error: string;
 	/** An extension completed the hello handshake at least once in this server's lifetime. */
 	extensionSeen: boolean;
 	/** Milliseconds this server has been listening. */
 	uptimeMs: number;
+	/** Downstream CDP clients connected to this relay. */
+	ompRelayCdpClients: number;
+	/** Milliseconds since the last connected extension went away; absent if none has connected yet. */
+	disconnectedMs?: number;
 }
 
 /** A running relay server. */
@@ -44,6 +87,8 @@ export interface RelayServer {
 interface SocketData {
 	role: "cdp" | "ext";
 	connId?: number;
+	/** The Chrome extension id an `ext` upgrade's `Origin` named. */
+	extensionId?: string;
 }
 
 type RelayWebSocket = Bun.ServerWebSocket<SocketData>;
@@ -69,7 +114,8 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const log = opts.log ?? (() => {});
 	const group =
 		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
-	const bridge = new RelayBridge({ log, group });
+	const updateExtension = extensionUpdaterFor(opts.extensionDir ?? defaultRelayExtensionDir());
+	const bridge = new RelayBridge({ log, group, updateExtension });
 	const sockets = new Set<RelayWebSocket>();
 	const startedAt = Date.now();
 
@@ -102,17 +148,21 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (opts.token && url.searchParams.get("token") !== opts.token) {
 					return new Response("Unauthorized", { status: 401 });
 				}
-				const data: SocketData = { role: "ext" };
+				const data: SocketData = { role: "ext", extensionId: origin?.match(EXTENSION_ORIGIN)?.[1] };
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
 			if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (path === "/json/version") {
 				if (!bridge.ready) {
+					const disconnectedMs = bridge.extensionGoneForMs;
 					const info: RelayUnavailableInfo = {
+						ompRelayVersion: VERSION,
 						error: "relay extension is not connected",
 						extensionSeen: bridge.extensionSeen,
 						uptimeMs: Date.now() - startedAt,
+						ompRelayCdpClients: bridge.cdpClientCount,
+						...(disconnectedMs === null ? {} : { disconnectedMs }),
 					};
 					return Response.json(info, { status: 503 });
 				}
@@ -131,7 +181,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			open(ws: RelayWebSocket): void {
 				sockets.add(ws);
 				if (ws.data.role === "ext") {
-					bridge.extConnected(ws);
+					bridge.extConnected(ws, ws.data.extensionId);
 				} else {
 					ws.data.connId = bridge.cdpConnected(ws);
 				}

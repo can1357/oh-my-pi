@@ -126,7 +126,6 @@ async function callSessionToolPromptOnAbort(
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
-		defaultIntent: "py prelude",
 		identity,
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;

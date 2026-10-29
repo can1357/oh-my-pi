@@ -13,8 +13,12 @@ export const COMPUTER_WORKER_ARG = "__omp_worker_computer";
 export const DAEMON_BROKER_WORKER_ARG = "__omp_worker_daemon_broker";
 /** IDA-host selector shared by the CLI dispatcher and the broker daemon spec. */
 export const IDA_HOST_WORKER_ARG = "__omp_worker_ida_host";
+/** Mnemopi shared embedding-server selector shared by the CLI dispatcher and `embed-client.ts`. */
+export const MNEMOPI_EMBED_SERVER_WORKER_ARG = "__omp_worker_mnemopi_embed_server";
 /** LSP-multiplexer selector shared by the CLI dispatcher and worker launcher. */
 export const LSP_MUX_WORKER_ARG = "__omp_worker_lsp_mux";
+/** Parent-death watchdog thread selector shared by the CLI dispatcher and `startParentWatchdog`. */
+export const PARENT_WATCHDOG_WORKER_ARG = "__omp_worker_parent_watchdog";
 /** Activity-worker selector shared by the CLI dispatcher and worker launcher. */
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 /** Text-prediction daemon selector shared by the CLI dispatcher and the broker daemon spec. */

@@ -36,6 +36,8 @@ use crate::{
 
 pub struct HashlineEngine {
 	pub enforce_seen_lines: bool,
+	/// See [`crate::session::SessionConfig::max_columns`].
+	pub max_columns:        usize,
 }
 
 impl ModeEngine for HashlineEngine {
@@ -75,9 +77,16 @@ impl ModeEngine for HashlineEngine {
 		let patch =
 			Patch::parse(input, &SplitOptions { cwd: Some(&files.policy().cwd), path: None })?;
 		if patch.sections.is_empty() {
-			return Err(EditError::apply("No hashline sections found in input."));
+			let path = input::first_header_path(input, &SplitOptions {
+				cwd:  Some(&files.policy().cwd),
+				path: None,
+			});
+			return Err(match path {
+				Some(path) => patcher::header_only_error(&path, files),
+				None => EditError::parse("No hashline sections found in input."),
+			});
 		}
-		patcher::stage_patch(&patch, input, self.enforce_seen_lines, files, store)
+		patcher::stage_patch(&patch, input, self.enforce_seen_lines, self.max_columns, files, store)
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
@@ -117,14 +126,6 @@ fn header_parts(input: &str) -> Vec<(String, usize, usize)> {
 		.collect()
 }
 
-fn added_lines(body: &str) -> String {
-	body
-		.lines()
-		.filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++ ")))
-		.collect::<Vec<_>>()
-		.join("\n")
-}
-
 fn inspect_input(input: &str) -> Inspection {
 	let headers = header_parts(input);
 	let paths = headers.iter().map(|(path, ..)| path.clone()).collect();
@@ -133,7 +134,7 @@ fn inspect_input(input: &str) -> Inspection {
 		let body_end = headers
 			.get(index + 1)
 			.map_or(input.len(), |(_, start, _)| *start);
-		let digest = added_lines(&input[*body_start..body_end]);
+		let digest = super::added_lines(input[*body_start..body_end].lines()).unwrap_or_default();
 		if digest.is_empty() {
 			continue;
 		}

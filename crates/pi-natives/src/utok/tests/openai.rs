@@ -74,7 +74,7 @@ fn random_strings(seed: u64, n: usize) -> Vec<String> {
 	for _ in 0..n {
 		let len = (rng.next() % 300 + 1) as usize;
 		let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
-		out.push(String::from_utf8_lossy(&bytes).into_owned());
+		out.push(String::from_utf8_lossy_owned(bytes));
 	}
 	for _ in 0..n {
 		let len = (rng.next() % 120 + 1) as usize;
@@ -94,6 +94,42 @@ fn random_strings(seed: u64, n: usize) -> Vec<String> {
 			})
 			.collect();
 		out.push(s);
+	}
+	out
+}
+
+/// Texts whose pre-tokenized pieces are longer than the linear merge
+/// handles, so they take the heap merge: long runs of one character class
+/// (whitespace, letters, CJK, punctuation), repetitive and random, starting
+/// just past the length limit.
+fn long_pieces(seed: u64) -> Vec<String> {
+	let mut rng = Rng(seed ^ 0x10e9);
+	let mut out =
+		vec![" ".repeat(129), " ".repeat(4096), "\n".repeat(700), "ab".repeat(600), "!?".repeat(400)];
+	for _ in 0..6 {
+		let len = (rng.next() % 2000 + 200) as usize;
+		out.push(
+			(0..len)
+				.map(|_| char::from(b'a' + (rng.next() % 26) as u8))
+				.collect(),
+		);
+		out.push(
+			(0..len)
+				.map(|_| {
+					let letter = b'a' + (rng.next() % 26) as u8;
+					char::from(if rng.next() % 2 == 0 {
+						letter.to_ascii_uppercase()
+					} else {
+						letter
+					})
+				})
+				.collect(),
+		);
+		out.push(
+			(0..len / 3)
+				.map(|_| char::from_u32(0x4e00 + (rng.next() % 0x100) as u32).unwrap())
+				.collect(),
+		);
 	}
 	out
 }
@@ -130,6 +166,7 @@ fn check_differential(enc: Encoding, reference: &tiktoken_rs::CoreBPE, seed: u64
 		.into_iter()
 		.chain(TRICKY.iter().map(|s| s.to_string()))
 		.chain((0..4).flat_map(|k| random_strings(seed.wrapping_add(k * 0x9e37), 150)))
+		.chain(long_pieces(seed))
 		.collect();
 	for text in &texts {
 		let want: Vec<u32> = reference.encode_ordinary(text);

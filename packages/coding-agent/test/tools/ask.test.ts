@@ -1198,6 +1198,62 @@ describe("AskTool multi-question navigation", () => {
 		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["two"]);
 		expect(editor).toHaveBeenCalledTimes(1);
 	});
+
+	it("offers Done selecting for multi-select inside a multi-question ask without arrow navigation", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async (prompt, options) => {
+				const labels = options.map(selectItemLabel);
+				if (prompt.includes("Pick one")) return labels.find(label => label?.endsWith("gamma"));
+				if (!prompt.includes("selected")) return labels.find(label => label?.endsWith("alpha"));
+				return labels.find(label => label?.includes("Done selecting"));
+			},
+		});
+
+		const result = await tool.execute(
+			"call-multi-in-many-done",
+			{
+				questions: [
+					{ id: "many", question: "Pick many", options: [{ label: "alpha" }, { label: "beta" }], multi: true },
+					{ id: "one", question: "Pick one", options: [{ label: "gamma" }, { label: "delta" }] },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.results?.map(r => r.selectedOptions)).toEqual([["alpha"], ["gamma"]]);
+	});
+
+	it("reports ticked options together with Other text for a multi-select question", async () => {
+		const tool = new AskTool(createSession());
+		const featureChoices = ["alpha", "beta", "Other (type your own)"];
+		const questions = [
+			{
+				id: "features",
+				question: "Features?",
+				options: [{ label: "alpha" }, { label: "beta" }, { label: "gamma" }],
+				multi: true,
+			},
+			{
+				id: "summary",
+				question: "Summary?",
+				options: [{ label: "one" }, { label: "two" }],
+			},
+		];
+		const context = createContext({
+			select: async prompt => (prompt.includes("Features?") ? featureChoices.shift() : "two"),
+			editor: async () => "also X",
+		});
+
+		const result = await tool.execute("call-multi-other", { questions }, undefined, undefined, context);
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\nfeatures: [alpha, beta] + "also X"\nsummary: two',
+		});
+	});
 });
 
 describe("AskTool option markers", () => {
@@ -1451,6 +1507,45 @@ describe("AskTool rich ask dialog", () => {
 			note: "My Custom Note",
 			timedOut: undefined,
 		});
+	});
+
+	it("names the option a note is on in the text the model reads and in single-question details", async () => {
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "s", selectedOptions: ["Two"], note: "picked for speed", noteOption: "Two" },
+				{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" },
+				{ id: "c", selectedOptions: [], customInput: "my own", note: "about my answer" },
+			],
+		});
+		const questions = [
+			{ id: "s", question: "Single?", options: [{ label: "One" }, { label: "Two" }] },
+			{ id: "m", question: "Multi?", multi: true, options: [{ label: "X" }, { label: "Y" }] },
+			{ id: "c", question: "Custom?", options: [{ label: "A" }] },
+		];
+		const tool = new AskTool(createSession());
+		const multi = await tool.execute("call-multi", { questions }, undefined, undefined, createContext({ askDialog }));
+		expect(multi.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\ns: Two (note on Two: picked for speed)\nm: [X, Y] (note on Y: Y only on weekends)\nc: "my own" (note: about my answer)',
+		});
+
+		askDialog.mockResolvedValue({
+			kind: "submit",
+			results: [{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" }],
+		});
+		const single = await tool.execute(
+			"call-single",
+			{ questions: [questions[1]!] },
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+		expect(single.content[0]).toEqual({
+			type: "text",
+			text: "User selected: X, Y\nUser added note on Y: Y only on weekends",
+		});
+		expect(single.details?.noteOption).toBe("Y");
 	});
 
 	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {

@@ -24,8 +24,8 @@ fn drop_passed_lines(input: &str) -> String {
 	for line in input.lines() {
 		let trimmed = line.trim_start();
 		if is_summary_line(trimmed) {
-			push_line(&mut summary, line);
-			push_line(&mut out, line);
+			primitives::push_line(&mut summary, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 		// snip jest.yaml strips: console.log noise and the zero-information
@@ -36,12 +36,12 @@ fn drop_passed_lines(input: &str) -> String {
 		if is_pass_noise(trimmed) {
 			continue;
 		}
-		push_line(&mut out, line);
+		primitives::push_line(&mut out, line);
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out
-	} else if has_content(&summary) {
+	} else if primitives::has_content(&summary) {
 		summary
 	} else {
 		primitives::head_tail_lines(input, 0, 20)
@@ -67,7 +67,7 @@ fn failures_only(input: &str) -> String {
 		if is_summary_line(trimmed) {
 			keeping_block = false;
 			trailing_context = 0;
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 
@@ -75,7 +75,7 @@ fn failures_only(input: &str) -> String {
 			keeping_block = true;
 			kept_failure = true;
 			trailing_context = 10;
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 
@@ -85,7 +85,7 @@ fn failures_only(input: &str) -> String {
 				trailing_context = 0;
 				continue;
 			}
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 			if trimmed.is_empty() {
 				continue;
 			}
@@ -102,20 +102,11 @@ fn failures_only(input: &str) -> String {
 	// A failing run where no failure block was recognized means the format is
 	// unknown; summary counts alone lose the actual error (issue: bun's non-TTY
 	// `(fail)` output). Fall back to head/tail rather than drop the failure.
-	if kept_failure && has_content(&out) {
+	if kept_failure && primitives::has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
 	}
-}
-
-fn push_line(out: &mut String, line: &str) {
-	out.push_str(line);
-	out.push('\n');
-}
-
-fn has_content(text: &str) -> bool {
-	text.lines().any(|line| !line.trim().is_empty())
 }
 
 fn is_summary_line(trimmed: &str) -> bool {

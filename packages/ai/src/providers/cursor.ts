@@ -2,7 +2,6 @@ import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
-import { scheduler } from "node:timers/promises";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
@@ -183,6 +182,7 @@ import {
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
@@ -192,6 +192,7 @@ import type {
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
+	CursorHistoryPayload,
 	CursorMcpCall,
 	CursorShellStreamCallbacks,
 	CursorTodoSnapshot,
@@ -225,8 +226,10 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
-import { formatConnectEndStreamError } from "./connect-error-detail";
+import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
+import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -258,9 +261,9 @@ import {
 	piReadDisplayPath,
 	piReadPathHasRange,
 	piTimeout,
-	shellTimeoutSeconds,
+	shellDeadlineSeconds,
 } from "./cursor/exec-modern";
-import { frameConnectMessage, handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -345,12 +348,34 @@ function isCursorModelNotFound(error: unknown): boolean {
 	);
 }
 
+/**
+ * Failures that, before any token, mean the wire conversation is poisoned
+ * rather than the account: a bare gRPC `resource_exhausted` (#8345), or the
+ * structured PROVIDER_ERROR every resume of a turn cut mid-stream draws (#15830).
+ */
+function isCursorConversationRejected(error: unknown, message: string): boolean {
+	return (
+		(error instanceof AIError.ProviderHttpError && error.code === "PROVIDER_ERROR") ||
+		RESOURCE_EXHAUSTED_PATTERN.test(message)
+	);
+}
+
 const CURSOR_MAX_STREAM_RETRIES = 5;
 const CURSOR_RETRY_BASE_DELAY_MS = 500;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
-const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
+/**
+ * Per-conversation checkpoint and the blob store its blob refs point into, kept
+ * in one entry so they are always evicted together. Bounded: each blob store
+ * holds the serialized history, and an evicted conversation rebuilds from
+ * `context` exactly like the first request after a restart.
+ */
+interface CursorConversationEntry {
+	state: ConversationStateStructure | undefined;
+	blobs: Map<string, Uint8Array>;
+}
+const CURSOR_CONVERSATION_CACHE_MAX = 128;
+const cursorConversations = new LRUCache<string, CursorConversationEntry>({ max: CURSOR_CONVERSATION_CACHE_MAX });
 const warnedCursorKimiK3ReplayMessages = new Set<string>();
 /**
  * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
@@ -383,6 +408,7 @@ type CursorWireMode = "normalized" | "discovered";
 interface CursorRetryContext {
 	attempt: number;
 	originalRequestId: string;
+	requestIds: string[];
 	checkpoint?: ConversationStateStructure;
 	checkpointHash?: string;
 	noProgressResumes: number;
@@ -392,7 +418,22 @@ interface CursorRetryContext {
 	baseConversationId: string;
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
+	turnRecords: CursorTurnRecordState;
 	firstTokenTime?: number;
+}
+
+/** What one turn's server records stand for, as the turn sent it, across its retries. */
+interface CursorTurnRecordState {
+	/** Hash of the opening user message when the turn started. */
+	userHash: number | bigint;
+	/** The wire route of the turn's first request. */
+	wireRoute: string | undefined;
+	/** A retry went out on another route; its checkpoint mixes records from both. */
+	mixedRoutes: boolean;
+	/** Results the host stored for this turn's calls, by call id. */
+	stored: Map<string, ToolResultMessage>;
+	/** Hash of each result as the server saw it, taken before the host ran. */
+	given: Map<string, number | bigint>;
 }
 
 interface CursorStreamTiming {
@@ -418,9 +459,9 @@ interface CursorGrpcRequest {
 interface CursorTransportRequest extends CursorGrpcRequest {
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
+	/** The wire route this request selected; server records replay only on it. */
+	wireRoute: string;
 }
-
-const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 interface CursorLogEntry {
 	ts: number;
@@ -601,7 +642,7 @@ function classifyCursorStructuredError(structured: CursorStructuredError): Error
 	if (code === 21) return new AIError.AbortError(fullMessage);
 	const status = CURSOR_ERROR_STATUS[code];
 	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name });
-	if (retryable === true || CURSOR_RETRYABLE_ERROR_CODES.has(code)) {
+	if (retryable === true || (retryable === undefined && CURSOR_RETRYABLE_ERROR_CODES.has(code))) {
 		return new AIError.ProviderHttpError(fullMessage, 503, { code: name });
 	}
 	return new AIError.ProviderHttpError(fullMessage, 400, { code: name });
@@ -613,7 +654,17 @@ function classifyConnectError(error: Record<string, unknown>): Error {
 	if (structured) return classifyCursorStructuredError(structured);
 	const code = typeof error.code === "string" ? error.code : "unknown";
 	const message = typeof error.message === "string" ? error.message : "Unknown error";
-	return new ConnectEndStreamError(`Connect error ${code}: ${message}`, formatConnectEndStreamError(error));
+	const endStreamError = new ConnectEndStreamError(
+		`Connect error ${code}: ${message}`,
+		formatConnectEndStreamError(error),
+	);
+	// Without a decodable binary detail, Cursor's retry verdict survives only in
+	// the detail's debug JSON; the classification text drops it, so carry it as
+	// a structured flag.
+	if (hasRetryableCursorErrorDetail(error.details)) {
+		AIError.attach(endStreamError, AIError.create(AIError.Flag.Transient));
+	}
+	return endStreamError;
 }
 
 function parseConnectEndStream(data: Uint8Array): Error | null {
@@ -1041,20 +1092,24 @@ function streamCursorWithWireMode(
 		// Once aborted, the Agent finalizes from the abort error and discards
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
-		let abortSettled: Promise<void> | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			const signal = options?.signal;
-			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all(inFlightDispatches);
-				if (!signal) {
-					await settled;
-					continue;
+			if (!signal) {
+				while (inFlightDispatches.size > 0) await Promise.all(inFlightDispatches);
+				return;
+			}
+			if (inFlightDispatches.size === 0 || signal.aborted) return;
+			const { promise: aborted, resolve } = Promise.withResolvers<void>();
+			const onAbort = (): void => resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				while (inFlightDispatches.size > 0 && !signal.aborted) {
+					await Promise.race([Promise.all(inFlightDispatches), aborted]);
 				}
-				abortSettled ??= new Promise<void>(resolve =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				await Promise.race([settled, abortSettled]);
+			} finally {
+				// The request signal outlives this stream (it spans the agent's tool
+				// loop); a lingering listener would pin this request's whole scope.
+				signal.removeEventListener("abort", onAbort);
 			}
 		};
 
@@ -1065,11 +1120,18 @@ function streamCursorWithWireMode(
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
+		// After the final step's `stepCompleted`, only a repeat checkpoint and the
+		// `turnEnded` usage frame follow.
+		let stepCompletedIsLatest = false;
 		let endStreamError: Error | null = null;
 		let progressVersion = 0;
 		let latestCheckpointProgressVersion = -1;
 		let latestCheckpoint: ConversationStateStructure | undefined;
 		let latestCheckpointTerminal = false;
+		// Whether the latest checkpoint covers everything the turn produced: only
+		// such a checkpoint's records may stand for the completed turn, since a
+		// stale one would replay a partial turn under the full turn's digest.
+		let checkpointCoversTurn = false;
 		// Blocks the discovered-id retry once the turn produced observable output or
 		// ran a side effect (streamed content/tool call, exec bridge, permission
 		// reply). Pure keepalive heartbeats never set it, so a `not_found` that
@@ -1091,6 +1153,20 @@ function streamCursorWithWireMode(
 				return;
 			}
 			if (!sawTurnEnded) {
+				// A stream cut after the final step lost only usage and a repeat
+				// checkpoint, so the turn is complete. The final step ends on answer
+				// text; a step that ended on tool calls, or left one open, may be
+				// followed by another step and is still treated as truncated.
+				if (
+					stepCompletedIsLatest &&
+					output.content.at(-1)?.type === "text" &&
+					openBlockState?.currentToolCall === null &&
+					openBlockState.openToolCalls.size === 0
+				) {
+					logger.debug("cursor stream ended after stepCompleted without turnEnded", { model: model.id });
+					h2Completion.resolve();
+					return;
+				}
 				h2Completion.reject(
 					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 						kind: "incomplete-stream",
@@ -1109,6 +1185,51 @@ function streamCursorWithWireMode(
 		let serializedFallbackWireModelId: string | undefined;
 		let activeBlobStore: Map<string, Uint8Array> | undefined;
 		let originalRequestId: string | undefined;
+		// Every request id this turn has sent: the server stamps its user record
+		// with whichever request opened the run a checkpoint continues.
+		let turnRequestIds = retryContext?.requestIds ?? [];
+		// Removed in `finally`: the request signal outlives this stream, and a
+		// listener left on it would retain this request's scope (request bytes,
+		// output, blob store) until the caller's whole prompt ends.
+		let onTransportAbort: (() => void) | undefined;
+		// A call without conversation/session id mints a one-off conversation that
+		// no later request can address; its cache entries are released at the end.
+		const ephemeralConversation =
+			!retryContext && options?.conversationId === undefined && options?.sessionId === undefined;
+		// Whether an earlier request already opened this conversation. A session
+		// id minted per call (e.g. by `streamSimple`) never has one.
+		let knownConversation = retryContext !== undefined;
+		// The turn's server records stand for the opening user message and tool
+		// results as the server saw them; they are captured only while what the
+		// host keeps still matches. Hashed now, before anything awaits, since a
+		// host may edit either in place while the turn runs. Server-owned tools
+		// report results without awaiting them, so each one is tracked with the
+		// dispatches and drained before the turn is captured.
+		const turnRecords: CursorTurnRecordState = retryContext?.turnRecords ?? {
+			userHash: hashCursorUserMessage(context.messages[findLastUserMessageIndex(context.messages)]),
+			wireRoute: undefined,
+			mixedRoutes: false,
+			stored: new Map(),
+			given: new Map(),
+		};
+		const hostOnToolResult = options?.onToolResult;
+		const onToolResult: CursorToolResultHandler | undefined = hostOnToolResult
+			? result => {
+					turnRecords.given.set(result.toolCallId, hashCursorToolResult(result));
+					const persisted = (async () => {
+						const stored = (await hostOnToolResult(result)) ?? result;
+						turnRecords.stored.set(stored.toolCallId, stored);
+						return stored;
+					})();
+					const settled = persisted.then(
+						() => {},
+						() => {},
+					);
+					inFlightDispatches.add(settled);
+					void settled.finally(() => inFlightDispatches.delete(settled));
+					return persisted;
+				}
+			: undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -1125,12 +1246,13 @@ function streamCursorWithWireMode(
 			// and result, so the turn resumes where it stopped instead of replaying
 			// the last user message.
 			const rotatedFresh = retryContext ? false : freshRotatedConversationIds.has(conversationId);
-			activeBlobStore =
-				retryContext?.blobStore ?? conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
+			const cachedConversation = cursorConversations.get(conversationId);
+			if (cachedConversation) knownConversation = true;
+			activeBlobStore = retryContext?.blobStore ?? cachedConversation?.blobs ?? new Map<string, Uint8Array>();
 			const blobStore = activeBlobStore;
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState =
-				retryContext?.checkpoint ?? (rotatedFresh ? undefined : conversationStateCache.get(conversationId));
+			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
+			cursorConversations.set(conversationId, conversationEntry);
+			const cachedState = retryContext?.checkpoint ?? (rotatedFresh ? undefined : cachedConversation?.state);
 			const builtRequest = await buildGrpcRequestForWireMode(
 				model,
 				context,
@@ -1145,7 +1267,11 @@ function streamCursorWithWireMode(
 			);
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
-			conversationStateCache.set(conversationId, conversationState);
+			// A retry resumes the checkpoint its earlier requests wrote, so every
+			// request of the turn must share the first one's route.
+			turnRecords.wireRoute ??= builtRequest.wireRoute;
+			if (builtRequest.wireRoute !== turnRecords.wireRoute) turnRecords.mixedRoutes = true;
+			conversationEntry.state = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(
 				context.tools,
 				model.requiresCursorToolSchemaProjection === true,
@@ -1156,6 +1282,7 @@ function streamCursorWithWireMode(
 			const requestPath = transportMode === "http2" ? CURSOR_RUN_PATH : CURSOR_RUN_SSE_PATH;
 			const requestId = crypto.randomUUID();
 			originalRequestId = retryContext?.originalRequestId ?? requestId;
+			turnRequestIds = [...turnRequestIds, requestId];
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const sharedRequestHeaders = {
 				...callerHeaders,
@@ -1217,7 +1344,7 @@ function streamCursorWithWireMode(
 
 			if (!retryContext) stream.push({ type: "start", partial: output });
 
-			let pendingBuffer: Buffer = Buffer.alloc(0);
+			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
 			let currentTextBlock = previousState?.currentTextBlock ?? null;
 			let currentThinkingBlock = previousState?.currentThinkingBlock ?? null;
@@ -1253,12 +1380,13 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
+				onToolResult,
 			};
 			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId!, checkpoint);
+				conversationEntry.state = checkpoint;
+				cursorConversations.set(conversationId!, conversationEntry);
 			};
 
 			// Client replies that carry a local result (exec output, exec control,
@@ -1271,6 +1399,7 @@ function streamCursorWithWireMode(
 			const resultWriter: CursorMessageWriter = {
 				write(frame) {
 					progressVersion++;
+					checkpointCoversTurn = false;
 					resultTransport.write(frame);
 				},
 			};
@@ -1289,18 +1418,7 @@ function streamCursorWithWireMode(
 						log?.write(chunk);
 					});
 				}
-				// Steady state drains fully per chunk; alias a fresh transport chunk
-				// instead of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
+				for (const { flags, payload: messageBytes } of frameDecoder.decode(chunk)) {
 					if (flags & CONNECT_END_STREAM_FLAG) {
 						const endError = parseConnectEndStream(messageBytes);
 						if (endError) {
@@ -1327,11 +1445,32 @@ function streamCursorWithWireMode(
 							sawProgressOrSideEffect = true;
 							progressVersion++;
 						}
+						if (interactionCase === "stepCompleted") {
+							stepCompletedIsLatest = true;
+						} else if (
+							interactionCase !== "heartbeat" &&
+							serverMessage.message.case !== "conversationCheckpointUpdate" &&
+							serverMessage.message.case !== "kvServerMessage"
+						) {
+							stepCompletedIsLatest = false;
+						}
 						if (serverMessage.message.case === "conversationCheckpointUpdate") {
 							latestCheckpoint = serverMessage.message.value;
 							latestCheckpointProgressVersion = progressVersion;
 							latestCheckpointTerminal = sawTurnEnded;
-							conversationStateCache.set(conversationId!, latestCheckpoint);
+							checkpointCoversTurn = true;
+							conversationEntry.state = latestCheckpoint;
+							cursorConversations.set(conversationId!, conversationEntry);
+						} else if (
+							// Blob traffic, keepalives, usage and step/turn ends add nothing
+							// the turn's records hold; any other frame may.
+							serverMessage.message.case !== "kvServerMessage" &&
+							interactionCase !== "heartbeat" &&
+							interactionCase !== "tokenDelta" &&
+							interactionCase !== "stepCompleted" &&
+							interactionCase !== "turnEnded"
+						) {
+							checkpointCoversTurn = false;
 						}
 						const isTurnEnded = interactionCase === "turnEnded";
 						// Dispatch is fire-and-forget so the socket keeps draining while a
@@ -1348,7 +1487,7 @@ function streamCursorWithWireMode(
 							blobStore,
 							serverMessage.message.case === "kvServerMessage" ? runTransport! : resultWriter,
 							options?.execHandlers,
-							options?.onToolResult,
+							onToolResult,
 							usageState!,
 							requestContextTools,
 							requestContextRules,
@@ -1413,12 +1552,13 @@ function streamCursorWithWireMode(
 			});
 
 			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
+				onTransportAbort = () => {
 					runTransport?.close();
 					void closeDebugLog().finally(() => {
 						settleH2(new AIError.AbortError());
 					});
-				});
+				};
+				options.signal.addEventListener("abort", onTransportAbort, { once: true });
 			}
 
 			runTransport.write(frameConnectMessage(requestBytes));
@@ -1438,7 +1578,40 @@ function streamCursorWithWireMode(
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
+			// A call the server never completed gets its result from the flush, which
+			// no checkpoint holds. An MCP call the exec channel already answered, with
+			// its arguments complete, leaves the turn as checkpointed.
+			const flushChangesTurn = [...state.openToolCalls.values(), state.currentToolCall].some(
+				call =>
+					call !== null &&
+					!(
+						call[kStreamingBlockKind] === "mcp" &&
+						call[kCursorExecResolved] &&
+						call[kStreamingPartialJson] === undefined
+					),
+			);
+			if (flushChangesTurn) checkpointCoversTurn = false;
 			flushOpenToolCalls(output, stream, state);
+			// Results that flush and server-owned tools reported are still settling
+			// through the host; the digest must see them as the host stored them.
+			await drainInFlightDispatches();
+			// The records hold the user message and results as the server saw them,
+			// written on one route; a host edit to either, in place or not, must not
+			// be undone by sending them back, nor may a retry's route change relabel them.
+			const userMessage = context.messages[findLastUserMessageIndex(context.messages)];
+			let keptAsSent = hashCursorUserMessage(userMessage) === turnRecords.userHash && !turnRecords.mixedRoutes;
+			for (const [callId, stored] of turnRecords.stored) {
+				if (hashCursorToolResult(stored) !== turnRecords.given.get(callId)) keptAsSent = false;
+			}
+			output.providerPayload =
+				checkpointCoversTurn && latestCheckpoint && keptAsSent
+					? captureCursorHistoryPayload(latestCheckpoint, blobStore, turnRequestIds, {
+							wireRoute: builtRequest.wireRoute,
+							userMessage,
+							content: output.content,
+							toolResults: turnRecords.stored,
+						})
+					: undefined;
 
 			calculateCost(model, output.usage, output.timestamp);
 
@@ -1478,6 +1651,7 @@ function streamCursorWithWireMode(
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
+						requestIds: turnRequestIds,
 						checkpoint: retryContext?.checkpoint,
 						checkpointHash: retryContext?.checkpointHash,
 						noProgressResumes: retryContext?.noProgressResumes ?? 0,
@@ -1487,6 +1661,7 @@ function streamCursorWithWireMode(
 						baseConversationId,
 						conversationId,
 						blobStore: activeBlobStore,
+						turnRecords,
 						firstTokenTime,
 					},
 				});
@@ -1600,11 +1775,7 @@ function streamCursorWithWireMode(
 				});
 				let retryDelayCompleted = false;
 				try {
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					retryDelayCompleted = !options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;
@@ -1617,6 +1788,7 @@ function streamCursorWithWireMode(
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,
+							requestIds: turnRequestIds,
 							checkpoint: retryCheckpoint,
 							checkpointHash,
 							noProgressResumes,
@@ -1626,6 +1798,7 @@ function streamCursorWithWireMode(
 							baseConversationId: retryBaseConversationId,
 							conversationId: retryConversationId,
 							blobStore: retryBlobStore,
+							turnRecords,
 							firstTokenTime,
 						},
 					});
@@ -1657,37 +1830,49 @@ function streamCursorWithWireMode(
 				flushOpenToolCalls(output, stream, openBlockState);
 			}
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
-			// #8345: a server-side per-conversation rejection surfaces as a bare
-			// resource_exhausted with zero tokens — the conversation is poisoned,
-			// not the account. Rotate the wire id and rebuild from `context` on
-			// the next attempt (the caller's retry loop). Do not migrate cached
-			// side-state: pendingToolCalls from a mid-turn checkpoint re-poison
-			// the new id. One rotation per failure streak; a new rotation is
-			// allowed only after the current rotated id completed a turn.
+			// #8345/#15830: a server-side per-conversation rejection (a bare
+			// resource_exhausted, or PROVIDER_ERROR after a mid-turn cut) with zero
+			// tokens means the conversation is poisoned, not the account. Rotate
+			// the wire id and rebuild from `context` on the next attempt (the
+			// caller's retry loop). Do not migrate cached side-state:
+			// pendingToolCalls from a mid-turn checkpoint re-poison the new id.
+			// One rotation per failure streak; a new rotation is allowed only
+			// after the current rotated id completed a turn.
 			const currentRotated =
 				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
 			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
+			let rotatedRejection = false;
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
 				!usageState.sawTokenDelta &&
-				RESOURCE_EXHAUSTED_PATTERN.test(result.message) &&
+				isCursorConversationRejected(error, result.message) &&
 				canRotate
 			) {
 				const rotated = crypto.randomUUID();
 				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
 				rotatedConversationIds.set(baseConversationId, rotated);
 				freshRotatedConversationIds.add(rotated);
+				// The poisoned id is never addressed again; release its side state.
+				cursorConversations.delete(conversationId);
 				logger.debug("cursor conversation rotated", {
 					base: baseConversationId,
 					from: conversationId,
 					to: rotated,
 				});
+				// Only a conversation an earlier request opened can be poisoned. A
+				// first request's rejection is real, and a caller retrying without a
+				// stable id would never reach the rotated one; keep Cursor's verdict.
+				rotatedRejection = knownConversation;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
-			output.errorId = result.id;
+			// The rejection is non-retriable on the poisoned id, but the fresh id
+			// is a different request. Mark this one attempt transient so the
+			// caller's retry loop actually rebuilds on the rotated id; if that id
+			// rejects too, `canRotate` is false and the original status surfaces.
+			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
 			if (error instanceof ConnectEndStreamError) {
 				output.errorClassificationMessage = result.message;
 				output.errorMessage = error.diagnosticMessage;
@@ -1707,6 +1892,17 @@ function streamCursorWithWireMode(
 			}
 			runTransport?.close();
 			h2Client?.close();
+			if (onTransportAbort) options?.signal?.removeEventListener("abort", onTransportAbort);
+			if (ephemeralConversation && baseConversationId !== undefined) {
+				const rotated = rotatedConversationIds.get(baseConversationId);
+				for (const id of [baseConversationId, rotated]) {
+					if (id === undefined) continue;
+					cursorConversations.delete(id);
+					successfulRotatedConversationIds.delete(id);
+					freshRotatedConversationIds.delete(id);
+				}
+				rotatedConversationIds.delete(baseConversationId);
+			}
 		}
 	})();
 
@@ -1725,6 +1921,19 @@ export type ToolCallState = ToolCall & {
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
+
+/**
+ * Content index of a streamed block. Blocks are stamped with their index on
+ * push and Cursor never reorders `output.content`, so this is O(1) per delta;
+ * the identity check keeps a foreign block resolvable.
+ */
+function streamedBlockIndex(
+	output: AssistantMessage,
+	block: AssistantMessage["content"][number] & { [kStreamingBlockIndex]: number },
+): number {
+	const index = block[kStreamingBlockIndex];
+	return output.content[index] === block ? index : output.content.indexOf(block);
+}
 
 export interface BlockState {
 	currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null;
@@ -2485,7 +2694,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			const { execResult } = await resolveExecHandler(
 				args,
@@ -2506,7 +2715,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			await handleShellStreamArgs(args, execMsg, runTransport, execHandlers, onToolResult);
 			return;
@@ -2984,7 +3193,7 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeoutSeconds(args.timeout),
+				timeout: shellDeadlineSeconds(args),
 			});
 			const { execResult } = await resolveExecHandler(
 				normalizedArgs,
@@ -4420,13 +4629,13 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * so reparsing unconditionally would erase the arguments of every such block
  * caught open by a truncated stream.
  *
- * Server-owned blocks are also paired here. `connect-scm` and `todo` are
- * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
- * synthesizes no placeholder for them and only their `toolCallCompleted` frame
- * pairs a result. A transport that closes before that frame would leave the
- * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
- * emitted instead.
+ * Server-owned blocks are also paired here. `connect-scm`, `todo` and
+ * `web-fetch` are stamped {@link kCursorExecResolved} the moment they open,
+ * so `agent-loop.ts` synthesizes no placeholder for them and only their
+ * `toolCallCompleted` frame pairs a result. A transport that closes before
+ * that frame would leave the call unpaired, and `buildSessionContext` strips
+ * a dangling call from every rebuilt transcript — the interaction disappears.
+ * An interrupted result is emitted instead.
  *
  * MCP blocks are excluded even when resolved: the exec dispatch that marked
  * them owns their result, and `drainInFlightDispatches` awaits it before this
@@ -4440,14 +4649,14 @@ export function flushOpenToolCalls(
 	const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
 	if (state.currentToolCall) openBlocks.add(state.currentToolCall);
 	for (const block of openBlocks) {
-		const idx = output.content.indexOf(block);
+		const idx = streamedBlockIndex(output, block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
 			block.arguments = parseToolCallArguments(partialJson);
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
@@ -4847,7 +5056,7 @@ export function mergeCursorMcpToolCallArgs(
 function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
 	const block = state.currentTextBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "text_end",
 		contentIndex: idx,
@@ -4864,7 +5073,7 @@ function endCurrentThinkingBlock(
 ): void {
 	const block = state.currentThinkingBlock;
 	if (!block) return;
-	const idx = output.content.indexOf(block);
+	const idx = streamedBlockIndex(output, block);
 	stream.push({
 		type: "thinking_end",
 		contentIndex: idx,
@@ -4893,6 +5102,13 @@ function endCurrentThinkingBlock(
  * call handed to an external executor is only a handoff while the marker is
  * absent, and the consumer that runs it needs a runnable block.
  *
+ * A frame whose `toolCallId` already has a block in `output` is the server
+ * re-dispatching that call (a new `execId`, e.g. a `read` re-sent once a
+ * parallel shell created the file). It adds no block: a second block with the
+ * same id makes every rebuilt history replay the call twice, which Cursor
+ * rejects (issue #15749). The re-run's result supersedes the first one in the
+ * host's result buffer.
+ *
  * Exported for tests to exercise ordering with adjacent text/thinking blocks.
  */
 export function synthesizeCursorExecToolCall(
@@ -4904,6 +5120,7 @@ export function synthesizeCursorExecToolCall(
 	args: Record<string, unknown>,
 	{ executed = true }: { executed?: boolean } = {},
 ): void {
+	if (output.content.some(block => block.type === "toolCall" && block.id === toolCallId)) return;
 	endCurrentTextBlock(output, stream, state);
 	endCurrentThinkingBlock(output, stream, state);
 	// Exec-frame translators often write `optional: value || undefined`. A
@@ -4986,7 +5203,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentTextBlock!.text += delta;
-		const idx = output.content.indexOf(state.currentTextBlock!);
+		const idx = streamedBlockIndex(output, state.currentTextBlock!);
 		stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingDelta") {
 		state.setFirstTokenTime();
@@ -5002,7 +5219,7 @@ export function processInteractionUpdate(
 			stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentThinkingBlock!.thinking += delta;
-		const idx = output.content.indexOf(state.currentThinkingBlock!);
+		const idx = streamedBlockIndex(output, state.currentThinkingBlock!);
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
 		endCurrentThinkingBlock(output, stream, state);
@@ -5140,7 +5357,7 @@ export function processInteractionUpdate(
 			if (target?.[kStreamingBlockKind] === "cursor-edit") {
 				const current = stringToolArg(target.arguments, "stream_content") ?? "";
 				target.arguments = { ...target.arguments, stream_content: current + editDelta };
-				const idx = output.content.indexOf(target);
+				const idx = streamedBlockIndex(output, target);
 				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: editDelta, partial: output });
 				return;
 			}
@@ -5170,7 +5387,7 @@ export function processInteractionUpdate(
 				target.arguments = throttled.value;
 				target[kStreamingLastParseLen] = throttled.parsedLen;
 			}
-			const idx = output.content.indexOf(target);
+			const idx = streamedBlockIndex(output, target);
 			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: chunk, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
@@ -5309,7 +5526,7 @@ export function processInteractionUpdate(
 					});
 				}
 			}
-			const idx = output.content.indexOf(settled);
+			const idx = streamedBlockIndex(output, settled);
 			clearStreamingPartialJson(settled);
 			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
 			releaseStreamedCall(state, settled);
@@ -5400,11 +5617,169 @@ function readCursorBlob(blobStore: Map<string, Uint8Array>, blobId: Uint8Array):
 	return data;
 }
 
+/** How the server's record of a run's user message begins; it carries the run's request id. */
+const CURSOR_USER_RECORD_PREFIX = '{"role":"user"';
+const cursorRecordDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+
+/** What a turn's server records stand for; replay requires all of it unchanged. */
+interface CursorTurnBinding {
+	/** The wire route (requested model, details id, max mode, parameters) the records were written under. */
+	wireRoute: string;
+	/** The user message that opened the turn. */
+	userMessage: Message | undefined;
+	content: AssistantMessage["content"];
+	toolResults: ReadonlyMap<string, ToolResultMessage>;
+}
+
+/** Chains `Bun.hash` over message parts from `seed`, without copying them. */
+function hashCursorParts(
+	parts: string | readonly (TextContent | ImageContent)[],
+	seed: number | bigint,
+): number | bigint {
+	if (typeof parts === "string") return Bun.hash(parts, seed);
+	let hash = seed;
+	for (const item of parts) {
+		hash = Bun.hash(item.type, hash);
+		if (item.type === "text") hash = Bun.hash(item.text, hash);
+		else hash = Bun.hash(item.data, Bun.hash(item.mimeType, hash));
+	}
+	return hash;
+}
+
+/** Hash of a tool result's error state and content, chained from `seed`. */
+function hashCursorToolResult(result: ToolResultMessage, seed: number | bigint = 0): number | bigint {
+	return hashCursorParts(result.content, Bun.hash(result.isError ? "error" : "ok", seed));
+}
+
+/** Hash of the user or developer message that opened a turn, chained from `seed`. */
+function hashCursorUserMessage(message: Message | undefined, seed: number | bigint = 0): number | bigint {
+	return message?.role === "user" || message?.role === "developer" ? hashCursorParts(message.content, seed) : seed;
+}
+
+/** The wire route a Run request selects: requested model, its details id, max mode and parameters. */
+function cursorWireRoute(
+	requested: { modelId: string; maxMode?: boolean; parameters: readonly { id: string; value: string }[] } | undefined,
+	details: { modelId: string; maxMode?: boolean } | undefined,
+): string {
+	return JSON.stringify([
+		requested?.modelId,
+		details?.modelId,
+		requested?.maxMode === true,
+		details?.maxMode === true,
+		requested?.parameters.map(parameter => [parameter.id, parameter.value]) ?? [],
+	]);
+}
+
+/** Hash of a blob-id list's bytes in order; taken before `onPayload`, it survives the hook mutating the ids. */
+function hashCursorBlobIds(ids: readonly Uint8Array[]): number | bigint {
+	let hash: number | bigint = ids.length;
+	for (const id of ids) hash = Bun.hash(id, hash);
+	return hash;
+}
+
+/**
+ * Digest of an assistant turn as its server records stand for it: the user
+ * message that opened it, its content, and the result persisted for each call.
+ * Pruning, snapcompact, secret redaction or an edit changes it, and the turn
+ * then rebuilds from content. Each field seeds the next one's hash, so no copy
+ * of the turn is built.
+ */
+function cursorTurnDigest({ userMessage, content, toolResults }: Omit<CursorTurnBinding, "wireRoute">): string {
+	let digest = hashCursorUserMessage(userMessage);
+	for (const block of content) {
+		digest = Bun.hash(block.type, digest);
+		if (block.type === "text") digest = Bun.hash(block.text, digest);
+		else if (block.type === "thinking") digest = Bun.hash(block.thinking, digest);
+		else if (block.type === "toolCall") {
+			digest = Bun.hash(JSON.stringify(block.arguments), Bun.hash(block.name, Bun.hash(block.id, digest)));
+			const result = toolResults.get(block.id);
+			digest = result === undefined ? Bun.hash("unpaired", digest) : hashCursorToolResult(result, digest);
+		}
+	}
+	return digest.toString(36);
+}
+
+/**
+ * The records Cursor wrote for this turn: the checkpoint's `rootPromptMessagesJson`
+ * entries after the user message the server recorded for one of this turn's
+ * requests. Undefined when that message is not found, a record's bytes are
+ * missing, or a record does not round-trip through UTF-8 text unchanged.
+ */
+function captureCursorHistoryPayload(
+	checkpoint: ConversationStateStructure,
+	blobStore: Map<string, Uint8Array>,
+	requestIds: readonly string[],
+	binding: CursorTurnBinding,
+): CursorHistoryPayload | undefined {
+	const stamps = requestIds.map(id => `"requestId":"${id}"`);
+	const records: string[] = [];
+	for (let index = checkpoint.rootPromptMessagesJson.length - 1; index >= 0; index--) {
+		const bytes = blobStore.get(Buffer.from(checkpoint.rootPromptMessagesJson[index]).toString("hex"));
+		if (!bytes) return undefined;
+		const record = cursorRecordDecoder.decode(bytes);
+		if (record.startsWith(CURSOR_USER_RECORD_PREFIX) && stamps.some(stamp => record.includes(stamp))) {
+			if (records.length === 0) return undefined;
+			log("info", "capturedServerRecords", { count: records.length });
+			return {
+				type: "cursorHistory",
+				wireRoute: binding.wireRoute,
+				digest: cursorTurnDigest(binding),
+				records: records.reverse(),
+			};
+		}
+		if (!Buffer.from(record).equals(bytes)) return undefined;
+		records.push(record);
+	}
+	return undefined;
+}
+
+interface CursorRecordReplay {
+	records: Uint8Array[];
+	/** Calls whose results the records already carry. */
+	toolCallIds: string[];
+}
+
+/**
+ * Assistant turns that go back as their server records, by message index: turns
+ * the target model produced on the same wire route whose opening user message,
+ * content and paired results still match the digest taken when they were recorded.
+ */
+function resolveCursorRecordReplays(
+	messages: Message[],
+	activeUserMessageIndex: number,
+	provider: string,
+	modelId: string | undefined,
+	wireRoute: string,
+	{ toolResults }: CursorToolHistory,
+): Map<number, CursorRecordReplay> {
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
+	const replays = new Map<number, CursorRecordReplay>();
+	let userMessage: Message | undefined;
+	for (let index = 0; index < historyEnd; index++) {
+		const msg = messages[index];
+		if (msg.role === "user" || msg.role === "developer") userMessage = msg;
+		if (msg.role !== "assistant" || msg.providerPayload?.type !== "cursorHistory") continue;
+		if (msg.api !== "cursor-agent" || msg.provider !== provider || msg.model !== modelId) continue;
+		if (msg.providerPayload.wireRoute !== wireRoute) continue;
+		if (cursorTurnDigest({ userMessage, content: msg.content, toolResults }) !== msg.providerPayload.digest) {
+			continue;
+		}
+		replays.set(index, {
+			records: msg.providerPayload.records.map(record => new TextEncoder().encode(record)),
+			toolCallIds: msg.content.flatMap(block =>
+				block.type === "toolCall" && toolResults.has(block.id) ? [block.id] : [],
+			),
+		});
+	}
+	return replays;
+}
+
 /**
  * Cursor AgentService reconstructs the model prompt from `requestContext.rules`,
  * not from the client-supplied `rootPromptMessagesJson` system blobs. Map each
  * OMP system-prompt entry to a global CursorRule so always-apply rules survive
- * that reconstruction.
+ * that reconstruction. The server only does this while the root carries no
+ * history; later turns rely on {@link buildCursorRulesEntryJson}.
  */
 export function buildCursorRequestContextRules(systemPrompt: readonly string[] | undefined): CursorRule[] {
 	return normalizeSystemPrompts(systemPrompt).map((content, index) =>
@@ -5556,6 +5931,7 @@ type CursorRootPromptAssistantContentPart =
 	  }
 	| { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> };
 
+/** Kimi K3 turns without replayable server records rebuild their reasoning from content. */
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
@@ -5566,18 +5942,41 @@ function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | 
 	);
 }
 
-function buildCursorAssistantContent(
-	msg: AssistantMessage,
-	targetModelId: string | undefined,
-): CursorRootPromptAssistantContentPart[] {
-	const content: CursorRootPromptAssistantContentPart[] = [];
+interface CursorAssistantStep {
+	content: CursorRootPromptAssistantContentPart[];
+	/** Raw (un-normalized) ids of the calls this round issued, in order. */
+	callIds: string[];
+}
+
+/**
+ * Split one assistant message into the model rounds it recorded. A Cursor
+ * server turn persists as a single message whose tool calls interleave with
+ * the text and reasoning that followed each result; a round ends at a call
+ * followed by anything other than another call. Consecutive calls stay in one
+ * round — they were issued together. Hidden reasoning still marks a boundary.
+ * A call id repeated within the message — a re-dispatched exec frame recorded
+ * before issue #15749 was fixed — is issued once; Cursor rejects a history that
+ * repeats it.
+ */
+function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
+	const steps: CursorAssistantStep[] = [];
+	let step: CursorAssistantStep = { content: [], callIds: [] };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
+	const issuedCallIds = new Set<string>();
 	for (const item of msg.content) {
+		if (item.type === "toolCall") {
+			if (issuedCallIds.has(item.id)) continue;
+			issuedCallIds.add(item.id);
+		}
+		if (item.type !== "toolCall" && step.callIds.length > 0) {
+			steps.push(step);
+			step = { content: [], callIds: [] };
+		}
 		if (item.type === "text") {
-			if (item.text) content.push({ type: "text", text: item.text });
+			if (item.text) step.content.push({ type: "text", text: item.text });
 		} else if (item.type === "thinking") {
 			if (replayThinking && item.thinking) {
-				content.push({
+				step.content.push({
 					type: "reasoning",
 					text: item.thinking,
 					providerOptions: { cursor: { modelName: msg.model } },
@@ -5591,21 +5990,24 @@ function buildCursorAssistantContent(
 			// gets the whole Run rejected as opaque resource_exhausted. Sanitize the
 			// id everywhere it reaches the wire; the tool-result side normalizes the
 			// same id identically, so the call/result pairing stays intact.
-			content.push({
+			step.content.push({
 				type: "tool-call",
 				toolCallId: normalizeToolCallId(item.id),
 				toolName: item.name,
 				args: normalizeCursorMcpArguments(item.arguments),
 			});
+			step.callIds.push(item.id);
 		}
 	}
-	return content;
+	steps.push(step);
+	return steps.filter(({ content }) => content.length > 0);
 }
 
 function assertCursorKimiK3HistoryReplayable(
 	messages: Message[],
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
 ): void {
 	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
@@ -5625,7 +6027,7 @@ function assertCursorKimiK3HistoryReplayable(
 			);
 		}
 		const hasThinking = msg.content.some(item => item.type === "thinking" && item.thinking.length > 0);
-		if (hasThinking) continue;
+		if (hasThinking || replays.has(i)) continue;
 		const warningKey = `${msg.api}\0${msg.provider}\0${msg.model}\0${msg.timestamp}`;
 		if (warnedCursorKimiK3ReplayMessages.has(warningKey)) continue;
 		missingThinkingTurns.push(assistantTurn);
@@ -5682,7 +6084,27 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
 	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
 }
 
-function collectCursorToolHistory(messages: Message[], historyEnd: number) {
+/**
+ * The `<rules>` user entry Cursor's server builds from `requestContext.rules` on a
+ * history-less root. On a history-bearing root the server replaces the system
+ * entries with its own prompt and keeps the client's history verbatim without
+ * rebuilding this entry, so the client carries it (as the native CLI does) right
+ * after the system entries. Undefined when there is no system prompt (#17059).
+ */
+function buildCursorRulesEntryJson(systemPrompt: readonly string[] | undefined): string | undefined {
+	const systemPrompts = normalizeSystemPrompts(systemPrompt);
+	if (systemPrompts.length === 0) return undefined;
+	return JSON.stringify({ role: "user", content: `<rules>\n${systemPrompts.join("\n\n")}\n</rules>` });
+}
+
+/** Tool results before the history end by call id, and the ids of calls the history issued. */
+interface CursorToolHistory {
+	toolResults: Map<string, ToolResultMessage>;
+	pairedToolCallIds: Set<string>;
+}
+
+function collectCursorToolHistory(messages: Message[], activeUserMessageIndex: number): CursorToolHistory {
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const toolResults = new Map<string, ToolResultMessage>();
 	const pairedToolCallIds = new Set<string>();
 	for (let index = 0; index < historyEnd; index++) {
@@ -5707,30 +6129,73 @@ function buildRootPromptMessagesJson(
 	messages: Message[],
 	systemPromptIds: Uint8Array[],
 	blobStore: Map<string, Uint8Array>,
-	activeUserMessageIndex = findLastUserMessageIndex(messages),
-	targetModelId?: string,
+	activeUserMessageIndex: number,
+	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
+	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
-	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
+	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId, replays);
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
 		entries.push(storeCursorBlob(blobStore, bytes));
 	};
+	// Results already replayed under the step that issued their call; the
+	// message-order pass below skips them.
+	const emittedResults = new Set<string>();
+	// Emit even when the result text is empty: the assistant `tool-call` is
+	// already in history, so dropping the pair would replay an orphaned call.
+	const pushToolResult = (result: ToolResultMessage) => {
+		const toolCallId = normalizeToolCallId(result.toolCallId);
+		pushJson({
+			role: "tool",
+			id: toolCallId,
+			content: [
+				{
+					type: "tool-result",
+					toolName: result.toolName,
+					toolCallId,
+					result: toolResultToText(result),
+					...(result.isError ? { isError: true } : {}),
+				},
+			],
+		});
+		emittedResults.add(result.toolCallId);
+	};
 
-	for (let i = 0; i < messages.length; i++) {
-		if (i === activeUserMessageIndex) break;
+	for (let i = 0; i < historyEnd; i++) {
 		const msg = messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
 			const content = buildCursorRootPromptContent(msg.content);
 			if (content.length === 0) continue;
 			pushJson({ role: "user", content });
 		} else if (msg.role === "assistant") {
-			const content = buildCursorAssistantContent(msg, targetModelId);
-			if (content.length === 0) continue;
-			pushJson({ role: "assistant", content });
+			const replay = replays.get(i);
+			if (replay) {
+				for (const record of replay.records) entries.push(storeCursorBlob(blobStore, record));
+				for (const toolCallId of replay.toolCallIds) emittedResults.add(toolCallId);
+				continue;
+			}
+			const steps = buildCursorAssistantSteps(msg, targetModelId);
+			for (const [stepIndex, step] of steps.entries()) {
+				pushJson({ role: "assistant", content: step.content });
+				// The final step's results stay in message order below: they are
+				// what the following turn responds to, and may arrive out of order.
+				if (stepIndex === steps.length - 1) continue;
+				// Replay this round's results in the order they arrived: calls issued
+				// together can finish out of call order.
+				const roundCallIds = new Set(step.callIds);
+				for (let j = i + 1; j < historyEnd; j++) {
+					const later = messages[j];
+					if (later.role !== "toolResult" || !roundCallIds.has(later.toolCallId)) continue;
+					if (emittedResults.has(later.toolCallId)) continue;
+					const result = toolResults.get(later.toolCallId);
+					if (result) pushToolResult(result);
+				}
+			}
 		} else if (msg.role === "toolResult") {
+			if (emittedResults.has(msg.toolCallId)) continue;
 			if (!pairedToolCallIds.has(msg.toolCallId)) {
 				pushJson({
 					role: "assistant",
@@ -5738,22 +6203,14 @@ function buildRootPromptMessagesJson(
 				});
 				continue;
 			}
-			// Emit even when the result text is empty: the assistant `tool-call` is
-			// already in history, so dropping the pair would replay an orphaned call.
-			const toolCallId = normalizeToolCallId(msg.toolCallId);
-			pushJson({
-				role: "tool",
-				id: toolCallId,
-				content: [
-					{
-						type: "tool-result",
-						toolName: msg.toolName,
-						toolCallId,
-						result: toolResultToText(msg),
-						...(msg.isError ? { isError: true } : {}),
-					},
-				],
-			});
+			// A re-dispatched call recorded two results in the same batch; the
+			// re-run's answer is the one the model saw.
+			let result = msg;
+			for (let j = i + 1; j < historyEnd && messages[j].role === "toolResult"; j++) {
+				const later = messages[j];
+				if (later.role === "toolResult" && later.toolCallId === msg.toolCallId) result = later;
+			}
+			pushToolResult(result);
 		}
 	}
 
@@ -5871,12 +6328,12 @@ function createCursorToolCallStep(toolCall: ToolCall, result: ToolResultMessage 
 function buildConversationTurns(
 	messages: Message[],
 	blobStore: Map<string, Uint8Array>,
-	activeUserMessageIndex = findLastUserMessageIndex(messages),
-	targetModelId?: string,
+	activeUserMessageIndex: number,
+	targetModelId: string | undefined,
+	replays: ReadonlyMap<number, CursorRecordReplay>,
+	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
 	const turns: Uint8Array[] = [];
-	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 
 	let i = 0;
 	while (i < messages.length) {
@@ -5905,6 +6362,8 @@ function buildConversationTurns(
 		while (i < messages.length && messages[i].role !== "user" && messages[i].role !== "developer") {
 			const stepMsg = messages[i];
 			if (stepMsg.role === "assistant") {
+				// Mirrors `buildCursorAssistantSteps`: a repeated call id is issued once.
+				const issuedCallIds = new Set<string>();
 				for (const item of stepMsg.content) {
 					let step: ConversationStep;
 					if (item.type === "text") {
@@ -5916,10 +6375,11 @@ function buildConversationTurns(
 							},
 						});
 					} else if (item.type === "thinking") {
-						// Same guard as root-prompt replay: only same-model Cursor K3
-						// thinking is replayed, so foreign/hidden reasoning never leaks
-						// into Cursor's turn history as native thinking.
-						if (!item.thinking || !canReplayCursorThinking(stepMsg, targetModelId)) continue;
+						// Thinking goes into Cursor's turn history only where the root
+						// prompt replays it: server records, or same-model K3 content.
+						if (!item.thinking || !(replays.has(i) || canReplayCursorThinking(stepMsg, targetModelId))) {
+							continue;
+						}
 						step = create(ConversationStepSchema, {
 							message: {
 								case: "thinkingMessage",
@@ -5927,6 +6387,8 @@ function buildConversationTurns(
 							},
 						});
 					} else if (item.type === "toolCall") {
+						if (issuedCallIds.has(item.id)) continue;
+						issuedCallIds.add(item.id);
 						step = createCursorToolCallStep(item, toolResults.get(item.id));
 					} else {
 						continue;
@@ -5972,16 +6434,28 @@ export function buildCursorHistoryForTest(
 	turnStepMessagesJson: JsonValue[][];
 } {
 	const blobStore = new Map<string, Uint8Array>();
+	const toolHistory = collectCursorToolHistory(messages, activeUserMessageIndex);
+	// Server records replay only on a resolved wire route, which this helper does not build: every turn rebuilds.
+	const replays = new Map<number, CursorRecordReplay>();
 	const rootPromptMessagesJson = buildRootPromptMessagesJson(
 		messages,
 		[],
 		blobStore,
 		activeUserMessageIndex,
 		targetModelId,
+		replays,
+		toolHistory,
 	).map(blobId => JSON.parse(new TextDecoder().decode(readCursorBlob(blobStore, blobId))));
 	const turnUserMessagesJson: JsonValue[] = [];
 	const turnStepMessagesJson: JsonValue[][] = [];
-	for (const turnBlobId of buildConversationTurns(messages, blobStore, activeUserMessageIndex, targetModelId)) {
+	for (const turnBlobId of buildConversationTurns(
+		messages,
+		blobStore,
+		activeUserMessageIndex,
+		targetModelId,
+		replays,
+		toolHistory,
+	)) {
 		const turn = fromBinary(ConversationTurnStructureSchema, readCursorBlob(blobStore, turnBlobId));
 		if (turn.turn.case !== "agentConversationTurn") {
 			continue;
@@ -6214,14 +6688,6 @@ async function buildGrpcRequestForWireMode(
 					},
 	});
 
-	const conversationState =
-		state.resume && state.conversationState
-			? // A checkpoint resume sends the checkpoint verbatim (native CLI parity):
-				// its turns hold the partial turn the server resumes from, which
-				// `context.messages` cannot rebuild.
-				state.conversationState
-			: buildCursorConversationState(model, context, state, blobStore, systemPromptIds, historyEndIndex);
-
 	const {
 		modelId: wireModelId,
 		modelDetailsId: wireModelDetailsId,
@@ -6240,6 +6706,19 @@ async function buildGrpcRequestForWireMode(
 		maxMode: cursorMaxMode,
 		parameters: wireParameters,
 	});
+	const builtRoute = cursorWireRoute(requestedModel, modelDetails);
+
+	const built =
+		state.resume && state.conversationState
+			? // A checkpoint resume sends the checkpoint verbatim (native CLI parity):
+				// its turns hold the partial turn the server resumes from, which
+				// `context.messages` cannot rebuild.
+				{ conversationState: state.conversationState, replayed: false }
+			: buildCursorConversationState(model, context, state, blobStore, systemPromptIds, historyEndIndex, builtRoute);
+	const { conversationState } = built;
+	// Fingerprints of the history as built, to tell which field the hook below edited.
+	const builtRootHash = built.replayed ? hashCursorBlobIds(conversationState.rootPromptMessagesJson) : undefined;
+	const builtTurnsHash = built.replayed ? hashCursorBlobIds(conversationState.turns) : undefined;
 
 	let runRequest = create(AgentRunRequestSchema, {
 		conversationState,
@@ -6260,6 +6739,29 @@ async function buildGrpcRequestForWireMode(
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
 	if (replacementRequest !== undefined) runRequest = replacementRequest as typeof runRequest;
+
+	// Server records replay only on the route that wrote them, and the hook may
+	// have changed it. A history field the hook left as built then goes out
+	// rebuilt for the sent route; a field it edited is its own.
+	const wireRoute = cursorWireRoute(runRequest.requestedModel, runRequest.modelDetails);
+	const sentState = runRequest.conversationState;
+	if (built.replayed && wireRoute !== builtRoute && sentState !== undefined) {
+		const rootAsBuilt = hashCursorBlobIds(sentState.rootPromptMessagesJson) === builtRootHash;
+		const turnsAsBuilt = hashCursorBlobIds(sentState.turns) === builtTurnsHash;
+		if (rootAsBuilt || turnsAsBuilt) {
+			const rebuilt = buildCursorConversationState(
+				model,
+				context,
+				state,
+				blobStore,
+				systemPromptIds,
+				historyEndIndex,
+				wireRoute,
+			).conversationState;
+			if (rootAsBuilt) sentState.rootPromptMessagesJson = rebuilt.rootPromptMessagesJson;
+			if (turnsAsBuilt) sentState.turns = rebuilt.turns;
+		}
+	}
 
 	const discoveredWireModelId = options?.wireModelId ?? model.requestModelId ?? model.id;
 	const serializedParameters = runRequest.requestedModel?.parameters;
@@ -6297,12 +6799,13 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, wireRoute };
 }
 
 /**
  * Rebuilds `rootPromptMessagesJson` and `turns` from `context.messages` over
- * the cached non-history side fields (todos, file states, summaries, …).
+ * the cached non-history side fields (todos, file states, summaries, …), with
+ * this model's own turns sent back as the records its server wrote for them.
  */
 function buildCursorConversationState(
 	model: Model<"cursor-agent">,
@@ -6311,10 +6814,26 @@ function buildCursorConversationState(
 	blobStore: Map<string, Uint8Array>,
 	systemPromptIds: Uint8Array[],
 	historyEndIndex: number,
-): ConversationStateStructure {
+	wireRoute: string,
+): { conversationState: ConversationStateStructure; replayed: boolean } {
+	const toolHistory = collectCursorToolHistory(context.messages, historyEndIndex);
+	const replays = resolveCursorRecordReplays(
+		context.messages,
+		historyEndIndex,
+		model.provider,
+		model.id,
+		wireRoute,
+		toolHistory,
+	);
+	if (replays.size > 0) {
+		log("info", "replayedServerRecords", {
+			turns: replays.size,
+			records: [...replays.values()].reduce((count, replay) => count + replay.records.length, 0),
+		});
+	}
 	// Build conversation turns from prior messages, excluding only the active user message
 	// when the request is sending one. Resume actions must preserve trailing tool results.
-	const turns = buildConversationTurns(context.messages, blobStore, historyEndIndex, model.id);
+	const turns = buildConversationTurns(context.messages, blobStore, historyEndIndex, model.id, replays, toolHistory);
 
 	// Build `rootPromptMessagesJson` from prior messages. Cursor's server uses this
 	// field (not `turns[]`) to construct the actual model prompt; if we only send the
@@ -6326,7 +6845,21 @@ function buildCursorConversationState(
 		blobStore,
 		historyEndIndex,
 		model.id,
+		replays,
+		toolHistory,
 	);
+	// The server builds its `<rules>` entry from `requestContext.rules` only for a
+	// history-less root; with history it would drop the system prompt entirely.
+	if (rootPromptMessagesJson.length > systemPromptIds.length) {
+		const rulesEntry = buildCursorRulesEntryJson(context.systemPrompt);
+		if (rulesEntry) {
+			rootPromptMessagesJson.splice(
+				systemPromptIds.length,
+				0,
+				storeCursorBlob(blobStore, new TextEncoder().encode(rulesEntry)),
+			);
+		}
+	}
 
 	// Preserve cached non-history state fields (todos, file states, summaries, etc.)
 	// when the system prompt is unchanged; otherwise start fresh.
@@ -6352,14 +6885,17 @@ function buildCursorConversationState(
 					readPaths: [],
 				});
 
-	// Always override `rootPromptMessagesJson` and `turns` with content freshly built from
-	// `context.messages`. The server-echoed checkpoint replaces historical user entries
-	// with empty placeholders, so we cannot rely on the cached `rootPromptMessagesJson`.
-	return create(ConversationStateStructureSchema, {
-		...baseState,
-		rootPromptMessagesJson,
-		turns,
-	});
+	// Always override `rootPromptMessagesJson` and `turns` with history built from
+	// `context.messages`: compaction, edits and branches rewrite it, and the cached
+	// checkpoint reflects none of them.
+	return {
+		conversationState: create(ConversationStateStructureSchema, {
+			...baseState,
+			rootPromptMessagesJson,
+			turns,
+		}),
+		replayed: replays.size > 0,
+	};
 }
 
 /** Builds the normalized Cursor Run request used by transport callers and request inspection hooks. */

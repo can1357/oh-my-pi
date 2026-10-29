@@ -105,6 +105,17 @@ describe("template semantics", () => {
 		);
 	});
 
+	it("closes an else-chain with the opening block's single closing tag", () => {
+		const render = create().compile(
+			"{{#if a}}A{{else if b}}B{{#if c}}+C{{/if}}{{else unless d}}not-D{{else}}D{{/if}}|after",
+		);
+		expect(render({ a: true })).toBe("A|after");
+		expect(render({ b: true, c: true })).toBe("B+C|after");
+		expect(render({})).toBe("not-D|after");
+		expect(render({ d: true })).toBe("D|after");
+		expect(() => create().compile("{{#if a}}A{{else if b}}B{{/unless}}")).toThrow("mismatched /unless");
+	});
+
 	it("supports hash arguments and helper subexpressions", () => {
 		const engine = create();
 		engine.registerHelper("eq", (left, right) => left === right);

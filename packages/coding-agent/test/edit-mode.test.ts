@@ -51,6 +51,38 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe("replace");
 	});
 
+	test("falls back for K3 SKUs without changing ordinary or near-miss model edit mode", () => {
+		for (const activeModel of [
+			"k3",
+			"kimi-code/k3",
+			"kimi-coding/K3",
+			"k3-256k",
+			"K3-256K",
+			"kimi-code/k3-256k",
+			"kimi-coding/K3-256K",
+		]) {
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("replace");
+		}
+		for (const activeModel of ["openai/gpt-5.5", "k30", "k3-custom", "k3-256kb", "kimi-code/k3-256k-custom"]) {
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+		}
+	});
+
+	test("keeps explicit K3 edit-mode overrides ahead of the fallback", () => {
+		for (const activeModel of ["kimi-code/k3", "kimi-coding/K3-256K"]) {
+			expect(resolveEditMode(createSession({ activeModel, modelVariant: "hashline" }))).toBe("hashline");
+			expect(resolveEditMode(createSession({ activeModel, settingsMode: "apply_patch" }))).toBe("apply_patch");
+
+			Bun.env.PI_EDIT_VARIANT = "hashline";
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+			delete Bun.env.PI_EDIT_VARIANT;
+
+			Bun.env.PI_STRICT_EDIT_MODE = "1";
+			expect(resolveEditMode(createSession({ activeModel }))).toBe("hashline");
+			delete Bun.env.PI_STRICT_EDIT_MODE;
+		}
+	});
+
 	test("falls back from hashline to replace for MiMo models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
@@ -88,6 +120,13 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3-flash" }))).toBe("replace");
 		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3" }))).toBe("hashline");
 		expect(resolveEditMode(createSession({ activeModel: "zai/glm-4.7-flash" }))).toBe("hashline");
+	});
+
+	test("uses replace for Qwen 3.8 without changing other Qwen generations", () => {
+		expect(resolveEditMode(createSession({ activeModel: "omlx/Qwen3.8-Flash-Next-oQ6e-mtp" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "lm-studio/qwen3.8-27b" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/qwen/qwen3-coder" }))).toBe("hashline");
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/qwen/qwen3.5-35b-a3b" }))).toBe("hashline");
 	});
 
 	test("does not exclude non-Kimi Moonshot models", () => {

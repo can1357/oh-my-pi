@@ -63,11 +63,11 @@ pi-*.html
 .close_issue.sh
 
 # Generated files
-packages/coding-agent/src/export/html/tool-views.generated.js
+packages/coding-agent/export-assets/
 packages/natives/npm/
 /runs/
-python/omp-rpc/src/omp_rpc.egg-info/
-python/omp-rpc/build/
+sdk/python/omp-rpc/src/omp_rpc.egg-info/
+sdk/python/omp-rpc/build/
 # parallel-agent worktrees
 .wt/
 CPU*.md

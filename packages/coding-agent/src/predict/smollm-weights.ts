@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
 import { withDownload } from "../downloads/activity";
+import { sha256File } from "../utils/file-hash";
 import { downloadFile } from "../utils/tools-manager";
 
 /**
@@ -95,12 +96,6 @@ async function readReadyMarker(dir: string): Promise<string | null> {
 		if (isEnoent(error)) return null;
 		throw error;
 	}
-}
-
-async function sha256File(filePath: string): Promise<string> {
-	const hasher = new Bun.CryptoHasher("sha256");
-	for await (const chunk of Bun.file(filePath).stream()) hasher.update(chunk);
-	return hasher.digest("hex");
 }
 
 async function hasVerifiedFile(filePath: string, file: WeightFile): Promise<boolean> {

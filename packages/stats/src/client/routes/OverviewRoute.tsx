@@ -5,6 +5,7 @@ import { Legend, ShareBar, TimeChart } from "../charts";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatMessageCost,
@@ -61,8 +62,8 @@ const TOKEN_MIX = [
 ] as const;
 
 export function OverviewRoute({ active, range, onRequestClick }: OverviewRouteProps) {
-	const overview = useQuery(["overview", range], () => getOverviewStats(range), { enabled: active });
-	const recent = useQuery(["recent-requests"], () => getRecentRequests(12), { enabled: active });
+	const overview = useQuery(["overview", range], ({ signal }) => getOverviewStats(range, signal), { enabled: active });
+	const recent = useQuery(["recent-requests"], ({ signal }) => getRecentRequests(12, signal), { enabled: active });
 	const [metric, setMetric] = useState<ActivityMetric>("requests");
 	const meta = rangeMeta(range);
 
@@ -133,7 +134,7 @@ export function OverviewRoute({ active, range, onRequestClick }: OverviewRoutePr
 							/>
 							<Stat
 								label="Error rate"
-								value={formatPercent(overall.errorRate)}
+								value={formatErrorRate(overall.errorRate)}
 								hint={`${formatInteger(overall.successfulRequests)} succeeded`}
 								spark={series.errors}
 								sparkColor="var(--bad)"

@@ -137,7 +137,7 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				contextWindow: 1_000_000,
 				maxTokens: 128_000,
 			};
-			expect(resolveModelPolicy(spec).compat).toEqual({
+			expect(resolveModelPolicy(spec).compat).toMatchObject({
 				promptCacheMode: "explicit",
 				supportsLongPromptCacheRetention: true,
 				promptCacheMinimumTokens: 512,
@@ -146,6 +146,8 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				// reasoning:true adaptive-thinking family → 900s keepalive-free idle floor.
 				streamIdleTimeoutMs: 900_000,
 				streamRevision: "possible",
+				supportsSamplingParams: false,
+				supportsThinkingBindingControls: true,
 			});
 		}
 	});

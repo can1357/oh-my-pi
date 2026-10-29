@@ -79,7 +79,7 @@ impl Arena {
 	/// Record `start..start + len` as owned by a new guard.
 	fn commit(&self, start: usize, len: usize) {
 		self.offset.set(start + len);
-		self.live.set(self.live.get() + 1);
+		self.live.update(|v| v + 1);
 	}
 
 	/// Return `start..end`. The topmost range rolls the bump pointer back
@@ -227,7 +227,10 @@ pub fn utf8(value: JsString<'_>) -> Result<Utf8> {
 				sys::napi_get_value_string_utf8(raw.env, raw.value, ptr.cast(), avail, &mut written)
 			};
 			napi::check_status!(status, "Failed to read JavaScript string")?;
-			if written < avail - 1 {
+			// Node-API truncates at a character boundary, up to 3 bytes short of
+			// the `avail - 1` it may fill, so only 4 bytes of slack prove the
+			// whole string fit.
+			if written + 4 < avail {
 				// SAFETY: Node-API initialised `written` bytes at `ptr`.
 				let bytes = unsafe { slice::from_raw_parts(ptr, written) };
 				if let Err(error) = str::from_utf8(bytes) {

@@ -2,6 +2,74 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
+### Changed
+
+- Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
+
+### Fixed
+
+- Fixed `/stats` and `omp stats` failing when another dashboard was syncing sessions or the configured port was already in use; busy dashboards are now reused, and a free port is selected when necessary.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed usage stats pricing Google Antigravity and MiniMax Token Plan models at $0 when their catalog rows carry no price; they now use the catalog's pricing peer, as `xai-oauth` already did ([#16092](https://github.com/can1357/oh-my-pi/pull/16092) by [@H4vC](https://github.com/H4vC))
+
+## [18.11.0] - 2026-10-14
+
+### Fixed
+
+- Providers → Subscription windows no longer mixes Codex 5-hour and 7-day quotas across plans: Team and weekly-only (ProLite) accounts now share the 7-day row, the 5-hour row counts only accounts that have one, and labels no longer flip with whichever account reported last ([#15664](https://github.com/can1357/oh-my-pi/issues/15664))
+
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
+- Usage recorded at $0 for a model whose catalog price changes on a date (Gemini 4 Argon, Devin SWE-2) is now priced at the rate in force on the request's date, instead of staying $0 like peak/off-peak tariff usage ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.9.0] - 2026-10-11
+
+### Fixed
+
+- Fixed the stats dashboard favicon so dashboard tabs and bookmarks display the OMP icon correctly.
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved dashboard responsiveness and efficiency by reducing unnecessary data refreshes and re-rendering, speeding up session synchronization, database access, package imports, and usage, model, and time-series requests, and avoiding repeated downloads of unchanged traces.
+- Dashboard requests are now cancelled when no longer needed, improving responsiveness when switching sessions or closing trace views during loading.
+
+## [18.7.0] - 2026-10-06
+
+### Fixed
+
+- Fixed Ultrafast turns not being counted toward the Premium Requests statistic.
+- Fixed the desktop stats dashboard menu button so it no longer appears unnecessarily or dims the page without opening navigation.
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- Fixed the Frustration page splitting DeepSeek V4 provider variants and the V4.1 Flash alias into separate model-version rows ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
+
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed stats dashboard request rows for Judge and other role-model calls so they open correctly and display usage details.
+- Fixed stats and summary error-rate formatting so small nonzero percentages are displayed accurately instead of as 0.0%.
+- Fixed a visual fringe on the edges of the stats dashboard’s “Classify with judge” button.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

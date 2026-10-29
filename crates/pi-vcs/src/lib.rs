@@ -2,9 +2,9 @@
 //!
 //! Collapses the git and Jujutsu CLI wrappers into one Rust interface:
 //! - **git** ([`git::GitRepo`]) runs primarily on gitoxide. The git binary
-//!   handles credential-bound network transfers, reftable repositories, and
+//!   handles credential-bound network transfers, reftable repositories,
 //!   whole-worktree status/untracked walks whose resource failures must stay
-//!   outside the driving process.
+//!   outside the driving process, and configured commit signing.
 //! - **jj** ([`jj::JjWorkspace`]) runs on jj-lib, which shares the same
 //!   gitoxide stack for its git backend. No subprocess at all.
 //!

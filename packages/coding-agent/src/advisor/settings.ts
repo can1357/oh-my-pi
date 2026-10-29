@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { ADVISOR_SEVERITIES } from "@oh-my-pi/pi-tui/chat/messages";
 import { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { register } from "../config/registry";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "./emission-guard";
@@ -48,14 +49,35 @@ export const cfgAdvisorImmuneTurns = register({
 		group: "Advisor",
 		label: "Advisor Immune Turns",
 		description:
-			"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
+			"After an advisor concern or blocker interrupts, route further concerns as non-interrupting asides for this many primary turns. Blockers are exempt from the cooldown.",
 		options: [
-			{ value: "0", label: "0 steps", description: "Allow every concern/blocker to interrupt." },
+			{ value: "0", label: "0 steps", description: "No cooldown." },
 			{ value: "1", label: "1 step" },
 			{ value: "2", label: "2 steps" },
 			{ value: "3", label: "3 steps", description: "Default." },
 			{ value: "4", label: "4 steps" },
 			{ value: "5", label: "5 steps" },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorContinueSeverity = register({
+	id: "advisor.continueSeverity",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ADVISOR_SEVERITIES,
+	default: "concern",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Continue Severity",
+		description:
+			"Minimum severity of an advisor note that wakes the agent after it finished with a final answer. Lower-severity notes stay as a card at the end of the transcript and reach the agent with your next message.",
+		options: [
+			{ value: "nit", label: "Nit", description: "Every note continues the run." },
+			{ value: "concern", label: "Concern", description: "Concerns and blockers continue the run. Default." },
+			{ value: "blocker", label: "Blocker", description: "Only blockers continue the run." },
 		],
 		condition: "advisorEnabled",
 	},

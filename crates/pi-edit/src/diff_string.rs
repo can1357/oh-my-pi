@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, sync::LazyLock};
 
 use pi_ast::block::{EnclosingBoundaryOptions, LineRange, enclosing_block_boundaries};
+use pi_diff::HunkLine;
 use regex::Regex;
 
 use crate::error::EditError;
@@ -48,9 +49,13 @@ pub struct DiffOutput {
 #[derive(Debug, Clone, Default)]
 pub struct BlockContextSource<'a> {
 	/// File path used for language inference.
-	pub path: Option<&'a str>,
+	pub path:      Option<&'a str>,
 	/// Explicit language alias.
-	pub lang: Option<&'a str>,
+	pub lang:      Option<&'a str>,
+	/// Set while the edit is still streaming: block context is skipped, since
+	/// resolving it means a full parse of an edited text that changes on every
+	/// chunk. The final pass computes it.
+	pub streaming: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,28 +97,30 @@ fn parse_source_row_line_number(row: &str) -> Option<u32> {
 }
 
 fn normalize_diff_gap_rows(rows: &mut Vec<String>) {
-	let mut kept = Vec::with_capacity(rows.len());
-	for (index, row) in rows.iter().enumerate() {
-		if row != DIFF_GAP_ROW {
-			kept.push(row.clone());
+	let mut write_idx = 0;
+	for read_idx in 0..rows.len() {
+		if rows[read_idx] != DIFF_GAP_ROW {
+			rows.swap(write_idx, read_idx);
+			write_idx += 1;
 			continue;
 		}
-		if kept.is_empty() || kept.last().is_some_and(String::is_empty) {
+		if write_idx == 0 || rows[write_idx - 1].is_empty() {
 			continue;
 		}
-		let before = kept
+		let before = rows[..write_idx]
 			.iter()
 			.rev()
 			.find_map(|candidate| parse_source_row_line_number(candidate));
-		let after = rows[index + 1..]
+		let after = rows[read_idx + 1..]
 			.iter()
 			.filter(|candidate| !candidate.is_empty())
 			.find_map(|candidate| parse_source_row_line_number(candidate));
 		if matches!((before, after), (Some(left), Some(right)) if right > left + 1) {
-			kept.push(String::new());
+			rows[write_idx].clear();
+			write_idx += 1;
 		}
 	}
-	*rows = kept;
+	rows.truncate(write_idx);
 }
 
 fn adjusted_context_insert_index(rows: &[String], index: usize) -> usize {
@@ -132,14 +139,11 @@ fn adjusted_context_insert_index(rows: &[String], index: usize) -> usize {
 	}
 }
 
-fn insert_bracket_context_rows(
-	rows: &mut Vec<String>,
-	context_lines: Vec<(u32, String)>,
-	seen_rows: &mut BTreeSet<String>,
-) {
+fn insert_bracket_context_rows(rows: &mut Vec<String>, context_lines: Vec<(u32, String)>) {
 	for (line_number, text) in context_lines {
 		let row = format_numbered_diff_line(' ', line_number, &text);
-		if seen_rows.contains(&row) {
+		// Context lines are few and each one scans the rows below anyway.
+		if rows.contains(&row) {
 			continue;
 		}
 
@@ -166,74 +170,255 @@ fn insert_bracket_context_rows(
 		if previous_source_line.is_some_and(|previous| line_number > previous + 1) {
 			chunk.push(String::new());
 		}
-		chunk.push(row.clone());
+		chunk.push(row);
 		if next_source_line.is_some_and(|next| next > line_number + 1) {
 			chunk.push(String::new());
 		}
 
 		let insert_index = adjusted_context_insert_index(rows, insert_index);
 		rows.splice(insert_index..insert_index, chunk);
-		seen_rows.insert(row);
 	}
 }
 
 fn add_matching_bracket_context_rows(
 	rows: &mut Vec<String>,
-	old_lines: &[&str],
-	new_lines: &[&str],
+	old: &str,
+	new: &str,
 	source: &BlockContextSource<'_>,
 ) {
-	let mut old_visible = Vec::new();
-	let mut new_visible = Vec::new();
-	let mut seen_rows = rows.iter().cloned().collect::<BTreeSet<_>>();
-	let mut changes: Vec<(i64, i64)> = Vec::new();
-	let mut offset = 0_i64;
+	if !source.streaming {
+		let old_lines = old.split('\n').collect::<Vec<_>>();
+		let new_lines = new.split('\n').collect::<Vec<_>>();
+		let mut old_visible = Vec::new();
+		let mut new_visible = Vec::new();
+		let mut changes: Vec<(i64, i64)> = Vec::new();
+		let mut offset = 0_i64;
 
-	for row in rows.iter() {
-		let Some(parsed) = parse_numbered_diff_row(row) else {
-			continue;
+		for row in rows.iter() {
+			let Some(parsed) = parse_numbered_diff_row(row) else {
+				continue;
+			};
+			match parsed.prefix {
+				DiffPrefix::Removed => {
+					old_visible.push(parsed.line_number);
+					changes.push((i64::from(parsed.line_number) + offset, -1));
+					offset -= 1;
+				},
+				DiffPrefix::Added => {
+					new_visible.push(parsed.line_number);
+					changes.push((i64::from(parsed.line_number), 1));
+					offset += 1;
+				},
+				DiffPrefix::Context => {
+					old_visible.push(parsed.line_number);
+					let shifted = i64::from(parsed.line_number) + offset;
+					if let Ok(line) = u32::try_from(shifted) {
+						new_visible.push(line);
+					}
+				},
+			}
+		}
+
+		let to_old_line_number = |new_line_number: u32| {
+			let new_line_number = i64::from(new_line_number);
+			let shift: i64 = changes
+				.iter()
+				.filter(|(new_position, _)| *new_position <= new_line_number)
+				.map(|(_, delta)| delta)
+				.sum();
+			u32::try_from(new_line_number - shift).ok()
 		};
-		match parsed.prefix {
-			DiffPrefix::Removed => {
-				old_visible.push(parsed.line_number);
-				changes.push((i64::from(parsed.line_number) + offset, -1));
-				offset -= 1;
-			},
-			DiffPrefix::Added => {
-				new_visible.push(parsed.line_number);
-				changes.push((i64::from(parsed.line_number), 1));
-				offset += 1;
-			},
-			DiffPrefix::Context => {
-				old_visible.push(parsed.line_number);
-				let shifted = i64::from(parsed.line_number) + offset;
-				if let Ok(line) = u32::try_from(shifted) {
-					new_visible.push(line);
-				}
-			},
-		}
-	}
 
-	let to_old_line_number = |new_line_number: u32| {
-		let new_line_number = i64::from(new_line_number);
-		let shift: i64 = changes
-			.iter()
-			.filter(|(new_position, _)| *new_position <= new_line_number)
-			.map(|(_, delta)| delta)
-			.sum();
-		u32::try_from(new_line_number - shift).ok()
-	};
-
-	let mut context_rows = find_block_context_lines(old_lines, &old_visible, source)
-		.into_iter()
-		.collect::<std::collections::BTreeMap<_, _>>();
-	for (line_number, text) in find_block_context_lines(new_lines, &new_visible, source) {
-		if let Some(old_line_number) = to_old_line_number(line_number) {
-			context_rows.entry(old_line_number).or_insert(text);
+		let mut context_rows = find_block_context_lines(&old_lines, &old_visible, source)
+			.into_iter()
+			.collect::<std::collections::BTreeMap<_, _>>();
+		for (line_number, text) in find_block_context_lines(&new_lines, &new_visible, source) {
+			if let Some(old_line_number) = to_old_line_number(line_number) {
+				context_rows.entry(old_line_number).or_insert(text);
+			}
 		}
+		insert_bracket_context_rows(rows, context_rows.into_iter().collect());
 	}
-	insert_bracket_context_rows(rows, context_rows.into_iter().collect(), &mut seen_rows);
 	normalize_diff_gap_rows(rows);
+}
+
+/// Line diff of two texts, computed once and rendered in either format.
+pub struct LineDiff<'a> {
+	old:        &'a str,
+	new:        &'a str,
+	old_tokens: Vec<&'a str>,
+	new_tokens: Vec<&'a str>,
+	runs:       Vec<pi_diff::Run>,
+}
+
+impl<'a> LineDiff<'a> {
+	/// Tokenize both texts and run Myers over their lines.
+	pub fn new(old: &'a str, new: &'a str) -> Self {
+		let old_tokens = pi_diff::line_tokens_str(old);
+		let new_tokens = pi_diff::line_tokens_str(new);
+		let runs = pi_diff::diff_line_tokens(&old_tokens, &new_tokens);
+		Self { old, new, old_tokens, new_tokens, runs }
+	}
+
+	/// Numbered diff with nearby and enclosing-block context.
+	pub fn numbered(
+		&self,
+		context_lines: Option<usize>,
+		source: &BlockContextSource<'_>,
+	) -> DiffOutput {
+		// A run's rows are its line tokens without their `\n` terminators.
+		fn rows<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
+			tokens
+				.iter()
+				.map(|token| token.strip_suffix('\n').unwrap_or(token))
+				.collect()
+		}
+		let (old_rows, new_rows) = (rows(&self.old_tokens), rows(&self.new_tokens));
+		let context_lines = context_lines.unwrap_or(2);
+		let mut output = Vec::new();
+		let mut old_line_number = 1_u32;
+		let mut new_line_number = 1_u32;
+		let mut last_was_change = false;
+		let mut first_changed_line = None;
+		let (mut old_pos, mut new_pos) = (0, 0);
+
+		for (index, run) in self.runs.iter().enumerate() {
+			let count = run.count as usize;
+			let raw = if run.removed {
+				old_pos += count;
+				&old_rows[old_pos - count..old_pos]
+			} else {
+				new_pos += count;
+				if !run.added {
+					old_pos += count;
+				}
+				&new_rows[new_pos - count..new_pos]
+			};
+
+			if run.added || run.removed {
+				first_changed_line.get_or_insert(new_line_number);
+				for &line in raw {
+					if run.added {
+						output.push(format_numbered_diff_line('+', new_line_number, line));
+						new_line_number += 1;
+					} else {
+						output.push(format_numbered_diff_line('-', old_line_number, line));
+						old_line_number += 1;
+					}
+				}
+				last_was_change = true;
+			} else {
+				let next_part_is_change = self
+					.runs
+					.get(index + 1)
+					.is_some_and(|next| next.added || next.removed);
+				if last_was_change || next_part_is_change {
+					let mut leading_skip = 0;
+					let mut middle_skip = 0;
+					let mut trailing_skip = 0;
+					let lines_to_show;
+
+					if last_was_change && next_part_is_change {
+						if raw.len() > context_lines * 2 {
+							middle_skip = raw.len() - context_lines * 2;
+							lines_to_show = raw[..context_lines]
+								.iter()
+								.chain(&raw[raw.len() - context_lines..])
+								.copied()
+								.collect::<Vec<_>>();
+						} else {
+							lines_to_show = raw.to_vec();
+						}
+					} else if next_part_is_change {
+						leading_skip = raw.len().saturating_sub(context_lines);
+						lines_to_show = raw[leading_skip..].to_vec();
+					} else {
+						trailing_skip = raw.len().saturating_sub(context_lines);
+						lines_to_show = raw[..raw.len().min(context_lines)].to_vec();
+					}
+
+					old_line_number += u32::try_from(leading_skip).unwrap_or(u32::MAX);
+					new_line_number += u32::try_from(leading_skip).unwrap_or(u32::MAX);
+					let first_chunk_length = if middle_skip > 0 {
+						context_lines
+					} else {
+						lines_to_show.len()
+					};
+					for line in &lines_to_show[..first_chunk_length] {
+						output.push(format_numbered_diff_line(' ', old_line_number, line));
+						old_line_number += 1;
+						new_line_number += 1;
+					}
+					if middle_skip > 0 {
+						old_line_number += u32::try_from(middle_skip).unwrap_or(u32::MAX);
+						new_line_number += u32::try_from(middle_skip).unwrap_or(u32::MAX);
+						for line in &lines_to_show[first_chunk_length..] {
+							output.push(format_numbered_diff_line(' ', old_line_number, line));
+							old_line_number += 1;
+							new_line_number += 1;
+						}
+					}
+					old_line_number += u32::try_from(trailing_skip).unwrap_or(u32::MAX);
+					new_line_number += u32::try_from(trailing_skip).unwrap_or(u32::MAX);
+				} else {
+					let skipped = u32::try_from(raw.len()).unwrap_or(u32::MAX);
+					old_line_number += skipped;
+					new_line_number += skipped;
+				}
+				last_was_change = false;
+			}
+		}
+
+		add_matching_bracket_context_rows(&mut output, self.old, self.new, source);
+		DiffOutput { diff: output.join("\n"), first_changed_line }
+	}
+
+	/// Numbered unified hunks without file headers.
+	pub fn unified(
+		&self,
+		context_lines: Option<usize>,
+		source: &BlockContextSource<'_>,
+	) -> DiffOutput {
+		let context_lines = context_lines.unwrap_or(3);
+		let hunks = pi_diff::structured_patch_hunk_rows(
+			Some(u32::try_from(context_lines).unwrap_or(u32::MAX)),
+			&self.old_tokens,
+			&self.new_tokens,
+			&self.runs,
+		);
+		let mut output = Vec::new();
+		let mut first_changed_line = None;
+		for hunk in hunks {
+			output.push(format!(
+				"@@ -{},{} +{},{} @@",
+				hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+			));
+			let mut old_line = hunk.old_start;
+			let mut new_line = hunk.new_start;
+			for line in hunk.lines {
+				match line {
+					HunkLine::Removed(content) => {
+						first_changed_line.get_or_insert(new_line);
+						output.push(format_numbered_diff_line('-', old_line, content));
+						old_line += 1;
+					},
+					HunkLine::Added(content) => {
+						first_changed_line.get_or_insert(new_line);
+						output.push(format_numbered_diff_line('+', new_line, content));
+						new_line += 1;
+					},
+					HunkLine::Context(content) => {
+						output.push(format_numbered_diff_line(' ', old_line, content));
+						old_line += 1;
+						new_line += 1;
+					},
+					HunkLine::NoNewlineAtEof => output.push("\\ No newline at end of file".to_owned()),
+				}
+			}
+		}
+		add_matching_bracket_context_rows(&mut output, self.old, self.new, source);
+		DiffOutput { diff: output.join("\n"), first_changed_line }
+	}
 }
 
 /// Generate a numbered diff with nearby and enclosing-block context.
@@ -243,146 +428,7 @@ pub fn generate_diff_string(
 	context_lines: Option<usize>,
 	source: &BlockContextSource<'_>,
 ) -> DiffOutput {
-	let parts = pi_diff::line_changes_str(old, new);
-	let context_lines = context_lines.unwrap_or(2);
-	let mut output = Vec::new();
-	let mut old_line_number = 1_u32;
-	let mut new_line_number = 1_u32;
-	let mut last_was_change = false;
-	let mut first_changed_line = None;
-
-	for (index, part) in parts.iter().enumerate() {
-		let mut raw = part.value.split('\n').collect::<Vec<_>>();
-		if raw.last() == Some(&"") {
-			raw.pop();
-		}
-
-		if part.added || part.removed {
-			first_changed_line.get_or_insert(new_line_number);
-			for line in raw {
-				if part.added {
-					output.push(format_numbered_diff_line('+', new_line_number, line));
-					new_line_number += 1;
-				} else {
-					output.push(format_numbered_diff_line('-', old_line_number, line));
-					old_line_number += 1;
-				}
-			}
-			last_was_change = true;
-		} else {
-			let next_part_is_change = parts
-				.get(index + 1)
-				.is_some_and(|next| next.added || next.removed);
-			if last_was_change || next_part_is_change {
-				let mut leading_skip = 0;
-				let mut middle_skip = 0;
-				let mut trailing_skip = 0;
-				let lines_to_show;
-
-				if last_was_change && next_part_is_change {
-					if raw.len() > context_lines * 2 {
-						middle_skip = raw.len() - context_lines * 2;
-						lines_to_show = raw[..context_lines]
-							.iter()
-							.chain(&raw[raw.len() - context_lines..])
-							.copied()
-							.collect::<Vec<_>>();
-					} else {
-						lines_to_show = raw.clone();
-					}
-				} else if next_part_is_change {
-					leading_skip = raw.len().saturating_sub(context_lines);
-					lines_to_show = raw[leading_skip..].to_vec();
-				} else {
-					trailing_skip = raw.len().saturating_sub(context_lines);
-					lines_to_show = raw[..raw.len().min(context_lines)].to_vec();
-				}
-
-				old_line_number += u32::try_from(leading_skip).unwrap_or(u32::MAX);
-				new_line_number += u32::try_from(leading_skip).unwrap_or(u32::MAX);
-				let first_chunk_length = if middle_skip > 0 {
-					context_lines
-				} else {
-					lines_to_show.len()
-				};
-				for line in &lines_to_show[..first_chunk_length] {
-					output.push(format_numbered_diff_line(' ', old_line_number, line));
-					old_line_number += 1;
-					new_line_number += 1;
-				}
-				if middle_skip > 0 {
-					old_line_number += u32::try_from(middle_skip).unwrap_or(u32::MAX);
-					new_line_number += u32::try_from(middle_skip).unwrap_or(u32::MAX);
-					for line in &lines_to_show[first_chunk_length..] {
-						output.push(format_numbered_diff_line(' ', old_line_number, line));
-						old_line_number += 1;
-						new_line_number += 1;
-					}
-				}
-				old_line_number += u32::try_from(trailing_skip).unwrap_or(u32::MAX);
-				new_line_number += u32::try_from(trailing_skip).unwrap_or(u32::MAX);
-			} else {
-				let skipped = u32::try_from(raw.len()).unwrap_or(u32::MAX);
-				old_line_number += skipped;
-				new_line_number += skipped;
-			}
-			last_was_change = false;
-		}
-	}
-
-	let old_lines = old.split('\n').collect::<Vec<_>>();
-	let new_lines = new.split('\n').collect::<Vec<_>>();
-	add_matching_bracket_context_rows(&mut output, &old_lines, &new_lines, source);
-	DiffOutput { diff: output.join("\n"), first_changed_line }
-}
-
-/// Generate numbered unified hunks without file headers.
-pub fn generate_unified_diff_string(
-	old: &str,
-	new: &str,
-	context_lines: Option<usize>,
-	source: &BlockContextSource<'_>,
-) -> DiffOutput {
-	let old_utf16 = old.encode_utf16().collect::<Vec<_>>();
-	let new_utf16 = new.encode_utf16().collect::<Vec<_>>();
-	let context_lines = context_lines.unwrap_or(3);
-	let hunks = pi_diff::structured_patch_hunks_u16(
-		&old_utf16,
-		&new_utf16,
-		Some(u32::try_from(context_lines).unwrap_or(u32::MAX)),
-	);
-	let mut output = Vec::new();
-	let mut first_changed_line = None;
-	for hunk in hunks {
-		output.push(format!(
-			"@@ -{},{} +{},{} @@",
-			hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-		));
-		let mut old_line = hunk.old_start;
-		let mut new_line = hunk.new_start;
-		for encoded in hunk.lines {
-			let line = String::from_utf16(&encoded).expect("hunk text originates from valid UTF-8");
-			if let Some(content) = line.strip_prefix('-') {
-				first_changed_line.get_or_insert(new_line);
-				output.push(format_numbered_diff_line('-', old_line, content));
-				old_line += 1;
-			} else if let Some(content) = line.strip_prefix('+') {
-				first_changed_line.get_or_insert(new_line);
-				output.push(format_numbered_diff_line('+', new_line, content));
-				new_line += 1;
-			} else if let Some(content) = line.strip_prefix(' ') {
-				output.push(format_numbered_diff_line(' ', old_line, content));
-				old_line += 1;
-				new_line += 1;
-			} else {
-				output.push(line);
-			}
-		}
-	}
-	let old_lines = old.split('\n').collect::<Vec<_>>();
-	let new_lines = new.split('\n').collect::<Vec<_>>();
-	add_matching_bracket_context_rows(&mut output, &old_lines, &new_lines, source);
-	DiffOutput { diff: output.join("\n"), first_changed_line }
+	LineDiff::new(old, new).numbered(context_lines, source)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -454,10 +500,10 @@ enum ScannerMode {
 }
 
 #[derive(Debug)]
-struct StackEntry {
+struct StackEntry<'a> {
 	opener:      char,
 	line_number: u32,
-	text:        String,
+	text:        &'a str,
 	visible:     bool,
 }
 
@@ -470,7 +516,7 @@ fn is_hash_comment_start(line: &str, byte_index: usize) -> bool {
 
 fn lexical_bracket_context(full_lines: &[&str], visible: &BTreeSet<u32>) -> Vec<(u32, String)> {
 	let mut context = std::collections::BTreeMap::new();
-	let mut stack: Vec<StackEntry> = Vec::new();
+	let mut stack: Vec<StackEntry<'_>> = Vec::new();
 	let mut mode = ScannerMode::Code;
 	let mut escaped = false;
 
@@ -534,7 +580,7 @@ fn lexical_bracket_context(full_lines: &[&str], visible: &BTreeSet<u32>) -> Vec<
 				stack.push(StackEntry {
 					opener: character,
 					line_number,
-					text: line.to_owned(),
+					text: line,
 					visible: line_visible,
 				});
 				continue;
@@ -554,7 +600,7 @@ fn lexical_bracket_context(full_lines: &[&str], visible: &BTreeSet<u32>) -> Vec<
 					context.insert(matched.line_number, matched.text);
 				}
 				if matched.visible && !line_visible {
-					context.insert(line_number, line.to_owned());
+					context.insert(line_number, line);
 				}
 			}
 		}
@@ -566,7 +612,10 @@ fn lexical_bracket_context(full_lines: &[&str], visible: &BTreeSet<u32>) -> Vec<
 	for line_number in visible {
 		context.remove(line_number);
 	}
-	context.into_iter().collect()
+	context
+		.into_iter()
+		.map(|(line_number, text)| (line_number, text.to_owned()))
+		.collect()
 }
 
 /// Resolve off-window block-boundary lines for a visible window.
@@ -774,25 +823,17 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
-	while let Some(last_line) = lines.last().copied() {
-		if last_line.is_empty() || (last_line.trim().is_empty() && !is_diff_content_line(last_line)) {
-			lines.pop();
-		} else {
-			break;
-		}
-	}
+	while lines
+		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
+		.is_some()
+	{}
 	if lines
 		.first()
 		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
 	{
 		lines.remove(0);
 	}
-	if lines
-		.last()
-		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
-	{
-		lines.pop();
-	}
+	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
 	lines.retain(|line| {
 		is_diff_content_line(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
@@ -884,8 +925,8 @@ fn strip_line_number_prefixes(hunk: &mut DiffHunk) {
 		.filter_map(|captures| captures.get(1)?.as_str().parse::<u32>().ok())
 		.collect::<Vec<_>>();
 	let sequential = numbers
-		.windows(2)
-		.filter(|pair| pair[1] == pair[0] + 1)
+		.array_windows()
+		.filter(|&&[previous, next]| next == previous + 1)
 		.count();
 	if numbers.len() >= 3 && sequential < 1_usize.max(numbers.len() - 2) {
 		return;
@@ -909,6 +950,7 @@ fn parse_one_hunk(
 	lines: &[&str],
 	line_number: u32,
 	allow_missing_context: bool,
+	recover_line_numbers: bool,
 ) -> Result<ParseHunkResult, EditError> {
 	if lines.is_empty() {
 		return Err(parse_error("Diff does not contain any lines", line_number));
@@ -924,8 +966,7 @@ fn parse_one_hunk(
 		.then(|| parse_unified_hunk_header(header_trimmed))
 		.flatten();
 	let is_empty_context_marker = header_trimmed
-		.strip_prefix("@@")
-		.and_then(|rest| rest.strip_suffix("@@"))
+		.strip_circumfix("@@", "@@")
 		.is_some_and(|middle| middle.trim().is_empty());
 
 	if is_header_line && (header_trimmed == EMPTY_CHANGE_CONTEXT_MARKER || is_empty_context_marker) {
@@ -1085,7 +1126,9 @@ fn parse_one_hunk(
 			line_number + u32::try_from(start_index).unwrap_or(u32::MAX),
 		));
 	}
-	strip_line_number_prefixes(&mut hunk);
+	if recover_line_numbers {
+		strip_line_number_prefixes(&mut hunk);
+	}
 	Ok(ParseHunkResult { hunk, lines_consumed: parsed_lines + start_index })
 }
 
@@ -1143,8 +1186,17 @@ fn is_unified_diff_metadata_line(line: &str) -> bool {
 		.any(|prefix| line.starts_with(prefix))
 }
 
-/// Parse a diff body into hunks.
+/// Parse JSON patch hunks, recovering numbered read output when present.
 pub fn parse_diff_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
+	parse_hunks(diff, true)
+}
+
+/// Codex `apply_patch` preserves numeric prefixes as literal content.
+pub(crate) fn parse_apply_patch_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
+	parse_hunks(diff, false)
+}
+
+fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, EditError> {
 	let multi_file_count = count_multi_file_markers(diff);
 	if multi_file_count > 1 {
 		return Err(EditError::Apply(format!(
@@ -1171,8 +1223,12 @@ pub fn parse_diff_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
 		if trimmed.starts_with("@@") && lines[index + 1..].iter().all(|next| next.trim().is_empty()) {
 			break;
 		}
-		let parsed =
-			parse_one_hunk(&lines[index..], u32::try_from(index + 1).unwrap_or(u32::MAX), true)?;
+		let parsed = parse_one_hunk(
+			&lines[index..],
+			u32::try_from(index + 1).unwrap_or(u32::MAX),
+			true,
+			recover_line_numbers,
+		)?;
 		hunks.push(parsed.hunk);
 		index += parsed.lines_consumed;
 	}
@@ -1184,7 +1240,7 @@ mod tests {
 	use super::*;
 
 	fn source(path: &str) -> BlockContextSource<'_> {
-		BlockContextSource { path: Some(path), lang: None }
+		BlockContextSource { path: Some(path), lang: None, streaming: false }
 	}
 
 	#[test]
@@ -1492,13 +1548,83 @@ mod tests {
 
 	#[test]
 	fn generates_numbered_unified_diff() {
-		let result = generate_unified_diff_string(
-			"a\nb\nc\n",
-			"a\nB\nc\n",
-			Some(1),
-			&BlockContextSource::default(),
-		);
+		let result =
+			LineDiff::new("a\nb\nc\n", "a\nB\nc\n").unified(Some(1), &BlockContextSource::default());
 		assert_eq!(result.diff, "@@ -1,3 +1,3 @@\n 1|a\n-2|b\n+2|B\n 3|c");
 		assert_eq!(result.first_changed_line, Some(2));
+	}
+
+	#[test]
+	fn unified_diff_omits_duplicate_and_boundary_gap_rows() {
+		let old = [
+			"function alpha() {",
+			"  const a1 = 1;",
+			"  const a2 = 2;",
+			"  const a3 = 3;",
+			"  const a4 = 4;",
+			"  return a1;",
+			"}",
+			"// spacer",
+			"function beta() {",
+			"  const b1 = 1;",
+			"  const b2 = 2;",
+			"  const b3 = 3;",
+			"  const b4 = 4;",
+			"  return b1;",
+			"}",
+		];
+		let mut new = old;
+		new[1] = "  const a1 = 100;";
+		new[13] = "  return b1 + 1;";
+
+		let result =
+			LineDiff::new(&old.join("\n"), &new.join("\n")).unified(Some(1), &source("sample.ts"));
+		let lines = result.diff.split('\n').collect::<Vec<_>>();
+		let closer = lines.iter().position(|line| *line == " 7|}").unwrap();
+		let opener = lines
+			.iter()
+			.position(|line| *line == " 9|function beta() {")
+			.unwrap();
+		assert!(opener > closer);
+		assert_eq!(lines[closer - 1], "");
+		assert_eq!(lines[closer + 1], "");
+		assert_eq!(lines[opener - 1], "");
+		assert_eq!(lines[opener + 1], "");
+		assert!(!lines.windows(2).any(|pair| pair == ["", ""]));
+		assert_ne!(lines.first(), Some(&""));
+		assert_ne!(lines.last(), Some(&""));
+
+		let contiguous_old = [
+			"function alpha() {",
+			"  const a1 = 1;",
+			"  const a2 = 2;",
+			"  const a3 = 3;",
+			"  const a4 = 4;",
+			"  return a1;",
+			"}",
+			"function beta() {",
+			"  const b1 = 1;",
+			"  const b2 = 2;",
+			"  const b3 = 3;",
+			"  const b4 = 4;",
+			"  return b1;",
+			"}",
+		];
+		let mut contiguous_new = contiguous_old;
+		contiguous_new[1] = "  const a1 = 100;";
+		contiguous_new[12] = "  return b1 + 1;";
+
+		let contiguous_result = LineDiff::new(&contiguous_old.join("\n"), &contiguous_new.join("\n"))
+			.unified(Some(1), &source("sample.ts"));
+		let contiguous_lines = contiguous_result.diff.split('\n').collect::<Vec<_>>();
+		let contiguous_closer = contiguous_lines
+			.iter()
+			.position(|line| *line == " 7|}")
+			.unwrap();
+		let contiguous_opener = contiguous_lines
+			.iter()
+			.position(|line| *line == " 8|function beta() {")
+			.unwrap();
+		assert_eq!(contiguous_opener, contiguous_closer + 1);
 	}
 }

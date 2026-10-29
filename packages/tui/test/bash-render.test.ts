@@ -139,6 +139,26 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
 	});
 
+	it("strips only the generated subsecond footer from older results with identical stdout", () => {
+		const result = {
+			content: [{ type: "text", text: "Wall time: 0.02 seconds\n\nWall time: 0.02 seconds" }],
+			details: { wallTimeMs: 20 },
+		};
+		for (const expanded of [false, true]) {
+			const options = { expanded, isPartial: false };
+			const args = { command: "benchmark" };
+			const component = bashToolRenderer.renderResult(result, options, uiTheme, args);
+			const rendered = sanitizeText(component.render(120).join("\n"));
+			expect(rendered.match(/Wall time: 0\.02 seconds/gu)).toHaveLength(1);
+			expect(rendered).toContain("Wall: 0.02s");
+			const view = bashToolRenderer.describeResult(result, options, args);
+			const output = (view.body ?? [])
+				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
+				.find(node => "k" in node && node.k === "ansi");
+			expect(output).toMatchObject({ p: { role: "omp.tool.bash.output", text: "Wall time: 0.02 seconds" } });
+		}
+	});
+
 	it("shows a supervised service's readiness and output without a command timeout", async () => {
 		const component = bashToolRenderer.renderResult(
 			{
@@ -159,29 +179,37 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Timeout:");
 	});
 
-	it("renders a backgrounded job as a static footer notice", async () => {
-		const component = bashToolRenderer.renderResult(
-			{
-				content: [
-					{
-						type: "text",
-						text: `started\n\n${formatBackgroundNotice("bash-42")}`,
+	it("renders a backgrounded job as a static footer notice, with or without a stated deadline", async () => {
+		for (const [label, notice] of [
+			// Persisted by older versions, before the notice stated a deadline.
+			[
+				"no deadline stated",
+				"Backgrounded as job bash-42; its output is injected into the conversation as a follow-up the moment it finishes.",
+			],
+			["deadline", formatBackgroundNotice("bash-42", 300)],
+			["deadline disabled", formatBackgroundNotice("bash-42", undefined)],
+		] as const) {
+			const component = bashToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: `started\n\n${notice}` }],
+					details: {
+						timeoutSeconds: 300,
+						async: { state: "running", jobId: "bash-42", type: "bash" },
 					},
-				],
-				details: {
-					timeoutSeconds: 300,
-					async: { state: "running", jobId: "bash-42", type: "bash" },
+					isError: false,
 				},
-				isError: false,
-			},
-			{ expanded: false, isPartial: false },
-			uiTheme,
-			{ command: "sleep 30" },
-		);
-		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("started");
-		expect(rendered).toContain("Backgrounded: bash-42");
-		expect(rendered).not.toContain("Do NOT poll");
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ command: "sleep 30" },
+			);
+			const rendered = sanitizeText(component.render(120).join("\n"));
+			expect(rendered, label).toContain("started");
+			expect(rendered, label).toContain("Backgrounded: bash-42");
+			// Shared by every notice form, so a row whose notice is not stripped fails here.
+			expect(rendered, label).not.toContain("injected into the conversation");
+			expect(rendered, label).not.toContain("Do NOT poll");
+			expect(rendered, label).not.toContain("deadline");
+		}
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {

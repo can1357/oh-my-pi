@@ -66,6 +66,35 @@ describe("BracketedPasteHandler", () => {
 			// @ts-expect-error - handled=true carries pasteContent
 			expect(finish.pasteContent.length).toBe(100_000);
 		});
+
+		it("caps a multibyte payload by UTF-8 bytes, not UTF-16 code units", () => {
+			// Regression: the cap compared `buffer.length`, so a payload over
+			// the byte limit but under it in code units kept buffering. A
+			// caller now receives the accumulated bytes on the chunk that
+			// crosses the byte cap.
+			const handler = new BracketedPasteHandler({ byteLimit: 16 });
+			handler.process(PASTE_START);
+			const overflow = handler.process("é".repeat(9)); // 9 units, 18 bytes
+			expect(overflow.handled).toBe(true);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(overflow.pasteContent).toBe("é".repeat(9));
+		});
+
+		it("resets the byte counter when a new paste starts", () => {
+			const handler = new BracketedPasteHandler({ byteLimit: 16 });
+			handler.process(PASTE_START);
+			// 18 bytes → cap-abort, leaving the counter at 18 unless the next
+			// paste resets it.
+			handler.process("é".repeat(9));
+
+			handler.process(PASTE_START);
+			const first = handler.process("hello");
+			// A carried-over counter would abort this chunk instead of buffering.
+			expect(first).toEqual({ handled: true, remaining: "" });
+			const finish = handler.process(PASTE_END);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(finish.pasteContent).toBe("hello");
+		});
 	});
 
 	describe("Baseline flow", () => {
@@ -89,6 +118,26 @@ describe("BracketedPasteHandler", () => {
 			expect(result.pasteContent).toBe("payload");
 			// @ts-expect-error - remaining carries post-marker input
 			expect(result.remaining).toBe("tail");
+		});
+
+		it("consumes doubled start delimiters without leaking framing into pasted text", () => {
+			const handler = new BracketedPasteHandler();
+			expect(handler.process(`${PASTE_START}${PASTE_START}https://example.com${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "https://example.com",
+				remaining: "",
+			});
+		});
+
+		it("keeps the payload when a second start arrives in a later chunk", () => {
+			const handler = new BracketedPasteHandler();
+			handler.process(`${PASTE_START}first`);
+			handler.process(PASTE_START);
+			expect(handler.process(`second${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "firstsecond",
+				remaining: "",
+			});
 		});
 	});
 

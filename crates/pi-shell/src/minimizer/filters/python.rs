@@ -13,6 +13,8 @@
 //! fall through unchanged (RTK's defensive default), so xdist `[gwN]`
 //! prefixes and custom reporters never cause data loss.
 
+use std::fmt::NumBuffer;
+
 use super::lint;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -99,7 +101,7 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 		if is_pytest_summary_header(trimmed) {
 			in_failure = false;
 			suppressing = false;
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 		if is_pytest_summary_line(trimmed) {
@@ -115,7 +117,7 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 		if trimmed.starts_with("XFAIL ") || trimmed.starts_with("XPASS ") {
 			in_failure = false;
 			suppressing = false;
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 
@@ -135,7 +137,7 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 				suppressing = failure_blocks > MAX_PYTEST_FAILURES;
 			}
 			if !suppressing {
-				push_line(&mut out, line);
+				primitives::push_line(&mut out, line);
 			}
 			continue;
 		}
@@ -147,7 +149,7 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 			// dropped too. (`FAILED ` short-summary lines only appear after the
 			// summary header has cleared `suppressing`, so they stay.)
 			if !suppressing {
-				push_line(&mut out, line);
+				primitives::push_line(&mut out, line);
 			}
 			continue;
 		}
@@ -158,13 +160,13 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 				continue;
 			}
 			if !suppressing && !is_pytest_pass_noise(trimmed) {
-				push_line(&mut out, line);
+				primitives::push_line(&mut out, line);
 			}
 			continue;
 		}
 
 		if trimmed.starts_with("FAILED ") || trimmed.starts_with("ERROR ") {
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 		}
 	}
 
@@ -173,17 +175,17 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 	let error_overflow = error_blocks.saturating_sub(MAX_PYTEST_FAILURES);
 	if error_overflow > 0 {
 		out.push_str("[…");
-		out.push_str(&error_overflow.to_string());
+		out.push_str(error_overflow.format_into(&mut NumBuffer::new()));
 		out.push_str(" errors elided…]\n");
 	}
 	let overflow = failure_blocks.saturating_sub(MAX_PYTEST_FAILURES);
 	if overflow > 0 {
 		out.push_str("[…");
-		out.push_str(&overflow.to_string());
+		out.push_str(overflow.format_into(&mut NumBuffer::new()));
 		out.push_str(" failures elided…]\n");
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -197,8 +199,8 @@ fn pytest_success(input: &str) -> String {
 	for line in input.lines() {
 		let trimmed = line.trim();
 		if is_pytest_summary_header(trimmed) {
-			push_line(&mut summary, line);
-			push_line(&mut out, line);
+			primitives::push_line(&mut summary, line);
+			primitives::push_line(&mut out, line);
 			continue;
 		}
 		if is_pytest_summary_line(trimmed) {
@@ -209,12 +211,12 @@ fn pytest_success(input: &str) -> String {
 		if is_pytest_pass_noise(trimmed) {
 			continue;
 		}
-		push_line(&mut out, line);
+		primitives::push_line(&mut out, line);
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out
-	} else if has_content(&summary) {
+	} else if primitives::has_content(&summary) {
 		summary
 	} else {
 		primitives::head_tail_lines(input, 0, 20)
@@ -369,11 +371,11 @@ fn filter_ruff_format(input: &str) -> String {
 			continue;
 		}
 		if is_ruff_format_line(trimmed) {
-			push_line(&mut out, line);
+			primitives::push_line(&mut out, line);
 		}
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -394,19 +396,10 @@ fn is_ruff_format_line(trimmed: &str) -> bool {
 		|| trimmed.contains(" files already formatted")
 }
 
-fn push_line(out: &mut String, line: &str) {
-	out.push_str(line);
-	out.push('\n');
-}
-
 fn push_pytest_summary_line(out: &mut String, trimmed: &str) {
 	out.push_str("pytest: ");
 	out.push_str(compact_pytest_summary_line(trimmed));
 	out.push('\n');
-}
-
-fn has_content(text: &str) -> bool {
-	text.lines().any(|line| !line.trim().is_empty())
 }
 
 #[cfg(test)]

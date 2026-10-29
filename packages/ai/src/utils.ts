@@ -1,7 +1,9 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
+export { normalizeToolCallId } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
+import { invalidToolCallArguments } from "./utils/tool-call-arguments";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -31,11 +33,6 @@ export function normalizeSystemPrompts(systemPrompt: readonly string[] | string 
 	return prompts
 		.map(prompt => redactSensitiveCredentials(prompt.toWellFormed()))
 		.filter(prompt => prompt.trim().length > 0);
-}
-
-export function normalizeToolCallId(id: string): string {
-	const sanitized = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
 }
 
 type ResponsesToolItemIdPrefix = "fc" | "ctc";
@@ -119,10 +116,10 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
  * every history node on providers that reject native-resolution images.
  */
-function clampReplayItemImageDetail(
-	item: Record<string, unknown>,
+function clampReplayItemImageDetail<TItem extends { type?: unknown; detail?: unknown; content?: unknown }>(
+	item: TItem,
 	supportsImageDetailOriginal: boolean,
-): Record<string, unknown> {
+): TItem {
 	if (supportsImageDetailOriginal) return item;
 
 	if (item.type === "input_image" && item.detail === "original") {
@@ -140,6 +137,21 @@ function clampReplayItemImageDetail(
 		return { ...record, detail: "auto" };
 	});
 	return changed ? { ...item, content } : item;
+}
+
+/** Clamp replayed images without changing item identities or other native replay fields. */
+export function clampOpenAIResponsesImageDetailForReplay<
+	TItem extends { type?: unknown; detail?: unknown; content?: unknown },
+>(items: TItem[], supportsImageDetailOriginal: boolean): TItem[] {
+	if (supportsImageDetailOriginal) return items;
+	let clamped: TItem[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const clampedItem = clampReplayItemImageDetail(item, supportsImageDetailOriginal);
+		if (clampedItem !== item && !clamped) clamped = items.slice(0, index);
+		clamped?.push(clampedItem);
+	}
+	return clamped ?? items;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -220,7 +232,7 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
 	const replayItems = dropMalformedOpenAIResponsesToolCalls(items);
-	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal === true;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
 			? undefined
@@ -545,6 +557,47 @@ export function dropMalformedOpenAIResponsesToolCalls<
 	return kept;
 }
 
+/**
+ * Replay history is immutable and re-sanitized on every request, so each item
+ * remembers the replay `arguments` derived from its stored value instead of
+ * re-parsing every historical call (large write/edit payloads) per request.
+ * Frozen/sealed caller-owned items are never mutated; they re-parse instead.
+ */
+const kReplayArguments = Symbol("openaiResponses.replayArguments");
+
+interface FunctionCallReplayItem extends Record<string, unknown> {
+	[kReplayArguments]?: { raw: unknown; replay: string };
+}
+
+/**
+ * `arguments` to replay for a native `function_call`: the stored string when it
+ * parses, `{}` when absent/blank, else the bounded `{__parseError, __rawJson}`
+ * diagnostic the transcript (and the cold replay path) already carries.
+ *
+ * Unparsable text (stream cut off mid-JSON) 400s the whole request, but dropping
+ * the call orphans its recorded tool result into an assistant note that can end
+ * the request and 400 it again (#15568).
+ */
+function replayFunctionCallArguments(item: FunctionCallReplayItem): string {
+	const raw = item.arguments;
+	const cached = item[kReplayArguments];
+	if (cached && cached.raw === raw) return cached.replay;
+	let replay = "{}";
+	if (typeof raw === "string" && raw.trim().length > 0) {
+		try {
+			JSON.parse(raw);
+			replay = raw;
+		} catch (error) {
+			replay = JSON.stringify(invalidToolCallArguments(raw, error));
+		}
+	}
+	// Non-enumerable: the sanitizer's object rest copy must not carry the cache onto wire items.
+	if (Object.isExtensible(item)) {
+		Object.defineProperty(item, kReplayArguments, { value: { raw, replay }, writable: true });
+	}
+	return replay;
+}
+
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
 	supportsImageDetailOriginal: boolean,
@@ -556,14 +609,6 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (isMalformedOpenAIResponsesToolCall(item)) {
 		return undefined;
 	}
-	if (item.type === "function_call") {
-		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
-		try {
-			JSON.parse(item.arguments);
-		} catch {
-			return undefined;
-		}
-	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);
 	if (item.type === "reasoning") {
@@ -571,6 +616,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	}
 	const { id: _id, ...sanitizedItem } = item;
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
+	if (item.type === "function_call") sanitizedItem.arguments = replayFunctionCallArguments(item);
 
 	return clampReplayItemImageDetail(
 		sanitizedItem,

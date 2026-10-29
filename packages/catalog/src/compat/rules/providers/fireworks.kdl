@@ -24,6 +24,32 @@ provider "fireworks" priority=-1 {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
+	// Replaces the Fireworks Kimi output caps in provider-models/openai-compat.ts
+	// (#1849). The K2 family ships long reasoning traces Fireworks bounds at
+	// 32,768 output tokens; the control plane reports no output budget, so the
+	// cap is also the fallback. K2.7-Code serves its full 65,536 (verified with
+	// a 58,971-token completion), which seeds rows that report none.
+	class "kimi" {
+		family "k2" {
+			max-tokens-fallback 32768
+			max-tokens-ceiling 32768
+		}
+		family "k2.5" {
+			max-tokens-fallback 32768
+			max-tokens-ceiling 32768
+		}
+		family "k2.6" {
+			max-tokens-fallback 32768
+			max-tokens-ceiling 32768
+		}
+		family "k2-thinking" {
+			max-tokens-fallback 32768
+			max-tokens-ceiling 32768
+		}
+		family "k2.7-code" {
+			max-tokens-fallback 65536
+		}
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v4-flash" {
 		requires-reasoning-content-for-all-assistant-turns #true

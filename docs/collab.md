@@ -30,19 +30,18 @@ The guest's previous session is restored on `/leave` (or when the host stops).
 
 ### Commands
 
-| Command           | Effect                                                                              |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `/collab`         | Start full-control sharing; reuse a control room or replace a view-only room        |
-| `/collab <relay>` | Start sharing through a specific relay (`relay.example.com`, `ws://localhost:7475`) |
-| `/collab view [relay]` | Start read-only sharing, or print the existing room's read-only link/QR        |
-| `/collab status`  | Show link + participants                                                            |
-| `/collab stop`    | Stop sharing                                                                        |
-| `/collab list`    | List every active local Collab host (no links)                                      |
-| `/join <link>`    | Join a shared session as a guest                                                    |
-| `/leave`          | Leave (guest) or stop sharing (host)                                                |
+| Command                | Effect                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| `/collab`              | Start full-control sharing; reuse a control room or replace a view-only room        |
+| `/collab <relay>`      | Start sharing through a specific relay (`relay.example.com`, `ws://localhost:7475`) |
+| `/collab view [relay]` | Start read-only sharing, or print the existing room's read-only link/QR             |
+| `/collab status`       | Show link + participants                                                            |
+| `/collab stop`         | Stop sharing                                                                        |
+| `/collab list`         | List every active local Collab host (no links)                                      |
+| `/join <link>`         | Join a shared session as a guest                                                    |
+| `/leave`               | Leave (guest) or stop sharing (host)                                                |
 
 `/collab start [relay]` is also accepted. Passing a relay while a reusable room is active does not move that room to another relay; stop it first to change the relay.
-
 
 ### Sharing every session automatically
 
@@ -58,7 +57,7 @@ Rooms follow the session, not the process. `/new`, `/resume`, `/fork`, and branc
 
 Explicit stop also cancels pending automatic launches without changing the saved policy. Application frames still queued or being encrypted are discarded; only the final goodbye drains. Bytes already handed to the transport cannot be recalled. A later distinct session change or manual start can host again.
 
-A room can also end on its own: the relay closes it for good, or the host's send backlog exceeds its limit (`Collab ended: …`). Its guests must rejoin to resync, but the session keeps following the live auto-start policy: once the ended room has withdrawn, a replacement room (next generation) is hosted for the same session. The first replacement is immediate; if rooms keep ending within five minutes of each other, each further replacement waits twice as long (1 s, 2 s, 4 s, … up to 60 s). `/collab`, a session switch, `/collab stop`, and shutdown are not held behind that wait. With auto-start `off`, a manually started room that ends this way stays down until `/collab` is run again.
+A room can also end on its own: the relay closes it for good, or the host's send backlog exceeds its limit (`Collab ended: …`). Its guests must rejoin to resync, but the session keeps following the live auto-start policy: once the ended room has withdrawn, a replacement room (next generation) is hosted for the same session. An auto-started room the relay never opens — the relay is unreachable, or the connection times out — is retried the same way; no guest or registry reader ever saw it, so the retry reuses its generation and a session that recovers still publishes generation 1 first. The first replacement is immediate; if rooms keep ending, or the relay stays unavailable, within five minutes of each other, each further replacement waits twice as long (1 s, 2 s, 4 s, … up to 60 s). `/collab`, a session switch, `/collab stop`, and shutdown are not held behind that wait. With auto-start `off`, a manually started room that ends this way stays down until `/collab` is run again.
 
 Guest ownership begins before replica activation and lasts through restoration of the previous local session. Neither joining, resynchronizing, nor a failed join may publish the replica as a local host. Leaving waits for restoration; a restoration failure is reported and keeps hosting blocked. An explicit stop during restoration suppresses its pending automatic restart without cancelling the restoration itself.
 
@@ -142,7 +141,6 @@ Guests with a view-only link can read everything live — back-transcript, strea
 
 Advisor records are not guest-visible subagents: they are excluded from roster snapshots and transcript fetches, and advisor chat/kill/revive commands are rejected.
 
-
 Other session/machine commands remain host-only: `/model`, `/compact`, `/resume`, `/branch`, bash (`!`), python (`$`), skills, etc. Guests keep a small local allowlist (`/dump`, `/export`, `/copy`, `/open`, `/help`, `/hotkeys`, `/theme`, `/settings`, `/leave`, `/collab`, `/exit`, `/quit`).
 
 When a guest joins during an assistant turn, that in-flight turn appears on the first subsequent `message_update`: the guest synthesizes the missing `message_start` from the update's full accumulating message before forwarding the delta. If the host emits no further update for that turn after the guest joins, there is no update from which to synthesize the live component. The durable entry still reaches the replica's message state, but entry frames are intentionally not rendered, so that edge case can remain absent from the live TUI.
@@ -160,9 +158,9 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 | `collab.relayUrl`     | `wss://my.omp.sh`     | Relay used by `/collab` when no relay is passed inline                                                         |
 | `collab.webUrl`       | empty                 | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
 | `collab.displayName`  | OS username           | Name shown to other participants                                                                               |
-| `collab.autoStart`    | `off`                 | `view` / `control`: host every interactive session as it starts and publish it to the local registry            |
+| `collab.autoStart`    | `off`                 | `view` / `control`: host every interactive session as it starts and publish it to the local registry           |
 | `share.serverUrl`     | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`)                                      |
-| `share.store`         | `blob`                | `/share` uploads to the blob server; `gist` uses an authenticated secret gist with blob fallback             |
+| `share.store`         | `blob`                | `/share` uploads to the blob server; `gist` uses an authenticated secret gist with blob fallback               |
 | `share.redactSecrets` | `true`                | Run the secret obfuscator over `/share` snapshots before upload                                                |
 
 ## Self-hosting the relay

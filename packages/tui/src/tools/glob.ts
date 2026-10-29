@@ -1,6 +1,12 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
 import { col, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { fileHref, fileRow, footnoteText, inlineErrorView, resultText } from "./native-view";
@@ -9,9 +15,10 @@ import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { toPathList } from "../render/render-utils";
 import * as path from "node:path";
-import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { fileHyperlink, renderFileList, renderStatusLine, renderTreeList } from "../render";
 import {
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
@@ -29,6 +36,10 @@ export interface GlobToolDetails {
 	fileCount?: number;
 	files?: string[];
 	truncated?: boolean;
+	/** The scan hit the tool deadline, so the listed files are an incomplete
+	 * set rather than a complete answer. Distinct from `truncated`, which also
+	 * covers result-limit and output truncation. */
+	timedOut?: boolean;
 	error?: string;
 	/** Working directory at search time. Used by the renderer to resolve relative
 	 * file paths to absolute paths for OSC 8 hyperlinks. */
@@ -64,13 +75,33 @@ const NATIVE_LIST_MAX = 6;
 /** Collapsed clamp: the whole ≤ 6-row list, or about six rows of chips. */
 const NATIVE_PREVIEW_LINES = 8;
 
-/**
- * Native glob files: 22px path rows when there are few, else a wrap of
- * chips (glyph and name, the full path in the tooltip). Paths link when the
- * search `cwd` is known.
- */
-function describeGlobFiles(files: readonly string[], cwd: string | undefined): NativeNode {
-	const links = files.map(file => (cwd && !file.endsWith("/") ? fileHref(path.resolve(cwd, file)) : undefined));
+/** Use original filesystem paths for existing links, never for displayed labels or extra links. */
+function globLinkPaths(
+	details: GlobToolDetails | undefined,
+	rawDetails: unknown,
+): { cwd: string | undefined; files: readonly unknown[] } {
+	const raw = rawDetails && typeof rawDetails === "object" ? rawDetails : undefined;
+	const rawCwd = raw && "cwd" in raw && typeof raw.cwd === "string" ? raw.cwd : undefined;
+	const rawFiles = raw && "files" in raw && Array.isArray(raw.files) ? raw.files : undefined;
+	const files = details?.files ?? [];
+	return {
+		cwd: details?.cwd ? (rawCwd ?? details.cwd) : undefined,
+		files: rawFiles?.length === files.length ? rawFiles : files,
+	};
+}
+
+/** Native glob files: path rows when few, otherwise wrapped chips; links require a known cwd. */
+function describeGlobFiles(
+	files: readonly string[],
+	cwd: string | undefined,
+	rawFiles: readonly unknown[] = files,
+): NativeNode {
+	const links = files.map((file, i) => {
+		const rawFile = rawFiles[i];
+		return cwd && !file.endsWith("/")
+			? fileHref(path.resolve(cwd, typeof rawFile === "string" ? rawFile : file))
+			: undefined;
+	});
 	if (files.length <= NATIVE_LIST_MAX) {
 		return col(
 			files.map((file, i) => fileRow(file, { href: links[i] })),
@@ -121,20 +152,21 @@ export const globToolRenderer = {
 			},
 			uiTheme,
 		);
-		return new Text(text, 1, 0);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: GlobToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: GlobRenderArgs,
 	): Component {
 		const details = result.details;
+		const linkPaths = globLinkPaths(details, options.renderContext?.rawDetails);
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
+			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
 		}
 
 		const hasDetailedData = details?.fileCount !== undefined;
@@ -147,7 +179,7 @@ export const globToolRenderer = {
 				textContent.includes("No files found") ||
 				textContent.trim() === ""
 			) {
-				return new Text(formatEmptyMessage("No files found", uiTheme), 1, 0);
+				return new Text(formatEmptyMessage("No files found", uiTheme), 0, 0);
 			}
 
 			const lines = textContent.split("\n").filter(l => l.trim());
@@ -174,9 +206,8 @@ export const globToolRenderer = {
 						},
 						uiTheme,
 					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+					return fitHeaderedRows(header, listLines, width);
 				},
-				{ paddingX: 1 },
 			);
 		}
 
@@ -184,6 +215,10 @@ export const globToolRenderer = {
 		const truncation = details?.truncation ?? details?.meta?.truncation;
 		const limits = details?.meta?.limits;
 		const truncated = Boolean(details?.truncated || truncation || details?.resultLimitReached || limits?.resultLimit);
+		// A non-empty timed-out result is the case `truncated` alone cannot
+		// explain: the listing is short because the scan died, not because it
+		// finished. Say which one it was.
+		const timedOut = Boolean(details?.timedOut);
 		const files = details?.files ?? [];
 
 		const missingPaths = details?.missingPaths ?? [];
@@ -192,25 +227,28 @@ export const globToolRenderer = {
 
 		if (fileCount === 0) {
 			// `truncated` on an empty result means the scan timed out mid-walk —
-			// render "incomplete", not a definitive "No files found".
-			const emptyLabel = truncated ? "No matches before timeout (scan incomplete)" : "No files found";
+			// render "incomplete", not a definitive "No files found". `timedOut`
+			// states it outright; the inference stays for old transcripts that
+			// predate the field.
+			const emptyTimedOut = timedOut || truncated;
+			const emptyLabel = emptyTimedOut ? "No matches before timeout (scan incomplete)" : "No files found";
 			const header = renderStatusLine(
 				{
 					icon: "warning",
 					title: "Glob",
 					titleColor: "toolTitle",
 					description: formatGlobRenderPaths(args),
-					meta: truncated ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
+					meta: emptyTimedOut ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
 				},
 				uiTheme,
 			);
 			const lines = [header, formatEmptyMessage(emptyLabel, uiTheme)];
 			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 1, 0);
+			return new Text(lines.join("\n"), 0, 0);
 		}
 		const meta: string[] = [formatCount("file", fileCount)];
 		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
+		if (truncated) meta.push(uiTheme.fg("warning", timedOut ? "timed out" : "truncated"));
 		const header = renderStatusLine(
 			{
 				...(truncated ? { icon: "warning" as const } : { iconOverride: globStatusIcon(uiTheme) }),
@@ -238,23 +276,28 @@ export const globToolRenderer = {
 		return createCachedComponent(
 			() => options.expanded,
 			width => {
-				const cwd = details?.cwd;
+				const cwd = linkPaths.cwd;
 				const fileLines = renderFileList(
 					{
-						files: files.map(entry => ({
-							path: entry,
-							isDirectory: entry.endsWith("/"),
-							absPath: cwd && !entry.endsWith("/") ? path.resolve(cwd, entry) : undefined,
-						})),
+						files: files.map((entry, index) => {
+							const rawFile = linkPaths.files[index];
+							return {
+								path: entry,
+								isDirectory: entry.endsWith("/"),
+								absPath:
+									cwd && !entry.endsWith("/")
+										? path.resolve(cwd, typeof rawFile === "string" ? rawFile : entry)
+										: undefined,
+							};
+						}),
 						expanded: options.expanded,
 						maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 						hyperlinkFn: fileHyperlink,
 					},
 					uiTheme,
 				);
-				return [header, ...fileLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...fileLines, ...extraLines], width);
 			},
-			{ paddingX: 1 },
 		);
 	},
 	describeCall(args: GlobRenderArgs): NativeToolView {
@@ -267,10 +310,11 @@ export const globToolRenderer = {
 	 */
 	describeResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: GlobToolDetails; isError?: boolean },
-		_options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		args?: GlobRenderArgs,
 	): NativeToolView {
 		const details = result.details;
+		const linkPaths = globLinkPaths(details, options.renderContext?.rawDetails);
 		if (result.isError || details?.error) {
 			return inlineErrorView(globNativeHead(args), details?.error || resultText(result) || "Unknown error");
 		}
@@ -294,6 +338,7 @@ export const globToolRenderer = {
 		const truncation = details.truncation ?? details.meta?.truncation;
 		const limits = details.meta?.limits;
 		const truncated = Boolean(details.truncated || truncation || details.resultLimitReached || limits?.resultLimit);
+		const timedOut = Boolean(details.timedOut);
 		const missingPaths = details.missingPaths ?? [];
 		const missingNote = missingPaths.length > 0 ? `skipped missing: ${missingPaths.join(", ")}` : undefined;
 		const scope = details.scopePath ? `in ${details.scopePath}` : undefined;
@@ -301,7 +346,10 @@ export const globToolRenderer = {
 			const foot = footnoteText(compact([missingNote]));
 			return {
 				// `truncated` on an empty result means the scan timed out mid-walk.
-				tool: { ...globNativeHead(args, compact(["0 files", scope])), note: truncated ? "timed out" : undefined },
+				tool: {
+					...globNativeHead(args, compact(["0 files", scope])),
+					note: timedOut || truncated ? "timed out" : undefined,
+				},
 				tone: "warning",
 				inline: true,
 				body: foot ? [foot] : undefined,
@@ -315,10 +363,12 @@ export const globToolRenderer = {
 		if (artifactId) reasons.push(formatFullOutputReference(artifactId));
 		const head = globNativeHead(args, compact([formatCount("file", details.fileCount), scope]));
 		return {
-			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
+			tool: truncated
+				? { ...head, badges: [{ text: timedOut ? "timed out" : "truncated", tone: "warning" }] }
+				: head,
 			inline: true,
 			body: compact<NativeChild>([
-				describeGlobFiles(details.files ?? [], details.cwd),
+				describeGlobFiles(details.files ?? [], linkPaths.cwd, linkPaths.files),
 				footnoteText(compact([reasons.length > 0 && `truncated: ${reasons.join(", ")}`, missingNote])),
 			]),
 			preview: { lines: NATIVE_PREVIEW_LINES },

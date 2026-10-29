@@ -14,7 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
-/** #9235: byte/media HTTP 413s must not route into token-context compaction. */
+/** Byte-limit 413s may be recoverable when older live history can be compacted. */
 
 const PAYLOAD_ERROR_MESSAGE =
 	"413 request body exceeds the configured payload limit (type=invalid_request_error param=request_too_large)";
@@ -54,6 +54,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		seed?: { toolText: string },
 		options?: {
 			streamFn?: NonNullable<ConstructorParameters<typeof Agent>[0]>["streamFn"];
+			initialMessages?: AgentMessage[];
 			extraSettings?: Parameters<typeof Settings.isolated>[0];
 		},
 	): Promise<void> {
@@ -98,6 +99,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 						} as AgentMessage,
 					]
 				: []),
+			...(options?.initialMessages ?? []),
 		];
 		for (const message of initialMessages) {
 			sessionManager.appendMessage(message as never);
@@ -423,10 +425,9 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
-	it("honestly skips token compaction for a low-token payload-shaped 413", async () => {
+	it("keeps an irreducible payload 413 terminal when no old turn can be dropped", async () => {
 		await createSession(200_000);
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
-		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
@@ -440,7 +441,6 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		await session.waitForIdle();
 
 		expect(endCount()).toBe(0);
-		expect(prepareSpy).not.toHaveBeenCalled();
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(continueSpy).not.toHaveBeenCalled();
 
@@ -453,6 +453,52 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("compacts old live screenshot history on a generic byte-limit 413 with token headroom", async () => {
+		const screenshot = { type: "image" as const, mimeType: "image/png", data: "A".repeat(534_000) };
+		await createSession(200_000, undefined, {
+			extraSettings: { "compaction.methodOrder": ["soft"], "compaction.keepRecentTokens": 1 },
+			initialMessages: [
+				{ role: "user", content: [{ type: "text", text: "old screenshot" }, screenshot], timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Old screen recorded." }],
+					timestamp: Date.now(),
+				} as AgentMessage,
+				{ role: "user", content: "Review the current screen.", timestamp: Date.now() },
+			],
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const notices = collectNotices();
+		const starts = countCompactionEvents("auto_compaction_start");
+		const { promise: compacted, resolve } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") resolve();
+		});
+
+		const failed = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: failed });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [failed] });
+		await compacted;
+		await session.waitForIdle();
+
+		expect(starts()).toBe(1);
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
+		const live = sessionManager.buildSessionContext().messages;
+		expect(
+			live.some(
+				message =>
+					(message.role === "user" || message.role === "developer" || message.role === "toolResult") &&
+					Array.isArray(message.content) &&
+					message.content.some(part => part.type === "image"),
+			),
+		).toBe(false);
+		expect(live.some(message => message.role === "user" && message.content === "Review the current screen.")).toBe(
+			true,
+		);
+		expect(notices.some(notice => notice.message.includes("413"))).toBe(false);
 	});
 
 	it("falls through to overflow recovery when the local gauge shows no headroom", async () => {
@@ -1233,7 +1279,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(startCount()).toBeGreaterThanOrEqual(1);
 	});
 
-	it("keeps the goal-mode BLOCK terminal when no fallback chain is configured", async () => {
+	it("exposes a terminal live 413 to the task consumer without goal reminders", async () => {
 		const requestedModels: string[] = [];
 		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
 		await createSession(200_000, undefined, {
@@ -1254,7 +1300,74 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
 		expect(payloadNotices.length).toBe(1);
 		expect(payloadNotices[0].level).toBe("warning");
+		const terminal = session.getLastAssistantMessage();
+		expect(terminal?.stopReason).toBe("error");
+		expect(terminal?.errorMessage).toContain("413");
+		expect(
+			session.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "error"),
+		).toBe(false);
+		expect(notices.every(notice => !notice.message.includes("archived image frames"))).toBe(true);
 	});
+
+	it("retains a live 413 after configured shake reclaims nothing", async () => {
+		const requestedModels: string[] = [];
+		const provider = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				provider.push({ throw: PAYLOAD_ERROR_MESSAGE });
+				return provider.stream(model, context, options);
+			},
+			extraSettings: { "compaction.methodOrder": ["shake"] },
+		});
+		await session.prompt("Review this image.");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		expect(session.getLastAssistantMessage()?.errorMessage).toContain("413");
+		expect(
+			session.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "error"),
+		).toBe(false);
+	});
+
+	it("keeps an explicit single-image limit terminal even with summary compaction configured", async () => {
+		const requestedModels: string[] = [];
+		const provider = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				provider.push({ throw: "request_too_large: image is too large (413)" });
+				return provider.stream(model, context, options);
+			},
+			extraSettings: { "compaction.methodOrder": ["soft"], "compaction.keepRecentTokens": 1 },
+			initialMessages: [
+				{ role: "user", content: "Prior turn with reclaimable history.", timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Prior turn completed." }],
+					timestamp: Date.now(),
+				} as AgentMessage,
+			],
+		});
+		const starts = countCompactionEvents("auto_compaction_start");
+		await session.prompt("Review this image.", {
+			images: [
+				{
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+				},
+			],
+		});
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(starts()).toBe(0);
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		expect(session.getLastAssistantMessage()?.errorMessage).toContain("image is too large");
+	});
+
 	it("does not blind-resend a transient-wrapped payload rejection before maintenance sees it", async () => {
 		const requestedModels: string[] = [];
 		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });

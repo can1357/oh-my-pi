@@ -2,8 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwLatestTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
-import { acquireFileLock, type FileLockHandle, isEnoent, toError } from "@oh-my-pi/pi-utils";
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { acquireFileLock, type FileLockHandle, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "../utils/atomic-file";
 
 export {
 	type BtwHistoryRecord,
@@ -13,8 +13,10 @@ export {
 	getBtwTurns,
 } from "@oh-my-pi/pi-tui/overlays/btw-history";
 
+const imageSchema = type({ type: "'image'", data: "string", mimeType: "string" });
 const turnFields = {
 	question: "string",
+	"images?": imageSchema.array(),
 	answer: "string",
 	status: "'running' | 'complete' | 'cancelled' | 'error' | 'interrupted'",
 	createdAt: "0 <= number <= 8640000000000000",
@@ -26,6 +28,7 @@ const recordSchema = type({
 	...turnFields,
 	id: "string > 0",
 	leafId: "string | null",
+	// `title` lives in the `entry-<id>.title` sidecar: older builds reject unknown record keys.
 	"followUps?": turnSchema.array(),
 	"+": "reject",
 });
@@ -56,6 +59,11 @@ function recordFileName(id: string): string {
 	return `entry-${id}.json`;
 }
 
+/** Older builds only read `.json` names, so the title sidecar never breaks their history. */
+function titleFileName(id: string): string {
+	return `entry-${id}.title`;
+}
+
 interface StoredRecord {
 	record: BtwHistoryRecord;
 	revision: string;
@@ -77,12 +85,34 @@ async function readRecord(filePath: string): Promise<StoredRecord | undefined> {
 	}
 }
 
+/** A missing or unreadable title only loses the heading; the topic still opens under its question. */
+async function readTitle(filePath: string): Promise<string | undefined> {
+	try {
+		const stat = await fs.lstat(filePath);
+		if (!stat.isFile()) throw new Error("Expected a regular file");
+		return await fs.readFile(filePath, "utf8");
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Ignoring unreadable BTW history title", { path: filePath, error: toError(error).message });
+		}
+		return undefined;
+	}
+}
+
 function historyDirectory(artifactsDir: string, scope: string | undefined): string {
 	const root = path.join(artifactsDir, "btw-history");
 	if (scope === undefined) return root;
 	// Session ids come from session headers; never let one escape the history root.
 	const segment = /^[\w-]+$/.test(scope) ? scope : new Bun.CryptoHasher("sha256").update(scope).digest("hex");
 	return path.join(root, "sessions", segment);
+}
+
+/** The topic on disk is missing or was rewritten since this store read it; retrying the same write can never succeed. */
+export class BtwHistoryConflictError extends Error {
+	constructor(readonly recordId: string) {
+		super(`BTW history conflict for ${recordId}; reopen history before retrying`);
+		this.name = "BtwHistoryConflictError";
+	}
 }
 
 /** Session-local sidecar storage; never reads or writes the main session journal. */
@@ -114,13 +144,20 @@ export class BtwHistoryStore {
 			if (isEnoent(error)) return store;
 			throw error;
 		}
+		// Only titled topics have a sidecar; skip the lookup for the rest.
+		const titleNames = new Set(names.filter(name => name.endsWith(".title")));
 		for (const name of names.sort()) {
 			if (!name.endsWith(".json")) continue;
 			const stored = await readRecord(path.join(store.#directory, name));
 			if (!stored) continue;
+			const titleName = titleFileName(stored.record.id);
+			const title = titleNames.has(titleName) ? await readTitle(path.join(store.#directory, titleName)) : undefined;
 			// Recovery is only a view. CAS must compare the original disk bytes,
 			// and the live writer's lease prevents a recovered view stealing a turn.
-			store.#records.set(stored.record.id, snapshotRecord(stored.record, true));
+			store.#records.set(
+				stored.record.id,
+				snapshotRecord(title === undefined ? stored.record : { ...stored.record, title }, true),
+			);
 			store.#revisions.set(stored.record.id, stored.revision);
 		}
 		store.#refreshSnapshot();
@@ -143,14 +180,16 @@ export class BtwHistoryStore {
 	async #upsert(record: BtwHistoryRecord, retry: boolean): Promise<void> {
 		if (this.#writeError && !retry) throw this.#writeError;
 		// Capture before yielding: callers may keep mutating their streaming record.
-		const snapshot = snapshotRecord(parseRecord(record));
+		const { title, ...fields } = record;
+		const saved = snapshotRecord(parseRecord(fields));
+		const snapshot = title === undefined ? saved : Object.freeze({ ...saved, title });
 		if (this.#directory === undefined) {
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();
 			return;
 		}
 		const directory = this.#directory;
-		const content = `${JSON.stringify(snapshot)}\n`;
+		const content = `${JSON.stringify(saved)}\n`;
 		const write = this.#pending.then(async () => {
 			// Reset only at this queue boundary: earlier attempts and their error
 			// handlers must settle before an explicit retry can recover the store.
@@ -168,15 +207,16 @@ export class BtwHistoryStore {
 			// Missing records and new-id collisions are conflicts, not blind inserts.
 			const stored = await readRecord(filePath);
 			if (stored?.revision !== this.#revisions.get(snapshot.id)) {
-				throw new Error(`BTW history conflict for ${snapshot.id}; reopen history before retrying`);
+				throw new BtwHistoryConflictError(snapshot.id);
 			}
-			const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-			try {
-				await fs.writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-				await replaceFileAtomically(temporaryPath, filePath);
-			} finally {
-				await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+			if (!stored) {
+				// The title never changes, so it is written once, before the record is
+				// visible; a stale sidecar from a vanished record must not title a new one.
+				const titlePath = path.join(directory, titleFileName(snapshot.id));
+				if (title === undefined) await fs.rm(titlePath, { force: true });
+				else await writeFileAtomically(titlePath, title);
 			}
+			await writeFileAtomically(filePath, content);
 			this.#revisions.set(snapshot.id, new Bun.CryptoHasher("sha256").update(content).digest("hex"));
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();

@@ -1,0 +1,34 @@
+// Cloudflare Workers AI decision models. Clef and Clef Flash answer typed
+// questions over JSON state with the TypeSafe System One body
+// (`{model, state, questions}`) at
+// `POST /client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/<model>`.
+// `<account>` in the base URL is resolved per request from the stored login
+// credential (else `CLOUDFLARE_ACCOUNT_ID`).
+
+provider "cloudflare-workers-ai" {
+	default-model "@cf/cloudflare/clef"
+	env "CLOUDFLARE_API_TOKEN" "CLOUDFLARE_AUTH_TOKEN"
+
+	// developers.cloudflare.com/workers-ai/models/clef and /clef-flash: both
+	// take text and image input and bill input tokens only.
+	seed api="workers-ai-systemone" base-url="https://api.cloudflare.com/client/v4/accounts/<account>/ai/run" bundle="always" {
+		model "@cf/cloudflare/clef" name="Clef" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.24 output=0 cache-read=0 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
+		model "@cf/cloudflare/clef-flash" name="Clef Flash" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.038 output=0 cache-read=0 cache-write=0
+			limits context=24576
+			supports-tools #false
+		}
+	}
+
+	models "*" {
+		kind "judge"
+	}
+}

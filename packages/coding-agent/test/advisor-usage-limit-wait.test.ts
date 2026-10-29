@@ -135,6 +135,26 @@ describe("planAdvisorUsageLimitWait", () => {
 		expect(waitMs).toBe(11_000);
 	});
 
+	it("waits out a five-minute sibling auth block without latching on its selection buffer", () => {
+		const waitMs = planAdvisorUsageLimitWait({
+			retryAtMs: NOW + RETRY.maxDelayMs,
+			reportResetAtMs: NOW + 3 * 24 * 60 * 60 * 1000,
+			retry: RETRY,
+			attempt: 0,
+			nowMs: NOW,
+		});
+		expect(waitMs).toBe(RETRY.maxDelayMs + 1_000);
+		expect(
+			planAdvisorUsageLimitWait({
+				retryAtMs: NOW + RETRY.maxDelayMs + 1,
+				reportResetAtMs: NOW + 3 * 24 * 60 * 60 * 1000,
+				retry: RETRY,
+				attempt: 0,
+				nowMs: NOW,
+			}),
+		).toBeUndefined();
+	});
+
 	it("declines (latch) immediately on a hintless heuristic block with no sibling", () => {
 		// A permanent 402 balance/spend cap: no retry hint, no complete report,
 		// only AuthStorage's 60s default. Waiting on it would retry the dead

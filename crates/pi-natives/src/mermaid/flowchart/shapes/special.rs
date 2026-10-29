@@ -203,11 +203,23 @@ macro_rules! corner_renderer {
 	};
 }
 
-corner_renderer!(/// Double-circle-decorated node renderer.
-	DoubleCircle, NodeShape::DoubleCircle);
-corner_renderer!(/// Left-pointed asymmetric flag node renderer.
-	Asymmetric, NodeShape::Asymmetric);
-corner_renderer!(/// Bottom-wide trapezoid node renderer.
-	Trapezoid, NodeShape::Trapezoid);
-corner_renderer!(/// Top-wide trapezoid node renderer.
-	TrapezoidAlt, NodeShape::TrapezoidAlt);
+corner_renderer!(
+	/// Double-circle-decorated node renderer.
+	DoubleCircle,
+	NodeShape::DoubleCircle
+);
+corner_renderer!(
+	/// Left-pointed asymmetric flag node renderer.
+	Asymmetric,
+	NodeShape::Asymmetric
+);
+corner_renderer!(
+	/// Bottom-wide trapezoid node renderer.
+	Trapezoid,
+	NodeShape::Trapezoid
+);
+corner_renderer!(
+	/// Top-wide trapezoid node renderer.
+	TrapezoidAlt,
+	NodeShape::TrapezoidAlt
+);

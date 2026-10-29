@@ -260,6 +260,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			funcs: functions::FunctionEnv::default(),
 			options: options::RuntimeOptions::default(),
 			jobs: jobs::JobManager::default(),
+			last_background_pid: None,
 			aliases: HashMap::default(),
 			last_exit_status: 0,
 			last_exit_status_change_count: 0,
@@ -280,6 +281,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			key_bindings: None,
 			history: None,
 			resource_limits: crate::rlimits::ResourceLimits::default(),
+			umask: None,
 		}
 	}
 }

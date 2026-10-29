@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.88"
 name = "napi"
-version = "3.13.0"
+version = "3.14.2"
 authors = [
     "Nathan Sobo <nathan@github.com>",
     "Yinan Long <lynweklm@gmail.com>",
@@ -179,7 +179,7 @@ version = "2"
 optional = true
 
 [dependencies.napi-sys]
-version = "3.3.2"
+version = "3.4.0"
 default-features = false
 
 [dependencies.nohash-hasher]
@@ -205,7 +205,8 @@ version = "0.1"
 optional = true
 
 [build-dependencies.napi-build]
-version = "2.5.0"
+version = "2.6.0"
+features = ["wasi-heap-sync"]
 
 [target.'cfg(all(target_family = "wasm", not(tokio_unstable)))'.dependencies.tokio]
 version = "1"
@@ -226,3 +227,11 @@ optional = true
 
 [target."cfg(unix)".dependencies.libc]
 version = "0.2"
+
+# Vendored upstream code: keep the workspace's pedantic lint config off it and
+# make that non-inheritance explicit so cargo stops warning for this member.
+[lints.clippy]
+all = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }

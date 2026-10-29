@@ -61,11 +61,32 @@ pub(crate) fn park_on<F: Future>(fut: F) -> F::Output {
 	}
 }
 
+/// Runs blocking host I/O for an async caller on the runtime's blocking pool,
+/// so the caller's worker stays free for the tasks the I/O may wait on (the
+/// one that cancels it, a FIFO's other end); on a current-thread runtime that
+/// worker is the only one. A panic in `work` resumes in the caller. With no
+/// runtime there is no worker to free, and `work` runs inline.
+pub(crate) async fn offload<T: Send + 'static>(
+	work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+	let Ok(handle) = Handle::try_current() else {
+		return work();
+	};
+	match handle.spawn_blocking(work).await {
+		Ok(result) => result,
+		Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+		Err(error) => Err(io::Error::other(error)),
+	}
+}
+
 /// Per-facade state inherited by everything opened through it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Scope {
-	pub(crate) cancel: Option<CancellationToken>,
-	pub(crate) closes: Option<Arc<CloseTracker>>,
+	pub(crate) cancel:        Option<CancellationToken>,
+	pub(crate) closes:        Option<Arc<CloseTracker>>,
+	/// Mode bits cleared from host creations; see
+	/// [`crate::Fs::with_creation_mask`].
+	pub(crate) creation_mask: Option<u32>,
 }
 
 impl Scope {

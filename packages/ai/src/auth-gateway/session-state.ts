@@ -26,7 +26,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import { resetAccountScopedProviderSessionState } from "../provider-session-state";
-import type { Api, Context, Model, ProviderSessionState } from "../types";
+import type { Api, Context, Message, Model, ProviderSessionState } from "../types";
 
 /**
  * Retained logical sessions. Each entry is a handful of small provider records
@@ -73,6 +73,12 @@ export interface AuthGatewaySessionStateRequest {
 	 */
 	context: Context;
 	/**
+	 * `JSON.stringify(context.tools)` when the caller already serialized it
+	 * (the gateway derives its `sessionId` from the same string). Recomputed
+	 * from `context` when absent.
+	 */
+	toolsJson?: string;
+	/**
 	 * Stable identity of the account this request's credential resolved to.
 	 * A change means the gateway switched the session to a sibling credential,
 	 * so the account-dependent lessons in the retained map are re-probed. The
@@ -80,6 +86,12 @@ export interface AuthGatewaySessionStateRequest {
 	 * resolves a sibling credential.
 	 */
 	account: string;
+	/**
+	 * Name of the scoped gateway client that sent the request, if any. A
+	 * client's conversations never share retained state with another client's,
+	 * or with unscoped traffic, even when their keys or histories match.
+	 */
+	client?: string;
 }
 
 interface RetainedSession {
@@ -155,26 +167,70 @@ function closeSessionState(
  * `sessionId` today.
  */
 function sessionKeys(request: AuthGatewaySessionStateRequest): string[] {
+	const keys = conversationKeys(request);
+	const { client } = request;
+	// Scoped keys get their own leading tag, so none can equal an unscoped one.
+	return client === undefined ? keys : keys.map(key => `s\u0000${client}\u0000${key}`);
+}
+
+/** {@link sessionKeys} of one conversation, before any client scope. */
+function conversationKeys(request: AuthGatewaySessionStateRequest): string[] {
 	const { model } = request;
 	const scope = `${model.provider}\u0000${model.id}`;
 	if (request.clientKey !== undefined) return [`c\u0000${scope}\u0000${request.clientKey}`];
 	const { context } = request;
-	// NUL separates the components so none of them can forge the boundary.
-	let hash = Bun.hash(
-		`${scope}\u0000${context.systemPrompt?.join("\n\n") ?? ""}\u0000${context.tools ? JSON.stringify(context.tools) : ""}`,
-	);
+	const toolsJson = request.toolsJson ?? (context.tools?.length ? JSON.stringify(context.tools) : "");
+	// Each component is its own seeded hash step, so no component can forge
+	// another's boundary.
+	let hash = Bun.hash(toolsJson, Bun.hash(context.systemPrompt?.join("\n\n") ?? "", Bun.hash(scope)));
 	const keys: string[] = [];
 	for (const message of context.messages) {
-		// Role + content only: omp re-stamps `timestamp` and provider metadata on
-		// every parsed message, so hashing those would break the chain on turn
-		// two of every conversation.
-		hash = Bun.hash(JSON.stringify({ role: message.role, content: message.content }), hash);
+		hash = hashMessage(message, hash);
 		keys.push(`h\u0000${scope}\u0000${hash.toString(36)}`);
 	}
 	// A request with no messages has no history to place; its root is the key.
 	if (keys.length === 0) return [`h\u0000${scope}\u0000${hash.toString(36)}`];
 	keys.reverse();
 	return keys;
+}
+
+/**
+ * Chain one message into `seed`.
+ *
+ * Role + content only: omp re-stamps `timestamp` and provider metadata on
+ * every parsed message, so hashing those would break the chain on turn two of
+ * every conversation. Each part's bulk string (text, thinking, base64 image
+ * data) is hashed in place rather than re-serialized, and the part's remaining
+ * fields are serialized on their own, so two histories hash alike exactly when
+ * their role + content serialize alike.
+ */
+function hashMessage(message: Message, seed: number | bigint): number | bigint {
+	let hash = Bun.hash(message.role, seed);
+	const { content } = message;
+	if (typeof content === "string") return Bun.hash(content, hash);
+	for (const part of content) {
+		switch (part.type) {
+			case "text": {
+				const { text, ...rest } = part;
+				hash = Bun.hash(JSON.stringify(rest), Bun.hash(text, hash));
+				break;
+			}
+			case "thinking": {
+				const { thinking, ...rest } = part;
+				hash = Bun.hash(JSON.stringify(rest), Bun.hash(thinking, hash));
+				break;
+			}
+			case "image":
+			case "redactedThinking": {
+				const { data, ...rest } = part;
+				hash = Bun.hash(JSON.stringify(rest), Bun.hash(data, hash));
+				break;
+			}
+			default:
+				hash = Bun.hash(JSON.stringify(part), hash);
+		}
+	}
+	return hash;
 }
 
 /**

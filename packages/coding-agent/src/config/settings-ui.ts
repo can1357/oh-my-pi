@@ -1,4 +1,5 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { isSettingsInitialized, Settings, settings } from "./settings";
 import { orderedSettings } from "./all-settings";
@@ -15,6 +16,8 @@ import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
+import { cfgContextFilesExtra } from "../session/context-settings";
+import { cfgToolsRestrictedFolders } from "../tools/settings";
 
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
@@ -24,6 +27,7 @@ function whenSettings(test: (settings: Settings) => boolean): () => boolean {
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
+	nativeRendering: () => isNativeRendering(),
 	advisorEnabled: whenSettings(s => cfgAdvisorEnabled.get(s) === true),
 	vimModeEnabled: whenSettings(s => cfgTuiVimMode.get(s) === true),
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
@@ -33,6 +37,9 @@ const CONDITIONS: Record<string, () => boolean> = {
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),
 	planModeEnabled: whenSettings(s => cfgPlanEnabled.get(s)),
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),
+	// These editors write the global layer; hide them so a project-supplied list is never promoted to global.
+	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
+	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */

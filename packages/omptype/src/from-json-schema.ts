@@ -12,6 +12,7 @@
  * omptype IR and passes the rest through.
  */
 import { OmpTypeError } from "./errors";
+import { parseLocalRefPointer } from "./local-ref";
 import { type EmbeddableSchema, type IR, IR_BRAND, type PropIR, type TupleItemIR } from "./ir";
 import { keywordIR, patternIR } from "./keywords";
 import { type BaseType, type } from "./type";
@@ -45,10 +46,11 @@ class Importer {
 		if (ref === "#") {
 			target = this.#root;
 		} else {
-			const defsMatch = /^#\/(\$defs|definitions)\/(.+)$/.exec(ref);
-			if (defsMatch === null) throw new OmpTypeError(`unsupported $ref: ${ref}`);
-			const defs = this.#root[defsMatch[1]];
-			target = typeof defs === "object" && defs !== null ? (defs as JsonSchema)[defsMatch[2]] : undefined;
+			const pointer = parseLocalRefPointer(ref);
+			if (pointer === undefined || pointer.length !== 2 || (pointer[0] !== "$defs" && pointer[0] !== "definitions"))
+				throw new OmpTypeError(`unsupported $ref: ${ref}`);
+			const defs = this.#root[pointer[0]];
+			target = typeof defs === "object" && defs !== null ? (defs as JsonSchema)[pointer[1]!] : undefined;
 			if (target === undefined) throw new OmpTypeError(`unresolved $ref: ${ref}`);
 		}
 

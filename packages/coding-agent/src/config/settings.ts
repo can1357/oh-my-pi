@@ -15,6 +15,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -36,8 +39,7 @@ import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { writeFileAtomically } from "../utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
@@ -199,6 +201,19 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
+}
+
+/**
+ * Assign `obj[key]` as an own property. Plain assignment of a parsed
+ * `__proto__` key (an agent name, say) would replace the prototype instead,
+ * silently dropping that entry.
+ */
+function setOwn(obj: RawSettings, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+	} else {
+		obj[key] = value;
+	}
 }
 
 /**
@@ -1093,9 +1108,10 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Only the persisting process-global instance watches; other
-	 * instances ignore the call. Stopped by {@link stopWatching} /
-	 * {@link cancelPendingSaves}.
+	 * layer's last good values). Arming a watch also schedules one reload, so
+	 * edits that landed before it went live are not lost. Only the persisting
+	 * process-global instance watches; other instances ignore the call. Stopped
+	 * by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
@@ -1121,19 +1137,39 @@ export class Settings {
 			else targets.set(dir, new Set([name]));
 		};
 		const addFile = (file: string) => {
-			const dir = path.dirname(file);
-			// A missing directory cannot be watched; watch its parent for the
-			// directory's creation instead (the next sync re-arms the real watch).
-			if (fs.existsSync(dir)) addTarget(dir, path.basename(file));
-			else addTarget(path.dirname(dir), path.basename(dir));
-			// Symlinked configs (dotfile managers) change at the link target.
-			let real: string;
-			try {
-				real = fs.realpathSync(file);
-			} catch {
-				return;
+			// Walk physically so every symlink hop (including profile/ancestor
+			// directory links) is observed, not just the logical file and final
+			// realpath. Physical directory keys also re-arm a watch after retargeting.
+			const absolute = path.resolve(file);
+			let dir = path.parse(absolute).root;
+			let segments = physicalTargetSegments(absolute);
+			let hops = 0;
+			while (segments.length > 0) {
+				const segment = segments.shift()!;
+				if (segment === "" || segment === ".") continue;
+				if (segment === "..") {
+					dir = path.dirname(dir);
+					continue;
+				}
+				const current = path.join(dir, segment);
+				if (segments.length === 0) addTarget(dir, segment);
+				try {
+					if (fs.lstatSync(current).isSymbolicLink()) {
+						addTarget(dir, segment);
+						if (++hops > MAX_SYMLINK_HOPS) return;
+						const target = fs.readlinkSync(current);
+						if (path.isAbsolute(target)) dir = path.parse(target).root;
+						segments = [...physicalTargetSegments(target), ...segments];
+					} else {
+						dir = current;
+					}
+				} catch {
+					// Watch the nearest existing parent, even when several
+					// directories or a symlink's referent are missing.
+					addTarget(dir, segment);
+					return;
+				}
 			}
-			if (real !== file) addTarget(path.dirname(real), path.basename(real));
 		};
 		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
 		const projectCwd = path.resolve(this.#cwd);
@@ -1153,6 +1189,7 @@ export class Settings {
 	#syncFileWatchers(): void {
 		if (!this.#watchingFiles) return;
 		const targets = this.#configWatchTargets();
+		let armed = false;
 		for (const [dir, entry] of this.#fileWatchers) {
 			if (targets.has(dir)) continue;
 			entry.watcher.close();
@@ -1161,6 +1198,15 @@ export class Settings {
 		for (const [dir, names] of targets) {
 			const existing = this.#fileWatchers.get(dir);
 			if (existing) {
+				// A newly followed target can share a directory with the old one.
+				// Events for its name were filtered out while the reload was reading
+				// the files, so reconcile once even though no new watch was opened.
+				for (const name of names) {
+					if (!existing.names.has(name)) {
+						armed = true;
+						break;
+					}
+				}
 				existing.names = names;
 				continue;
 			}
@@ -1183,7 +1229,12 @@ export class Settings {
 				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
 			});
 			this.#fileWatchers.set(dir, { watcher, names });
+			armed = true;
 		}
+		// The sources were last read before a watch or name was added. Bun also
+		// arms macOS FSEvents asynchronously, so a write in between may raise no
+		// event. Re-read once; the next sync adds nothing new, so it settles.
+		if (armed) this.#scheduleWatchReload();
 	}
 
 	#scheduleWatchReload(): void {
@@ -1313,7 +1364,13 @@ export class Settings {
 	async #reloadPersistedLayers(mode: PersistedReloadMode): Promise<void> {
 		const keepLastGood = mode === "keep-last-good";
 		for (;;) {
-			await this.flush();
+			try {
+				await this.flush();
+			} catch (error) {
+				// The failed writes stay pending for the next flush and are re-applied over the
+				// layers read below, so an unwritable config never blocks a reload or reverts them.
+				logger.warn("Settings: reloading over unsaved changes", { error: String(error) });
+			}
 			const mutationGeneration = this.#persistedMutationGeneration;
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
@@ -1332,10 +1389,15 @@ export class Settings {
 
 			const refreshed: LayerRefresh[] = [];
 			if (globalResult.status === "fulfilled") {
-				const { settings, configPath } = globalResult.value;
+				const { configPath } = globalResult.value;
+				// A config this instance moved aside as malformed reads as missing until a save
+				// recreates it; keep the last good layer instead of rebuilding it from pending writes.
+				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
+				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
+				this.#applyPendingGlobalWrites(settings);
 				refreshed.push({
 					layer: "global",
-					settings: settings ?? {},
+					settings,
 					source: configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
 					commit: () => {
 						this.#configPath = configPath;
@@ -1344,6 +1406,7 @@ export class Settings {
 			}
 			if (projectResult.status === "fulfilled") {
 				const project = projectResult.value;
+				this.#applyPendingProjectWrites(project.settings);
 				refreshed.push({
 					layer: "project",
 					settings: project.settings,
@@ -1485,6 +1548,11 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/** Resolved absolute paths of the config overlays supplied to this instance. */
+	getConfigFiles(): readonly string[] {
+		return [...this.#configFiles];
 	}
 
 	/**
@@ -2391,10 +2459,12 @@ export class Settings {
 		if (rejectedWarnings) {
 			throw new Error(`Project settings failed to parse: ${rejectedWarnings.join("; ")}`);
 		}
+		// A native config this instance moved aside reads as missing until a save recreates it;
+		// keep its last good contents, as `#saveProjectNow` does.
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
-				{});
+				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
@@ -3226,6 +3296,23 @@ export class Settings {
 			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
 			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
 			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
+			// Legacy settings named a provider; its swap target is the catalog's
+			// resolved per-model policy (`web-search-model` / `image-model` / tts
+			// seed kind), uniform across that provider's bundled rows.
+			const bundledSelector = (
+				provider: string,
+				pick: (model: Model<Api>) => string | undefined,
+			): string | undefined => {
+				for (const model of getBundledModels(provider as GeneratedProvider)) {
+					const id = pick(model);
+					if (id) return `${provider}/${id}`;
+				}
+				return undefined;
+			};
+			const webSearchSelector = (provider: string): string[] => {
+				const selector = bundledSelector(provider, model => model.webSearchModel);
+				return selector ? [selector] : [];
+			};
 			const geminiSelectors = (model: string): string[] => [
 				`google-gemini-cli/${model}`,
 				`google-antigravity/${model}`,
@@ -3236,11 +3323,11 @@ export class Settings {
 					case "gemini":
 						return geminiSelectors(geminiModel);
 					case "anthropic":
-						return ["anthropic/claude-haiku-4-5"];
+						return webSearchSelector("anthropic");
 					case "codex":
-						return ["openai-codex/gpt-5.6-luna"];
+						return webSearchSelector("openai-codex");
 					case "xai":
-						return ["xai/grok-4.5"];
+						return webSearchSelector("xai");
 					case "auto":
 						return [];
 					default:
@@ -3250,7 +3337,7 @@ export class Settings {
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
-					: "gemini-2.5-flash";
+					: (getBundledModels("google").find(model => model.webSearchModel)?.webSearchModel ?? "");
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
@@ -3283,31 +3370,28 @@ export class Settings {
 			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...roleDefaultModels().web]).filter(
+						selector => !isWebSelectorExcluded(selector),
+					),
 				);
 			}
 
 			const legacyImage = legacy(providerSettings, "image", "providers.image");
 			const legacyImageOrder = legacy(providerSettings, "imageOrder", "providers.imageOrder");
+			const legacyImageProviders: Record<string, string> = {
+				openai: "openai",
+				"openai-codex": "openai-codex",
+				antigravity: "google-antigravity",
+				xai: "xai",
+				gemini: "google",
+				deepinfra: "deepinfra",
+			};
 			const imageSelector = (provider: string): string | undefined => {
-				switch (provider) {
-					case "openai":
-						return "openai/gpt-image-2";
-					case "openai-codex":
-						return "openai-codex/gpt-image-2";
-					case "antigravity":
-						return "google-antigravity/gemini-3-pro-image";
-					case "xai":
-						return "xai/grok-imagine-image";
-					case "openrouter":
-						return "openrouter/google/gemini-3-pro-image";
-					case "gemini":
-						return "google/gemini-3-pro-image";
-					case "deepinfra":
-						return "deepinfra/black-forest-labs/FLUX-2-pro";
-					default:
-						return undefined;
-				}
+				// OpenRouter rows carry no gemini image-model swap (the gemini class
+				// binds to Google transports only), so its legacy target stays literal.
+				if (provider === "openrouter") return "openrouter/google/gemini-3-pro-image";
+				const catalogProvider = legacyImageProviders[provider];
+				return catalogProvider ? bundledSelector(catalogProvider, model => model.imageModel) : undefined;
 			};
 			const orderedImageProviders = Array.isArray(legacyImageOrder)
 				? legacyImageOrder
@@ -3318,18 +3402,14 @@ export class Settings {
 				typeof value === "string" ? (imageSelector(value) ?? []) : [],
 			);
 			if (orderedImageSelectors.length > 0) {
-				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...roleDefaultModels().image]));
 			}
 
 			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");
 			const speechSelector =
-				legacyTtsProvider === "local"
-					? "local/kokoro"
-					: legacyTtsProvider === "xai"
-						? "xai/grok-tts"
-						: legacyTtsProvider === "deepinfra"
-							? "deepinfra/hexgrad/Kokoro-82M"
-							: undefined;
+				legacyTtsProvider === "local" || legacyTtsProvider === "xai" || legacyTtsProvider === "deepinfra"
+					? bundledSelector(legacyTtsProvider, model => (modelKind(model) === "tts" ? model.id : undefined))
+					: undefined;
 			if (speechSelector) setRoleChain("speech", [speechSelector]);
 
 			const legacySttModel = legacy(sttSettings, "modelName", "stt.modelName");
@@ -3359,7 +3439,7 @@ export class Settings {
 				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
 			if (nonDefaultJudge) {
 				const judgeCandidates: string[] = [];
-				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-1.14.0");
 				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
 					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
 				}
@@ -3415,6 +3495,23 @@ export class Settings {
 			if (sttSettings && Object.keys(sttSettings).length === 0) delete raw.stt;
 		}
 		migrateKindRoleSettings();
+
+		// The old web-provider migration persisted this pair of fuzzy defaults.
+		// Qualified selectors are now exact, so replace the pair without changing
+		// independently configured selectors or other role chains.
+		{
+			const retry = isRecord(raw.retry) ? raw.retry : undefined;
+			const chains = retry && isRecord(retry.fallbackChains) ? retry.fallbackChains : undefined;
+			const web = chains?.web;
+			if (chains && Array.isArray(web)) {
+				const index = web.findIndex(
+					(selector, i) => selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
+				);
+				if (index !== -1) {
+					chains.web = [...web.slice(0, index), "openai-codex/gpt-5.6-sol", ...web.slice(index + 2)];
+				}
+			}
+		}
 
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
@@ -3493,24 +3590,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
-		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-		let removeTemp = false;
-		try {
-			const handle = await fs.promises.open(tempPath, "wx", 0o600);
-			removeTemp = true;
-			try {
-				await handle.writeFile(content, "utf8");
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-			await replaceFileAtomically(tempPath, filePath);
-			removeTemp = false;
-		} finally {
-			if (removeTemp) {
-				await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-			}
-		}
+		await writeFileAtomically(filePath, content);
 	}
 
 	#queueSave(): void {
@@ -3726,26 +3806,39 @@ export class Settings {
 	 * Notifies every setting whose effective value changed.
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
-		if (this.#modifiedGlobalModelRoles.size > 0) {
-			const liveRoles = getByPath(this.#global, ["modelRoles"]);
-			const savedRoles = getByPath(saved, ["modelRoles"]);
-			const roles: Record<string, unknown> = isRecord(savedRoles) ? savedRoles : {};
-			for (const role of this.#modifiedGlobalModelRoles) {
-				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
-				else delete roles[role];
-			}
-			setByPath(saved, ["modelRoles"], roles);
-		}
-		for (const segments of this.#modified.values()) {
-			const value = getByPath(this.#global, segments);
-			if (value === undefined) deleteByPath(saved, segments);
-			else setByPath(saved, segments, value);
-		}
+		this.#applyPendingGlobalWrites(saved);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
+	}
+
+	/** Re-applies every global write still pending a save onto `target`, a global layer read from disk. */
+	#applyPendingGlobalWrites(target: RawSettings): void {
+		if (this.#modifiedGlobalModelRoles.size > 0) {
+			const liveRoles = getByPath(this.#global, ["modelRoles"]);
+			const targetRoles = getByPath(target, ["modelRoles"]);
+			const roles: Record<string, unknown> = isRecord(targetRoles) ? targetRoles : {};
+			for (const role of this.#modifiedGlobalModelRoles) {
+				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
+				else delete roles[role];
+			}
+			setByPath(target, ["modelRoles"], roles);
+		}
+		for (const segments of this.#modified.values()) {
+			const value = getByPath(this.#global, segments);
+			if (value === undefined) deleteByPath(target, segments);
+			else setByPath(target, segments, value);
+		}
+	}
+
+	/** Re-applies every project model role still pending a save onto `target`, a project layer read from disk. */
+	#applyPendingProjectWrites(target: RawSettings): void {
+		const liveRoles = getByPath(this.#project, ["modelRoles"]);
+		for (const role of this.#modifiedProjectModelRoles) {
+			setByPath(target, ["modelRoles", role], isRecord(liveRoles) ? liveRoles[role] : undefined);
+		}
 	}
 
 	#queueProjectSave(): void {
@@ -3851,7 +3944,7 @@ export class Settings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
-			const baseVal = base[key];
+			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
 
@@ -3863,12 +3956,12 @@ export class Settings {
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				result[key] = this.#deepMerge(baseVal as RawSettings, override as RawSettings);
+				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
 			} else {
-				result[key] = override;
+				setOwn(result, key, override);
 			}
 		}
-		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
 		return result;
 	}
 }

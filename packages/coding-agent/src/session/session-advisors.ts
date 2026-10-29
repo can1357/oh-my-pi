@@ -67,7 +67,8 @@ import {
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
-	isInterruptingSeverity,
+	isClassifierRefusal,
+	meetsAdvisorSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
@@ -85,7 +86,7 @@ import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/s
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
-import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -96,11 +97,12 @@ import {
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
+	automaticThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
-import { type CustomMessage, type CustomMessagePayload, isUserTurnInitiator } from "./messages";
+import { type CustomMessage, type CustomMessagePayload, isUserAuthoredMessage, isUserTurnInitiator } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	calculateRetryBackoffDelayMs,
@@ -108,6 +110,7 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackSelector,
+	retryFallbackAdmits,
 } from "./retry-fallback-chains";
 import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -118,6 +121,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
 import {
+	cfgAdvisorContinueSeverity,
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
 	cfgAdvisorMaxNotesPerUpdate,
@@ -126,6 +130,7 @@ import {
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -181,9 +186,8 @@ export function planAdvisorUsageLimitWait(args: {
 	// matching the primary retry path's exhausted-budget semantics.
 	if (attempt >= retry.maxRetries) return undefined;
 	// Retry as soon as either the just-blocked credential frees or a temporarily
-	// blocked sibling does — the next attempt's getApiKey re-ranks and picks up
-	// whichever is available first.
-	const candidates: number[] = [];
+	// blocked sibling does. The sibling's post-deadline buffer makes selection
+	// see an expired block, but does not extend the provider wait budget.
 	let credentialUnblockAtMs: number | undefined;
 	if (retryAfterMs !== undefined) {
 		// Provider-stated retry hint, merged with any longer persisted/shared block.
@@ -214,17 +218,20 @@ export function planAdvisorUsageLimitWait(args: {
 	}
 	// Hintless with no complete report → blockedUntilMs is only the default
 	// heuristic (e.g. a permanent 402 balance/spend cap). Never wait on it: a
-	// sibling unblock (retryAtMs) may still authorize a wait, otherwise the
-	// empty-candidate decline below latches immediately instead of retrying the
-	// dead credential every minute until the budget drains.
-	if (credentialUnblockAtMs !== undefined) candidates.push(Math.max(0, credentialUnblockAtMs - nowMs));
-	if (retryAtMs !== undefined) candidates.push(Math.max(0, retryAtMs - nowMs) + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS);
-	if (candidates.length === 0) return undefined;
-	const providerWaitMs = Math.min(...candidates);
+	// sibling unblock (retryAtMs) may still authorize a wait, otherwise decline
+	// instead of retrying the dead credential until the budget drains.
+	const credentialWaitMs =
+		credentialUnblockAtMs === undefined ? undefined : Math.max(0, credentialUnblockAtMs - nowMs);
+	const siblingWaitMs = retryAtMs === undefined ? undefined : Math.max(0, retryAtMs - nowMs);
+	if (credentialWaitMs === undefined && siblingWaitMs === undefined) return undefined;
 	const retryBackoffMs = calculateRetryBackoffDelayMs(retry.baseDelayMs, attempt + 1);
-	const waitMs = Math.max(providerWaitMs, retryBackoffMs);
-	if (retry.maxDelayMs > 0 && waitMs > retry.maxDelayMs) return undefined;
-	return waitMs;
+	const earliestUnblockMs = Math.min(credentialWaitMs ?? Infinity, siblingWaitMs ?? Infinity);
+	if (retry.maxDelayMs > 0 && Math.max(earliestUnblockMs, retryBackoffMs) > retry.maxDelayMs) return undefined;
+	const providerWaitMs = Math.min(
+		credentialWaitMs ?? Infinity,
+		siblingWaitMs === undefined ? Infinity : siblingWaitMs + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS,
+	);
+	return Math.max(providerWaitMs, retryBackoffMs);
 }
 /**
  * Header prepended to the merged terminal-boundary delivery, sourced from
@@ -303,6 +310,10 @@ interface AdvisorRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ThinkingLevel;
 	lastAppliedThinkingLevel: ThinkingLevel;
+	/** Whether the active fallback selector explicitly follows the primary's effort. */
+	autoThinking: boolean;
+	/** Set by a classifier refusal: no cooldown restore until a compaction or new conversation replaces the context. */
+	pinned: boolean;
 }
 
 interface ActiveAdvisor {
@@ -339,8 +350,13 @@ interface ActiveAdvisor {
 	pendingCoveredTurn: number;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
-	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
-	usageLimitRetries: number;
+	/**
+	 * Consecutive provider-block waits (usage limit or timed rate limit), bounded
+	 * by retry.maxRetries. Reset on turn success, abandonment, and conversation
+	 * reset — never on exhaustion of a non-latching rate limit, so the runtime's
+	 * 3-strike drop can fire.
+	 */
+	providerWaitRetries: number;
 	signature: string;
 }
 /** First index whose provider usage may anchor the advisor's context estimate. */
@@ -440,7 +456,8 @@ export interface SessionAdvisorsOptions {
 	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
 	configWarnings?: string[];
 	streamFn?: StreamFn;
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/** Builds each advisor's provider request transform; called once per advisor agent. */
+	createTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -508,17 +525,23 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
+	/** Put an advisor's provider session under the primary session's account pools. */
+	restrictOAuthAccounts(providerSessionId: string): void;
+	/** Whether the owning session is the top-level main session or a spawned subagent (`"main"` when omitted). */
+	agentKind?(): "main" | "sub";
 }
 
 /**
- * One advisor's status-line slice: runtime status plus whether it has
- * finished reviewing the current yield — i.e. it is not going to add any
- * more comments until a new primary turn starts (or an explicit reset).
+ * One advisor's status-line slice: runtime status, whether it has finished
+ * reviewing the current yield, its queued or in-flight review backlog, and
+ * whether the live runtime is parked at the pause boundary.
  */
 export interface AdvisorStatusOverviewEntry {
 	name: string;
 	status: AdvisorRuntimeStatus;
 	yielded: boolean;
+	backlog: number;
+	isPaused: boolean;
 }
 
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
@@ -536,7 +559,7 @@ export class SessionAdvisors {
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
-	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	#createTransformProviderContext: (() => (context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -556,7 +579,7 @@ export class SessionAdvisors {
 	#advisorAutoResumeSuppressed = false;
 	#preserveAdvisorAdvice = false;
 	#preserveTerminalYieldAdvice = false;
-	/** Keeps terminal non-blocker advice on the visible card route during unwind. */
+	/** Routes late advice against a finished run through the boundary-flush continuation policy during unwind. */
 	#terminalUnwindActive = false;
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorPrimaryWillContinue = false;
@@ -611,7 +634,7 @@ export class SessionAdvisors {
 		this.#advisorConfigs = options.configs;
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
-		this.#transformProviderContext = options.transformProviderContext;
+		this.#createTransformProviderContext = options.createTransformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -701,9 +724,9 @@ export class SessionAdvisors {
 			// The merge window covers only this callback. With advisor.syncBacklog
 			// off the review drain can still emit after it returns; those late notes
 			// deliver individually through #routeAdvice, and `#terminalUnwindActive`
-			// (held until the next real agent start), not the merge window, is what
-			// keeps them from steering finished work — only a blocker or an
-			// agent-end reviewer's concern may still request a continuation.
+			// (held until the next primary turn starts), not the merge window, is what
+			// keeps them from steering finished work — only a note at or above
+			// `advisor.continueSeverity` may still request a continuation.
 			if (!terminalBoundary) this.#terminalUnwindActive = false;
 		}
 	}
@@ -896,9 +919,12 @@ export class SessionAdvisors {
 		for (const advisor of this.#advisors) this.#refreshAdvisorProviderIdentity(advisor);
 	}
 
-	/** Re-primes advisor transcript views after an in-conversation history rewrite. */
-	resetAllRuntimes(reason?: string): void {
-		this.#resetAllAdvisorRuntimes(reason);
+	/**
+	 * Re-primes advisor transcript views after an in-conversation history rewrite.
+	 * `compacted` marks a rewrite that replaced history with a summary, which releases refusal pins.
+	 */
+	resetAllRuntimes(reason?: string, options?: { compacted?: boolean }): void {
+		this.#resetAllAdvisorRuntimes(reason, options?.compacted === true);
 	}
 
 	/** Re-aligns advisor delivered prefixes after an in-place rewrite their contexts already cover. */
@@ -978,14 +1004,24 @@ export class SessionAdvisors {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
 	}
 
+	/**
+	 * One advisor's provider session id under the active primary conversation.
+	 * The primary's account pools follow it: an advisor is part of that session.
+	 */
+	#advisorProviderSessionId(slug: string): string | undefined {
+		const providerSessionId = getOrCreateAdvisorProviderSessionId(
+			this.#advisorProviderSessionIds,
+			this.#host.sessionId(),
+			slug,
+		);
+		if (providerSessionId) this.#host.restrictOAuthAccounts(providerSessionId);
+		return providerSessionId;
+	}
+
 	/** Rebind one advisor to the active primary conversation's provider identity. */
 	#refreshAdvisorProviderIdentity(advisor: ActiveAdvisor): void {
 		const primaryProviderSessionId = this.#host.sessionId();
-		const providerSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			primaryProviderSessionId,
-			advisor.slug,
-		);
+		const providerSessionId = this.#advisorProviderSessionId(advisor.slug);
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
@@ -1037,9 +1073,10 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.reset("conversation-boundary");
-			// A reset aborts any pending usage-limit wait; clear its budget so the new
+			// A reset aborts any pending provider-block wait; clear its budget so the new
 			// conversation starts with a fresh retry allowance (issue #11947).
-			a.usageLimitRetries = 0;
+			a.providerWaitRetries = 0;
+			this.#releaseRefusalPin(a);
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
 			a.eligibleUpdates = 0;
@@ -1062,7 +1099,14 @@ export class SessionAdvisors {
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
+		const sessionKind = this.#host.agentKind?.() ?? "main";
 		for (const config of roster) {
+			if (
+				(config.scope === "main" && sessionKind !== "main") ||
+				(config.scope === "subagent" && sessionKind !== "sub")
+			) {
+				continue;
+			}
 			let slug = legacy ? "" : slugifyAdvisorName(config.name);
 			if (slug) {
 				let candidate = slug;
@@ -1152,8 +1196,8 @@ export class SessionAdvisors {
 			// is sent and reasoning stays enabled (matching the `auto`-path fix for
 			// Devin models via `clampAutoThinkingEffort`). See #4579.
 			const requestedLevel = autoThinking
-				? this.#autoAdvisorThinkingLevel()
-				: (thinkingLevel ?? ThinkingLevel.Medium);
+				? automaticThinkingLevel(model, this.#autoAdvisorThinkingLevel())
+				: (thinkingLevel ?? automaticThinkingLevel(model, ThinkingLevel.Medium));
 			const resolvedLevel = resolveThinkingLevelForModel(model, requestedLevel);
 			const advisorThinkingLevel: ThinkingLevel = resolvedLevel ?? ThinkingLevel.Inherit;
 			// Record the status entry now (in roster order) so the Map's insertion
@@ -1198,6 +1242,8 @@ export class SessionAdvisors {
 		const budget = this.#advisorMaxNotesPerUpdate(config);
 		// The service tier is bound at build time, so a `tier.advisor` edit must rebuild.
 		const tier = cfgTierAdvisor.get(this.#host.settings);
+		const scope = config.scope ?? "all";
+		const includeReasoning = config.includeReasoning !== false ? "1" : "0";
 		return [
 			config.name,
 			slug,
@@ -1207,6 +1253,8 @@ export class SessionAdvisors {
 			instructions,
 			budget,
 			tier,
+			scope,
+			includeReasoning,
 		].join("\u001f");
 	}
 
@@ -1314,11 +1362,7 @@ export class SessionAdvisors {
 			const advisorSessionLabel = slug
 				? `${primaryProviderSessionId}-advisor-${slug}`
 				: `${primaryProviderSessionId}-advisor`;
-			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-				this.#advisorProviderSessionIds,
-				primaryProviderSessionId,
-				slug,
-			);
+			const advisorProviderSessionId = this.#advisorProviderSessionId(slug);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -1423,7 +1467,9 @@ export class SessionAdvisors {
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
-				transformProviderContext: this.#transformProviderContext,
+				// Built per advisor: the transform keeps per-conversation state (the
+				// date/cwd reminder), and each advisor is a conversation of its own.
+				transformProviderContext: this.#createTransformProviderContext?.(),
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(
@@ -1457,6 +1503,7 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			advisorAgent.setModelResolver(model => this.#host.modelRegistry.fitContextWindow(model, this.#host.settings));
 			let advisorLoopGuardStopped = false;
 			// The advisor's own loop needs the same repeated-tool-call bound the
 			// primary gets from `LoopGuards`; nothing else stops it reissuing one
@@ -1544,6 +1591,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator(),
+				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
@@ -1564,9 +1612,9 @@ export class SessionAdvisors {
 					// Commit the delivered batch so retries of a failed turn stay deduped
 					// while this successful turn's context is persisted once (issue #9553).
 					advisorRef.recorder.commitTurn();
-					// A completed turn ended the usage-limit episode — start the next
+					// A completed turn ended the provider-block episode — start the next
 					// block's bounded wait budget fresh.
-					advisorRef.usageLimitRetries = 0;
+					advisorRef.providerWaitRetries = 0;
 					const fallback = advisorRef.retryFallback;
 					if (!advisorRef.retryFallbackPendingSuccess || !fallback) return;
 					advisorRef.retryFallbackPendingSuccess = false;
@@ -1576,7 +1624,11 @@ export class SessionAdvisors {
 						role: fallback.role,
 					});
 				},
-				onTurnAbandoned: () => advisorRef.recorder.abandonTurn(),
+				onTurnAbandoned: () => {
+					advisorRef.recorder.abandonTurn();
+					// The dropped batch ends this episode; the next batch gets a fresh budget.
+					advisorRef.providerWaitRetries = 0;
+				},
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
 					const message = error instanceof Error ? error.message : String(error);
@@ -1625,7 +1677,7 @@ export class SessionAdvisors {
 				eligibleUpdates: carried?.get(slug)?.eligibleUpdates ?? 0,
 				pendingCoveredTurn: 0,
 				retryFallbackPendingSuccess: false,
-				usageLimitRetries: 0,
+				providerWaitRetries: 0,
 				signature,
 			};
 			this.#refreshAdvisorProviderIdentity(advisorRef);
@@ -1661,19 +1713,7 @@ export class SessionAdvisors {
 		return this.#advisors.length > 0;
 	}
 
-	/**
-	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
-	 * visible advisor card, while a blocker wakes the primary to acknowledge work
-	 * it handed off incorrectly. After a deliberate user interrupt auto-resume is
-	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
-	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
-	 * the non-interrupting YieldQueue aside during streaming. The emission guard
-	 * has already accepted the note; rejected calls never enter this route and
-	 * receive their specific policy outcome from `AdviseTool`.
-	 */
+	/** Whether the primary's tail (past advisor cards) is a terminal text answer with nothing queued behind it. */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
 		const messages = this.#host.agent.state.messages;
@@ -1682,10 +1722,18 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
-	/** Route an already-accepted advice note to the primary. Never re-runs
-	 *  admission — the note cleared the emission guard inside AdviseTool when it
-	 *  was emitted, so a deferred flush replays the backlog without
-	 *  re-filtering. */
+	/**
+	 * Route one accepted advice note from `advisor` to the primary. Concern and
+	 * blocker interrupt the running agent through the steering channel; a plain nit
+	 * rides the non-interrupting YieldQueue aside during streaming. After a terminal
+	 * text answer with no queued work, a note below `advisor.continueSeverity` is
+	 * preserved as a visible advisor card, while one at or above it wakes the
+	 * primary for one continuation. After a deliberate user interrupt auto-resume is
+	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
+	 * on resume); a live-streaming turn is steered in directly. Never re-runs
+	 * admission — the note cleared the emission guard inside AdviseTool when it was
+	 * emitted, so a deferred flush replays the backlog without re-filtering.
+	 */
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity, turn?: number): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
@@ -1696,8 +1744,9 @@ export class SessionAdvisors {
 		// finished, and N simultaneous notes would force N separate deliveries
 		// (#4840's spurious post-completion calls; N blockers = N identical "Done"
 		// continuations). Buffer everything — nits, concerns, blockers — and deliver
-		// once when the window closes: any blocker steers one merged continuation,
-		// otherwise one preserved card re-enters context on the next user turn.
+		// once when the window closes: any note at `advisor.continueSeverity` steers
+		// one merged continuation, otherwise one preserved card re-enters context on
+		// the next user turn.
 		if (this.#advisorTerminalBoundaryOpen) {
 			this.#advisorBoundaryNotes.push({
 				note,
@@ -1707,31 +1756,29 @@ export class SessionAdvisors {
 			});
 			return;
 		}
-		const interrupting = isInterruptingSeverity(severity);
+		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
-		// A final-review concern that lands after the boundary window closed
-		// (catch-up off, or a review slower than its wait) keeps the one
-		// continuation the merged boundary flush would have granted it.
-		const finalReviewConcern =
-			severity === "concern" &&
-			this.#terminalUnwindActive &&
-			(advisor.reviewMode ?? cfgAdvisorReviewMode.get(this.#host.settings)) === "agent-end";
-		const terminalUnwindPreserve =
-			this.#terminalUnwindActive && severity !== "blocker" && !finalReviewConcern && terminalAnswerNoQueuedWork;
+		// A note that lands after the boundary window closed (catch-up off, or a
+		// review slower than its wait) gets exactly what the merged boundary flush
+		// would have granted it. The loop may still report streaming here, and an
+		// aside would be drained into an extra turn that skips the continuation latch.
+		if (this.#terminalUnwindActive && terminalAnswerNoQueuedWork) {
+			this.#deliverAdvisorBatch(notes, formatAdvisorBatchContent(notes), this.#continuesFinishedRun(severity));
+			return;
+		}
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
+			continueSeverity: cfgAdvisorContinueSeverity.get(this.#host.settings),
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
-			preserveOnly: this.#preserveAdvisorAdvice || terminalUnwindPreserve,
+			preserveOnly: this.#preserveAdvisorAdvice,
 			// Key on the live agent-core loop, not session `isStreaming` (which also
 			// counts `#promptInFlightCount` during post-turn unwind). Only a running
 			// loop consumes a steer at its next boundary.
-			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
+			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice,
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork,
-			allowTerminalConcernSteering: finalReviewConcern,
-			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			interruptImmuneTurnActive: this.#isAdvisorInterruptImmuneTurnActive(),
 		});
-		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
 			return;
@@ -1748,13 +1795,9 @@ export class SessionAdvisors {
 	 * uses — user-stop suppression, headless/terminal-yield preservation, and
 	 * the post-interrupt cooldown all gate a final-review continuation exactly
 	 * as they gate a live steer. The batch steers at most ONE continuation, only
-	 * when a note qualifies on its own merits: a blocker, or a concern from an
-	 * agent-end advisor (it reviewed the complete run, so a material issue in
-	 * finished work deserves one steering turn — the sleep latch prevents
-	 * cascade). For those final-review concerns `allowTerminalConcernSteering`
-	 * lifts ONLY the terminal-answer preservation — the turn they reviewed has
-	 * by definition just answered — never the stop/abort/preserve/cooldown
-	 * gates. Otherwise preserves as a single visible card.
+	 * when a note qualifies on its own merits: its severity meets
+	 * `advisor.continueSeverity` (the advisor continuation latch prevents a
+	 * cascade). Otherwise preserves as a single visible card.
 	 */
 	#flushAdvisorBoundaryNotes(): void {
 		if (this.#advisorBoundaryNotes.length === 0) return;
@@ -1773,46 +1816,36 @@ export class SessionAdvisors {
 		if (showGuidance) this.#advisorBoundaryGuidanceLastTurn = this.#advisorPrimaryTurnsCompleted;
 		const batch = formatAdvisorBatchContent(notes, { currentTurn: this.#advisorPrimaryTurnsCompleted });
 		const content = showGuidance ? `${ADVISOR_BOUNDARY_GUIDANCE}\n${batch}` : batch;
-		// Snapshot the shared policy inputs once: they cannot change while this
-		// synchronous flush runs. `streaming` is forced false — the primary's turn
-		// IS final even though the loop still reports streaming during the
-		// boundary callback, so "steer" here means triggering one continuation
-		// turn, never steering into the just-completed one. Forcing false also
-		// keeps user-stop suppression independent of the exact unwind state.
-		const aborting = this.#host.abortInProgress();
-		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
-		const interruptImmuneTurnActive = this.#isAdvisorInterruptImmuneTurnActive();
-		const shouldSteer = notes.some(n => {
-			// Steering eligibility: a blocker, or a concern from an agent-end
-			// reviewer. A turn-mode concern at a terminal boundary still
-			// preserves: the work was already reviewed per-turn.
-			const finalReviewConcern = n.severity === "concern" && this.#noteAdvisorIsAgentEnd(n.advisor);
-			if (n.severity !== "blocker" && !finalReviewConcern) return false;
-			return (
-				resolveAdvisorDeliveryChannel({
-					severity: n.severity,
-					autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
-					preserveOnly: this.#preserveAdvisorAdvice,
-					streaming: false,
-					aborting,
-					terminalAnswerNoQueuedWork,
-					interruptImmuneTurnActive,
-					allowTerminalConcernSteering: finalReviewConcern,
-				}) === "steer"
-			);
-		});
-		this.#deliverAdvisorBatch(notes, content, shouldSteer);
+		this.#deliverAdvisorBatch(
+			notes,
+			content,
+			notes.some(n => this.#continuesFinishedRun(n.severity)),
+		);
 	}
 
-	/** Whether the advisor that produced `sourceName` reviews only at agent end.
-	 *  For the default advisor (no name), falls back to the live `advisor.reviewMode`. */
-	#noteAdvisorIsAgentEnd(sourceName: string | undefined): boolean {
-		for (const a of this.#advisors) {
-			if (sourceName === undefined ? !a.slug : a.name === sourceName) {
-				return (a.reviewMode ?? cfgAdvisorReviewMode.get(this.#host.settings)) === "agent-end";
-			}
-		}
-		return false;
+	/**
+	 * Whether a note against a finished primary run may start one continuation:
+	 * its severity meets `advisor.continueSeverity` (even when the tail is not a
+	 * clean answer) and the shared delivery policy would steer it. `streaming` is
+	 * forced false — the turn IS final even while the loop still reports
+	 * streaming, so "steer" means triggering one latched continuation turn, never
+	 * steering into the completed one; it also keeps user-stop suppression
+	 * independent of the exact unwind state.
+	 */
+	#continuesFinishedRun(severity: AdvisorSeverity | undefined): boolean {
+		const continueSeverity = cfgAdvisorContinueSeverity.get(this.#host.settings);
+		if (!meetsAdvisorSeverity(severity, continueSeverity)) return false;
+		const channel = resolveAdvisorDeliveryChannel({
+			severity,
+			continueSeverity,
+			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
+			preserveOnly: this.#preserveAdvisorAdvice,
+			streaming: false,
+			aborting: this.#host.abortInProgress(),
+			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
+			interruptImmuneTurnActive: this.#isAdvisorInterruptImmuneTurnActive(),
+		});
+		return channel === "steer";
 	}
 
 	/**
@@ -1868,12 +1901,13 @@ export class SessionAdvisors {
 	}
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
-	#resetAllAdvisorRuntimes(reason?: string): void {
+	#resetAllAdvisorRuntimes(reason: string | undefined, compacted: boolean): void {
 		for (const a of this.#advisors) {
 			a.runtime.reset(reason);
 			// Match the conversation-boundary re-prime: a reset must not carry a
-			// pending wait's usage-limit budget into the reset conversation.
-			a.usageLimitRetries = 0;
+			// pending wait's provider-block budget into the reset conversation.
+			a.providerWaitRetries = 0;
+			if (compacted) this.#releaseRefusalPin(a);
 		}
 	}
 
@@ -1919,7 +1953,11 @@ export class SessionAdvisors {
 	}
 
 	/** Switch one advisor model while preserving its context and effort invariants. */
-	#setAdvisorModel(advisor: ActiveAdvisor, model: Model, requestedThinkingLevel: ThinkingLevel): ThinkingLevel {
+	#setAdvisorModel(
+		advisor: ActiveAdvisor,
+		model: Model,
+		requestedThinkingLevel: ThinkingLevel | undefined,
+	): ThinkingLevel {
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
@@ -1955,14 +1993,17 @@ export class SessionAdvisors {
 	#retuneAutoThinkingAdvisors(): void {
 		const requested = this.#autoAdvisorThinkingLevel();
 		for (const advisor of this.#advisors) {
-			// A retry-fallback selector pinned its own effort for the fallback
-			// model; the retune resumes once the configured model is restored.
-			if (!advisor.autoThinking || advisor.runtime.disposed || advisor.retryFallback) continue;
-			const next = resolveThinkingLevelForModel(advisor.model, requested) ?? ThinkingLevel.Inherit;
+			// Concrete and bare fallback selectors keep their applied effort.
+			const autoThinking = advisor.retryFallback?.autoThinking ?? advisor.autoThinking;
+			if (!autoThinking || advisor.runtime.disposed) continue;
+			const next =
+				resolveThinkingLevelForModel(advisor.model, automaticThinkingLevel(advisor.model, requested)) ??
+				ThinkingLevel.Inherit;
 			if (next === advisor.thinkingLevel) continue;
 			advisor.agent.setThinkingLevel(toReasoningEffort(next));
 			advisor.agent.setDisableReasoning(shouldDisableReasoning(next));
 			advisor.thinkingLevel = next;
+			if (advisor.retryFallback) advisor.retryFallback.lastAppliedThinkingLevel = next;
 		}
 	}
 
@@ -1974,10 +2015,17 @@ export class SessionAdvisors {
 		);
 	}
 
+	/** Release refusal pins so the next review may retry the configured primary. */
+	#releaseRefusalPin(advisor: ActiveAdvisor): void {
+		if (advisor.retryFallback) advisor.retryFallback.pinned = false;
+	}
+
 	/** Restore an advisor's configured primary once its fallback cooldown expires. */
 	async #maybeRestoreAdvisorRetryFallbackPrimary(advisor: ActiveAdvisor, signal: AbortSignal): Promise<void> {
 		const fallback = advisor.retryFallback;
-		if (!fallback || getRetryFallbackRevertPolicy(this.#host.settings) !== "cooldown-expiry") return;
+		if (!fallback || fallback.pinned || getRetryFallbackRevertPolicy(this.#host.settings) !== "cooldown-expiry") {
+			return;
+		}
 
 		const originalSelector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
 		if (!originalSelector) {
@@ -2007,8 +2055,8 @@ export class SessionAdvisors {
 		if (!apiKey) return;
 		signal.throwIfAborted();
 
-		// An `auto` advisor skipped the retune while on the fallback: rejoin the
-		// primary's live level now, not the level it had when it fell back.
+		// Rejoin the primary's live level for an auto advisor, or restore the
+		// fixed effort it had before falling back.
 		const thinkingToApply = advisor.autoThinking
 			? this.#autoAdvisorThinkingLevel()
 			: advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
@@ -2099,20 +2147,26 @@ export class SessionAdvisors {
 			usagePriorBlockedUntilMs = outcome.priorBlockedUntilMs;
 			usagePriorBlockedUntilTimed = outcome.priorBlockedUntilTimed;
 		}
-		if (!assistantFailure && !accountPolicyDenial && !usageLimit) return false;
+		// A provider-timed transient rejection (Codex `turn_rate_limit_exceeded`
+		// "Codex is at capacity" with Retry-After) clears on its own: wait out the
+		// stated window like the primary retry loop instead of burning the
+		// runtime's three 1s retries and dropping the batch.
+		const timedRateLimit = !usageLimit && retryAfterMs !== undefined && AIError.is(errorId, AIError.Flag.Transient);
+		if (!assistantFailure && !accountPolicyDenial && !usageLimit && !timedRateLimit) return false;
 
 		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
 
 		const retrySettings = cfgRetry.get(this.#host.settings);
-		// A usage-limit error with no sibling credential and no usable model
-		// fallback is not automatically fatal: wait out a transient credential
-		// block and retry, mirroring the primary turn-recovery. Only a wait past
-		// retry.maxDelayMs / an exhausted budget falls through to the latch.
-		const declineUsageLimit = (): Promise<boolean> =>
-			usageLimit
-				? this.#waitOutAdvisorUsageLimit(
+		// A usage-limit or timed rate-limit error with no sibling credential and no
+		// usable model fallback is not automatically fatal: wait out the block and
+		// retry, mirroring the primary turn-recovery. Only a wait past
+		// retry.maxDelayMs / an exhausted budget falls through to the runtime.
+		const waitOrDecline = (): Promise<boolean> =>
+			usageLimit || timedRateLimit
+				? this.#waitOutAdvisorProviderBlock(
 						advisor,
 						retrySettings,
+						usageLimit,
 						{
 							retryAtMs: usageRetryAtMs,
 							blockedUntilMs: usageBlockedUntilMs,
@@ -2125,7 +2179,8 @@ export class SessionAdvisors {
 						signal,
 					)
 				: Promise.resolve(false);
-		if (!retrySettings.enabled || !retrySettings.modelFallback) return declineUsageLimit();
+		if (!retrySettings.enabled || !retrySettings.modelFallback) return waitOrDecline();
+		if (!retryFallbackAdmits(retrySettings.fallbackOn, usageLimit)) return waitOrDecline();
 		// Same two-key walk the main loop uses: the chain that owns this advisor's
 		// active fallback, then the chain the current model owns. Without the
 		// second key an advisor that lands on the last entry of one chain never
@@ -2137,10 +2192,16 @@ export class SessionAdvisors {
 		if (
 			!chainKeys.some(role => this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length > 0)
 		) {
-			return declineUsageLimit();
+			return waitOrDecline();
 		}
 
-		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		// A refusal by the advisor's primary judges this context, not the model's health:
+		// skip its cooldown and pin the switch. A refusing fallback gets the usual cooldown.
+		const primaryRefused =
+			assistantFailure !== undefined &&
+			isClassifierRefusal(assistantFailure) &&
+			(advisor.retryFallback === undefined || advisor.retryFallback.originalSelector === currentSelector);
+		if (!primaryRefused) this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2153,16 +2214,24 @@ export class SessionAdvisors {
 				signal.throwIfAborted();
 
 				const originalThinkingLevel = advisor.thinkingLevel;
-				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				// A `:auto` fallback entry follows the primary's resolved effort, like an `auto` advisor.
+				const requestedThinkingLevel =
+					selector.thinkingLevel === AUTO_THINKING
+						? automaticThinkingLevel(candidate, this.#autoAdvisorThinkingLevel())
+						: (selector.thinkingLevel ?? originalThinkingLevel);
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+					advisor.retryFallback.autoThinking = selector.thinkingLevel === AUTO_THINKING;
+					advisor.retryFallback.pinned ||= primaryRefused;
 				} else {
 					advisor.retryFallback = {
 						role,
 						originalSelector: currentSelector,
 						originalThinkingLevel,
 						lastAppliedThinkingLevel: nextThinkingLevel,
+						autoThinking: selector.thinkingLevel === AUTO_THINKING,
+						pinned: primaryRefused,
 					};
 				}
 				advisor.retryFallbackPendingSuccess = true;
@@ -2177,18 +2246,22 @@ export class SessionAdvisors {
 				return true;
 			}
 		}
-		return declineUsageLimit();
+		return waitOrDecline();
 	}
 
 	/**
-	 * Wait out a transient usage-limit credential block and signal a retry, or
-	 * decline so {@link AdvisorRuntime} latches its permanent quota state.
-	 * See {@link planAdvisorUsageLimitWait} for the wait-vs-latch decision; the
-	 * wait is abortable via `signal` (reset/dispose/session transition).
+	 * Wait out a transient provider block (usage limit or timed rate limit) and
+	 * signal a retry, or decline. A declined usage limit latches
+	 * {@link AdvisorRuntime}'s quota state; a declined rate limit falls to the
+	 * runtime's generic 3-strike retry, so its spent budget is kept until the
+	 * batch succeeds or is abandoned. See {@link planAdvisorUsageLimitWait} for
+	 * the wait-vs-decline decision; the wait is abortable via `signal`
+	 * (reset/dispose/session transition).
 	 */
-	async #waitOutAdvisorUsageLimit(
+	async #waitOutAdvisorProviderBlock(
 		advisor: ActiveAdvisor,
 		retry: { enabled: boolean; baseDelayMs: number; maxDelayMs: number; maxRetries: number },
+		latchesOnDecline: boolean,
 		timing: {
 			retryAtMs?: number;
 			blockedUntilMs?: number;
@@ -2209,18 +2282,19 @@ export class SessionAdvisors {
 			priorBlockedUntilMs: timing.priorBlockedUntilMs,
 			priorBlockedUntilTimed: timing.priorBlockedUntilTimed,
 			retry,
-			attempt: advisor.usageLimitRetries,
+			attempt: advisor.providerWaitRetries,
 			nowMs: Date.now(),
 		});
 		if (waitMs === undefined) {
-			// A genuine long quota window (wait past retry.maxDelayMs) or an
-			// exhausted retry budget — reset the counter so a fresh episode after a
-			// reset starts over, then decline so the runtime latches.
-			advisor.usageLimitRetries = 0;
+			// A wait past retry.maxDelayMs or an exhausted budget. A latching usage
+			// limit resets the counter so a fresh episode after a reset starts over.
+			// A rate limit keeps it spent: resetting would grant a new budget on the
+			// runtime's next retry and the batch would never be dropped.
+			if (latchesOnDecline) advisor.providerWaitRetries = 0;
 			return false;
 		}
-		const attempt = advisor.usageLimitRetries + 1;
-		logger.debug("advisor waiting out usage-limit block", {
+		const attempt = advisor.providerWaitRetries + 1;
+		logger.debug("advisor waiting out provider block", {
 			advisor: advisor.name,
 			waitMs,
 			attempt,
@@ -2228,7 +2302,7 @@ export class SessionAdvisors {
 		await scheduler.wait(waitMs, { signal });
 		// An aborted pause/reset did not reach a provider retry and must not
 		// consume budget in the resumed/reset conversation.
-		advisor.usageLimitRetries = attempt;
+		advisor.providerWaitRetries = attempt;
 		return true;
 	}
 
@@ -2301,12 +2375,12 @@ export class SessionAdvisors {
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
-		const compactionSettings = resolveMethodSettings(
-			configuredCompaction,
-			methods.includes("remote") ? "remote" : "soft",
-		);
-
+		const compactionMethod = methods.includes("remote") ? "remote" : "soft";
 		let advisorModel = agent.state.model;
+		let compactionSettings = resolveMethodSettings(
+			resolveModelCompactionSettings(this.#host.settings, advisorModel),
+			compactionMethod,
+		);
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -2317,13 +2391,22 @@ export class SessionAdvisors {
 		// delta to that arm. Floor it by a full local estimate — fixed advisor system
 		// prompt, tool schemas, stored messages, and incoming delta — so provider
 		// under-reporting or payload transforms cannot suppress maintenance.
+		// Schema overhead depends on the model, so promotion re-evaluates the
+		// local arm against the promoted model's schema policy.
 		const providerContextTokens = this.#estimateAdvisorContextTokens(advisor) + incomingTokens;
-		const localContextTokens =
-			agent.tokenizer.countTokens(agent.state.systemPrompt) +
-			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer, this.#host.settings.revision) +
-			storedConversationTokens +
-			incomingTokens;
-		const contextTokens = compactionContextTokens(providerContextTokens, localContextTokens);
+		const fixedPromptTokens = agent.tokenizer.countTokens(agent.state.systemPrompt);
+		const contextTokensFor = (model: Model): number =>
+			compactionContextTokens(
+				providerContextTokens,
+				fixedPromptTokens +
+					estimateContextToolSchemaTokens(agent.state.tools, agent.tokenizer, model, {
+						sourceRevision: this.#host.settings.revision,
+						pruneDescriptions: agent.prunesToolDescriptions(model),
+					}) +
+					storedConversationTokens +
+					incomingTokens,
+			);
+		const contextTokens = contextTokensFor(advisorModel);
 
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			return false;
@@ -2331,11 +2414,15 @@ export class SessionAdvisors {
 
 		// 1. Try promotion first
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
-			// Promotion succeeded, check if new model has enough space
+			// Promotion succeeded, check if new model has enough space under its own compaction point
 			const newModel = agent.state.model;
+			compactionSettings = resolveMethodSettings(
+				resolveModelCompactionSettings(this.#host.settings, newModel),
+				compactionMethod,
+			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
-				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
+				const stillNeedsCompaction = shouldCompact(contextTokensFor(newModel), newWindow, compactionSettings);
 				if (!stillNeedsCompaction) return false;
 			}
 		}
@@ -2397,11 +2484,7 @@ export class SessionAdvisors {
 			// No compaction candidates, fallback to re-prime
 			return true;
 		}
-		const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			this.#host.sessionId(),
-			advisor.slug,
-		);
+		const advisorProviderSessionId = this.#advisorProviderSessionId(advisor.slug);
 		// Advisors no longer retain the pre-compaction originals. Prepare opaque
 		// history only for an eligible native writer, independently of whether the
 		// advisor reader itself can create a new compaction. Without such a writer,
@@ -2476,6 +2559,7 @@ export class SessionAdvisors {
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						tools: agent.state.tools,
 						// The advisor's own live prompt, so a provider-native compaction
@@ -2526,8 +2610,11 @@ export class SessionAdvisors {
 			throw new NativeCompactionError(new Error("Compaction result cannot be replayed by the advisor model"));
 		}
 		// Native replacement history already contains the retained tail. Replaying
-		// that tail again as raw messages duplicates turns and tool-call IDs.
-		const recentMessages = providerPayload ? [] : preparation.recentMessages;
+		// that tail again as raw messages duplicates turns and tool-call IDs. A
+		// prefix-only compaction (`providerReplayThroughEntryId`: the tail could not
+		// fit the window) stops before the tail, so the tail replays as raw messages.
+		const recentMessages =
+			providerPayload && compactResult.providerReplayThroughEntryId === undefined ? [] : preparation.recentMessages;
 
 		// The retained messages still carry provider usage from before this
 		// compaction. Record their exact array boundary on the in-memory summary so
@@ -2563,6 +2650,7 @@ export class SessionAdvisors {
 		} satisfies AdvisorCompactionSummaryMessage;
 
 		agent.replaceMessages([summaryMessage, ...recentMessages]);
+		this.#releaseRefusalPin(advisor);
 		return false;
 	}
 	/**
@@ -2582,13 +2670,14 @@ export class SessionAdvisors {
 		this.#preserveTerminalYieldAdvice = true;
 	}
 
-	/** Clear terminal-unwind delivery only when a real primary run starts. */
+	/** Clear terminal-unwind delivery when a new primary run starts. */
 	onPrimaryAgentStart(): void {
 		this.#terminalUnwindActive = false;
 	}
 
-	/** Restore normal advisor routing when a kept-alive subagent starts new work. */
+	/** Restore normal advisor routing when the primary starts or continues work. */
 	onPrimaryTurnStart(): void {
+		this.#terminalUnwindActive = false;
 		if (!this.#preserveTerminalYieldAdvice) return;
 		this.#preserveTerminalYieldAdvice = false;
 		this.#preserveAdvisorAdvice = false;
@@ -2771,8 +2860,8 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Lightweight advisor status for the status line: returns just the configured
-	 * flag and per-advisor name/status without computing token/cost breakdowns.
+	 * Lightweight advisor status for the status line and pause screen: the
+	 * configured flag and each advisor's status, yield and pause state, and review backlog.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
 	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
@@ -2780,13 +2869,15 @@ export class SessionAdvisors {
 		// clear on reset() but #advisorStatuses lags until the next build.
 		const liveStatusBySlug = new Map<
 			string,
-			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean }
+			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean; backlog: number; isPaused: boolean }
 		>();
 		for (const a of this.#advisors) {
 			liveStatusBySlug.set(a.slug, {
 				status: a.runtime.quotaExhausted ? "quota_exhausted" : a.runtime.failureNotified ? "error" : "running",
+				backlog: a.runtime.backlog,
 				yielded: a.runtime.yielded,
 				canReview: !a.runtime.quotaExhausted && !a.runtime.halted && !a.runtime.disposed,
+				isPaused: a.agent.isPaused,
 			});
 		}
 		const advisors = [...this.#advisorStatuses.entries()].map(([slug, { name, status }]) => {
@@ -2794,6 +2885,8 @@ export class SessionAdvisors {
 			return {
 				name,
 				status: live?.status ?? status,
+				backlog: live?.backlog ?? 0,
+				isPaused: live?.isPaused ?? false,
 				// The eye only closes after the primary itself has yielded: while it
 				// is streaming, an advisor that can still accept review work may
 				// receive (and comment on) new deltas even when its backlog is

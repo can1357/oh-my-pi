@@ -11,11 +11,13 @@
 #       against a different SDK than the rest of the addon. Probes versions
 #       only; never compiles.
 #
-#   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk>]
+#   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk> [<swiftc arg>...]]
 #       Compiles bridge.swift into a standalone <out.dylib> with the given
-#       toolchain. Without a toolchain, or for a non-arm64 <arch> (Foundation
-#       Models needs Apple silicon), writes an empty <out.dylib>, which the
-#       addon reports as not built.
+#       toolchain; trailing arguments go to swiftc (the linux cross toolchain's
+#       resource dir, shims path and linker, see bazel/toolchains/swift). Without
+#       a toolchain, or for a non-arm64 <arch> (Foundation Models needs Apple
+#       silicon), writes an empty <out.dylib>, which the addon reports as not
+#       built.
 #
 # The bridge is never linked into the addon: the addon embeds these bytes and
 # dlopens them only on macOS 27+, so the Swift runtime and FoundationModels
@@ -67,6 +69,7 @@ build() {
 	arch=$2
 	swiftc=${3:-}
 	sdk=${4:-}
+	shift $(($# < 4 ? $# : 4))
 	rm -f "$out"
 	if [ "$arch" = arm64 ] && [ -n "$swiftc" ]; then
 		cache=${OMP_APPLEFM_MODULE_CACHE:-${TMPDIR:-/tmp}/omp-applefm-module-cache}
@@ -76,7 +79,7 @@ build() {
 			-sdk "$sdk" -target arm64-apple-macos27.0 -swift-version 6 -O \
 			-module-cache-path "$cache" \
 			-Xlinker -install_name -Xlinker @rpath/libomp_applefm.dylib \
-			"$here/bridge.swift" -o "$out"
+			"$@" "$here/bridge.swift" -o "$out"
 		return
 	fi
 	: >"$out"

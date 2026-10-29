@@ -8,7 +8,7 @@ import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graph
 import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
-import { withoutTerminalMultiplexer } from "../../tui/test/terminal-multiplexer-environment";
+import { withoutTerminalMultiplexer } from "../../tui/test/helpers/terminal-multiplexer";
 
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
@@ -293,7 +293,10 @@ describe("composer welcome native-history resize", () => {
 		expect(narrowWidth).toBeLessThan(60);
 
 		terminal.resize(100, 12);
-		await scheduler.advance(terminal, 160);
+		// The refresh-capable settle waits out the 400 ms drag-end window plus
+		// the 40 ms drain horizon, then commits the recomposed header in the
+		// same transaction.
+		await scheduler.advance(terminal, 440);
 
 		const rebuilt = plainBuffer(terminal);
 		expect(countRows(rebuilt, "vtest")).toBe(1);
@@ -320,7 +323,10 @@ describe("composer welcome native-history resize", () => {
 		expect(plainBuffer(terminal)).toContain("block-0@20");
 
 		terminal.resize(30, 4);
-		await scheduler.advance(terminal, 160);
+		// The refresh-capable settle waits out the 400 ms drag-end window plus
+		// the 40 ms drain horizon, then rebuilds the ledger at the settled width
+		// in the same transaction.
+		await scheduler.advance(terminal, 440);
 
 		const resized = plainBuffer(terminal);
 		expect(resized.some(row => row.includes("@20"))).toBe(false);

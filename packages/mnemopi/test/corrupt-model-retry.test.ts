@@ -11,7 +11,7 @@ import * as runtime from "../src/core/fastembed-runtime";
 
 async function corruptCache(): Promise<{ cacheDir: string; modelFile: string }> {
 	const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-retry-"));
-	const modelDir = path.join(cacheDir, "fast-bge-small-en-v1.5");
+	const modelDir = path.join(cacheDir, "Qdrant_bge-small-en-v1.5-onnx-Q");
 	await fs.mkdir(modelDir, { recursive: true });
 	const modelFile = path.join(modelDir, "model_optimized.onnx");
 	await fs.writeFile(modelFile, "garbage");

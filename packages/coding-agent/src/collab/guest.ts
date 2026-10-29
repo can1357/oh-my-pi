@@ -21,14 +21,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
-import { mintSessionId } from "../session/session-manager";
+import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
@@ -165,6 +165,45 @@ export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconc
 	reconcileGuestIdleHostState(ctx, false);
 }
 
+/** Streamed text of a text or thinking block; `undefined` for blocks speech never reads. */
+function streamedText(block: AssistantMessage["content"][number] | undefined): string | undefined {
+	if (block?.type === "text") return block.text;
+	if (block?.type === "thinking") return block.thinking;
+	return undefined;
+}
+
+/**
+ * Text and thinking deltas that grew `message` past `previous` without arriving
+ * in `own`, the update's own delta. Non-empty only when the host superseded the
+ * updates in between (#16956); one delta per grown block, in block order.
+ */
+function omittedStreamDeltas(
+	previous: AssistantMessage,
+	message: AssistantMessage,
+	own: AssistantMessageEvent,
+): AssistantMessageEvent[] {
+	const omitted: AssistantMessageEvent[] = [];
+	for (const [contentIndex, block] of message.content.entries()) {
+		const text = streamedText(block);
+		if (text === undefined) continue;
+		const prior = previous.content[contentIndex];
+		const start = prior?.type === block.type ? (streamedText(prior)?.length ?? 0) : 0;
+		const ownsTail =
+			(own.type === "text_delta" || own.type === "thinking_delta") &&
+			own.contentIndex === contentIndex &&
+			own.type === `${block.type}_delta`;
+		const end = text.length - (ownsTail ? own.delta.length : 0);
+		if (end <= start) continue;
+		const delta = text.slice(start, end);
+		omitted.push(
+			block.type === "text"
+				? { type: "text_delta", contentIndex, delta, partial: message }
+				: { type: "thinking_delta", contentIndex, delta, partial: message },
+		);
+	}
+	return omitted;
+}
+
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -216,6 +255,8 @@ export class CollabGuestLink {
 	#readOnly = false;
 	/** False until the first assistant message_start (real or synthesized) since (re)sync. */
 	#assistantStreamSynced = false;
+	/** Last snapshot received for the streaming assistant message; diffed against the next update. */
+	#streamedSnapshot: AssistantMessage | undefined;
 	/** Mirrors host lifecycle events into the local extension runner while joined. */
 	#lifecycleEmitter = new GuestLifecycleEmitter();
 	state: CollabSessionState | null = null;
@@ -477,7 +518,7 @@ export class CollabGuestLink {
 			...pending.header,
 			id: this.#replicaId,
 			parentSession: pending.header.id,
-			providerPromptCacheKey: pending.header.providerPromptCacheKey ?? pending.header.id,
+			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(pending.header),
 		};
 		const lines = [header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		const storage = new FileSessionStorage();
@@ -494,8 +535,9 @@ export class CollabGuestLink {
 		}
 		if (this.#left) return;
 
-		// Resume through AgentSession without adopting the host's cwd.
-		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
+		// Resume through AgentSession without adopting the host's cwd. The replica
+		// keeps its model: #applyHostState mirrors the host's, which runs inference.
+		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true, keepModel: true });
 		if (switched === false) {
 			throw new Error("Collab replica activation was cancelled");
 		}
@@ -505,6 +547,10 @@ export class CollabGuestLink {
 			...this.#ctx.pendingTools.values(),
 			...this.#ctx.eventController.takeDisplaceableComponents(),
 		];
+		// Drop turn-scoped controller state (coalesced message_update timer,
+		// in-flight anchors) so a pending pre-boundary snapshot cannot flush
+		// into the replacement transcript.
+		this.#ctx.eventController.resetTranscriptAnchors();
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
 		this.state = pending.state;
@@ -515,6 +561,7 @@ export class CollabGuestLink {
 		this.#applyAgentSnapshots(pending.agents);
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
+		this.#streamedSnapshot = undefined;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
 		// No eager teardown here: renderInitialMessages() stages the replacement
 		// transcript and disposes the visible children only when the staged tree
@@ -667,15 +714,34 @@ export class CollabGuestLink {
 		// unknown anchors (guarded by streamingComponent/pendingTools lookups).
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			this.#assistantStreamSynced = true;
-		} else if (
-			event.type === "message_update" &&
-			event.message.role === "assistant" &&
-			!this.#assistantStreamSynced
-		) {
-			this.#assistantStreamSynced = true;
-			void this.#ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+			this.#streamedSnapshot = event.message;
+		} else if (event.type === "message_update" && event.message.role === "assistant") {
+			if (!this.#assistantStreamSynced) {
+				this.#assistantStreamSynced = true;
+				this.#streamedSnapshot = event.message;
+				this.#dispatchEvent({ type: "message_start", message: event.message });
+			}
+			// The host supersedes still-queued updates of a streaming message, so
+			// their per-update deltas (speech, extensions) never arrive. Replay the
+			// text they carried, recovered from the cumulative snapshots.
+			if (this.#streamedSnapshot) {
+				for (const omitted of omittedStreamDeltas(
+					this.#streamedSnapshot,
+					event.message,
+					event.assistantMessageEvent,
+				)) {
+					this.#mirrorEvent({ type: "message_update", message: event.message, assistantMessageEvent: omitted });
+				}
+			}
+			this.#streamedSnapshot = event.message;
+		} else if (event.type === "message_end") {
+			this.#streamedSnapshot = undefined;
 		}
-		void this.#ctx.eventController.handleEvent(event);
+		this.#mirrorEvent(event);
+	}
+
+	#mirrorEvent(event: AgentSessionEvent): void {
+		this.#dispatchEvent(event);
 		// Lifecycle mirror: the guest's own agent loop never runs, so the session's
 		// extension-event path stays silent. Route the mirrored wire event through
 		// the same mapping the session uses so extension-installed lifecycle
@@ -685,6 +751,18 @@ export class CollabGuestLink {
 		// application nor completes out of order.
 		const runner = this.#ctx.session.extensionRunner;
 		if (runner) this.#lifecycleEmitter.emit(runner, event);
+	}
+
+	/**
+	 * Feed a mirrored event through the same pipeline as a local session:
+	 * `message_update` joins the controller's coalesced streaming rebuild and
+	 * every other event runs serialized behind it, so a mirrored stream tail
+	 * cannot reorder (message_update → message_end → agent_end).
+	 */
+	#dispatchEvent(event: AgentSessionEvent): void {
+		this.#ctx.eventController.dispatchSessionEvent(event).catch(err => {
+			logger.warn("collab guest event dispatch failed", { type: event.type, error: String(err) });
+		});
 	}
 
 	/**
@@ -908,6 +986,8 @@ export class CollabGuestLink {
 	async #resumeLocalSession(): Promise<void> {
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#flushPendingTranscripts();
+		// A pending coalesced mirror message_update must not flush after leave.
+		this.#ctx.eventController.resetTranscriptAnchors();
 		this.#clearAgentMirror();
 		this.#ctx.syncRunningSubagentBadge();
 		this.#ctx.resetObserverRegistry();

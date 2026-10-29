@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Component, Container, EditorTheme, Loader, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, Container, EditorTheme, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
@@ -9,6 +9,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
+import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -19,7 +20,14 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ExtensionLiveSession,
+	ExtensionLiveStartOptions,
+	ExtensionSessionModes,
+	PlanReviewChoice,
+	PlanReviewRequestedEvent,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
@@ -31,6 +39,7 @@ import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import type { DictationTarget } from "../stt";
+import type { SessionContinuation, SessionInfo } from "../session/session-listing";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "../tools";
@@ -65,21 +74,17 @@ export type SubmittedUserInput = {
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
-	/** Route through `session.prompt(text, { synthetic: true })` so the text lands
-	 *  as a hidden agent-authored `developer` message rather than a visible user
-	 *  turn. Used by the `c`/`.` continue shortcut. */
-	synthetic?: boolean;
-	/** Marks this submission as a deliberate user resume (set by the `.`/`c`
-	 *  continue shortcut, which is also `synthetic`). Forwarded to
-	 *  `session.prompt({ userInitiated })` so it clears advisor auto-resume
-	 *  suppression even though it is synthetic. */
-	userInitiated?: boolean;
+	/** The `.`/`c` continue shortcut: dispatch through `session.resume()` instead of
+	 *  prompting with `text`, so no visible user turn is added. */
+	resume?: boolean;
 	display?: boolean;
 	/** Queue intent if the session is (or becomes) busy when this submission is
 	 *  dispatched: "steer" (interrupt the active turn) or "followUp" (process after
 	 *  it). Normal user Enter carries "steer" to match the streaming-branch Enter;
 	 *  background/continuation submits omit it and default to "followUp". */
 	streamingBehavior?: "steer" | "followUp";
+	/** Set by `submitInteractiveInput` for a custom-message submission: the session took it (started a turn or queued it into one). */
+	dispatched?: boolean;
 	cancelled: boolean;
 	started: boolean;
 };
@@ -91,13 +96,46 @@ export interface InteractiveModeInitOptions {
 	autoStartCollab?: boolean;
 }
 
-export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
+export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
+	Pick<HookSelectorOptions, "disabledIndices" | "inline">;
+
+export type SessionPickHandler = (session: SessionInfo) => void | Promise<void>;
+
+/** How {@link InteractiveModeContext.handleResumeSession} picks the file it opens. */
+export interface ResumeSessionOptions {
+	/**
+	 * The user chose this session to resume (picker, `/resume <id>`, welcome
+	 * card): when its conversation went on in another file, resume that copy.
+	 * Restoring a session the process itself left (collab) opens the path as given.
+	 */
+	followContinuation?: boolean;
+	/**
+	 * The copy to resume, already found by the caller (`resolveResumeTarget`):
+	 * `sessionPath` is that copy, and the notice names the file it came from.
+	 */
+	continuation?: SessionContinuation;
+}
 
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
 	preservedLiveToolCallIds?: ReadonlySet<string>;
+}
+
+/** How {@link InteractiveModeContext.showStatus} shows a notice. */
+export interface ShowStatusOptions {
+	/** Dims the ANSI line (default true). */
+	dim?: boolean;
+	/** Toasts it on a native terminal (default true); false keeps it to the ANSI transcript. */
+	toast?: boolean;
+}
+
+export interface SelectOnlyModelSelectorOptions {
+	/** Use the selected `provider/id` for the caller's operation without mutating session defaults. */
+	onSelect: (selector: string) => void | Promise<void>;
+	/** `provider/id` initially highlighted in the picker. */
+	currentSelector?: string;
 }
 
 export interface AgentHubOpenOptions {
@@ -109,6 +147,7 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
+	readonly composer: Pick<Composer, "setRunActive">;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
@@ -130,16 +169,27 @@ export interface InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
+	/**
+	 * Push the extension link schemes to the markdown renderer; redraws the transcript when that
+	 * changes how links are drawn.
+	 */
+	syncExtensionLinks(): void;
 
 	// Session access
 	session: AgentSession;
 	sessionManager: SessionManager;
+	/** Re-resolve the CLI/settings model scope after a successful OAuth login. */
+	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
 	readonly viewSession: AgentSession;
+	/** Bind idle maintenance to the given view (default: the current one), or release the UI activity binding on null. */
+	syncIdleMaintenanceView(target?: AgentSession | null): void;
 	/** Id of the focused agent, undefined when the main session is attached. */
 	readonly focusedAgentId: string | undefined;
+	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
+	approvalOwnsComposer?: boolean;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
 	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
@@ -150,6 +200,23 @@ export interface InteractiveModeContext {
 	invalidatePendingFocus(): void;
 	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
 	resolveViewportClickCandidates(index: number): string[];
+	/**
+	 * Deliver a click at cell `col` of a mutable-viewport line to the extension owning the link
+	 * drawn there. Returns false when no extension link is under the click.
+	 */
+	activateViewportLink(index: number, col: number): boolean;
+	/**
+	 * Enter keyboard link-hint mode: tag each extension link label on screen, or show a status when
+	 * none is drawn. Returns false, doing nothing, unless extension links are routed (a scheme
+	 * claimed, plain terminal).
+	 */
+	startLinkHints(): boolean;
+	/** Whether link-hint mode is on; it ends by itself once the tagged labels move or vanish. */
+	readonly linkHintsActive: boolean;
+	/** Narrow link-hint mode by one typed letter; a whole tag raises `link_activate` for its link. */
+	typeLinkHint(letter: string): void;
+	/** Leave link-hint mode without activating a link. */
+	cancelLinkHints(): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
@@ -207,12 +274,15 @@ export interface InteractiveModeContext {
 	 */
 	readonly effectiveHideThinkingBlock: boolean;
 	readonly assistantImagesVisible: boolean;
-	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>>;
+	/** Whether the viewed session's tables get charts: the main session's do, a focused subagent's do not. */
+	readonly tableChartsVisible: boolean;
+	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>>;
 	/** Whether this visible session has produced thinking content the user can reveal. */
 	readonly hasDisplayableThinkingContent: boolean;
 	/** Record a message whose thinking content makes Ctrl+T meaningful even at thinking level "off"; returns true on first observation. */
 	noteDisplayableThinkingContent(message: AgentMessage): boolean;
 	proseOnlyThinking: boolean;
+	expandThinkingBlocks: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
@@ -285,6 +355,7 @@ export interface InteractiveModeContext {
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void;
+	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined;
 
 	// UI helpers
 	/**
@@ -311,7 +382,7 @@ export interface InteractiveModeContext {
 	 * leak.
 	 */
 	resetTranscript(): void;
-	showStatus(message: string, options?: { dim?: boolean }): void;
+	showStatus(message: string, options?: ShowStatusOptions): void;
 	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
 	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
 	showError(message: string): void;
@@ -330,11 +401,12 @@ export interface InteractiveModeContext {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
-	setWorkingMessage(message?: string): void;
+	/** No argument restores the default; a function label is re-read on every spinner tick. */
+	setWorkingMessage(message?: string | (() => string)): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
 	/** Interrupt key id for a maintenance working row's stop control; undefined while Esc would not cancel it. */
-	maintenanceInterruptKey(): string | undefined;
+	maintenanceInterruptKey(): KeyId | undefined;
 	/** A click on a working row's stop control: the interrupt key's handler. */
 	interruptFromPointer(): void;
 	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
@@ -432,13 +504,16 @@ export interface InteractiveModeContext {
 	handleContextCommand(): void;
 	handleDumpCommand(): Promise<void>;
 	handleDumpAllCommand(): Promise<void>;
+	handleDumpAnonCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
 	handleClearCommand(): Promise<void>;
+	/** User-initiated `/new`: {@link handleClearCommand} plus the `plan.defaultOnStartup` default. */
+	handleNewCommand(): Promise<void>;
 	handleFreshCommand(): Promise<void>;
 	handleResetContextCommand(): Promise<void>;
 	handleDeleteCommand(): Promise<void>;
-	handleForkCommand(): Promise<void>;
+	handleForkCommand(placement?: "pane" | "window"): Promise<void>;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
 	handlePythonCommand(code: string, excludeFromContext?: boolean): Promise<void>;
 	handleMCPCommand(text: string): Promise<void>;
@@ -451,8 +526,8 @@ export interface InteractiveModeContext {
 	handleHandoffCommand(customInstructions?: string): Promise<void>;
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
-	/** `/wt`: fork the checkout into a new worktree (keeping changes) and move there. */
-	handleWorktreeCommand(branch?: string): Promise<void>;
+	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
+	handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void>;
 	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
@@ -462,6 +537,8 @@ export interface InteractiveModeContext {
 	dictationSpaceHold(target: DictationTarget): SpaceHoldHandler;
 	/** Start or stop the Codex-backed realtime voice session. */
 	handleLiveCommand(): Promise<void>;
+	/** Start a live session whose audio runs on an extension's own WebRTC peer (`ctx.startLive`). */
+	startRemoteLive(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
 	/** Start a `/record` screen capture, or stop the running one. */
 	toggleRecording(): Promise<void>;
 	executeCompaction(
@@ -484,7 +561,7 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
-	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
@@ -493,16 +570,16 @@ export interface InteractiveModeContext {
 	showTreeSelector(): void;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
-	showSessionSelector(source?: ForeignSessionSource): void;
+	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
-	handleResumeSession(sessionPath: string): Promise<void>;
+	handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
 	showSessionPinSelector(): Promise<void>;
 	showResetUsageSelector(): Promise<void>;
 	showProviderSetup(): Promise<void>;
-	showHookConfirm(title: string, message: string): Promise<boolean>;
+	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
 	resetObserverRegistry(): void;
@@ -526,8 +603,9 @@ export interface InteractiveModeContext {
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
-	handleBtwCommand(question: string): Promise<void>;
-	handleTanCommand(work: string): Promise<void>;
+	/** `title` heads the side question instead of its text, e.g. a side file command's `/sitrep the migration`. */
+	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;
+	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;
@@ -542,6 +620,7 @@ export interface InteractiveModeContext {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<void>;
 	handleOmfgCommand(complaint: string): Promise<void>;
 	hasActiveOmfg(): boolean;
@@ -561,10 +640,6 @@ export interface InteractiveModeContext {
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */
 	commandReportRows(): number | undefined;
-	/** Whether the last frame put the editor on the bottom row of the screen. */
-	composerInputAtBottom(): boolean;
-	/** Keep the editor on the bottom row while the live rows cannot fill the screen (after a tall report closed). */
-	pinComposerToBottom(): void;
 	cycleThinkingLevel(): void;
 	cycleRoleModel(direction?: "forward" | "backward"): Promise<void>;
 	toggleToolOutputExpansion(): void;
@@ -590,7 +665,10 @@ export interface InteractiveModeContext {
 	disableGoalMode(message?: string): void;
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
-	openPlanReview(): Promise<void>;
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
+	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
+	openPlanReview(options?: { fromExtension?: boolean }): Promise<boolean>;
+	readonly sessionModes: ExtensionSessionModes;
 
 	// Hook UI methods
 	initHooksAndCustomTools(): Promise<void>;

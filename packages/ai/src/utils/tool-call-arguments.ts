@@ -12,6 +12,23 @@ export function parseToolCallArguments(json: string | undefined): ToolCall["argu
 	}
 }
 
+/**
+ * Native Responses `function_call.arguments` to persist for replay.
+ *
+ * {@link parseToolCallArguments} repairs some invalid JSON (e.g. `"name": ,`) and the tool runs with the
+ * repaired value; replay must carry what was executed (#14155), not the {@link invalidToolCallArguments}
+ * diagnostic it substitutes for stored arguments that do not parse (#15568).
+ * Returns `raw` when it already parses or the arguments were unrepairable, else the executed arguments.
+ */
+export function replayableToolCallArguments(raw: string, executed: ToolCall["arguments"]): string {
+	try {
+		JSON.parse(raw);
+		return raw;
+	} catch {
+		return executed && typeof executed === "object" && "__parseError" in executed ? raw : JSON.stringify(executed);
+	}
+}
+
 /** Longest raw argument text kept in the parse-error diagnostic. */
 export const INVALID_ARGUMENTS_RAW_LIMIT = 512;
 const TRUNCATED_SUFFIX = /… \[truncated \d+ chars\]$/;

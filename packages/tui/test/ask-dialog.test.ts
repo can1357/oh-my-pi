@@ -6,6 +6,7 @@ import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-d
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
+import type { DescribeContext, NativeUiEvent } from "../src/native/node";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -38,6 +39,22 @@ describe("AskDialogComponent", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	it("multi-question footer labels the question-switch keys", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "A2" }] },
+			{ id: "q2", question: "Second?", options: [{ label: "B1" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const lines = component.render(80).map(line => stripVTControlCharacters(line));
+		const footer = lines.find(line => line.includes("select"));
+		expect(footer).toContain("⇥/←/→ question · ");
+		expect(footer).toContain("cancel");
 	});
 
 	it("single-question, single-select: Enter on option submits immediately", () => {
@@ -525,6 +542,76 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0]).toMatchObject({
 			note: "Updated [Image #1]",
 			noteImages: [image],
+		});
+	});
+
+	describe("Note right after a pick that moved to the next question", () => {
+		const twoQuestions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "Alpha" }, { label: "Beta" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "Gamma" }, { label: "Delta" }] },
+		];
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const action = (act: string): NativeUiEvent => ({ type: "action", key: `actions/${act}`, act, mods: [] });
+		const flush = async (): Promise<void> => {
+			for (let i = 0; i < 4; i++) await Promise.resolve();
+		};
+		const surfaces = {
+			// Tern: a click commits a single-choice row, then the Note button.
+			tern: async (component: AskDialogComponent) => {
+				component.describe(cx);
+				component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
+				component.handleNativeEvent(action("note"));
+				await flush();
+				component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
+				component.handleNativeEvent(action("submit"));
+			},
+			tui: async (component: AskDialogComponent) => {
+				component.handleInput(DOWN);
+				component.handleInput(ENTER);
+				component.handleInput("n");
+				await flush();
+				component.handleInput(ENTER);
+				component.handleInput(ENTER);
+			},
+		};
+
+		for (const [surface, run] of Object.entries(surfaces)) {
+			it(`annotates that pick, not the next question's row (${surface})`, async () => {
+				const onPrompt = vi.fn().mockResolvedValue("why Beta");
+				const onSubmit = vi.fn();
+				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+				await run(component);
+
+				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+				const [first, second] = onSubmit.mock.calls[0][0].results;
+				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
+			});
+		}
+
+		it("goes back to the highlighted row once the next question gets other input", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+			component.handleInput(ENTER); // Alpha, on to Q2
+			component.handleInput(DOWN); // Delta highlighted
+			component.handleInput("n");
+			await flush();
+			component.handleInput(ENTER);
+			component.handleInput(ENTER);
+
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+			const [first, second] = onSubmit.mock.calls[0][0].results;
+			expect(first.note).toBeUndefined();
+			expect(second).toMatchObject({ selectedOptions: ["Delta"], note: "why Delta", noteOption: "Delta" });
 		});
 	});
 
@@ -1301,6 +1388,29 @@ describe("AskDialogComponent", () => {
 		// …but the question line is just the question, not "[Alpha] First question?".
 		expect(output).toContain("First question?");
 		expect(output).not.toContain("[Alpha]");
+	});
+
+	it("renders fenced diff questions as blocks separate from prose", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "diff",
+					question: "Review this patch:\n```diff\n-old()\n+new()\n```",
+					options: [{ label: "Apply" }, { label: "Reject" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rows = render(component).split("\n");
+		const questionRow = rows.findIndex(row => row.includes("Review this patch:"));
+		const deletionRow = rows.findIndex(row => row.includes("-old()"));
+		const additionRow = rows.findIndex(row => row.includes("+new()"));
+		expect(questionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThan(questionRow);
+		expect(additionRow).toBeGreaterThan(deletionRow);
+		expect(rows[deletionRow]).not.toContain("+new()");
 	});
 
 	it("bounds in-body question header for long multi-line questions", () => {

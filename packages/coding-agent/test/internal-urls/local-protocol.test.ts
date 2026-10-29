@@ -6,6 +6,7 @@ import {
 	InternalUrlRouter,
 	LocalProtocolHandler,
 	resolveLocalRoot,
+	listLocalFiles,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -101,6 +102,15 @@ describe("LocalProtocolHandler", () => {
 		expect(resolveLocalUrlToPath("local://memo.txt", { getSessionId: () => "session-fallback" })).toBe(
 			path.join(root, "memo.txt"),
 		);
+	});
+
+	it("keeps the fallback root inside its own session dir under omp-local", () => {
+		for (const sessionId of ["..", "."]) {
+			const getSessionId = () => sessionId;
+			expect(resolveLocalRoot({ getSessionId, getArtifactsDir: () => null })).toBe(
+				path.join(os.tmpdir(), "omp-local", "session"),
+			);
+		}
 	});
 
 	it("uses a stable short temp root for long Windows artifact paths", async () => {
@@ -277,6 +287,29 @@ describe("LocalProtocolHandler", () => {
 					},
 				}),
 			).rejects.toThrow("Local file not found: local://PLAN.md");
+		});
+	});
+
+	it("listLocalFiles returns nested files newest first and [] for a missing root", async () => {
+		await withTempDir(async tempDir => {
+			const options = { getArtifactsDir: () => tempDir, getSessionId: () => "s" };
+			expect(await listLocalFiles(options)).toEqual([]);
+
+			const root = path.join(tempDir, "local");
+			const base = Date.now() / 1000 - 60;
+			for (const [name, offset] of [
+				["old.md", 0],
+				["sub/new.md", 2],
+				["mid.md", 1],
+			] as const) {
+				const filePath = path.join(root, name);
+				await Bun.write(filePath, name);
+				await fs.utimes(filePath, base + offset, base + offset);
+			}
+
+			const files = await listLocalFiles(options);
+			expect(files.map(file => file.url)).toEqual(["local://sub/new.md", "local://mid.md", "local://old.md"]);
+			expect(files[0]?.path).toBe(path.join(root, "sub", "new.md"));
 		});
 	});
 });

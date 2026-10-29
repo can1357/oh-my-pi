@@ -3,11 +3,11 @@ import { getRecentRequests } from "../api";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatFolder,
 	formatInteger,
 	formatMessageCost,
-	formatPercent,
 	formatRelativeTime,
 	formatTimestamp,
 } from "../data/formatters";
@@ -47,7 +47,7 @@ type StatusFilter = "all" | RequestStatus;
 export function RequestsRoute({ active, range, onRequestClick }: RequestsRouteProps) {
 	const [step, setStep] = useState(0);
 	const limit = LOAD_STEPS[step];
-	const log = useQuery(["requests-log", limit], () => getRecentRequests(limit), { enabled: active });
+	const log = useQuery(["requests-log", limit], ({ signal }) => getRecentRequests(limit, signal), { enabled: active });
 	const [search, setSearch] = useState("");
 	const [status, setStatus] = useState<StatusFilter>("all");
 	const meta = rangeMeta(range);
@@ -125,7 +125,7 @@ export function RequestsRoute({ active, range, onRequestClick }: RequestsRoutePr
 							<Stat
 								label="Failed"
 								value={formatInteger(summary.failed)}
-								hint={`${summary.requests > 0 ? formatPercent(summary.failed / summary.requests) : "–"} · ${formatInteger(summary.aborted)} aborted`}
+								hint={`${summary.requests > 0 ? formatErrorRate(summary.failed / summary.requests) : "–"} · ${formatInteger(summary.aborted)} aborted`}
 							/>
 							<Stat
 								label="Tokens"

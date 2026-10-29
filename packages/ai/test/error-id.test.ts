@@ -163,11 +163,40 @@ describe("error-id classification", () => {
 		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
 	});
 
+	it("keeps transport wording on a terminal 4xx terminal while 408/429/5xx stay retryable (#13807)", () => {
+		const body =
+			"Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it. (type=server_error)";
+		const denied = AIError.classify(message({ errorStatus: 400, errorMessage: `400 ${body}` }));
+		expect(AIError.is(denied, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(denied)).toBe(false);
+		for (const errorStatus of [408, 429, 503]) {
+			const id = AIError.classify(message({ errorStatus, errorMessage: `${errorStatus} ${body}` }));
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
 	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
 		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
 		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it.each([
+		"The service is temporarily unavailable, please try again later",
+		"Model temporarily_unavailable",
+		"Temporary unavailable: capacity",
+	])("classifies temporary-unavailability wording as transient + retryable: %s", errorMessage => {
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("keeps temporary-unavailability wording on a terminal 4xx terminal", () => {
+		const id = AIError.classifyMessage(
+			message({ errorStatus: 403, errorMessage: "403 This model is temporarily unavailable on your plan" }),
+		);
+		expect(AIError.retriable(id)).toBe(false);
 	});
 
 	it("keeps authenticated connection rejections non-retryable", () => {
@@ -381,6 +410,16 @@ describe("error-id classification", () => {
 			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 			expect(AIError.retriable(id)).toBe(true);
 		}
+	});
+
+	it("retries Go closed-connection transport errors forwarded by a gateway (#15385)", () => {
+		const errorMessage = "read tcp 127.0.0.1:9426->127.0.0.1:9050: use of closed network connection";
+		const id = AIError.classifyMessage(
+			message({ api: "openai-completions", provider: "custom-gateway", model: "mimo", errorId: 0, errorMessage }),
+		);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
 	});
 
 	it("retries remote Python HTTP/2 internal and refused stream resets", () => {

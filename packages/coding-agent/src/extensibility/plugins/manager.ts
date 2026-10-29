@@ -10,17 +10,20 @@ import {
 	getProjectPluginOverridesPath,
 	isEnoent,
 	logger,
+	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
+import { runBunCli } from "./bun-cli";
 import { refreshBunGitCache } from "./bun-git-cache";
+import { linkPluginDirectory } from "./directory-link";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
-import { normalizePluginRuntimeConfig } from "./runtime-config";
+import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "./runtime-config";
 import type {
 	DoctorCheck,
 	DoctorOptions,
@@ -74,13 +77,25 @@ function validateGitSpec(spec: string): void {
 }
 
 function gitInstallSpec(original: string, source: GitSource): string {
-	if (/^github:/i.test(original) || !/^[a-z]+:[^/]/i.test(original)) {
+	// bun resolves GitHub specs natively (shorthand → tarball, inline-credential
+	// URLs → git clone with those credentials); forward them untouched.
+	if (source.host === "github.com") {
 		return original;
 	}
-	if (!source.ref || source.repo.includes("#")) {
-		return source.repo;
+	const withRef = !source.ref || source.repo.includes("#") ? source.repo : `${source.repo}#${source.ref}`;
+	if (/^(https?|ssh):\/\//i.test(withRef) && !/^git\+/i.test(withRef)) {
+		// bun auto-detects git only for GitHub-hosted URLs — prefix `git+` so any
+		// git host is cloned via git instead of being misread as an npm tarball
+		// (e.g. private CodeHub instances).
+		//
+		// Inline userinfo credentials (`https://user:token@host/...`) are
+		// deliberately not forwarded: `bun install` persists the spec verbatim
+		// into plugins/package.json and bun.lock, and a long-lived repository
+		// token must not land in those user files. Private repos authenticate
+		// via SSH, a git credential helper, or .netrc instead.
+		return `git+${withRef}`;
 	}
-	return `${source.repo}#${source.ref}`;
+	return withRef;
 }
 
 function findGitPackageName(source: GitSource, deps: Record<string, string>): string | undefined {
@@ -114,12 +129,22 @@ async function readBunLockResolution(name: string): Promise<string | undefined> 
 	return Array.isArray(entry) && typeof entry[0] === "string" ? entry[0] : undefined;
 }
 
-interface PluginPackageSnapshot {
-	readonly actualName: string;
-	readonly packagePath: string;
-	readonly backupRoot: string;
-	readonly backupPath: string;
-}
+/**
+ * Pre-install state of `node_modules/<name>`, restored by rollback. A linked
+ * package (`omp plugin link`) is kept as its link target: copying the link
+ * would recreate an ordinary symlink, which EPERMs on Windows outside
+ * developer mode, while `bun install` replaces the link without writing
+ * through it.
+ */
+type PluginPackageSnapshot =
+	| { readonly kind: "link"; readonly actualName: string; readonly packagePath: string; readonly target: string }
+	| {
+			readonly kind: "copy";
+			readonly actualName: string;
+			readonly packagePath: string;
+			readonly backupRoot: string;
+			readonly backupPath: string;
+	  };
 
 interface RuntimePackageJson {
 	name?: unknown;
@@ -165,8 +190,8 @@ export class PluginManager {
 	}
 
 	async #saveRuntimeConfig(): Promise<void> {
-		await this.#ensureConfigLoaded();
-		await Bun.write(getPluginsLockfile(), JSON.stringify(this.#runtimeConfig, null, 2));
+		const config = await this.#ensureConfigLoaded();
+		await writePluginRuntimeConfig(getPluginsLockfile(), config);
 	}
 
 	async #loadProjectOverrides(): Promise<ProjectPluginOverrides> {
@@ -354,23 +379,34 @@ export class PluginManager {
 			return null;
 		}
 		const packagePath = path.join(getPluginsNodeModules(), actualName);
+		let stat: fs.Stats;
 		try {
-			await fs.promises.lstat(packagePath);
+			stat = await fs.promises.lstat(packagePath);
 		} catch (err) {
 			if (isEnoent(err)) {
 				return null;
 			}
 			throw err;
 		}
+		if (stat.isSymbolicLink()) {
+			// Junctions need an absolute target; resolve a relative symlink against its directory.
+			const target = path.resolve(path.dirname(packagePath), await fs.promises.readlink(packagePath));
+			return { kind: "link", actualName, packagePath, target };
+		}
 
 		const backupRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-plugin-backup-"));
 		const backupPath = path.join(backupRoot, "package");
-		await fs.promises.cp(packagePath, backupPath, { recursive: true, verbatimSymlinks: true });
-		return { actualName, packagePath, backupRoot, backupPath };
+		try {
+			await fs.promises.cp(packagePath, backupPath, { recursive: true, verbatimSymlinks: true });
+		} catch (err) {
+			await fs.promises.rm(backupRoot, { recursive: true, force: true });
+			throw err;
+		}
+		return { kind: "copy", actualName, packagePath, backupRoot, backupPath };
 	}
 
 	async #cleanupSnapshot(snapshot: PluginPackageSnapshot | null): Promise<void> {
-		if (!snapshot) {
+		if (snapshot?.kind !== "copy") {
 			return;
 		}
 		try {
@@ -410,7 +446,11 @@ export class PluginManager {
 			return;
 		}
 		await fs.promises.mkdir(path.dirname(snapshot.packagePath), { recursive: true });
-		await fs.promises.cp(snapshot.backupPath, snapshot.packagePath, { recursive: true, verbatimSymlinks: true });
+		if (snapshot.kind === "link") {
+			await linkPluginDirectory(snapshot.target, snapshot.packagePath);
+		} else {
+			await fs.promises.cp(snapshot.backupPath, snapshot.packagePath, { recursive: true, verbatimSymlinks: true });
+		}
 	}
 
 	async #validateInstalledExtensions(plugin: InstalledPlugin): Promise<void> {
@@ -472,8 +512,6 @@ export class PluginManager {
 			validatePackageName(spec.packageName);
 		}
 
-		await this.#ensurePackageJson();
-
 		if (options.dryRun) {
 			return {
 				name: spec.packageName,
@@ -484,6 +522,9 @@ export class PluginManager {
 				enabled: true,
 			};
 		}
+
+		await this.#ensurePackageJson();
+
 		const pkgJsonPath = getPluginsPackageJson();
 		const packageJsonBefore = await Bun.file(pkgJsonPath).text();
 		// Snapshot bun's lockfile so the rollback path can restore the pin. Every
@@ -547,31 +588,17 @@ export class PluginManager {
 			// `--no-cache` re-fetches the manifest while leaving the tarball cache
 			// intact. Git specs don't use the manifest cache; their cache staleness is
 			// handled by refreshBunGitCache + `bun update` below.
-			const installArgs = [
-				"bun",
-				"install",
-				...(gitSource ? [] : ["--no-cache"]),
-				...(options.force ? ["--force"] : []),
-				packageInstallSpec,
-			];
-			const installProc = Bun.spawn(installArgs, {
-				cwd: getPluginsDir(),
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "pipe",
-				windowsHide: true,
-			});
-			// Drain stdout+stderr concurrently with proc.exited. Awaiting exited
-			// before reading either pipe risks a >64 KiB OS-pipe-buffer deadlock
-			// once bun install prints enough progress; even where Bun currently
-			// buffers eagerly, doing this leaks unbounded memory.
-			const [installExit, , installStderr] = await Promise.all([
-				installProc.exited,
-				new Response(installProc.stdout).text(),
-				new Response(installProc.stderr).text(),
-			]);
-			if (installExit !== 0) {
-				throw new Error(`bun install failed: ${installStderr}`);
+			const install = await runBunCli(
+				[
+					"install",
+					...(gitSource ? [] : ["--no-cache"]),
+					...(options.force ? ["--force"] : []),
+					packageInstallSpec,
+				],
+				getPluginsDir(),
+			);
+			if (install.exitCode !== 0) {
+				throw new Error(`bun install failed: ${install.stderr}`);
 			}
 			// Resolve actual package name. npm specs encode the name (strip version);
 			// git specs do not, so diff plugins/package.json deps to find the new entry.
@@ -610,21 +637,9 @@ export class PluginManager {
 			// cache from the remote. Rollback is handled by the outer catch.
 			if (gitSource && existingActualName) {
 				await refreshBunGitCache(gitSource, getPluginsDir());
-				const updateProc = Bun.spawn(["bun", "update", actualName], {
-					cwd: getPluginsDir(),
-					stdin: "ignore",
-					stdout: "pipe",
-					stderr: "pipe",
-					windowsHide: true,
-				});
-				// Same drain-concurrent-with-exit pattern as the bun install above.
-				const [updateExit, , updateStderr] = await Promise.all([
-					updateProc.exited,
-					new Response(updateProc.stdout).text(),
-					new Response(updateProc.stderr).text(),
-				]);
-				if (updateExit !== 0) {
-					throw new Error(`bun update ${actualName} failed: ${updateStderr}`);
+				const update = await runBunCli(["update", actualName], getPluginsDir());
+				if (update.exitCode !== 0) {
+					throw new Error(`bun update ${actualName} failed: ${update.stderr}`);
 				}
 			}
 
@@ -726,19 +741,7 @@ export class PluginManager {
 	 * `bun.lock` resolution.
 	 */
 	async upgrade(name: string): Promise<{ from: string | undefined; plugin: InstalledPlugin; changed: boolean }> {
-		validatePackageName(name);
-		const deps = await this.#readDeps(getPluginsPackageJson());
-		const config = await this.#ensureConfigLoaded();
-		const recorded = deps[name];
-		if (recorded === undefined) {
-			if (config.plugins[name]) {
-				throw new Error(`${name} is linked from a local path; there is nothing to upgrade`);
-			}
-			throw new Error(`${name} is not installed`);
-		}
-		if (/^(file|link|workspace|portal):/i.test(recorded)) {
-			throw new Error(`${name} is installed from a local path (${recorded}); there is nothing to upgrade`);
-		}
+		const { recorded, config } = await this.#resolveUpgradeSource(name);
 
 		const previous = config.plugins[name];
 		let from = previous?.version;
@@ -762,6 +765,28 @@ export class PluginManager {
 		return { from, plugin, changed };
 	}
 
+	/** Throws the error `upgrade(name)` would throw before it changes anything (unknown, linked or local plugin). */
+	async validateUpgrade(name: string): Promise<void> {
+		await this.#resolveUpgradeSource(name);
+	}
+
+	async #resolveUpgradeSource(name: string): Promise<{ recorded: string; config: PluginRuntimeConfig }> {
+		validatePackageName(name);
+		const deps = await this.#readDeps(getPluginsPackageJson());
+		const config = await this.#ensureConfigLoaded();
+		const recorded = deps[name];
+		if (recorded === undefined) {
+			if (config.plugins[name]) {
+				throw new Error(`${name} is linked from a local path; there is nothing to upgrade`);
+			}
+			throw new Error(`${name} is not installed`);
+		}
+		if (/^(file|link|workspace|portal):/i.test(recorded)) {
+			throw new Error(`${name} is installed from a local path (${recorded}); there is nothing to upgrade`);
+		}
+		return { recorded, config };
+	}
+
 	/**
 	 * Uninstall a plugin.
 	 */
@@ -769,21 +794,7 @@ export class PluginManager {
 		validatePackageName(name);
 		await this.#ensurePackageJson();
 
-		const proc = Bun.spawn(["bun", "uninstall", name], {
-			cwd: getPluginsDir(),
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		});
-
-		// Drain both pipes concurrently with proc.exited to avoid a pipe-buffer
-		// deadlock if bun uninstall floods stdout/stderr.
-		const [exitCode] = await Promise.all([
-			proc.exited,
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
+		const { exitCode } = await runBunCli(["uninstall", name], getPluginsDir());
 		if (exitCode !== 0) {
 			throw new Error(`npm uninstall failed for ${name}`);
 		}
@@ -842,7 +853,7 @@ export class PluginManager {
 		const registryPath = await resolveActiveProjectRegistryPath(this.#cwd);
 		if (!registryPath) return undefined;
 		const projectRoot = path.dirname(registryPath);
-		if (path.resolve(projectRoot) === path.resolve(getPluginsDir())) return undefined;
+		if (normalizePathForComparison(projectRoot) === normalizePathForComparison(getPluginsDir())) return undefined;
 		const [projectDeps, projectConfig] = await Promise.all([
 			this.#readDeps(path.join(projectRoot, "package.json")),
 			this.#readRuntimeConfigAt(path.join(projectRoot, "omp-plugins.lock.json")),
@@ -915,10 +926,7 @@ export class PluginManager {
 		// Whatever is there — a stale link, or a real directory from a git install.
 		await fs.promises.rm(linkPath, { recursive: true, force: true });
 
-		// A junction needs no privilege on Windows; a plain directory symlink
-		// would EPERM outside developer mode (same treatment as the marketplace
-		// link in marketplace/manager.ts).
-		await fs.promises.symlink(absolutePath, linkPath, process.platform === "win32" ? "junction" : "dir");
+		await linkPluginDirectory(absolutePath, linkPath);
 
 		const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
 		manifest.version = pkg.version;
@@ -1229,21 +1237,8 @@ export class PluginManager {
 
 	async #installPluginDependencies(): Promise<boolean> {
 		try {
-			const proc = Bun.spawn(["bun", "install"], {
-				cwd: getPluginsDir(),
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "pipe",
-				windowsHide: true,
-			});
-			// Drain pipes concurrently with proc.exited; otherwise a chatty
-			// bun install can block on a full OS pipe buffer.
-			const [exit] = await Promise.all([
-				proc.exited,
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			return exit === 0;
+			const { exitCode } = await runBunCli(["install"], getPluginsDir());
+			return exitCode === 0;
 		} catch {
 			return false;
 		}

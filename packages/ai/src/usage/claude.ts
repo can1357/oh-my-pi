@@ -1,12 +1,13 @@
-import { scheduler } from "node:timers/promises";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { isAnthropicOAuthToken, toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
 	resolveUsedFraction,
 	type UsageAmount,
+	type UsageCredential,
 	type UsageFetchContext,
 	type UsageFetchParams,
 	type UsageLimit,
@@ -15,12 +16,15 @@ import {
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { waitForRetry } from "../utils/retry-wait";
 import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
 import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
+/** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
+const FAILURE_BACKOFF_MS = 60_000;
 /** Shared windows that gate every Claude request, whatever the model. */
 const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
 
@@ -237,11 +241,7 @@ async function waitBeforeRetry(
 	if (attempt >= MAX_ATTEMPTS - 1) return false;
 	try {
 		const delayMs = retryDelayMs(attempt, retryAfter);
-		if (retryWait) {
-			await retryWait(delayMs, signal);
-		} else {
-			await scheduler.wait(delayMs, { signal });
-		}
+		await waitForRetry(retryWait, delayMs, signal);
 		return !signal?.aborted;
 	} catch (error) {
 		if (isAbortError(error, signal)) return false;
@@ -546,14 +546,6 @@ function buildUsageLimit(args: {
 	};
 }
 
-function slugifyClaudeLimitDisplayName(displayName: string): string {
-	return displayName
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-}
-
 /**
  * Scoped weekly rows are per-model-family counters, not account-wide windows.
  * They deliberately leave `scope.shared` unset so credential-wide exhaustion
@@ -565,7 +557,7 @@ function buildScopedWeeklyUsageLimits(entries: readonly ParsedApiLimitEntry[]): 
 	const limits: UsageLimit[] = [];
 	for (const entry of entries) {
 		if (entry.kind !== "weekly_scoped" || !entry.displayName) continue;
-		const slug = slugifyClaudeLimitDisplayName(entry.displayName);
+		const slug = slugify(entry.displayName);
 		if (!slug || seenSlugs.has(slug)) continue;
 		seenSlugs.add(slug);
 		const limit = buildUsageLimit({
@@ -629,12 +621,19 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 	};
 }
 
+function claudeUsageToken(credential: UsageCredential): string | undefined {
+	if (credential.type === "oauth") return credential.accessToken;
+	const apiKey = credential.apiKey;
+	return apiKey && isAnthropicOAuthToken(apiKey) ? apiKey : undefined;
+}
+
 async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "anthropic") return null;
 	const credential = params.credential;
-	if (credential.type !== "oauth" || !credential.accessToken) return null;
+	const accessToken = claudeUsageToken(params.credential);
+	if (!accessToken) return null;
 
-	const headers = buildClaudeOAuthHeaders(credential.accessToken, { beta: CLAUDE_USAGE_BETAS });
+	const headers = buildClaudeOAuthHeaders(accessToken, { beta: CLAUDE_USAGE_BETAS });
 
 	let baseUrl: string | undefined;
 	let payload: ClaudeUsageResponse | null = null;
@@ -663,7 +662,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	const resetCreditList =
 		parseClaudeResetCreditsFromUsagePayload(payload, credential.orgId, baseUrl) ??
 		(await listClaudeResetCredits({
-			accessToken: credential.accessToken,
+			accessToken,
 			accountId: credential.accountId,
 			email: credential.email,
 			orgId: credential.orgId,
@@ -797,9 +796,10 @@ export const claudeUsageProvider: UsageProvider = {
 	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
 	// renewing those incomplete reports throughout the 24h last-good retention.
 	cacheVersion: 3,
+	failureBackoffMs: FAILURE_BACKOFF_MS,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
-	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
+	supports: params => params.provider === "anthropic" && !!claudeUsageToken(params.credential),
 };
 
 function getClaudeModelKind(context: CredentialRankingContext | undefined): ClaudeModelKind | undefined {

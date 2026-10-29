@@ -3,11 +3,19 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import {
+	buildSkillPromptMessage,
+	loadSkills,
+	resetActiveSkillsForTests,
+	setActiveSkills,
+	type Skill,
+} from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
 
 function makeSkillMd(name: string, dir: string) {
 	return `---\nname: ${name}\ndescription: ${name} skill.\n---\n\n# ${name} from ${dir}\n`;
@@ -49,6 +57,90 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		const resource = await handler.resolve(parseInternalUrl("skill://my-custom-skill/"));
 		expect(resource.sourcePath).toBe(path.join(skillDir, "SKILL.md"));
 		expect(resource.content).toContain(`from ${tempDir}`);
+	});
+
+	it("makes the helper location visible when one plugin skill reads another (#8740)", async () => {
+		const tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pi-cross-plugin-skills-")));
+		tempDirs.push(tempDir);
+		const skills: Skill[] = [];
+		for (const [plugin, name] of [
+			["plugin-a", "router-skill"],
+			["plugin-b", "helper-skill"],
+		]) {
+			const pluginRoot = path.join(tempDir, plugin);
+			const baseDir = path.join(pluginRoot, "skills", name);
+			await fs.mkdir(baseDir, { recursive: true });
+			const filePath = path.join(baseDir, "SKILL.md");
+			await Bun.write(filePath, makeSkillMd(name, plugin));
+			skills.push({
+				name,
+				description: name,
+				filePath,
+				baseDir,
+				source: "agent-plugins:user",
+				containRoot: pluginRoot,
+			});
+		}
+		const helper = skills[1];
+		await fs.mkdir(path.join(helper.baseDir, "scripts"));
+		await Bun.write(
+			path.join(helper.baseDir, "scripts", "helper.ts"),
+			'process.stdout.write("helper from plugin-b");',
+		);
+		await Bun.write(
+			helper.filePath,
+			`${makeSkillMd(helper.name, "plugin-b")}Run scripts/helper.ts next to this skill file.\n`,
+		);
+		setActiveSkills(skills);
+		const invocation = await buildSkillPromptMessage(skills[0], { args: "" });
+		expect(invocation.message).toContain(`[Skill directory: ${skills[0].baseDir}]`);
+		const session: ToolSession = {
+			cwd: skills[0].baseDir,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const result = await new ReadTool(session).execute("read-cross-plugin-helper", { path: "skill://helper-skill" });
+		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		// Consume the visible provenance, not renderer-only details, to locate the sibling.
+		const sourcePath = text.match(/\[Skill file: (.+)\]/)?.[1];
+		expect(sourcePath).toBe(helper.filePath);
+		const proc = Bun.spawn([process.execPath, path.join(path.dirname(sourcePath!), "scripts", "helper.ts")], {
+			cwd: skills[0].baseDir,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, output] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+		expect(exitCode).toBe(0);
+		expect(output).toBe("helper from plugin-b");
+		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "skill://helper-skill" });
+
+		// Out-of-range selectors have no displayContent; the TUI uses the first text block.
+		const outOfRangeArgs = { path: "skill://helper-skill:9999" };
+		const outOfRange = await new ReadTool(session).execute("read-cross-plugin-helper-out-of-range", outOfRangeArgs);
+		expect(outOfRange.details?.displayContent).toBeUndefined();
+		const firstText = outOfRange.content.find(block => block.type === "text")?.text;
+		expect(firstText).toContain(`[Skill file: ${helper.filePath}]`);
+		expect(firstText).toContain("Line 9999 is beyond end of file");
+		await initTheme(false, undefined, undefined, "dark", "light");
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("Failed to load dark theme");
+		for (const expanded of [false, true]) {
+			const rendered = readToolRenderer
+				.renderResult(outOfRange, { expanded, isPartial: false }, uiTheme, outOfRangeArgs)
+				.render(120)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(rendered).toContain("Line 9999 is beyond end of file");
+		}
+
+		// Raw reads remain verbatim for consumers using the skill URI as a file resource.
+		const raw = await new ReadTool(session).execute("read-cross-plugin-helper-raw", {
+			path: "skill://helper-skill:raw",
+		});
+		const rawText = raw.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(rawText).toBe(await Bun.file(helper.filePath).text());
 	});
 
 	it("reads semicolon-delimited lists across routed URL schemes", async () => {

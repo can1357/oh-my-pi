@@ -1,6 +1,6 @@
 //! Reusable text transforms shared by minimizer filters.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::NumBuffer};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapClass {
@@ -27,6 +27,14 @@ pub const fn reduced(cap: usize, by: usize) -> usize {
 	let reduced = cap.saturating_sub(by);
 	if reduced == 0 && cap > 0 { 1 } else { reduced }
 }
+
+/// Size up to which output the agent asked to read is returned whole.
+///
+/// Applies to patches, `jq` results and remote command output. Below it a
+/// lossy summary sends the agent to the raw artifact more often than it saves
+/// context: in recorded sessions, nearly half of the summarized `jq` results
+/// and `git diff`/`git show` patches were followed by a read of the raw output.
+pub const WHOLE_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// Remove ANSI CSI escape sequences while preserving line endings verbatim.
 #[must_use]
@@ -74,7 +82,7 @@ fn flush_repeated(out: &mut String, line: Option<&str>, count: usize) {
 	out.push_str(line);
 	if count > 1 {
 		out.push_str(" (×");
-		out.push_str(&count.to_string());
+		out.push_str(count.format_into(&mut NumBuffer::new()));
 		out.push(')');
 	}
 	out.push('\n');
@@ -87,6 +95,16 @@ pub fn head_tail_lines(input: &str, head: usize, tail: usize) -> String {
 	if lines.len() <= head + tail {
 		return input.to_string();
 	}
+	head_tail_of_lines(&lines, head, tail)
+}
+
+/// [`head_tail_lines`] over already-split lines; when nothing is elided the
+/// lines are joined back with `\n`.
+#[must_use]
+pub fn head_tail_of_lines(lines: &[&str], head: usize, tail: usize) -> String {
+	if lines.len() <= head + tail {
+		return lines.join("\n");
+	}
 	let omitted = lines.len() - head - tail;
 	let mut out = String::new();
 	for line in lines.iter().take(head) {
@@ -94,7 +112,7 @@ pub fn head_tail_lines(input: &str, head: usize, tail: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	for line in lines.iter().skip(lines.len() - tail) {
 		out.push_str(line);
@@ -154,7 +172,7 @@ pub fn group_by_file(input: &str, max_per_file: usize) -> String {
 		}
 		if entries.len() > max_per_file {
 			out.push_str("  … ");
-			out.push_str(&(entries.len() - max_per_file).to_string());
+			out.push_str((entries.len() - max_per_file).format_into(&mut NumBuffer::new()));
 			out.push_str(" more\n");
 		}
 	}
@@ -220,6 +238,31 @@ pub fn is_horizontal_rule(line: &str) -> bool {
 		&& line.chars().any(|ch| matches!(ch, '-' | '*' | '_'))
 }
 
+/// Append `line` verbatim followed by `\n`. Does not trim; callers that
+/// want trailing whitespace dropped pass `line.trim_end()` themselves.
+pub fn push_line(out: &mut String, line: &str) {
+	out.push_str(line);
+	out.push('\n');
+}
+
+/// Whether `text` has any non-whitespace line.
+#[must_use]
+pub fn has_content(text: &str) -> bool {
+	text.lines().any(|line| !line.trim().is_empty())
+}
+
+/// Join lines with `\n` and terminate with a trailing newline; empty input
+/// stays empty rather than becoming a lone `\n`.
+#[must_use]
+pub fn join_lines<S: std::borrow::Borrow<str>>(lines: &[S]) -> String {
+	if lines.is_empty() {
+		return String::new();
+	}
+	let mut out = lines.join("\n");
+	out.push('\n');
+	out
+}
+
 /// Compact a long plain listing to head/tail form.
 #[must_use]
 pub fn compact_listing(input: &str, max_lines: usize) -> String {
@@ -231,7 +274,7 @@ pub fn compact_listing(input: &str, max_lines: usize) -> String {
 		return input.to_string();
 	}
 	let mut out = String::new();
-	out.push_str(&lines.len().to_string());
+	out.push_str(lines.len().format_into(&mut NumBuffer::new()));
 	out.push_str(" entries\n");
 	for line in lines.iter().take(max_lines / 2) {
 		out.push_str(line);
@@ -293,7 +336,7 @@ pub fn head_lines_only(input: &str, head: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	out
 }
@@ -308,7 +351,7 @@ pub fn tail_lines_only(input: &str, tail: usize) -> String {
 	let omitted = lines.len() - tail;
 	let mut out = String::new();
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	for line in lines.iter().skip(omitted) {
 		out.push_str(line);
@@ -331,7 +374,7 @@ pub fn max_lines(input: &str, max: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&dropped.to_string());
+	out.push_str(dropped.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	out
 }

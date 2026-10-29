@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isUserInterruptAbort,
 	isCustomMessageContent,
@@ -14,6 +14,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -86,6 +87,8 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+/** Max chars kept from each anchored user request in the replan title context. */
+const REPLAN_TITLE_ANCHOR_CHARS = 400;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -96,7 +99,13 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	for (const block of message.content) {
 		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
 		if (block.type === "thinking") {
-			content.push({ type: "thinking", thinking: block.thinking });
+			// Signatures are replay-bound and go; summary and narration state are provenance and stay.
+			content.push({
+				type: "thinking",
+				thinking: block.thinking,
+				...(block.summary !== undefined && { summary: block.summary }),
+				...(block.narration && { narration: true }),
+			});
 			continue;
 		}
 		content.push(block);
@@ -106,9 +115,9 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 
 /**
  * Collapses degenerate repeated lines and bounds an ephemeral side-channel
- * reply to 4 KiB.
+ * reply to `maxBytes` (4 KiB unless the caller reads replies in full).
  */
-export function dedupeEphemeralReply(text: string): string {
+export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MAX_BYTES): string {
 	if (!text) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -124,39 +133,73 @@ export function dedupeEphemeralReply(text: string): string {
 		}
 		i = j;
 	}
-	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > EPHEMERAL_REPLY_MAX_BYTES) {
-		const suffix = "\n[…truncated]";
-		const budget = EPHEMERAL_REPLY_MAX_BYTES - Buffer.byteLength(suffix, "utf8");
-		while (Buffer.byteLength(result, "utf8") > budget) {
-			result = result.slice(0, -1);
-		}
-		result += suffix;
-	}
-	return result;
-}
-
-/** Builds the recent user/assistant context supplied to title regeneration. */
-export function buildReplanTitleContext(messages: AgentMessage[]): string {
-	const turns: TitleConversationTurn[] = [];
-	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
-		const message = messages[i];
-		if (!message) continue;
-		const turn = titleConversationTurnFromMessage(message);
-		if (turn) turns.push(turn);
-	}
-	turns.reverse();
-	return formatTitleConversationContext(turns);
+	const result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") <= maxBytes) return result;
+	const bytes = Buffer.from(result, "utf8");
+	const suffix = "\n[…truncated]";
+	// Cut on a UTF-8 character boundary: back off continuation bytes (10xxxxxx)
+	// so a multi-byte character straddling the budget is dropped whole.
+	let cut = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+	return bytes.toString("utf8", 0, cut) + suffix;
 }
 
 /**
- * True when a settled assistant message contributes reply text or thinking to
- * {@link buildReplanTitleContext}. Deferred auto-titling waits for one before
- * retitling from conversation context; aborted/errored turns do not count.
+ * Builds the recent user/assistant context supplied to title regeneration.
+ * The session's opening request and the latest user request always lead the
+ * context: in a long tool loop the recent window is all assistant notes, and
+ * follow-ups ("fix all") rarely restate the goal, so without them title models
+ * name the current micro-step (a file or symbol) instead of the session goal.
  */
-export function isTitleContextReply(message: AssistantMessage): boolean {
-	if (message.stopReason === "aborted" || message.stopReason === "error") return false;
-	return textFromContent(message.content) !== "" || thinkingFromContent(message.content) !== "";
+export function buildReplanTitleContext(messages: AgentMessage[]): string {
+	const recent: TitleConversationTurn[] = [];
+	let i = messages.length - 1;
+	for (; i >= 0 && recent.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
+		const message = messages[i];
+		if (!message) continue;
+		const turn = titleConversationTurnFromMessage(message);
+		if (turn) recent.push(turn);
+	}
+	recent.reverse();
+	// Earlier user turns outside the window, oldest first.
+	const earlierUsers: TitleConversationTurn[] = [];
+	for (let j = 0; j <= i; j++) {
+		const message = messages[j];
+		const turn = message && titleConversationTurnFromMessage(message);
+		if (turn?.role === "user") earlierUsers.push(turn);
+	}
+	const anchors: TitleConversationTurn[] = [];
+	const opening = earlierUsers[0];
+	if (opening) anchors.push(opening);
+	const latest = earlierUsers.at(-1);
+	if (latest && latest !== opening && !recent.some(turn => turn.role === "user")) anchors.push(latest);
+	// Bound anchors so a long pasted request cannot crowd the recent turns out
+	// of the shared truncation budget.
+	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
+	return formatTitleConversationContext([...bounded, ...recent]);
+}
+
+/**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
+}
+
+/**
+ * Words of thinking plus reply text a settled assistant message contributes to
+ * {@link buildReplanTitleContext}. Deferred auto-titling accumulates these and
+ * retitles once the assistant has said enough to reveal the task; aborted and
+ * errored turns count zero.
+ */
+export function titleContextWordCount(message: AssistantMessage): number {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return 0;
+	const text = `${thinkingFromContent(message.content)} ${textFromContent(message.content)}`;
+	return text.match(/\S+/g)?.length ?? 0;
 }
 
 /**
@@ -353,6 +396,9 @@ export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
+
+/** Custom message type carrying a completed rewind's report into model context. */
+export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
 
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
@@ -682,6 +728,11 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 	return { ...userMessage, content };
 }
 
+// One wrapper per steering message. Per-request transforms key on identity (the
+// date/cwd reminder treats an unseen user turn as new), so a fresh wrapper each
+// request would read as a never-sent turn. Owner edits evict it below.
+const steeringWrapperCache = new WeakMap<AgentMessage, UserMessage>();
+
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	// Wrap EVERY steering message, not just a trailing run. The wire bytes of a
 	// steering message must be a pure function of the message itself, independent
@@ -693,7 +744,11 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
-		const wrappedMessage = wrapSteeringUserMessage(message);
+		let wrappedMessage = steeringWrapperCache.get(message);
+		if (wrappedMessage === undefined) {
+			wrappedMessage = wrapSteeringUserMessage(message);
+			steeringWrapperCache.set(message, wrappedMessage);
+		}
 		if (wrappedMessage === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
@@ -999,6 +1054,7 @@ export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void
 }
 
 registerMessageCacheInvalidator(message => {
+	steeringWrapperCache.delete(message);
 	convertCache.delete(message);
 	convertGeneration++;
 });
@@ -1135,6 +1191,55 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
+/**
+ * Converts `messages[index]` with its neighbor-sensitive state.
+ * {@link convertToLlm} and {@link convertMessagesForContextView} both go
+ * through here so the viewer cannot drift from the per-message conversion that
+ * gets sent; a filter or reorder added outside this helper must be mirrored in
+ * both.
+ */
+function convertMessageAt(
+	messages: AgentMessage[],
+	index: number,
+	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
+): Message[] {
+	const m = messages[index];
+	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+}
+
+/** A converted viewer message and its position in the source and converted histories. */
+export interface ContextViewMessage {
+	message: Message;
+	sourceIndex: number;
+	convertedIndex: number;
+}
+
+/**
+ * Convert history for inspection without reading or populating the per-message
+ * and array conversion caches. Steering messages show the envelope
+ * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
+ * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
+ * through {@link convertMessageAt}, then drops API-level provider refusals
+ * like the send path's `filterProviderReplayMessages`, since they are never
+ * replayed.
+ *
+ * Kept separate from `convertToLlm` because the viewer needs source indices:
+ * reporting them from `convertToLlm` would add a per-message callback and
+ * disable its cache shortcuts, a cost every request would pay even when
+ * `/context` is never opened.
+ */
+export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+	const modelMessages = wrapSteeringForModel(messages);
+	const result: ContextViewMessage[] = [];
+	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
+		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
+			result.push({ message, sourceIndex, convertedIndex: result.length });
+		}
+	}
+	return result;
+}
+
 /** Cached per-message conversion. Reuses the stored fragment while identity and
  *  `interruptedNext` neighbor state hold; recomputes on a neighbor flip. */
 function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] {
@@ -1144,6 +1249,11 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
+}
+
+/** A turn the user wrote: a user message, or a user-initiated custom prompt (`/skill:`, collab). */
+export function isUserAuthoredMessage(message: AgentMessage): boolean {
+	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
 /**
@@ -1159,6 +1269,10 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
  * unchanged re-convert of the same array hands back the same outer `Message[]`.
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
+ *
+ * {@link convertMessagesForContextView} mirrors this loop through
+ * {@link convertMessageAt}; it stays separate so the index mapping `/context`
+ * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
@@ -1202,9 +1316,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const m = messages[i];
-		const interruptedNext = m.role === "assistant" && followedByInterruptedThinking(messages, i);
-		const fragment = convertOneCached(m, interruptedNext);
+		const fragment = convertMessageAt(messages, i, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;

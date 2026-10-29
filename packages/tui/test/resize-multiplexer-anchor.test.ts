@@ -6,6 +6,7 @@ import {
 	TUI,
 	type ViewportSize,
 } from "@oh-my-pi/pi-tui";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
 // Regression coverage for tmux pane zoom corrupting scrollback (duplication and
@@ -82,29 +83,12 @@ class ResizeScheduler {
 	}
 }
 
-// Every signal isInsideTerminalMultiplexer() recognizes; the suite itself may
-// run under tmux, screen, Zellij, CMUX, or Herdr, so direct-terminal describes
-// must clear them all (TERM prefixed tmux-/screen- also flags a multiplexer).
-const MUX_SIGNALS = [
-	"TMUX",
-	"STY",
-	"ZELLIJ",
-	"HERDR_ENV",
-	"HERDR_PANE_ID",
-	"HERDR_TAB_ID",
-	"HERDR_WORKSPACE_ID",
-	"CMUX_WORKSPACE_ID",
-	"CMUX_SURFACE_ID",
-	"CMUX_REMOTE_TRANSPORT",
-	"WMUX",
-	"WMUX_SURFACE_ID",
-	"TERM",
-	"TERM_PROGRAM",
-	"PI_TUI_RESIZE_IN_PLACE",
-] as const;
+// Every signal multiplexer classification reads; the suite itself may run under
+// any recognized multiplexer, so direct-terminal tests must clear them all.
+const MUX_SIGNALS = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
 
 function useDirectTerminalEnv() {
-	let saved: Partial<Record<(typeof MUX_SIGNALS)[number], string | undefined>>;
+	let saved: Record<string, string | undefined>;
 	beforeEach(() => {
 		saved = {};
 		for (const key of MUX_SIGNALS) {
@@ -205,6 +189,27 @@ describe("resize anchoring inside a terminal multiplexer", () => {
 		expect(cup).not.toBeNull();
 		expect(Number(cup![1])).toBe(6);
 		tui.stop();
+	});
+
+	it("waits for the new height when tmux answers from a grid taller than the application's cached size", () => {
+		const { terminal, tui, renderScheduler, writes } = startRig();
+		try {
+			terminal.resize(40, 20);
+			renderScheduler.settle();
+			writes.length = 0;
+			// tmux has grown again but throttles the corresponding SIGWINCH.
+			// Painting this cursor row using height 20 would erase the newly
+			// revealed history and leave the editor above a large blank band.
+			terminal.sendInput("\x1b[35;17R");
+			expect(writes).toEqual([]);
+			terminal.resize(40, 40);
+			renderScheduler.settle();
+			writes.length = 0;
+			terminal.sendInput("\x1b[35;18R");
+			expect(writes.join("")).toContain("\x1b[35;1H");
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("accounts for tmux width reflow in the CPR offset math", () => {

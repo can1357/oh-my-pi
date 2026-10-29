@@ -1,15 +1,16 @@
-"""Repository rule detecting the Swift toolchain for the Apple Foundation Models bridge.
+"""Repository rule detecting the mac host's Swift toolchain for the Apple Foundation Models bridge.
 
 Runs `crates/pi-natives/src/applefm/build-bridge.sh detect` on the host and
-materializes the result so the `applefm_bridge` genrule sees the toolchain as
-an input:
+materializes the result for the mac exec host toolchain (//bazel/toolchains/swift:host)
+the `applefm_bridge` rule resolves; linux exec hosts use the pinned swift.org
+toolchain instead (linux.bzl):
 
     toolchain.txt   "<swiftc>\\t<sdk>\\t<fingerprint>", empty when no Swift 6.4+
                     toolchain with the macOS 27 SDK exists (the bridge is then
                     an empty file, reported as not built)
 
 Caching: the fingerprint (compiler version + SDK build) is part of the
-genrule's inputs, so action and remote caches never reuse a bridge built by a
+bridge action's inputs, so action and remote caches never reuse a bridge built by a
 different toolchain, and an unchanged toolchain never recompiles. The rule
 re-runs when the selection env vars (tracked through `getenv`) or the watched
 compiler/SDK files change, and on `bazel fetch --configure`.

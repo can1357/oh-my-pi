@@ -261,13 +261,22 @@ fn diff_main(files: &[OsString], opts: Options<'_>, host: &mut Host) -> Result<i
 		}
 	}
 
+	// Every diff line goes through one stdout writer (one write per line on
+	// pipes, block-buffered for files) rather than one raw write per
+	// formatted piece.
+	let mut out = host.stdout_writer();
 	let differed = if let (Operand::Dir(res_a), Operand::Dir(res_b)) = (&op_a, &op_b) {
-		diff_dirs(&name_a, res_a, &name_b, res_b, opts, host)?
+		diff_dirs(&name_a, res_a, &name_b, res_b, opts, host, &mut out)
 	} else {
-		let (bytes_a, mtime_a) = read_operand(&op_a, &name_a, host)?;
-		let (bytes_b, mtime_b) = read_operand(&op_b, &name_b, host)?;
-		diff_pair(&name_a, &bytes_a, mtime_a, &name_b, &bytes_b, mtime_b, opts, None, host)?
+		read_operand(&op_a, &name_a, host).and_then(|(bytes_a, mtime_a)| {
+			let (bytes_b, mtime_b) = read_operand(&op_b, &name_b, host)?;
+			diff_pair(&name_a, &bytes_a, mtime_a, &name_b, &bytes_b, mtime_b, opts, None, &mut out)
+		})
 	};
+	// Output before a failure still lands, ahead of the error message.
+	let flushed = out.flush().map_err(|e| strip_errno(&e));
+	let differed = differed?;
+	flushed?;
 	Ok(i32::from(differed))
 }
 
@@ -408,10 +417,10 @@ fn is_suppressed(
 	norm_a[op.old_range()].iter().all(blank) && norm_b[op.new_range()].iter().all(blank)
 }
 
-/// Writes one line to the builtin's stdout, mapping I/O failures like the
-/// rest of this module.
-fn wline(host: &mut Host, line: std::fmt::Arguments<'_>) -> Result<(), String> {
-	writeln!(host.stdout, "{line}").map_err(|e| strip_errno(&e))
+/// Writes one line to the builtin's stdout writer, mapping I/O failures like
+/// the rest of this module.
+fn wline(out: &mut impl Write, line: std::fmt::Arguments<'_>) -> Result<(), String> {
+	writeln!(out, "{line}").map_err(|e| strip_errno(&e))
 }
 
 /// Diffs one pair of already-read inputs. `prefix` is the `diff -r A/x B/x`
@@ -426,21 +435,21 @@ fn diff_pair(
 	mtime_b: Option<SystemTime>,
 	opts: Options<'_>,
 	prefix: Option<&str>,
-	host: &mut Host,
+	out: &mut impl Write,
 ) -> Result<bool, String> {
 	let label_a = display_label(opts.labels.first(), name_a);
 	let label_b = display_label(opts.labels.get(1), name_b);
 	if bytes_a == bytes_b {
 		if opts.report_identical {
-			wline(host, format_args!("Files {label_a} and {label_b} are identical"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} are identical"))?;
 		}
 		return Ok(false);
 	}
 	if is_binary(bytes_a) || is_binary(bytes_b) {
 		if opts.brief {
-			wline(host, format_args!("Files {label_a} and {label_b} differ"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} differ"))?;
 		} else {
-			wline(host, format_args!("Binary files {label_a} and {label_b} differ"))?;
+			wline(out, format_args!("Binary files {label_a} and {label_b} differ"))?;
 		}
 		return Ok(true);
 	}
@@ -457,28 +466,28 @@ fn diff_pair(
 	// files count as identical, exit 0.
 	if !ops.iter().zip(&suppressed).any(|(op, &sup)| op.tag() != DiffTag::Equal && !sup) {
 		if opts.report_identical {
-			wline(host, format_args!("Files {label_a} and {label_b} are identical"))?;
+			wline(out, format_args!("Files {label_a} and {label_b} are identical"))?;
 		}
 		return Ok(false);
 	}
 	if opts.brief {
-		wline(host, format_args!("Files {label_a} and {label_b} differ"))?;
+		wline(out, format_args!("Files {label_a} and {label_b} differ"))?;
 		return Ok(true);
 	}
 	if let Some(line) = prefix {
-		wline(host, format_args!("{line}"))?;
+		wline(out, format_args!("{line}"))?;
 	}
 	match opts.format {
-		Format::Normal => write_normal(host, &ops, &suppressed, &old, &new)?,
+		Format::Normal => write_normal(out, &ops, &suppressed, &old, &new)?,
 		Format::Unified(context) => {
-			wline(host, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(host, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
-			write_unified(host, &ops, &suppressed, &old, &new, context)?;
+			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
+			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			write_unified(out, &ops, &suppressed, &old, &new, context)?;
 		},
 		Format::Context(context) => {
-			wline(host, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(host, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
-			write_context_format(host, &ops, &suppressed, &old, &new, context)?;
+			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
+			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			write_context_format(out, &ops, &suppressed, &old, &new, context)?;
 		},
 	}
 	Ok(true)
@@ -509,15 +518,15 @@ fn timestamp(mtime: Option<SystemTime>) -> String {
 /// Writes `range` lines of `file` prefixed with `marker`, emitting the GNU
 /// `\ No newline at end of file` marker after the file's final line.
 fn write_marked(
-	host: &mut Host,
+	out: &mut impl Write,
 	marker: &str,
 	range: Range<usize>,
 	file: &FileLines<'_>,
 ) -> Result<(), String> {
 	for idx in range {
-		wline(host, format_args!("{marker}{}", file.lines[idx]))?;
+		wline(out, format_args!("{marker}{}", file.lines[idx]))?;
 		if idx + 1 == file.lines.len() && file.missing_newline {
-			wline(host, format_args!("\\ No newline at end of file"))?;
+			wline(out, format_args!("\\ No newline at end of file"))?;
 		}
 	}
 	Ok(())
@@ -534,7 +543,7 @@ fn normal_range(range: &Range<usize>) -> String {
 
 /// Default diff output: `3c3` / `<` / `---` / `>` change commands.
 fn write_normal(
-	host: &mut Host,
+	out: &mut impl Write,
 	ops: &[DiffOp],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
@@ -549,21 +558,21 @@ fn write_normal(
 			DiffTag::Delete => {
 				// `5d4`: the trailing number is the new-file line *after which*
 				// the deleted lines would have appeared (0 for a leading delete).
-				wline(host, format_args!("{}d{}", normal_range(&old_range), new_range.start))?;
-				write_marked(host, "< ", old_range, old)?;
+				wline(out, format_args!("{}d{}", normal_range(&old_range), new_range.start))?;
+				write_marked(out, "< ", old_range, old)?;
 			},
 			DiffTag::Insert => {
-				wline(host, format_args!("{}a{}", old_range.start, normal_range(&new_range)))?;
-				write_marked(host, "> ", new_range, new)?;
+				wline(out, format_args!("{}a{}", old_range.start, normal_range(&new_range)))?;
+				write_marked(out, "> ", new_range, new)?;
 			},
 			DiffTag::Replace => {
 				wline(
-					host,
+					out,
 					format_args!("{}c{}", normal_range(&old_range), normal_range(&new_range)),
 				)?;
-				write_marked(host, "< ", old_range, old)?;
-				wline(host, format_args!("---"))?;
-				write_marked(host, "> ", new_range, new)?;
+				write_marked(out, "< ", old_range, old)?;
+				wline(out, format_args!("---"))?;
+				write_marked(out, "> ", new_range, new)?;
 			},
 			DiffTag::Equal => unreachable!(),
 		}
@@ -616,7 +625,7 @@ fn unified_range(start: usize, count: usize) -> String {
 }
 
 fn write_unified(
-	host: &mut Host,
+	out: &mut impl Write,
 	ops: &[DiffOp],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
@@ -630,27 +639,27 @@ fn write_unified(
 		let old_count = ops[last].old_range().end + trail - old_start;
 		let new_count = ops[last].new_range().end + trail - new_start;
 		wline(
-			host,
+			out,
 			format_args!(
 				"@@ -{} +{} @@",
 				unified_range(old_start, old_count),
 				unified_range(new_start, new_count)
 			),
 		)?;
-		write_marked(host, " ", old_start..ops[first].old_range().start, old)?;
+		write_marked(out, " ", old_start..ops[first].old_range().start, old)?;
 		for op in &ops[first..=last] {
 			match op.tag() {
-				DiffTag::Equal => write_marked(host, " ", op.old_range(), old)?,
-				DiffTag::Delete => write_marked(host, "-", op.old_range(), old)?,
-				DiffTag::Insert => write_marked(host, "+", op.new_range(), new)?,
+				DiffTag::Equal => write_marked(out, " ", op.old_range(), old)?,
+				DiffTag::Delete => write_marked(out, "-", op.old_range(), old)?,
+				DiffTag::Insert => write_marked(out, "+", op.new_range(), new)?,
 				DiffTag::Replace => {
-					write_marked(host, "-", op.old_range(), old)?;
-					write_marked(host, "+", op.new_range(), new)?;
+					write_marked(out, "-", op.old_range(), old)?;
+					write_marked(out, "+", op.new_range(), new)?;
 				},
 			}
 		}
 		let tail = ops[last].old_range().end;
-		write_marked(host, " ", tail..tail + trail, old)?;
+		write_marked(out, " ", tail..tail + trail, old)?;
 	}
 	Ok(())
 }
@@ -665,7 +674,7 @@ fn context_range(start: usize, count: usize) -> String {
 }
 
 fn write_context_format(
-	host: &mut Host,
+	out: &mut impl Write,
 	ops: &[DiffOp],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
@@ -679,35 +688,35 @@ fn write_context_format(
 		let old_count = ops[last].old_range().end + trail - old_start;
 		let new_count = ops[last].new_range().end + trail - new_start;
 		let group = &ops[first..=last];
-		wline(host, format_args!("***************"))?;
-		wline(host, format_args!("*** {} ****", context_range(old_start, old_count)))?;
+		wline(out, format_args!("***************"))?;
+		wline(out, format_args!("*** {} ****", context_range(old_start, old_count)))?;
 		// GNU omits a side's body entirely when it has no changes.
 		if group.iter().any(|op| matches!(op.tag(), DiffTag::Delete | DiffTag::Replace)) {
-			write_marked(host, "  ", old_start..ops[first].old_range().start, old)?;
+			write_marked(out, "  ", old_start..ops[first].old_range().start, old)?;
 			for op in group {
 				match op.tag() {
-					DiffTag::Equal => write_marked(host, "  ", op.old_range(), old)?,
-					DiffTag::Delete => write_marked(host, "- ", op.old_range(), old)?,
-					DiffTag::Replace => write_marked(host, "! ", op.old_range(), old)?,
+					DiffTag::Equal => write_marked(out, "  ", op.old_range(), old)?,
+					DiffTag::Delete => write_marked(out, "- ", op.old_range(), old)?,
+					DiffTag::Replace => write_marked(out, "! ", op.old_range(), old)?,
 					DiffTag::Insert => {},
 				}
 			}
 			let tail = ops[last].old_range().end;
-			write_marked(host, "  ", tail..tail + trail, old)?;
+			write_marked(out, "  ", tail..tail + trail, old)?;
 		}
-		wline(host, format_args!("--- {} ----", context_range(new_start, new_count)))?;
+		wline(out, format_args!("--- {} ----", context_range(new_start, new_count)))?;
 		if group.iter().any(|op| matches!(op.tag(), DiffTag::Insert | DiffTag::Replace)) {
-			write_marked(host, "  ", new_start..ops[first].new_range().start, new)?;
+			write_marked(out, "  ", new_start..ops[first].new_range().start, new)?;
 			for op in group {
 				match op.tag() {
-					DiffTag::Equal => write_marked(host, "  ", op.new_range(), new)?,
-					DiffTag::Insert => write_marked(host, "+ ", op.new_range(), new)?,
-					DiffTag::Replace => write_marked(host, "! ", op.new_range(), new)?,
+					DiffTag::Equal => write_marked(out, "  ", op.new_range(), new)?,
+					DiffTag::Insert => write_marked(out, "+ ", op.new_range(), new)?,
+					DiffTag::Replace => write_marked(out, "! ", op.new_range(), new)?,
 					DiffTag::Delete => {},
 				}
 			}
 			let tail = ops[last].new_range().end;
-			write_marked(host, "  ", tail..tail + trail, new)?;
+			write_marked(out, "  ", tail..tail + trail, new)?;
 		}
 	}
 	Ok(())
@@ -739,6 +748,7 @@ fn diff_dirs(
 	res_b: &Path,
 	opts: Options<'_>,
 	host: &mut Host,
+	out: &mut impl Write,
 ) -> Result<bool, String> {
 	let mut names: BTreeSet<OsString> = BTreeSet::new();
 	for (dir_name, dir_res) in [(name_a, res_a), (name_b, res_b)] {
@@ -777,10 +787,11 @@ fn diff_dirs(
 						&child_res_b,
 						opts,
 						host,
+						out,
 					)?;
 				} else {
 					wline(
-						host,
+						out,
 						format_args!(
 							"Common subdirectories: {} and {}",
 							child_name_a.display(),
@@ -796,7 +807,7 @@ fn diff_dirs(
 					(&child_name_b, &child_name_a)
 				};
 				wline(
-					host,
+					out,
 					format_args!(
 						"File {} is a directory while file {} is a regular file",
 						dir.display(),
@@ -824,7 +835,7 @@ fn diff_dirs(
 					mb.modified().ok(),
 					opts,
 					Some(&prefix),
-					host,
+					out,
 				)?;
 			},
 			(Some(meta), None) | (None, Some(meta)) => {
@@ -856,12 +867,12 @@ fn diff_dirs(
 						mtb,
 						opts,
 						Some(&prefix),
-						host,
+						out,
 					)?;
 				} else {
 					let present_dir = if in_a { name_a } else { name_b };
 					wline(
-						host,
+						out,
 						format_args!(
 							"Only in {}: {}",
 							present_dir.display(),

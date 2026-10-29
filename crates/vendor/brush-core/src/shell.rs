@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::{
 	ExecutionControlFlow, ExecutionResult, builtins, env::ShellEnvironment, error, extensions,
-	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache,
+	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache, sys,
 	wellknownvars,
 };
 
@@ -93,6 +93,9 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// TODO(serde): Need to warn somehow that jobs cannot be serialized.
 	#[cfg_attr(feature = "serde", serde(skip))]
 	jobs: jobs::JobManager,
+	/// PID of the most recently started async child in this shell's scope.
+	/// Cloned into subshells without transferring ownership of the job.
+	last_background_pid: Option<sys::process::ProcessId>,
 
 	/// Shell aliases.
 	aliases: HashMap<String, String>,
@@ -158,6 +161,13 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Resource limits applied to spawned external commands (`ulimit`).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	resource_limits: crate::rlimits::ResourceLimits,
+
+	/// File mode creation mask set by `umask`; `None` inherits the host
+	/// process's. Like the resource limits it never touches the host process:
+	/// it reaches external commands between fork and exec and files created
+	/// through the shell's filesystem (see [`Shell::set_umask`]).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	umask: Option<u32>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -172,6 +182,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
 			jobs: jobs::JobManager::new(),
+			last_background_pid: self.last_background_pid,
 			aliases: self.aliases.clone(),
 			last_exit_status: self.last_exit_status,
 			last_exit_status_change_count: self.last_exit_status_change_count,
@@ -198,6 +209,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			key_bindings: self.key_bindings.clone(),
 			history: self.history.clone(),
 			resource_limits: self.resource_limits.clone(),
+			umask: self.umask,
 			depth: self.depth + 1,
 		}
 	}
@@ -291,6 +303,21 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		&mut self.resource_limits
 	}
 
+	/// Returns the file mode creation mask set by `umask`, or `None` while the
+	/// shell still inherits the host process's.
+	pub const fn umask(&self) -> Option<u32> {
+		self.umask
+	}
+
+	/// Sets the shell's file mode creation mask. The host process umask is left
+	/// alone: the mask is applied to each external command between fork and
+	/// exec, and to files created through the shell's filesystem, which keeps
+	/// it across later [`Shell::set_filesystem`] calls.
+	pub fn set_umask(&mut self, mask: u32) {
+		self.umask = Some(mask);
+		self.filesystem = self.filesystem.with_creation_mask(Some(mask));
+	}
+
 	/// Increments the interactive line offset in the shell by the indicated
 	/// number of lines.
 	///
@@ -381,6 +408,18 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {
 		self.last_exit_status_change_count
+	}
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// PID of the last asynchronous child, including one inherited by a subshell.
+	pub(crate) fn last_background_pid(&self) -> Option<sys::process::ProcessId> {
+		self.last_background_pid
+	}
+
+	/// Records the last asynchronous child launched in this shell's scope.
+	pub(crate) fn set_last_background_pid(&mut self, pid: Option<sys::process::ProcessId>) {
+		self.last_background_pid = pid;
 	}
 }
 
@@ -571,7 +610,10 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	/// effect for subsequent operations; files already open stay bound to the
 	/// filesystem that opened them.
 	pub fn set_filesystem(&mut self, filesystem: pi_vfs::Fs) {
-		self.filesystem = filesystem;
+		self.filesystem = match self.umask {
+			Some(mask) => filesystem.with_creation_mask(Some(mask)),
+			None => filesystem,
+		};
 	}
 
 	/// Returns the shell's current working directory.

@@ -1,39 +1,14 @@
-/**
- * Integration regressions for the two codex saved-reset TRIGGERS — the wiring
- * the pure planner tests cannot cover:
- *
- * - A live 429 driven through the real retry pipeline (`AgentSession.prompt` →
- *   usage-limit classification → `markUsageLimitReached` (no sibling) →
- *   auto-redeem hook → `redeemResetCredit` → immediate retry). The usage
- *   report is deliberately a PRE-BLOCK snapshot (`limitReached: false`,
- *   healthy windows) — the original catch-22 that kept the feature from ever
- *   firing — so success proves the live 429's parsed unblock timestamp drives
- *   the decision.
- * - A stale-ZERO `/wham/usage` credit count corrected by the live
- *   `rate-limit-reset-credits` overlay (the usage provider never fixes a zero
- *   itself — it only consults the detail route on positive counts).
- * - The usage-fetch heartbeat (`AgentSession.fetchUsageReports`, what the
- *   status line polls) sweeping an expiring credit on a 5h-only exhausted
- *   account (the openai/codex#28525 shape), including once-per-episode
- *   idempotency across repeated heartbeats and headless `unset` consent.
- *
- * Provider IO is stubbed at the AuthStorage seam (`fetchUsageReports`,
- * `listResetCredits`, `redeemResetCredit`, `getOAuthAccountIdentity`);
- * everything in between — session hook, planner wiring, coordinator state,
- * sweep scheduling — is real. Each test injects its own coordinator, so the
- * process-wide default is never touched.
- */
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { createAcpExtensionUiContext } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -41,29 +16,28 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { getTestModel } from "./helpers/model-fixtures";
 
-const ACCOUNT_ID = "acct-1";
 const EMAIL = "user@example.com";
-const HOUR = 3_600_000;
-
-// 3 days — weekly-scale, parsed by the retry pipeline's retry-after parser.
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const CODEX_USAGE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
 
-interface CodexReportOpts {
-	primaryUsed: number;
+interface CodexAccount {
+	accountId: string;
+	credentialId: number;
 	weeklyUsed: number;
 	limitReached: boolean;
-	credits: number;
-	creditExpiresInMs?: number;
-	accountId?: string;
+	creditExpiresInMs: number;
 }
 
-/** A fresh openai-codex usage report for the stubbed account. */
-function codexReport(opts: CodexReportOpts): UsageReport {
+function codexReport(account: CodexAccount): UsageReport {
 	const now = Date.now();
-	const accountId = opts.accountId ?? ACCOUNT_ID;
+	const scope = { provider: "openai-codex", accountId: account.accountId };
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
@@ -71,68 +45,57 @@ function codexReport(opts: CodexReportOpts): UsageReport {
 			{
 				id: "openai-codex:primary",
 				label: "5 Hour",
-				scope: { provider: "openai-codex", accountId },
+				scope,
 				window: { id: "5h", label: "5 Hour", resetsAt: now + 2 * HOUR },
-				amount: { usedFraction: opts.primaryUsed, unit: "percent" },
+				amount: { usedFraction: 0.1, unit: "percent" },
 			},
 			{
 				id: "openai-codex:secondary",
 				label: "Weekly",
-				scope: { provider: "openai-codex", accountId },
+				scope,
 				window: { id: "7d", label: "Weekly", resetsAt: now + 3 * 24 * HOUR },
-				amount: { usedFraction: opts.weeklyUsed, unit: "percent" },
+				amount: { usedFraction: account.weeklyUsed, unit: "percent" },
 			},
 		],
-		resetCredits: {
-			availableCount: opts.credits,
-			credits:
-				opts.creditExpiresInMs === undefined
-					? undefined
-					: [{ status: "available", expiresAt: new Date(now + opts.creditExpiresInMs).toISOString() }],
-		},
-		metadata: { accountId, email: EMAIL, limitReached: opts.limitReached },
+		metadata: { accountId: account.accountId, email: EMAIL, limitReached: account.limitReached },
 	};
 }
 
-/** Live credits-route row for the stubbed account, as the overlay consumes it. */
-function liveCreditStatus(
-	availableCount: number,
-	expiresInMs?: number,
-	accountId: string = ACCOUNT_ID,
-): ResetCreditAccountStatus {
+function liveCreditStatus(account: CodexAccount, active: boolean): ResetCreditAccountStatus {
 	return {
 		provider: "openai-codex",
-		credentialId: 1,
-		accountId,
+		credentialId: account.credentialId,
+		accountId: account.accountId,
 		email: EMAIL,
-		active: true,
-		availableCount,
-		credits:
-			expiresInMs === undefined
-				? []
-				: [{ id: "credit-1", status: "available", expiresAt: new Date(Date.now() + expiresInMs).toISOString() }],
+		active,
+		availableCount: 1,
+		credits: [
+			{
+				id: `credit-${account.credentialId}`,
+				status: "available",
+				expiresAt: new Date(Date.now() + account.creditExpiresInMs).toISOString(),
+			},
+		],
 	};
 }
 
-describe("codex saved-reset trigger integration", () => {
+describe("Codex saved-reset consent without a prompt UI", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
-	let lockRoot: string;
-	let extraStorages: AuthStorage[];
+	let tempDir: TempDir;
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	});
 
-	beforeEach(async () => {
-		lockRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-reset-"));
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+	beforeEach(() => {
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		sessions = [];
 		managers = [];
-		extraStorages = [];
+		tempDir = TempDir.createSync("@pi-codex-reset-");
 	});
 
 	afterEach(async () => {
@@ -142,42 +105,37 @@ describe("codex saved-reset trigger integration", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
+		tempDir.removeSync();
 		vi.restoreAllMocks();
-		for (const storage of extraStorages) storage.close();
-		await fs.rm(lockRoot, { recursive: true, force: true });
 	});
 
 	afterAll(() => {
 		authStorage.close();
 	});
 
-	interface HarnessOpts {
-		settings: Record<string, unknown>;
-		report: UsageReport | null;
-		liveCredits: ResetCreditAccountStatus[];
+	function buildSession(options: {
+		accounts: CodexAccount[];
 		streamErrorFirst?: boolean;
-		storage?: AuthStorage;
-		accountId?: string;
-	}
-
-	interface Harness {
+		/** Builds the session the way ACP does for a client with or without form elicitation. */
+		acpForm?: boolean;
+	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
-		redeemTargets: ResetCreditTarget[];
-	}
-
-	function buildSession(opts: HarnessOpts): Harness {
-		const storage = opts.storage ?? authStorage;
-		const model = getBundledModel("openai-codex", "gpt-5.5");
-		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
-		storage.keys.setRuntime("openai-codex", "test-key");
-		vi.spyOn(storage.oauth, "identity").mockReturnValue({ accountId: opts.accountId ?? ACCOUNT_ID, email: EMAIL });
-		vi.spyOn(storage.usage, "reports").mockImplementation(async () => (opts.report ? [opts.report] : null));
-		vi.spyOn(storage.resets, "list").mockImplementation(async () => opts.liveCredits);
-		const redeemTargets: ResetCreditTarget[] = [];
-		vi.spyOn(storage.resets, "redeem").mockImplementation(async options => {
-			redeemTargets.push(options.target);
-			return { ok: true, code: "reset", accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
+		targets: ResetCreditTarget[];
+		notices: string[];
+	} {
+		const model = getTestModel("openai-codex", candidate => !candidate.id.includes("-spark"));
+		const [active] = options.accounts;
+		authStorage.keys.setRuntime("openai-codex", "test-key");
+		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({ accountId: active.accountId, email: EMAIL });
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.accounts.map(codexReport));
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () =>
+			options.accounts.map(account => liveCreditStatus(account, account === active)),
+		);
+		const targets: ResetCreditTarget[] = [];
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
+			targets.push(request.target);
+			return { ok: true, code: "reset", provider: "openai-codex", email: EMAIL, creditId: "credit" };
 		});
 
 		const mock = createMockModel();
@@ -185,271 +143,185 @@ describe("codex saved-reset trigger integration", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (requestedModel, context, options) => {
+			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
-				if (opts.streamErrorFirst && calls === 1) {
-					mock.push({ throw: CODEX_USAGE_LIMIT_ERROR });
-				} else {
-					mock.push({ content: ["recovered after reset redemption"], stopReason: "stop" });
-				}
-				return mock.stream(requestedModel, context, options);
+				if (options.streamErrorFirst && calls === 1) mock.push({ throw: CODEX_USAGE_LIMIT_ERROR });
+				else mock.push({ content: ["recovered after reset redemption"], stopReason: "stop" });
+				return mock.stream(requestedModel, context, streamOptions);
 			},
 		});
-
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
 			"retry.maxRetries": 1,
-			...opts.settings,
+			"codexResets.autoRedeem": "unset",
+			"claudeResets.autoRedeem": "no",
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
-		coordinator.resetLockPath = path.join(lockRoot, "agent.db");
+		coordinator.resetLockPath = `${tempDir.path()}/agent.db`;
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
-			modelRegistry: opts.storage
-				? new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true })
-				: modelRegistry,
+			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner:
+				options.acpForm === undefined
+					? undefined
+					: new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry),
+			interactivePrompts: options.acpForm,
 		});
 		sessions.push(session);
-		return { session, coordinator, redeemTargets };
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		return { session, coordinator, targets, notices };
 	}
 
-	it("spends a saved reset on a live 429 even when the report is a pre-block snapshot, then retries", async () => {
-		// The report is the catch-22 snapshot: fetched pre-block, so the wire flag
-		// and both windows still look healthy. Only the live 429 knows better.
-		const { session, coordinator, redeemTargets } = buildSession({
-			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
-			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 1 }),
-			liveCredits: [liveCreditStatus(1)],
-			streamErrorFirst: true,
+	/** Initializes extensions with ACP's elicitation-bridged UI context, installed whether or not the client can show forms. */
+	async function attachAcpClient(session: AgentSession, form: boolean): Promise<string[]> {
+		const elicitations: string[] = [];
+		const connection = {
+			unstable_createElicitation: async (request: CreateElicitationRequest) => {
+				elicitations.push(request.message);
+				return { action: "decline" };
+			},
+		} as unknown as AgentSideConnection;
+		await initializeExtensions(session, {
+			mode: "rpc",
+			reportSendError: () => {},
+			reportRuntimeError: () => {},
+			uiContext: createAcpExtensionUiContext(
+				connection,
+				() => session.sessionId,
+				form ? { elicitation: { form: {} } } : {},
+			),
 		});
-		mockSchedulerWaitWithClock();
+		return elicitations;
+	}
 
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		expect(redeemTargets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
-		]);
-		// The block episode is recorded in the injected coordinator so it cannot double-spend.
-		expect([...coordinator.attemptedKeys].some(key => key.startsWith("block|"))).toBe(true);
-		// The turn actually recovered on the retry after the redeem.
-		const recovered = session.sessionManager
-			.getEntries()
-			.some(
-				entry =>
-					entry.type === "message" &&
-					entry.message.role === "assistant" &&
-					entry.message.content.some(
-						block => block.type === "text" && block.text === "recovered after reset redemption",
-					),
-			);
-		expect(recovered).toBe(true);
-	});
-
-	it("recovers from a missing usage report only when live status supplies the unique credential", async () => {
-		const { session, redeemTargets } = buildSession({
-			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
-			report: null,
-			liveCredits: [liveCreditStatus(1)],
-			streamErrorFirst: true,
-		});
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit without a usage snapshot");
-		await session.waitForIdle();
-
-		expect(redeemTargets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
-		]);
-	});
-
-	it("corrects a stale-zero usage count from the live credits route before deciding", async () => {
-		// /wham/usage says 0 credits (stale — never corrected upstream on zero),
-		// weekly exhausted and blocked; the dedicated credits route says 1.
-		const { session, redeemTargets } = buildSession({
-			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
-			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1.0, limitReached: true, credits: 0 }),
-			liveCredits: [liveCreditStatus(1)],
-			streamErrorFirst: true,
-		});
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		expect(redeemTargets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
-		]);
-	});
-
-	it("salvages an expiring credit on a 5h-only exhausted account from the usage heartbeat, exactly once", async () => {
-		const { session, coordinator, redeemTargets } = buildSession({
-			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
-			// openai/codex#28525 shape: 5h exhausted, weekly mostly free.
-			report: codexReport({
-				primaryUsed: 1.0,
-				weeklyUsed: 0.2,
-				limitReached: false,
-				credits: 1,
-				creditExpiresInMs: 2 * HOUR,
-			}),
-			liveCredits: [liveCreditStatus(1, 2 * HOUR)],
-		});
-
-		// The status line's heartbeat is exactly this call; the sweep handle lets
-		// us await the fire-and-forget pass instead of polling wall-clock time.
-		await session.fetchUsageReports();
-		expect(coordinator.sweepPromise).toBeDefined();
-		await coordinator.sweepPromise;
-		expect(redeemTargets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
-		]);
-
-		// A later heartbeat re-plans over the same snapshot: the attempt key must
-		// make it a no-op instead of a second spend.
-		coordinator.lastSweepAt = 0;
-		await session.fetchUsageReports();
-		await coordinator.sweepPromise;
-		expect(redeemTargets).toHaveLength(1);
-	});
-
-	it("spends one credit when independent sessions encounter the same blocked account together", async () => {
-		const options: HarnessOpts = {
-			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
-			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1, limitReached: true, credits: 2 }),
-			liveCredits: [liveCreditStatus(2)],
-			streamErrorFirst: true,
+	it("restores a blocked turn with a reset expiring within five minutes and continues", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
 		};
-		const first = buildSession(options);
-		const secondStorage = await AuthStorage.create(":memory:");
-		extraStorages.push(secondStorage);
-		const second = buildSession({ ...options, storage: secondStorage });
-		const originalReports = options.report;
-		let redeemed = false;
-		let listed = 0;
-		const bothListed = Promise.withResolvers<void>();
-		const firstRedeemed = Promise.withResolvers<void>();
-		let spends = 0;
-		for (const [index, storage] of [authStorage, secondStorage].entries()) {
-			vi.spyOn(storage.usage, "reports").mockImplementation(async () =>
-				redeemed
-					? [codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 1 })]
-					: [originalReports!],
-			);
-			vi.spyOn(storage.resets, "list").mockImplementation(async () => {
-				if (++listed === 2) bothListed.resolve();
-				if (index === 1) await firstRedeemed.promise;
-				return redeemed ? [liveCreditStatus(1)] : [liveCreditStatus(2)];
-			});
-			vi.spyOn(storage.resets, "redeem").mockImplementation(async () => {
-				await bothListed.promise;
-				spends++;
-				redeemed = true;
-				firstRedeemed.resolve();
-				return { ok: true, code: "reset", accountId: ACCOUNT_ID, creditId: `credit-${spends}` };
-			});
-		}
+		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
 		mockSchedulerWaitWithClock();
 
-		await Promise.all([
-			first.session.prompt("trigger first blocked turn"),
-			second.session.prompt("trigger second blocked turn"),
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
 		]);
-		await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
-		const lastCreditStorage = await AuthStorage.create(":memory:");
-		extraStorages.push(lastCreditStorage);
-		const lastCredit = buildSession({
-			...options,
-			storage: lastCreditStorage,
-			report: codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 0 }),
-			liveCredits: [liveCreditStatus(0)],
+		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
+		expect(session.agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: "recovered after reset redemption" }],
 		});
-		await lastCredit.session.prompt("retry a stale 429 after the final credit was spent");
-		await lastCredit.session.waitForIdle();
-		expect(lastCredit.redeemTargets).toEqual([]);
-		expect(spends).toBe(1);
-		for (const { session } of [first, second, lastCredit]) {
-			expect(
-				session.sessionManager
-					.getEntries()
-					.some(
-						entry =>
-							entry.type === "message" &&
-							entry.message.role === "assistant" &&
-							entry.message.content.some(
-								block => block.type === "text" && block.text === "recovered after reset redemption",
-							),
-					),
-			).toBe(true);
-		}
 	});
 
-	it("does not reuse another account's reset when credential stores share a credential id", async () => {
-		const settings = { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 };
-		const first = buildSession({
-			settings,
-			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1, limitReached: true, credits: 1 }),
-			liveCredits: [liveCreditStatus(1)],
-			streamErrorFirst: true,
-		});
+	it("still needs consent to restore a blocked turn with a reset that has more time left", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 6 * HOUR,
+		};
+		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
 		mockSchedulerWaitWithClock();
-		await first.session.prompt("block the first account");
-		await first.session.waitForIdle();
 
-		// Another agentDir's store also numbers its first Codex row 1, but for a different account.
-		const otherStorage = await AuthStorage.create(":memory:");
-		extraStorages.push(otherStorage);
-		const other = buildSession({
-			settings,
-			storage: otherStorage,
-			accountId: "acct-other",
-			report: codexReport({
-				primaryUsed: 0.6,
-				weeklyUsed: 1,
-				limitReached: true,
-				credits: 1,
-				accountId: "acct-other",
-			}),
-			liveCredits: [liveCreditStatus(1, undefined, "acct-other")],
-			streamErrorFirst: true,
-		});
-		await other.session.prompt("block an unrelated account");
-		await other.session.waitForIdle();
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
 
-		expect(first.redeemTargets).toHaveLength(1);
-		expect(other.redeemTargets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-other", email: EMAIL },
-		]);
+		expect(targets).toEqual([]);
+		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
-	it("asks before spending in unset mode and never spends headless", async () => {
-		const { session, coordinator, redeemTargets } = buildSession({
-			settings: { "codexResets.autoRedeem": "unset", "codexResets.salvageHorizonHours": 12 },
-			report: codexReport({
-				primaryUsed: 1.0,
-				weeklyUsed: 0.2,
-				limitReached: false,
-				credits: 1,
-				creditExpiresInMs: 2 * HOUR,
-			}),
-			liveCredits: [liveCreditStatus(1, 2 * HOUR)],
-		});
+	it("spends only the reset about to expire from a mixed salvage batch", async () => {
+		const expiring = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 0.1,
+			limitReached: false,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const salvageable = {
+			accountId: "acct-b",
+			credentialId: 2,
+			weeklyUsed: 0.8,
+			limitReached: false,
+			creditExpiresInMs: 2 * HOUR,
+		};
+		const { session, coordinator, targets, notices } = buildSession({ accounts: [expiring, salvageable] });
 
 		await session.fetchUsageReports();
-		expect(coordinator.sweepPromise).toBeDefined();
 		await coordinator.sweepPromise;
-		// No prompt UI in this harness: consent is required, so nothing is spent —
-		// and the episode is NOT burned, so a UI session could still redeem it.
-		expect(redeemTargets).toHaveLength(0);
-		expect(coordinator.attemptedKeys.size).toBe(0);
+
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
+		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
+		expect([...coordinator.attemptedKeys]).toEqual([expect.stringContaining("openai-codex|-|1|")]);
+	});
+
+	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const { session, targets, notices } = buildSession({
+			accounts: [account],
+			streamErrorFirst: true,
+			acpForm: false,
+		});
+		const elicitations = await attachAcpClient(session, false);
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		// Extensions keep ACP's UI context; only the consent prompt knows it cannot reach anyone.
+		expect(session.extensionRunner?.hasUI()).toBe(true);
+		expect(elicitations).toEqual([]);
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
+		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const { session, targets } = buildSession({ accounts: [account], streamErrorFirst: true, acpForm: true });
+		const elicitations = await attachAcpClient(session, true);
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		expect(elicitations).toEqual([expect.stringContaining("Spend a saved Codex rate-limit reset?")]);
+		expect(targets).toEqual([]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 });

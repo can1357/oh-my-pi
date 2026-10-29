@@ -74,6 +74,13 @@ impl OutputDecoder {
 		if bytes.is_empty() {
 			return String::new();
 		}
+		// Common case: nothing held back and the read is valid UTF-8.
+		if self.pending.is_empty()
+			&& matches!(self.mode, Mode::Utf8)
+			&& let Ok(text) = str::from_utf8(bytes)
+		{
+			return text.to_owned();
+		}
 		self.pending.extend_from_slice(bytes);
 		self.drain(false)
 	}
@@ -91,55 +98,59 @@ impl OutputDecoder {
 		}
 	}
 
+	/// Decodes `pending` with a cursor and compacts it once at the end, so a
+	/// buffer with many invalid sequences costs linear time (draining the
+	/// prefix per sequence made it quadratic).
 	fn drain_utf8(&mut self, eof: bool) -> String {
-		let mut out = String::new();
-		loop {
-			if self.pending.is_empty() {
-				return out;
-			}
-			match str::from_utf8(&self.pending) {
+		let mut out = String::with_capacity(self.pending.len());
+		let mut start = 0;
+		while start < self.pending.len() {
+			let err = match str::from_utf8(&self.pending[start..]) {
 				Ok(text) => {
 					out.push_str(text);
-					self.pending.clear();
+					start = self.pending.len();
+					break;
+				},
+				Err(err) => err,
+			};
+			let valid_end = start + err.valid_up_to();
+			// SAFETY: [start..valid_end] is valid UTF-8 by valid_up_to().
+			out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[start..valid_end]) });
+			start = valid_end;
+			if let Some(invalid_len) = err.error_len() {
+				#[cfg(windows)]
+				if self.can_fallback_to_acp() {
+					// One encoding per command. Do not resume UTF-8 after
+					// a bad byte: later UTF-8 would be ACP-mojibake, but
+					// cmd/chcp emit ACP for the whole stream.
+					self.pending.drain(..start);
+					self.mode = Mode::Acp;
+					out.push_str(&self.drain_acp(eof));
 					return out;
-				},
-				Err(err) => {
-					let valid_up_to = err.valid_up_to();
-					if valid_up_to > 0 {
-						// SAFETY: [..valid_up_to] is valid UTF-8 by valid_up_to().
-						out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[..valid_up_to]) });
-						self.pending.drain(..valid_up_to);
-					}
-					if let Some(invalid_len) = err.error_len() {
-						#[cfg(windows)]
-						if self.can_fallback_to_acp() {
-							// One encoding per command. Do not resume UTF-8 after
-							// a bad byte: later UTF-8 would be ACP-mojibake, but
-							// cmd/chcp emit ACP for the whole stream.
-							self.mode = Mode::Acp;
-							out.push_str(&self.drain_acp(eof));
-							return out;
-						}
+				}
 
-						out.push_str(REPLACEMENT);
-						self.pending.drain(..invalid_len);
-					} else {
-						if eof {
-							#[cfg(windows)]
-							if self.can_fallback_to_acp() {
-								self.mode = Mode::Acp;
-								out.push_str(&self.drain_acp(true));
-								return out;
-							}
-
-							out.push_str(REPLACEMENT);
-							self.pending.clear();
-						}
-						return out;
-					}
-				},
+				out.push_str(REPLACEMENT);
+				start += invalid_len;
+				continue;
 			}
+			// An incomplete sequence ends the buffer: hold it for the next
+			// read, or resolve it at EOF.
+			if eof {
+				#[cfg(windows)]
+				if self.can_fallback_to_acp() {
+					self.pending.drain(..start);
+					self.mode = Mode::Acp;
+					out.push_str(&self.drain_acp(true));
+					return out;
+				}
+
+				out.push_str(REPLACEMENT);
+				start = self.pending.len();
+			}
+			break;
 		}
+		self.pending.drain(..start);
+		out
 	}
 
 	#[cfg(windows)]
@@ -161,15 +172,6 @@ impl OutputDecoder {
 		self.pending.drain(..len);
 		decoded
 	}
-}
-
-/// Decode a complete buffer with the same UTF-8-then-ACP policy as
-/// [`OutputDecoder`].
-pub fn decode_bytes(bytes: &[u8]) -> String {
-	let mut decoder = OutputDecoder::new();
-	let mut out = decoder.push(bytes);
-	out.push_str(&decoder.finish());
-	out
 }
 
 #[cfg(windows)]
@@ -288,7 +290,9 @@ mod tests {
 		if acp() != 936 {
 			return;
 		}
-		assert_eq!(decode_bytes(&[0xd6, 0xd0, 0xce, 0xc4]), "中文");
+		let mut decoder = OutputDecoder::new();
+		assert_eq!(decoder.push(&[0xd6, 0xd0, 0xce, 0xc4]), "中文");
+		assert_eq!(decoder.finish(), "");
 	}
 
 	#[cfg(windows)]
@@ -350,6 +354,35 @@ mod tests {
 	fn invalid_utf8_becomes_replacement() {
 		let mut decoder = OutputDecoder::new();
 		assert_eq!(decoder.push(&[0xff]), "\u{FFFD}");
+		assert_eq!(decoder.finish(), "");
+	}
+}
+
+#[cfg(test)]
+mod utf8_tests {
+	use super::*;
+
+	/// A decoder that never falls back to an ANSI code page.
+	fn utf8_decoder() -> OutputDecoder {
+		#[cfg(windows)]
+		return OutputDecoder::with_fallback_codepage(CP_UTF8);
+		#[cfg(not(windows))]
+		return OutputDecoder::new();
+	}
+
+	#[test]
+	fn invalid_sequences_between_text_keep_order_and_hold_the_tail() {
+		let mut decoder = utf8_decoder();
+		// Binary-ish output: invalid bytes between text, then the first byte of
+		// a three-byte character that the next read completes.
+		let mut bytes = Vec::new();
+		for _ in 0..1000 {
+			bytes.extend_from_slice(&[0xff, b'a', 0xc0, 0x80, b'b']);
+		}
+		bytes.push(0xe4);
+		let decoded = decoder.push(&bytes);
+		assert_eq!(decoded, "\u{FFFD}a\u{FFFD}\u{FFFD}b".repeat(1000));
+		assert_eq!(decoder.push(&[0xb8, 0xad, b'\n']), "中\n");
 		assert_eq!(decoder.finish(), "");
 	}
 }

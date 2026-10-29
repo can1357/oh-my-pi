@@ -139,6 +139,48 @@ describe("provider-file stream fallback", () => {
 		expect(service.fallbacks).toEqual(["native"]);
 	});
 
+	it("limits restored inline screenshot bytes before retrying a failed URL request", async () => {
+		const anthropicModel = buildModel({
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 4096,
+		});
+		const screenshot = "A".repeat(534_000);
+		const context: Context = {
+			messages: Array.from({ length: 62 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [{ type: "image", data: screenshot, mimeType: "image/png", url: "https://images.test/blob" }],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		const attempts: Context[] = [];
+		const base: StreamFn = (_model, attempt) => {
+			attempts.push(attempt);
+			return scriptedStream(attempts.length === 1 ? "error" : "success");
+		};
+		const service = new ImageUrlService("/tmp/provider-fallback-test", [], { daemon: false });
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
+
+		expect(await eventTypes(await wrapped(anthropicModel, context))).toEqual(["start", "done"]);
+		expect(attempts).toHaveLength(2);
+		const retried = attempts[1];
+		expect(
+			retried?.messages.flatMap(message =>
+				message.role === "toolResult" && message.content[0]?.type === "image" ? [message.toolCallId] : [],
+			),
+		).toEqual(Array.from({ length: 44 }, (_, index) => `call-${index + 18}`));
+	});
+
 	it("never retries after content has been emitted", async () => {
 		const calls: string[] = [];
 		const base: StreamFn = (_model, context) => {

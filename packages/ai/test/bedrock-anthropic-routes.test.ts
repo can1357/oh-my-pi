@@ -15,8 +15,8 @@ const context: Context = {
 	messages: [{ role: "user", content: "Hi", timestamp: 0 }],
 	tools: [
 		{
-			name: "bash",
-			description: "run a bash command",
+			name: "edit",
+			description: "edit a file",
 			parameters: {
 				type: "object",
 				properties: { command: { type: "string" } },
@@ -80,9 +80,9 @@ async function sentPayload(model: Model<"anthropic-messages">, options: Anthropi
 }
 
 function expectBedrockShape(payload: WirePayload): void {
-	const bash = payload.tools?.find(tool => tool.name === "bash");
-	expect(bash).toBeDefined();
-	expect(bash?.strict).toBeUndefined();
+	const edit = payload.tools?.find(tool => tool.name === "edit");
+	expect(edit).toBeDefined();
+	expect(edit?.strict).toBeUndefined();
 	expect(payload.metadata?.user_id).toBe(SESSION_ID);
 }
 
@@ -190,7 +190,7 @@ describe("Amazon Bedrock /anthropic requests", () => {
 	it("leaves the first-party Anthropic provider's request unchanged when rerouted to a Bedrock route", async () => {
 		await withEnv({ ANTHROPIC_BASE_URL: RUNTIME_URL }, async () => {
 			const payload = await sentPayload(official, { isOAuth: false, metadata: { user_id: JSON_USER_ID } });
-			expect(payload.tools?.find(tool => tool.name === "bash")?.strict).toBe(true);
+			expect(payload.tools?.find(tool => tool.name === "edit")?.strict).toBe(true);
 			expect(payload.metadata?.user_id).toBe(JSON_USER_ID);
 		});
 	});
@@ -222,7 +222,7 @@ describe("Amazon Bedrock /anthropic requests", () => {
 
 	it("keeps strict tools and caller metadata on the Claude API", async () => {
 		const payload = await sentPayload(official, { isOAuth: false, metadata: { user_id: JSON_USER_ID } });
-		expect(payload.tools?.find(tool => tool.name === "bash")?.strict).toBe(true);
+		expect(payload.tools?.find(tool => tool.name === "edit")?.strict).toBe(true);
 		expect(payload.metadata?.user_id).toBe(JSON_USER_ID);
 	});
 

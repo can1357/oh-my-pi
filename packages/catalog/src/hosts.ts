@@ -25,6 +25,8 @@ interface HostClassSpec {
 
 export const KNOWN_HOSTS = {
 	openai: { providers: ["openai"], urlMarkers: ["api.openai.com"] },
+	/** URL-only: a Codex provider rerouted through a proxy does not imply the subscription backend's capabilities. */
+	openaiCodex: { urlMarkers: ["chatgpt.com/backend-api", "chat.openai.com/backend-api"] },
 	azureOpenAI: {
 		providers: ["azure"],
 		urlMarkers: [".openai.azure.com", "azure.com/openai", "models.inference.ai.azure.com"],
@@ -191,11 +193,13 @@ function hasPathPrefix(pathname: string, prefix: string): boolean {
  * - `anthropic`: the Anthropic Messages API under `/anthropic`.
  * - `openai`: the OpenAI-compatible APIs under `/openai`, plus Mantle's
  *   documented `/v1` base (`https://bedrock-mantle.<region>.api.aws/v1`).
+ * - `runtime`: the bedrock-runtime origin itself, where Converse and
+ *   InvokeModel live under `/model/<id>/…`.
  *
  * Hostnames are parsed strictly so proxies that embed these hosts in a path
  * do not match.
  */
-export function isBedrockRouteUrl(baseUrl: string | undefined, route: "openai" | "anthropic"): boolean {
+export function isBedrockRouteUrl(baseUrl: string | undefined, route: "openai" | "anthropic" | "runtime"): boolean {
 	if (!baseUrl) return false;
 	let url: URL;
 	try {
@@ -206,8 +210,9 @@ export function isBedrockRouteUrl(baseUrl: string | undefined, route: "openai" |
 	if (url.protocol !== "https:") return false;
 	const host = BEDROCK_PUBLIC_HOST.exec(url.hostname) ?? BEDROCK_PRIVATELINK_HOST.exec(url.hostname);
 	if (!host) return false;
-	if (route === "anthropic") return hasPathPrefix(url.pathname, "/anthropic");
 	const isMantle = host.groups?.runtime === undefined;
+	if (route === "runtime") return !isMantle && url.pathname === "/";
+	if (route === "anthropic") return hasPathPrefix(url.pathname, "/anthropic");
 	return hasPathPrefix(url.pathname, "/openai") || (isMantle && hasPathPrefix(url.pathname, "/v1"));
 }
 

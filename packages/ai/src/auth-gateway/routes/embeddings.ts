@@ -6,6 +6,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayApiKey,
@@ -49,7 +50,7 @@ export async function handleEmbeddings(
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`embeddings\u0000${model.provider}/${model.id}`);
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) {
 		return embeddings.formatError(apiKey.status, apiKey.type, apiKey.message);
@@ -63,19 +64,12 @@ export async function handleEmbeddings(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	try {
 		const result = await embed(model, parsed.request, {
-			apiKey: buildGatewayApiKeyResolver(
-				bootOpts.storage,
-				model,
-				sessionId,
-				apiKey,
-				controller.signal,
-				"embeddings",
-				peer,
-			),
+			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "embeddings", peer),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { planSteeredRequest } from "@oh-my-pi/pi-ai/providers/openai-codex/live-steering";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type {
@@ -288,6 +289,115 @@ describe("codex live steering", () => {
 		]);
 	});
 
+	it("leaves accepted steering to the request that wins the socket when an overlapping one falls back to SSE", async () => {
+		const call = { type: "function_call", id: "fc_1", call_id: "call_1", name: "status", arguments: "{}" };
+		const winnerSent = Promise.withResolvers<void>();
+		let finishWinner = () => {};
+		installSocket((frame, socket) => {
+			if (frame.type === "response.create" && creates().length === 1) {
+				socket.emit(
+					{ type: "response.created", response: { id: "resp_1" } },
+					{ type: "response.output_item.added", output_index: 0, item: { ...call, arguments: "" } },
+				);
+				return;
+			}
+			if (frame.type === "response.steer") {
+				socket.emit(
+					{ type: "response.steer.accepted", steer: { id: "steer_1", previous_response_id: "resp_1" } },
+					{ type: "response.output_item.done", output_index: 0, item: { ...call, status: "completed" } },
+					{ type: "response.completed", response: { id: "resp_1", status: "completed", usage: USAGE } },
+					{
+						type: "response.steer.pending",
+						steer: { id: "steer_1", previous_response_id: "resp_1" },
+						reason: "waiting_for_required_input",
+						required_input: [{ type: "function_call_output", call_id: "call_1", name: "status" }],
+					},
+				);
+				return;
+			}
+			// Hold the terminal event so the winner still owns the socket when the
+			// stalled request tries to send.
+			socket.emit(
+				{ type: "response.created", response: { id: "resp_2" } },
+				...messageFrames("msg_2", "Scoped down"),
+			);
+			finishWinner = () =>
+				socket.emit({ type: "response.completed", response: { id: "resp_2", status: "completed", usage: USAGE } });
+			winnerSent.resolve();
+		});
+		const model = createGpt6Model();
+		const state = new Map<string, ProviderSessionState>();
+		const steering = oneShotSteering("keep it small");
+		const user: UserMessage = { role: "user", content: "Plan the project", timestamp: Date.now() };
+
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			options(state, steering.source),
+		).result();
+		expect(steering.settled()).toBe("accepted");
+		const toolCall = first.content.find(block => block.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected a tool call");
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "design done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const steerMessage: UserMessage = { role: "user", content: "keep it small", timestamp: Date.now() };
+		const context: Context = { systemPrompt: SYSTEM, messages: [user, first, toolResult, steerMessage] };
+
+		// The first request stalls in an async `onPayload` after it has looked at the
+		// steering; the second one claims the socket in the meantime.
+		const payloadReached = Promise.withResolvers<void>();
+		const releasePayload = Promise.withResolvers<void>();
+		let held = false;
+		let sseRequests = 0;
+		const loser = streamOpenAICodexResponses(model, context, {
+			...options(state),
+			onPayload: async () => {
+				if (held) return undefined;
+				held = true;
+				payloadReached.resolve();
+				await releasePayload.promise;
+				return undefined;
+			},
+			fetch: vi.fn(async () => {
+				sseRequests += 1;
+				const events = [
+					{ type: "response.created", response: { id: "resp_sse" } },
+					...messageFrames("msg_sse", "Over SSE"),
+					{ type: "response.completed", response: { id: "resp_sse", status: "completed", usage: USAGE } },
+				];
+				return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+					headers: { "content-type": "text/event-stream" },
+				});
+			}) as FetchImpl,
+		}).result();
+		await payloadReached.promise;
+		const winner = streamOpenAICodexResponses(model, context, options(state)).result();
+		await winnerSent.promise;
+		releasePayload.resolve();
+		const loserResult = await loser;
+		finishWinner();
+		const winnerResult = await winner;
+
+		// The socket owner still lines up with the queued steering and sends only
+		// the tool output the server is waiting for.
+		expect(winnerResult.content).toEqual([expect.objectContaining({ type: "text", text: "Scoped down" })]);
+		expect(creates()).toHaveLength(2);
+		expect(creates()[1]?.previous_response_id).toBe("resp_1");
+		expect(creates()[1]?.input).toEqual([
+			expect.objectContaining({ type: "function_call_output", call_id: "call_1", output: "design done" }),
+		]);
+		// The request that lost the socket went over SSE instead.
+		expect(loserResult.content).toEqual([expect.objectContaining({ type: "text", text: "Over SSE" })]);
+		expect(sseRequests).toBe(1);
+		expect(ScriptedWebSocket.instances).toHaveLength(1);
+	});
+
 	it("hands rejected steering back and sends it as ordinary input next time", async () => {
 		installSocket((frame, socket) => {
 			if (frame.type === "response.create" && creates().length === 1) {
@@ -328,6 +438,137 @@ describe("codex live steering", () => {
 
 		expect(creates()[1]?.previous_response_id).toBe("resp_1");
 		expect(creates()[1]?.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "one more thing" }] },
+		]);
+	});
+
+	it("replays without steering when the native turn lane rejects it", async () => {
+		installSocket((frame, socket) => {
+			if (frame.type === "response.create" && creates().length === 1) {
+				socket.emit({ type: "response.created", response: { id: "resp_1" } });
+				return;
+			}
+			if (frame.type === "response.steer") {
+				// The lane refuses the steer, drops the response, and closes the socket.
+				socket.emit({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						code: "unsupported_native_inflight_message",
+						message: "The experimental native turn lane cannot accept stateful WebSocket messages.",
+					},
+				});
+				queueMicrotask(() => {
+					socket.readyState = ScriptedWebSocket.CLOSED;
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
+				});
+				return;
+			}
+			const id = `resp_${creates().length}`;
+			socket.emit({ type: "response.created", response: { id } }, ...messageFrames(`msg_${id}`, "Hi"), {
+				type: "response.completed",
+				response: { id, status: "completed", usage: USAGE },
+			});
+		});
+		const model = createGpt6Model();
+		const state = new Map<string, ProviderSessionState>();
+		const steering = oneShotSteering("one more thing");
+		const user: UserMessage = { role: "user", content: "Hello", timestamp: Date.now() };
+
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			options(state, steering.source),
+		).result();
+		expect(first.stopReason).toBe("stop");
+		expect(first.content).toEqual([expect.objectContaining({ type: "text", text: "Hi" })]);
+		expect(steering.settled()).toBe("rejected");
+
+		// The session stops steering: a later response is not steered again.
+		const steerMessage: UserMessage = { role: "user", content: "one more thing", timestamp: Date.now() };
+		const next = oneShotSteering("and another");
+		await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user, first, steerMessage] },
+			options(state, next.source),
+		).result();
+		expect(next.settled()).toBeUndefined();
+		expect(steers()).toHaveLength(1);
+		expect(creates()).toHaveLength(3);
+	});
+
+	it("leaves a native-lane rejection after streamed reasoning to the agent retry, which no longer steers", async () => {
+		installSocket((frame, socket) => {
+			if (frame.type === "response.create" && creates().length === 1) {
+				// Reasoning streams before the steer goes out.
+				socket.emit(
+					{ type: "response.created", response: { id: "resp_1" } },
+					{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_1", summary: [] } },
+					{
+						type: "response.reasoning_summary_part.added",
+						item_id: "rs_1",
+						summary_index: 0,
+						part: { type: "summary_text", text: "" },
+					},
+					{ type: "response.reasoning_summary_text.delta", item_id: "rs_1", summary_index: 0, delta: "Planning" },
+				);
+				return;
+			}
+			if (frame.type === "response.steer") {
+				socket.emit({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						code: "unsupported_native_inflight_message",
+						message: "The experimental native turn lane cannot accept stateful WebSocket messages.",
+					},
+				});
+				queueMicrotask(() => {
+					socket.readyState = ScriptedWebSocket.CLOSED;
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
+				});
+				return;
+			}
+			const id = `resp_${creates().length}`;
+			socket.emit({ type: "response.created", response: { id } }, ...messageFrames(`msg_${id}`, "Done"), {
+				type: "response.completed",
+				response: { id, status: "completed", usage: USAGE },
+			});
+		});
+		const model = createGpt6Model();
+		const state = new Map<string, ProviderSessionState>();
+		const steering = oneShotSteering("one more thing");
+		const user: UserMessage = { role: "user", content: "Hello", timestamp: Date.now() };
+
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			options(state, steering.source),
+		).result();
+		// Replaying here would re-emit the streamed reasoning, so the provider
+		// surfaces a retryable rejection for the agent's same-model retry.
+		expect(first.stopReason).toBe("error");
+		expect(first.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "Planning" })]);
+		expect(AIError.isCodexSteerRejection(first)).toBe(true);
+		expect(AIError.retriable(AIError.classifyMessage(first))).toBe(true);
+		expect(steering.settled()).toBe("rejected");
+		expect(creates()).toHaveLength(1);
+
+		// That retry drops the failed turn and carries the handed-back steer as
+		// ordinary input on a fresh chain; the session no longer steers.
+		const steerMessage: UserMessage = { role: "user", content: "one more thing", timestamp: Date.now() };
+		const next = oneShotSteering("and another");
+		const retry = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user, steerMessage] },
+			options(state, next.source),
+		).result();
+		expect(retry.stopReason).toBe("stop");
+		expect(next.settled()).toBeUndefined();
+		expect(steers()).toHaveLength(1);
+		expect(creates()[1]?.previous_response_id).toBeUndefined();
+		expect(creates()[1]?.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "Hello" }] },
 			{ role: "user", content: [{ type: "input_text", text: "one more thing" }] },
 		]);
 	});
