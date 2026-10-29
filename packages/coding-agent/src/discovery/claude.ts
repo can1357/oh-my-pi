@@ -124,7 +124,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				env: serverConfig.env as Record<string, string> | undefined,
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
-				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				transport: serverConfig.type as "stdio" | "sse" | "http" | "streamable-http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
 		});

@@ -59,7 +59,7 @@ import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
-import type { MCPServerConfig } from "../../mcp/types";
+import { type MCPServerConfig, isRemoteMCPConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
@@ -3135,8 +3135,12 @@ export class AcpAgent implements Agent {
 		// race `#scheduleBootstrapUpdates` guards). `#emitBootstrapUpdates`
 		// drains the queue behind that guard.
 		for (const [name, message] of result.errors) {
-			const type = configs[name]?.type;
-			record.pendingMcpStartupChunks.push({ name, message, oauthCapable: type === "http" || type === "sse" });
+			const config = configs[name];
+			record.pendingMcpStartupChunks.push({
+				name,
+				message,
+				oauthCapable: config ? isRemoteMCPConfig(config) : false,
+			});
 		}
 	}
 
@@ -3149,9 +3153,9 @@ export class AcpAgent implements Agent {
 				env: this.#toNameValueMap(server.env),
 			};
 		}
-		if (server.type === "http") {
+		if (server.type === "http" || server.type === "streamable-http") {
 			return {
-				type: "http",
+				type: server.type,
 				url: server.url,
 				headers: this.#toNameValueMap(server.headers),
 			};

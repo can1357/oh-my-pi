@@ -60,7 +60,13 @@ import {
 	searchSmitheryRegistry,
 	toConfigName,
 } from "../../mcp/smithery-registry";
-import type { MCPAuthChallenge, MCPConfigFile, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
+import {
+	type MCPAuthChallenge,
+	type MCPConfigFile,
+	type MCPServerConfig,
+	type MCPServerConnection,
+	isRemoteMCPConfig,
+} from "../../mcp/types";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
@@ -245,7 +251,7 @@ class McpConnectingBlock extends ChatBlock {
 const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
 type MCPAddScope = "user" | "project";
-type MCPAddTransport = "http" | "sse";
+type MCPAddTransport = "http" | "streamable-http" | "sse";
 
 type MCPAddParsed = {
 	initialName?: string;
@@ -402,7 +408,7 @@ export class MCPCommandController {
 			"",
 			theme.fg("accent", "Commands:"),
 			"  /mcp add              Add a new MCP server (interactive wizard)",
-			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
+			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse|streamable-http] [--token <token>] [-- <command...>]",
 			"  /mcp list             List all configured MCP servers",
 			"  /mcp remove <name> [--scope project|user]    Remove an MCP server (default: project)",
 			"  /mcp test <name>      Test connection to an MCP server",
@@ -477,8 +483,8 @@ export class MCPCommandController {
 			}
 			if (argToken === "--transport") {
 				const value = tokens[i + 1];
-				if (!value || (value !== "http" && value !== "sse")) {
-					return { scope, error: "Invalid --transport value. Use http or sse." };
+				if (!value || (value !== "http" && value !== "streamable-http" && value !== "sse")) {
+					return { scope, error: "Invalid --transport value. Use http, streamable-http, or sse." };
 				}
 				transport = value;
 				i += 2;
@@ -526,7 +532,7 @@ export class MCPCommandController {
 			normalizedUrl = `https://${normalizedUrl}`;
 		}
 		const config: MCPServerConfig = {
-			type: useHttpTransport ? "http" : "sse",
+			type: useHttpTransport ? "http" : transport === "streamable-http" ? "streamable-http" : "sse",
 			url: normalizedUrl,
 			headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
 		};
@@ -626,7 +632,7 @@ export class MCPCommandController {
 
 			// Quick-add with URL should still perform auth detection and OAuth flow,
 			// matching wizard behavior. Command quick-add intentionally skips this.
-			if (!parsed.isCommandQuickAdd && (finalConfig.type === "http" || finalConfig.type === "sse")) {
+			if (!parsed.isCommandQuickAdd && isRemoteMCPConfig(finalConfig)) {
 				try {
 					await this.#handleTestConnection(finalConfig);
 				} catch (error) {
@@ -1607,7 +1613,7 @@ export class MCPCommandController {
 			// discovery expands `${...}` URL values before MCPManager looks up the
 			// deterministic credential row, so unauth must clear that same key.
 			let removedUrlKeyedCredential = false;
-			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
+			if (isRemoteMCPConfig(found.config) && found.config.url) {
 				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
 					authStorage,
 					mcpOAuthCredentialIdsForServerUrl(found.config.url),

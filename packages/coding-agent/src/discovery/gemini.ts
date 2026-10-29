@@ -110,8 +110,8 @@ async function loadMCPFromSettings(
 			env: raw.env && typeof raw.env === "object" ? (raw.env as Record<string, string>) : undefined,
 			url: typeof raw.url === "string" ? raw.url : undefined,
 			headers: raw.headers && typeof raw.headers === "object" ? (raw.headers as Record<string, string>) : undefined,
-			transport: ["stdio", "sse", "http"].includes(raw.type as string)
-				? (raw.type as "stdio" | "sse" | "http")
+			transport: ["stdio", "sse", "http", "streamable-http"].includes(raw.type as string)
+				? (raw.type as "stdio" | "sse" | "http" | "streamable-http")
 				: undefined,
 			timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),

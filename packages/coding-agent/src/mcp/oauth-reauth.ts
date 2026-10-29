@@ -33,7 +33,7 @@ import {
 } from "./oauth-credentials";
 import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "./oauth-flow";
 import type { AuthStorage } from "../session/auth-storage";
-import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig } from "./types";
+import { type MCPAuthChallenge, type MCPAuthConfig, type MCPServerConfig, isRemoteMCPConfig } from "./types";
 
 export function withTimeout<T>(
 	promise: Promise<T>,
@@ -284,7 +284,7 @@ export function stripMcpOAuthAuth(config: MCPServerConfig): MCPServerConfig {
  */
 export function clearMcpClientAuthSurface(config: MCPServerConfig): MCPServerConfig {
 	const next = stripMcpOAuthAuth(config);
-	if (next.type !== "http" && next.type !== "sse") return next;
+	if (!isRemoteMCPConfig(next)) return next;
 	const headers: Record<string, string> = { ...next.headers };
 	for (const header of Object.keys(headers)) {
 		if (header.toLowerCase() === "authorization") delete headers[header];
@@ -307,7 +307,7 @@ export function matchingManagerServerConfig(
 	name: string,
 	selected: MCPServerConfig,
 ): MCPServerConfig | undefined {
-	if (selected.type !== "http" && selected.type !== "sse") return undefined;
+	if (!isRemoteMCPConfig(selected)) return undefined;
 	const managerConfig = manager?.getServerConfig(name);
 	if (!managerConfig || managerConfig.type !== selected.type) return undefined;
 	const urls = [expandEnvVarsDeep(selected.url), selected.url];
@@ -385,7 +385,7 @@ export async function resolveMcpOAuthEndpointsFromServer(
 	// unauthenticated preflight below spawns the child, which happily reuses
 	// its own cached tokens (e.g. mcp-remote's machine-wide ~/.mcp-auth) and
 	// produces the misleading "reauthorization is not required".
-	if (config.type !== "http" && config.type !== "sse") {
+	if (!isRemoteMCPConfig(config)) {
 		const remoteUrl = config.args?.find(arg => /^https?:\/\//.test(arg));
 		const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ?? "<remote url>")} }`;
 		const usesMcpRemote = [config.command, ...(config.args ?? [])].some(part => part?.includes("mcp-remote"));
@@ -429,7 +429,7 @@ export async function resolveMcpOAuthEndpointsFromServer(
 	const authResult = analyzeAuthError(authError, "url" in config ? config.url : undefined);
 	let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
 
-	if (!oauth && (config.type === "http" || config.type === "sse") && config.url) {
+	if (!oauth && isRemoteMCPConfig(config) && config.url) {
 		oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl, {
 			protectedScopes: authResult.scopes,
 			signal: opts.signal,
@@ -761,8 +761,7 @@ export async function reauthorizeMcpServer(
 		opts.signal,
 		() => new MCPOAuthCancelledError(),
 	);
-	const serverUrl =
-		runtimeBaseConfig.type === "http" || runtimeBaseConfig.type === "sse" ? runtimeBaseConfig.url : undefined;
+	const serverUrl = isRemoteMCPConfig(runtimeBaseConfig) ? runtimeBaseConfig.url : undefined;
 	// Client credentials drive the token exchange, so they must come from the
 	// env-expanded runtime config; `found.config`/`currentAuth` may still hold
 	// `${...}` placeholders (the wizard writes the secret to auth.clientSecret).
