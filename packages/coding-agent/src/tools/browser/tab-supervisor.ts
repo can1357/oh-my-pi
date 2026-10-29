@@ -206,7 +206,7 @@ export interface AcquireTabOptions {
 export interface AcquireTabResult {
 	tab: TabSession;
 	created: boolean;
-	/** What the open recovered from before reusing the tab, for its result. */
+	/** What the open recovered from before reusing the tab, and what its own runs printed, for its result. */
 	note?: string;
 }
 
@@ -482,9 +482,10 @@ async function acquireTabImpl(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				const reuse = async (): Promise<void> => {
+				const reuse = async (): Promise<string | undefined> => {
+					const printed: string[] = [];
 					if (reuseSteps.length) {
-						await runInTabWithSnapshot(
+						const resized = await runInTabWithSnapshot(
 							name,
 							{
 								code: reuseSteps.join("\n"),
@@ -493,12 +494,15 @@ async function acquireTabImpl(
 							},
 							{ cwd: getProjectDir() },
 						);
+						printed.push(runText(resized));
 					}
-					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
+					if (opts.url) printed.push((await navigateOpenedTab(name, opts.url, opts, startedAt)) ?? "");
+					return printed.join("\n").trim() || undefined;
 				};
-				let note: string | undefined;
+				let recovered: string | undefined;
+				let printed: string | undefined;
 				try {
-					await reuse();
+					printed = await reuse();
 				} catch (error) {
 					// The tab's renderer had crashed: the failed step reloaded the page on a new worker, so the
 					// open goes on with it once. A tab closed by the crash, or a second crash, fails the open.
@@ -506,11 +510,12 @@ async function acquireTabImpl(
 						!(error instanceof RendererCrashedError && tabs.get(name) === existing && existing.state === "alive")
 					)
 						throw error;
-					note = RENDERER_RELOADED_NOTE;
-					await reuse();
+					recovered = RENDERER_RELOADED_NOTE;
+					printed = await reuse();
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
 				if (existing.backend === "tern") existing.info = await existing.ternTab.readyInfo();
+				const note = [recovered, printed].filter(line => line !== undefined).join("\n") || undefined;
 				return { tab: tabs.get(name)!, created: false, note };
 			}
 		} else {
@@ -635,8 +640,8 @@ async function acquireTabImpl(
 	// this process dies abnormally before its own teardown closes the tab.
 	const scope = sharedScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
+	const printed = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
+	return { tab, created: true, note: printed };
 }
 
 /**
@@ -653,11 +658,12 @@ async function navigateOpenedTab(
 	opts: AcquireTabOptions,
 	startedAt: number,
 	created?: WorkerTabSession,
-): Promise<void> {
+): Promise<string | undefined> {
 	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
 	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
+	let navigated: RunResultOk;
 	try {
-		await runInTabWithSnapshot(
+		navigated = await runInTabWithSnapshot(
 			name,
 			{
 				code: `await tab.goto(${JSON.stringify(url)}, { waitUntil: ${JSON.stringify(opts.waitUntil ?? "load")} });`,
@@ -688,6 +694,15 @@ async function navigateOpenedTab(
 		await rollBackCreatedTab(name, created);
 		throw new ToolAbortError("Browser tab open aborted");
 	}
+	return runText(navigated) || undefined;
+}
+
+/** The text an internal run printed, such as a page's print() notice, so the call it serves can report it. */
+function runText(result: RunResultOk): string {
+	return result.displays
+		.flatMap(display => (display.type === "text" ? [display.text] : []))
+		.join("")
+		.trim();
 }
 
 /** Close a tab its failed open created, unless something already replaced or closed it. */
