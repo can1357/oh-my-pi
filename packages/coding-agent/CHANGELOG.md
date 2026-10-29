@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Resuming a session another live omp process is writing now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id until the first write and then moving the conversation to a sibling file recorded as the owner's continuation
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).

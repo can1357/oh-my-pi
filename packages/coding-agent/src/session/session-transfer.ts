@@ -11,7 +11,9 @@
  * Moves are recorded in the transcript as `custom_message` entries of type
  * {@link SESSION_TRANSFER_MESSAGE_TYPE}: the model sees where the session came
  * from, and a copy whose latest marker says it moved away is stale — resuming
- * it forks instead of continuing it ({@link forkIfMovedAway}).
+ * it forks instead of continuing it ({@link forkIfMovedAway}). Resuming a
+ * session another live omp process still owns forks the same way
+ * ({@link forkIfOwnedElsewhere}); {@link adoptResumedSession} runs both guards.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -33,6 +35,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
+import resumeOwnedElsewhereTemplate from "../prompts/session/resume-owned-elsewhere.md" with { type: "text" };
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
@@ -66,12 +69,15 @@ export interface SessionArchiveManifest {
  * Structured details of a {@link SESSION_TRANSFER_MESSAGE_TYPE} entry:
  * - `arrived` — unpacked here from `fromCwd` on another machine into `cwd`;
  * - `departed` — this copy was handed to `to` and is stale from here on;
- * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork.
+ * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork;
+ * - `owned-elsewhere` — `source` was resumed while another live omp process
+ *   owned session `sessionId`, so this conversation continued as a fork of it.
  */
 export type SessionTransferDetails =
 	| { kind: "arrived"; fromCwd: string; cwd: string }
 	| { kind: "departed"; to: string }
-	| { kind: "forked"; source: string; to: string };
+	| { kind: "forked"; source: string; to: string }
+	| { kind: "owned-elsewhere"; source: string; sessionId: string };
 
 /** User-facing failure of a pack, unpack, or move marker: missing input, bad archive, live owner. */
 export class SessionTransferError extends Error {
@@ -147,6 +153,10 @@ export function sessionTransferDetails(entry: FileEntry): SessionTransferDetails
 			return typeof details.source === "string" && typeof details.to === "string"
 				? { kind: "forked", source: details.source, to: details.to }
 				: undefined;
+		case "owned-elsewhere":
+			return typeof details.source === "string" && typeof details.sessionId === "string"
+				? { kind: "owned-elsewhere", source: details.source, sessionId: details.sessionId }
+				: undefined;
 		default:
 			return undefined;
 	}
@@ -169,6 +179,10 @@ function renderTransferNotice(details: SessionTransferDetails): string {
 			return prompt.render(transferDepartedTemplate, { to: details.to }).trim();
 		case "forked":
 			return prompt.render(transferStaleForkTemplate, { to: details.to, source: details.source }).trim();
+		case "owned-elsewhere":
+			return prompt
+				.render(resumeOwnedElsewhereTemplate, { source: details.source, sessionId: details.sessionId })
+				.trim();
 	}
 }
 
@@ -690,4 +704,57 @@ export async function forkIfMovedAway(manager: SessionManager, sessionDir?: stri
 		fork: fork.getSessionFile(),
 	});
 	return fork;
+}
+
+/**
+ * Whether another live omp process holds the ownership lease of session `id`
+ * at `file`. Claims nothing of its own: a free lease is taken and dropped in
+ * the same breath, so opening a session still never counts as owning it.
+ */
+function ownedByAnotherProcess(id: string, file: string): boolean {
+	const release = new FileSessionStorage().claimSession(id, file);
+	if (release === null) return true;
+	release();
+	return false;
+}
+
+/**
+ * Resume guard: when another live omp process owns `manager`'s session, close
+ * it untouched and return a fork of it (in `sessionDir`, default: the cwd's
+ * session directory) carrying a visible `owned-elsewhere` notice. Otherwise
+ * return `manager` itself.
+ *
+ * Without this the resumed process keeps the owner's session id until its
+ * first write and only then moves to a sibling file (`open-elsewhere`), so for
+ * that window two live processes answer to one id, and the sibling records the
+ * still-live owner as the session it continues — a lineage anything keyed on
+ * the session id (an Envoy role claim, a scheduler, a peer's address) reads as
+ * a hand-over from a session that is in fact still running. Forking here keeps
+ * the owner's id with the owner, and the fork is a copy from the start.
+ */
+export async function forkIfOwnedElsewhere(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+	const source = manager.getSessionFile();
+	if (!source) return manager;
+	const sessionId = manager.getSessionId();
+	if (!ownedByAnotherProcess(sessionId, source)) return manager;
+	const cwd = manager.getCwd();
+	await manager.close();
+	const fork = await SessionManager.forkFrom(source, cwd, sessionDir, undefined, { repairInterruptedTail: true });
+	await appendTransferNotice(fork, { kind: "owned-elsewhere", source, sessionId });
+	logger.info("Resumed a session another omp process owns; continuing in a fork", {
+		source,
+		sessionId,
+		fork: fork.getSessionFile(),
+	});
+	return fork;
+}
+
+/**
+ * Every resume guard, in the order a startup resume needs them: a copy whose
+ * conversation moved to another machine continues as a fork ({@link
+ * forkIfMovedAway}) before the ownership check, so the fork — not the stale
+ * copy — is what the lease is tested for.
+ */
+export async function adoptResumedSession(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+	return await forkIfOwnedElsewhere(await forkIfMovedAway(manager, sessionDir), sessionDir);
 }

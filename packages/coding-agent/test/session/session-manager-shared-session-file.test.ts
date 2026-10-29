@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { findSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { loadEntriesFromFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { adoptResumedSession, lastSessionTransfer } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
@@ -114,6 +117,14 @@ async function userTurnsIn(sessionFile: string, sessionDir: string): Promise<unk
 	return reader
 		.getEntries()
 		.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : []));
+}
+
+/** The `session` header `sessionFile` records, as written. */
+async function sessionHeaderIn(sessionFile: string): Promise<SessionHeader> {
+	const entries = await loadEntriesFromFile(sessionFile, new FileSessionStorage(), { throwIfMissing: true });
+	const header = entries.find(entry => entry.type === "session");
+	if (!header) throw new Error(`No session header in ${sessionFile}`);
+	return header;
 }
 
 /** Resume `sessionFile` here, append one turn, and report where it saved and what it was told. */
@@ -396,6 +407,57 @@ describe("SessionManager on a session file another omp process writes", () => {
 		} finally {
 			await ours.close();
 			await other.close();
+		}
+	}, 30_000);
+
+	it("resumes a session its owner still holds as a fork, not under the owner's id", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const originalId = await readSessionHeaderId(original);
+		if (!originalId) throw new Error("Expected a session header");
+
+		const { other: owner } = await OtherProcess.resume(tempDir, original);
+		try {
+			// The first write is what takes ownership of the session.
+			await owner.run("append owner 1");
+
+			const resumed = await adoptResumedSession(
+				await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				}),
+				tempDir.path(),
+			);
+			const fork = resumed.getSessionFile();
+			if (!fork) throw new Error("Expected the resumed session to have a file");
+			try {
+				// A copy from the start: the owner's id is never this process's id,
+				// not even for the window before it writes.
+				expect(resumed.getSessionId()).not.toBe(originalId);
+				expect(fork).not.toBe(original);
+				expect(await userTurnsIn(fork, tempDir.path())).toEqual(["before", "owner 1"]);
+				expect(lastSessionTransfer(resumed.getEntries())).toEqual({
+					kind: "owned-elsewhere",
+					source: original,
+					sessionId: originalId,
+				});
+
+				const header = await sessionHeaderIn(fork);
+				expect(header.parentSession).toBe(originalId);
+				// Not a continuation of the owner: it is still running under that id,
+				// so a resume of its file must land on it and not follow this copy.
+				expect(header.continuationOf).toBeUndefined();
+				expect(await findSessionContinuation(original)).toBeUndefined();
+
+				resumed.appendMessage(userTurn("resumed here"));
+				await resumed.flush();
+			} finally {
+				await resumed.close();
+			}
+			// The owner keeps its id, its file, and everything in it.
+			expect(await readSessionHeaderId(original)).toBe(originalId);
+			expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "owner 1"]);
+		} finally {
+			await owner.close();
 		}
 	}, 30_000);
 });

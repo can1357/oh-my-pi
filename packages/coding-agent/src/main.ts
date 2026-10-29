@@ -129,7 +129,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
-import { forkIfMovedAway } from "./session/session-transfer";
+import { adoptResumedSession } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -1330,8 +1330,9 @@ export async function createSessionManager(
 				}
 				throw err;
 			}
-			// A copy whose conversation moved to another machine continues as a fork.
-			return await forkIfMovedAway(manager, parsed.sessionDir);
+			// A copy whose conversation moved to another machine, or whose session
+			// another live omp process owns, continues as a fork.
+			return await adoptResumedSession(manager, parsed.sessionDir);
 		}
 		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
 		if (!target) {
@@ -1347,15 +1348,15 @@ export async function createSessionManager(
 			askToMoveSession,
 		);
 		if (moveResult.status === "moved") {
-			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
+			return await adoptResumedSession(moveResult.manager, parsed.sessionDir);
 		}
 		if (moveResult.status === "declined") {
 			return undefined;
 		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await adoptResumedSession(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}
 	if (parsed.continue) {
-		return await forkIfMovedAway(
+		return await adoptResumedSession(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -1373,7 +1374,7 @@ export async function createSessionManager(
 	// overriding them with CLI defaults.
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
 	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
-		const manager = await forkIfMovedAway(
+		const manager = await adoptResumedSession(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -2276,7 +2277,7 @@ export async function runRootCommand(
 			if (continuation) resumedContinuations.push(continuation);
 			const chosen = continuation?.session ?? selected;
 			try {
-				sessionManager = await forkIfMovedAway(
+				sessionManager = await adoptResumedSession(
 					(await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
 						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
 						: await SessionManager.open(chosen.path),

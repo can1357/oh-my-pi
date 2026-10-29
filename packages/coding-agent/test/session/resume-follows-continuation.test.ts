@@ -434,7 +434,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 		}
 	}, 30_000);
 
-	it("moves off again when the continuation is itself open in another live process", async () => {
+	it("forks the continuation at open when another live process already owns it", async () => {
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");
 		const { original, continuation } = await movedOffSession(tempDir);
 		const continuationId = await readSessionHeaderId(continuation);
@@ -450,12 +450,17 @@ describe("--resume of a session that continued in a sibling file", () => {
 			if (!manager) throw new Error("Expected a resumed session");
 			const notices: SessionPersistenceNotice[] = [];
 			manager.onPersistenceNotice(notice => notices.push(notice));
-			manager.appendMessage(userTurn("after resume"));
-			await manager.flush();
 			const savedTo = manager.getSessionFile();
 			if (!savedTo) throw new Error("Expected the resumed session to save somewhere");
-			expect(notices).toEqual([{ reason: "open-elsewhere", from: continuation, to: savedTo }]);
-			expect(manager.getHeader()?.continuationOf).toBe(continuationId);
+			// Settled at open: the holder keeps the continuation's id and file, and
+			// this copy never answers to that id, so nothing keyed on it moves here.
+			expect(savedTo).not.toBe(continuation);
+			expect(manager.getSessionId()).not.toBe(continuationId);
+			expect(manager.getHeader()?.parentSession).toBe(continuationId);
+			expect(manager.getHeader()?.continuationOf).toBeUndefined();
+			manager.appendMessage(userTurn("after resume"));
+			await manager.flush();
+			expect(notices).toEqual([]);
 			await manager.close();
 			expect(await userTurnsIn(savedTo, tempDir.path())).toEqual([
 				"before",
