@@ -427,6 +427,13 @@ async function generateTitleOnlineWithModels(
 							// reject sampling params drop this via `supportsSamplingParams`.
 							temperature: 0,
 							metadata,
+							// `completeSimple` re-dispatches on its own — a thinking-loop
+							// re-sample, an attempt with a rotated credential — and those
+							// never re-enter the callback above, so the boundary is tested
+							// per dispatch from inside as well.
+							beforeRedispatch: async () => {
+								if (agentPauseGate.paused) await holdUntilResumed(signal, sessionId);
+							},
 							signal,
 						},
 					);

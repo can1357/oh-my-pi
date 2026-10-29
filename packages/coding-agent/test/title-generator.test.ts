@@ -197,6 +197,36 @@ describe("title generator", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 	});
 
+	// `completeSimple` re-dispatches on its own (thinking-loop re-sample,
+	// rotated credential) without re-entering the retry callback, so the
+	// request carries a hook those attempts go through.
+	it("holds a provider-made redispatch of the title request at the gate", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Hooked Title</title>" }],
+		} as never);
+
+		expect(await generateSessionTitle("Investigate the resolver", createRegistry(model), createSettings(model))).toBe(
+			"Hooked Title",
+		);
+		const options = completeSimpleMock.mock.calls[0]?.[2] as { beforeRedispatch?: () => Promise<void> } | undefined;
+		const beforeRedispatch = options?.beforeRedispatch;
+		if (!beforeRedispatch) throw new Error("the title request carries no redispatch hook");
+
+		agentPauseGate.pause();
+		let released = false;
+		const held = beforeRedispatch().then(() => {
+			released = true;
+		});
+		await drainMicrotasks();
+		expect(released).toBe(false);
+
+		agentPauseGate.resume();
+		await held;
+		expect(released).toBe(true);
+	});
+
 	it("selects an available local-inference model from the tiny role", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");
 		if (!localModel) throw new Error("Expected bundled local tiny model");

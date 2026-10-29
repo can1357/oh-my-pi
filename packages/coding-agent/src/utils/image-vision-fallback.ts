@@ -182,7 +182,16 @@ async function describeImage(
 					},
 				],
 			},
-			{ apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId), signal },
+			{
+				apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId),
+				signal,
+				// The retries `completeSimple` makes itself (thinking-loop
+				// re-sample, rotated credential) never come back through here,
+				// so each one tests the gate on its own.
+				beforeRedispatch: async () => {
+					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				},
+			},
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);
 		deps.costGate?.record(response.usage.cost.total);

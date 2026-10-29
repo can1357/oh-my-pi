@@ -275,4 +275,29 @@ describe("describeAttachedImagesForTextModel", () => {
 		expect(stub.calls).toHaveLength(1);
 		expect(blocks[0]!.text).toContain("red balloon");
 	});
+
+	it("holds a provider-made redispatch of the description at the gate", async () => {
+		// The retries `completeSimple` makes itself never re-enter this module,
+		// so the request carries a hook each of them goes through.
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			makeDeps(testDir, [textModel, visionModel], stub.fn),
+		);
+		const options = stub.calls[0]?.[2] as { beforeRedispatch?: () => Promise<void> } | undefined;
+		const beforeRedispatch = options?.beforeRedispatch;
+		if (!beforeRedispatch) throw new Error("the vision request carries no redispatch hook");
+
+		agentPauseGate.pause();
+		let released = false;
+		const held = beforeRedispatch().then(() => {
+			released = true;
+		});
+		await Bun.sleep(5);
+		expect(released).toBe(false);
+
+		agentPauseGate.resume();
+		await held;
+		expect(released).toBe(true);
+	});
 });

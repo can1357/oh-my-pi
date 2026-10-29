@@ -1024,6 +1024,7 @@ async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
 	dispatch: () => AssistantMessageEventStream,
 	onAttempt?: (message: AssistantMessage) => void,
+	beforeRedispatch?: () => Promise<void> | void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
 		const response = dispatch();
@@ -1043,6 +1044,8 @@ async function resolveWithThinkingLoopRetries(
 		signal?.throwIfAborted();
 		const delay = Math.min(THINKING_LOOP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), THINKING_LOOP_RETRY_MAX_DELAY_MS);
 		await scheduler.wait(delay, { signal });
+		// The caller gated the first dispatch; this one is ours, so it asks again.
+		await beforeRedispatch?.();
 		message = await dispatchAttempt();
 		thinkingLoopRetry = isRetryableThinkingLoop(message);
 	}
@@ -1055,7 +1058,12 @@ export async function complete<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
-	return resolveWithThinkingLoopRetries(options?.signal, () => stream(model, context, options));
+	return resolveWithThinkingLoopRetries(
+		options?.signal,
+		() => stream(model, context, options),
+		undefined,
+		options?.beforeRedispatch,
+	);
 }
 
 type AuthRetryFailure = {
@@ -1357,6 +1365,9 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
+				// This attempt is ours, not the caller's first: it asks again
+				// (the resolution above can have taken an OAuth refresh's time).
+				await requestOptions.beforeRedispatch?.();
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
@@ -1520,6 +1531,7 @@ export async function completeSimple<TApi extends Api>(
 		options?.signal,
 		() => streamSimple(model, context, sessionOptions),
 		onAttempt,
+		options?.beforeRedispatch,
 	);
 }
 
