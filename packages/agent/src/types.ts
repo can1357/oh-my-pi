@@ -671,6 +671,14 @@ export interface ToolCallContext {
 	/** Provider-native metadata for the current call, when present. */
 	providerMetadata?: ToolCallProviderMetadata;
 	/**
+	 * Settles once every earlier call of this batch that runs alongside this one
+	 * and may change files (approval tier other than "read", e.g. `bash`) has
+	 * finished; absent when there is none. The model sees the batch's results only
+	 * after the whole batch, so a read-only tool can check its target again here
+	 * and redo a read those calls changed instead of returning stale content.
+	 */
+	earlierEffectsSettled?: Promise<void>;
+	/**
 	 * Cooperative steering signal: aborted when a queued user/steering message
 	 * (or an interrupting peer IRC) is detected while this tool batch runs.
 	 * Unlike the hard abort signal it NEVER kills the tool — long-running
