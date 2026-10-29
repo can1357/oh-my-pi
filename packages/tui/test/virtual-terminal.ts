@@ -345,6 +345,17 @@ export class VirtualTerminal implements Terminal {
 		return columns;
 	}
 
+	/** Columns in a viewport row whose cells are drawn in reverse video, such as link hint tags. */
+	getViewportRowReverseColumns(row: number): number[] {
+		const words = this.#presentedRowCells(row);
+		if (!words) return [];
+		const columns: number[] = [];
+		for (let col = 0; col * CELL_U32 < words.length; col++) {
+			if ((words[col * CELL_U32 + CELL_FLAGS] ?? 0) & CellFlags.REVERSE) columns.push(col);
+		}
+		return columns;
+	}
+
 	/** Whether the cell at a viewport position carries the italic attribute. */
 	getCellItalic(row: number, col: number): boolean {
 		const words = this.#presentedRowCells(row);

@@ -8,6 +8,7 @@ import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extens
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { LinkBrowserComponent } from "@oh-my-pi/pi-tui/overlays/link-browser";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -325,7 +326,7 @@ describe("inline click-to-focus geometry", () => {
 		return { activated, firstActivation: first.promise, extension, runner };
 	}
 
-	function appendReply(text: string): void {
+	function appendReply(text: string, timestamp = 1): void {
 		session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text }],
@@ -341,8 +342,15 @@ describe("inline click-to-focus geometry", () => {
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-			timestamp: 1,
+			timestamp,
 		});
+	}
+
+	/** Whether a hint tag (drawn in reverse video) covers the first cell of `label` on screen. */
+	function tagDrawnOver(label: string): boolean {
+		const rows = plainRows(term.getViewport());
+		const row = rows.findIndex(line => line.includes(label));
+		return row >= 0 && term.getViewportRowReverseColumns(row).includes(rows[row]!.indexOf(label));
 	}
 
 	/** Draw one assistant reply with `text` and wait until `visible` shows on screen. */
@@ -416,7 +424,8 @@ describe("inline click-to-focus geometry", () => {
 		expect(session.extensionRunner?.getUIContext()?.getLinkClicksAvailable()).toBe(true);
 
 		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
-		const tagged = () => plainRows(term.getViewport()).some(row => row.includes("Open ahe details"));
+		// The tag is the letter it covers, `t`.
+		const tagged = () => tagDrawnOver("the details");
 		const hintKey = "\x1bk";
 
 		// Esc leaves hint mode untouched by any pick, and the next letter types into the editor again.
@@ -432,7 +441,7 @@ describe("inline click-to-focus geometry", () => {
 		// The tag drawn over the label picks it.
 		term.sendInput(hintKey);
 		await term.waitForRender(tagged);
-		term.sendInput("a");
+		term.sendInput("t");
 		await firstActivation;
 		expect(activated).toEqual(["demo:open/7"]);
 		await term.waitForRender(() => !tagged());
@@ -647,5 +656,208 @@ describe("inline click-to-focus geometry", () => {
 		runner.setSuspendedExtensions(() => false);
 		await Promise.resolve();
 		expect(chat()).toContain("Open the details NOW.");
+	});
+
+	it("browses to a link scrolled off the screen, picks it by tag, and redraws its reply in the browser", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { activated, extension } = installDemoLinkExtension();
+		// Opening the early link expands its reply; the handler asks omp to redraw it.
+		let expanded = false;
+		extension.assistantTextRenderers.push(({ text, message }) =>
+			expanded && message.timestamp === 1
+				? text.replace("here.", "here.\n\nEXPANDED one.\n\nEXPANDED two.")
+				: undefined,
+		);
+		const handled = Promise.withResolvers<void>();
+		extension.handlers.get("link_activate")!.push(async (...args: unknown[]) => {
+			expanded = true;
+			// The runner hands every link_activate handler its ExtensionContext as the second argument.
+			const ctx = args[1] as { ui: { rerenderMessage(timestamp: number): void } };
+			ctx.ui.rerenderMessage(1);
+			handled.resolve();
+		});
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		expect(cfgTuiMouse.get(mode.settings)).toBe(false);
+
+		appendReply("Early [the early link](demo:early) here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		appendReply("Late [the late link](demo:late) here.", 2);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the late link")));
+		// The early link has scrolled into terminal scrollback, where no tag can reach it.
+		expect(plainRows(term.getViewport()).some(row => row.includes("the early link"))).toBe(false);
+
+		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const hintKey = "\x1bo";
+		const screen = () => plainRows(term.getViewport());
+		// The hint key tags the late link on screen; pressed again it opens the browser, at the bottom.
+		term.sendInput(hintKey);
+		await term.waitForRender(() => tagDrawnOver("the late link"));
+		term.sendInput(hintKey);
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+		expect(tagDrawnOver("the late link")).toBe(true);
+		expect(screen().some(row => row.includes("Early"))).toBe(false);
+
+		// Scrolled to the top, the early link is tagged; typing its tag raises link_activate for it.
+		term.sendInput("\x1b[H");
+		await term.waitForRender(() => tagDrawnOver("the early link"));
+		expect(tagDrawnOver("the early link")).toBe(true);
+		const above = screen().slice(0, screen().findIndex(row => row.includes("Early")) + 1);
+		term.sendInput("t");
+		await handled.promise;
+		expect(activated).toEqual(["demo:early"]);
+
+		// The browser's copy grows in place: the rows down to the reply's first stay where they were.
+		await term.waitForRender(() => screen().some(row => row.includes("EXPANDED one.")));
+		expect(screen().some(row => row.includes("EXPANDED one."))).toBe(true);
+		const strip = (rows: string[]) => rows.map(row => row.slice(0, 119).trimEnd());
+		expect(strip(screen().slice(0, above.length))).toEqual(strip(above));
+		// The main transcript's scrollback is rebuilt only once the browser closes.
+		expect(resets).not.toHaveBeenCalled();
+
+		term.sendInput("\x1b");
+		await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+		expect(resets).toHaveBeenCalledTimes(1);
+		expect(plainRows(mode.chatContainer.render(120)).join("\n")).toContain("EXPANDED two.");
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+	});
+
+	it("opens the link browser from the hint key when no extension link is on screen", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+
+		// Nothing in the transcript draws a link: the status says so and nothing opens.
+		await showReply("Nothing to pick in this reply.", "Nothing to pick");
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => statuses.includes("No extension links on screen"));
+		expect(statuses).toContain("No extension links on screen");
+		expect(mode.ui.hasOverlay()).toBe(false);
+
+		appendReply("Early [the early link](demo:early) here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => screen().some(row => row.includes("Filler paragraph 39.")));
+		expect(screen().some(row => row.includes("the early link"))).toBe(false);
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+	});
+
+	it("replays a transcript without extension links once, until a reply is redrawn with one", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension();
+		let linked = false;
+		extension.assistantTextRenderers.push(({ text, message }) =>
+			linked && message.timestamp === 1
+				? text.replace("Early reply", "Early [the early link](demo:early)")
+				: undefined,
+		);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		appendReply("Early reply here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => screen().some(row => row.includes("Filler paragraph 39.")));
+
+		const checks = vi.spyOn(LinkBrowserComponent.prototype, "hasLinks");
+		const misses = () => statuses.filter(status => status === "No extension links on screen").length;
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => misses() === 1);
+		// Nothing changed since: the second press answers without replaying the branch again.
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => misses() === 2);
+		expect(checks).toHaveBeenCalledTimes(1);
+
+		// The extension redraws the early reply, now with a link (in scrollback): the key finds it.
+		linked = true;
+		session.extensionRunner!.getUIContext().rerenderMessage(1);
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+		expect(misses()).toBe(2);
+	});
+
+	it("closes the link browser when extension renderers are turned off or the extension is suspended", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { runner } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		await showReply("See [the late link](demo:late) here.", "the late link");
+		const openBrowser = async () => {
+			term.sendInput("\x1bo");
+			await term.waitForRender(() => tagDrawnOver("the late link"));
+			term.sendInput("\x1bo");
+			await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+			expect(mode.ui.hasOverlay()).toBe(true);
+		};
+		const expectClosed = async () => {
+			await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
+			expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+		};
+
+		// Suspended live, its renderers and scheme are gone: the browser's copy would draw with them.
+		await openBrowser();
+		runner.setSuspendedExtensions(() => true);
+		await expectClosed();
+		runner.setSuspendedExtensions(() => false);
+		// Resumed, the reply is rebuilt with its link drawn as a label again.
+		await Promise.resolve();
+
+		await openBrowser();
+		cfgExtensionAssistantTextRenderers.set(mode.settings, false);
+		await expectClosed();
+	});
+
+	it("closes the link browser when a picked link's handler opens a dialog, so the dialog gets the keys", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension();
+		const answered = Promise.withResolvers<boolean>();
+		extension.handlers.get("link_activate")!.push(async (...args: unknown[]) => {
+			const ctx = args[1] as { ui: { confirm(title: string, message: string): Promise<boolean> } };
+			answered.resolve(await ctx.ui.confirm("Open the link?", "It goes somewhere."));
+		});
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		await showReply("See [the late link](demo:late) here.", "the late link");
+
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => tagDrawnOver("the late link"));
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		term.sendInput("t");
+		await term.waitForRender(() => screen().some(row => row.includes("Open the link?")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+		expect(mode.ui.hasOverlay()).toBe(false);
+		// The keys reach the dialog: Enter takes its first choice.
+		term.sendInput("\r");
+		expect(await answered.promise).toBe(true);
 	});
 });
