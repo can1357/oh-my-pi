@@ -37,7 +37,7 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncResultBlock,
+	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
 	buildLaunchCompletionBlock,
@@ -599,7 +599,11 @@ export class ChatTranscriptBuilder {
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
-			const component = buildAsyncResultBlock(message);
+			// A registered renderer owns this card; the built-in block is the
+			// fallback when none exists, when one declines, and when one throws.
+			const renderer = this.#deps.getMessageRenderer?.(message.customType);
+			const component = buildAsyncResultComponent(message, renderer);
+			this.#trackExpandable(component);
 			this.container.addChild(component);
 			return;
 		}
