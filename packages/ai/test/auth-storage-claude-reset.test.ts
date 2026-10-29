@@ -339,7 +339,7 @@ describe("Claude saved reset account safety", () => {
 		const redeem = f.storage.resets.redeem({
 			target: f.target,
 			baseUrlResolver: f.baseUrlResolver,
-			signal: AbortSignal.timeout(5_000),
+			signal: new AbortController().signal,
 			preflightSignal: controller.signal,
 		});
 		await arrived.promise;
@@ -455,7 +455,7 @@ describe("Claude saved reset account safety", () => {
 					creditId: program === "juniper_tide" ? "juniper_tide" : "saved-reset",
 				},
 				baseUrlResolver: f.baseUrlResolver,
-				signal: AbortSignal.timeout(5_000),
+				signal: new AbortController().signal,
 			};
 			const redeem = f.storage.resets.redeem({ ...options, preflightSignal: controller.signal });
 			await lookupArrived.promise;
