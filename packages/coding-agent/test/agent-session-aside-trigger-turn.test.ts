@@ -1356,6 +1356,83 @@ describe("AgentSession triggerTurn aside", () => {
 		expect(agentEnds).toEqual([false, true]);
 	});
 
+	it("settles the end it held open when a context reset discards the parked record that promised the turn", async () => {
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			await harness.session.sendCustomMessage(card("CARD_PARKED_RESET"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, agentEnds } = harness;
+		const yieldWait = holdWorkPoolYieldWait(session);
+		try {
+			await parkStrandedAsideBehindPool(session, yieldWait);
+			expect(agentEnds).toEqual([false]);
+
+			// A context reset bumps the session generation like /new, so the parked record belongs
+			// to a transcript that no longer exists and no turn of this run's can follow.
+			expect(await session.resetSessionContext()).toBeDefined();
+			await settle(session);
+		} finally {
+			yieldWait.release();
+			yieldWait.restore();
+		}
+
+		expect(agentEnds).toEqual([false, true]);
+		// The reset discarded the record itself, not only the end it held open.
+		expect(session.ircWakesPending).toBe(false);
+	});
+
+	it("hands its record to a transition that starts while the generation check awaits", async () => {
+		const normalizeStarted = Promise.withResolvers<void>();
+		const releaseNormalize = Promise.withResolvers<void>();
+		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			normalizeStarted.resolve();
+			await releaseNormalize.promise;
+			return images;
+		});
+		const { session, mock } = await createHarness();
+		// `triggerTurn` in plan mode: only the transition can stop this turn.
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		let callsWhenTransitionStarted = Number.POSITIVE_INFINITY;
+		try {
+			const sent = session.sendCustomMessage(imageCard("CARD_IN_GENERATION_AWAIT"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+			await normalizeStarted.promise;
+			// Starts `/new` three microtasks after normalization resolves, which lands it after the
+			// dispatch has read `isSessionTransitioning` and before its generation await resumes —
+			// the window a check made before that await cannot see. The hop count pins that
+			// alignment; the assertion below holds whichever way the two interleave.
+			let chain: Promise<unknown> = releaseNormalize.promise;
+			for (let hop = 0; hop < 3; hop++) chain = chain.then(() => undefined);
+			void chain.then(() => {
+				callsWhenTransitionStarted = mock.calls.length;
+				void session.newSession();
+			});
+			releaseNormalize.resolve();
+			expect(await sent).toBe(false);
+			await settle(session);
+		} finally {
+			releaseNormalize.resolve();
+			normalizeSpy.mockRestore();
+		}
+
+		// No request carrying the record was made once the transition had started: a turn after
+		// that point would have run against the transcript replacing the one it was sent to.
+		const leaked = mock.calls.findIndex(
+			(call, index) =>
+				index >= callsWhenTransitionStarted &&
+				JSON.stringify(call.context.messages).includes("CARD_IN_GENERATION_AWAIT"),
+		);
+		expect(leaked).toBe(-1);
+	});
+
 	it("does not hold a session transition open while it queues an aside the transition's own hook sent", async () => {
 		const { session, mock } = await createHarness();
 		// The reconciler runs inside switchSession()'s transition scope, which awaits it. A send

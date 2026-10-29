@@ -20,6 +20,14 @@ export interface IrcBridgeHost {
 	wakeForIrc(records: AgentMessage[]): void;
 }
 
+/** Every IRC record queued at one moment: what `IrcBridge.clearPending` discards and
+ *  `IrcBridge.restorePending` puts back when a session transition rolls back. */
+export interface IrcPendingSnapshot {
+	interrupts: AgentMessage[];
+	asides: AgentMessage[];
+	deferredWakes: AgentMessage[];
+}
+
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
 	/** Tracks parent IRC steers by object identity without trusting prompt text or publication on receipt. */
@@ -122,7 +130,7 @@ export class IrcBridge {
 	 *  contract clear could wake the new transcript with a peer message belonging to the
 	 *  previous session. Pass the snapshot to `restorePending` to undo the clear
 	 *  if the transition is rolled back. */
-	clearPending(): { interrupts: AgentMessage[]; asides: AgentMessage[]; deferredWakes: AgentMessage[] } {
+	clearPending(): IrcPendingSnapshot {
 		const snapshot = { interrupts: this.#interrupts, asides: this.#asides, deferredWakes: this.#deferredWakes };
 		this.#interrupts = [];
 		this.#asides = [];
@@ -135,11 +143,7 @@ export class IrcBridge {
 	 *  the rolled-back switch's async load/hooks were still running) instead of overwriting it, so
 	 *  those newly arrived records aren't silently discarded — snapshot records precede them since
 	 *  they arrived first. */
-	restorePending(snapshot: {
-		interrupts: AgentMessage[];
-		asides: AgentMessage[];
-		deferredWakes: AgentMessage[];
-	}): void {
+	restorePending(snapshot: IrcPendingSnapshot): void {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];

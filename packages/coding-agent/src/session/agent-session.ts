@@ -382,7 +382,7 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IdleMaintenance, type IdleMaintenanceOptions } from "./idle-maintenance";
-import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import { IrcBridge, type IrcBridgeHost, type IrcPendingSnapshot } from "./irc-bridge";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
@@ -2000,6 +2000,22 @@ export class AgentSession implements SettingsScope {
 		// continuation can be folded away by an interrupt before any turn starts.
 		this.#continuationAgentEnd = ircContinuation && !queuedContinuation ? emitted : undefined;
 		this.#emit(emitted);
+	}
+
+	/**
+	 * Discards the IRC records of the session a `#sessionGeneration` bump leaves behind, and returns
+	 * them so a transition that can still roll back may restore them with `IrcBridge.restorePending`.
+	 * Every site that bumps the generation calls this: a record left behind rides the next unrelated
+	 * prompt into the new transcript, and a turn it promised never runs.
+	 *
+	 * @param settle publishes the end an earlier run left open for such a turn at once. A transition
+	 * that can still roll back passes `false` and settles at its own commit point instead, because a
+	 * rollback restores the records and they wake again.
+	 */
+	#discardOutgoingIrcRecords(settle: boolean): IrcPendingSnapshot {
+		const discarded = this.#irc.clearPending();
+		if (settle) this.#settleCancelledContinuation();
+		return discarded;
 	}
 
 	/**
@@ -6781,8 +6797,10 @@ export class AgentSession implements SettingsScope {
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
-		// its record instead of landing here (mirrors newSession()).
+		// its record instead of landing here (mirrors newSession()). The reset has no rollback, so the
+		// queued records go with the bump and any end held open for a turn one of them promised settles now.
 		this.#sessionGeneration++;
+		this.#discardOutgoingIrcRecords(true);
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -10426,15 +10444,19 @@ export class AgentSession implements SettingsScope {
 		}
 
 		if (options?.deliverAs === "aside") {
-			// A transition (/new, a switch) aborts and disconnects the agent long before it bumps
-			// the generation, so the check below passes while one is still applying and the dispatch
-			// further down would run the turn against the replacement transcript. Waiting the
-			// transition out here would deadlock a send its own hooks make, so hand the record to
-			// the transition the way #wakeForIrc's re-queue arm does: a commit clears it, a rollback
-			// restores it, and the resume below gives a restored record a turn of its own.
-			// A transition past its bump already owns the outgoing records; the check below drops
-			// this one with them, as it did before.
-			if (this.isSessionTransitioning && this.#sessionGeneration === sessionGeneration) {
+			// A transition past its bump already owns the outgoing records: this check drops this one
+			// with them, as it always did. It runs first so the transition test below is read after
+			// the await, synchronously with the dispatch — a transition that starts while this await
+			// yields would otherwise pass a check made before it.
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			// A transition (/new, a switch, a context reset) aborts and disconnects the agent long
+			// before it bumps the generation, so the check above passes while one is still applying
+			// and the dispatch below would run the turn against the replacement transcript. Waiting
+			// the transition out here would deadlock a send its own hooks make, so hand the record to
+			// the transition the way #wakeForIrc's re-queue arm does: the bump discards it
+			// (#discardOutgoingIrcRecords), a rollback restores it, and the resume below gives a
+			// restored record a turn of its own.
+			if (this.isSessionTransitioning) {
 				if (options.triggerTurn) this.#turnRequestingAsides.set(normalizedAppMessage, userInterruptCount);
 				this.#irc.queueAside([normalizedAppMessage]);
 				admission?.settle();
@@ -10449,7 +10471,6 @@ export class AgentSession implements SettingsScope {
 					.catch(error => logger.warn("Aside resume after a session transition failed", { error: String(error) }));
 				return false;
 			}
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			// Past the awaits above the record lands below, where agent_end can see it (same as the
 			// busy branch): close the admission window.
 			admission?.settle();
@@ -11638,11 +11659,8 @@ export class AgentSession implements SettingsScope {
 			// the first ordinary prompt's IrcBridge.flushPending(). Bump #sessionGeneration in
 			// the same breath so an aside-queueing call still awaiting normalization for the
 			// outgoing session also drops its record instead of landing in this new one.
-			this.#irc.clearPending();
 			this.#sessionGeneration++;
-			// A discarded record may have been the turn an earlier run's agent_end was left open
-			// for; with the record and its session gone, nothing else will publish that end.
-			this.#settleCancelledContinuation();
+			this.#discardOutgoingIrcRecords(true);
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -13355,7 +13373,7 @@ export class AgentSession implements SettingsScope {
 		// #sessionGeneration bumps in the same breath (and rolls back with it) so an
 		// aside-queueing call still awaiting normalization when the switch started drops its
 		// record on success but stays valid if the switch is rolled back to this same session.
-		const previousIrcPending = this.#irc.clearPending();
+		const previousIrcPending = this.#discardOutgoingIrcRecords(false);
 		const previousSessionGeneration = this.#sessionGeneration++;
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
