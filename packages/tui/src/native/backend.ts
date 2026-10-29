@@ -114,8 +114,13 @@ const DEFAULT_SCHEDULER: RenderScheduler = {
 
 /** Frames kept for the debug `tsp` op. */
 const RECENT_FRAMES = 64;
-/** An unanswered frame older than this no longer holds rendering back. */
-const STALLED_ACK_MS = 5000;
+/**
+ * An unanswered frame older than this no longer holds rendering back. Also
+ * the ceiling on waiting for a terminal to take a frame
+ * ({@link NativeBackend.acknowledged}, `TUI.renderNowAccepted`): past it the
+ * terminal is one this backend already renders to without credits.
+ */
+export const STALLED_ACK_MS = 5000;
 /** Role of the session's surfaces; a screen page may name its own. */
 const SESSION_ROLE = "omp.session";
 /** A `blobs` query unanswered this long counts its ids as missing: they go inline. */

@@ -46,8 +46,9 @@ export interface PauseScreenHost {
 		requestRender(): void;
 		/**
 		 * Paint one frame without the scheduler's hop and cadence, and resolve
-		 * once the terminal holds it. Bounded: a terminal that answers nothing
-		 * delays the resolution by the native backend's stall span at most.
+		 * once the terminal holds it: a native surface has acknowledged it, or
+		 * the row writer has delivered its bytes. Bounded — a terminal that
+		 * reads nothing delays the resolution by one stall span at most.
 		 */
 		renderNowAccepted(): Promise<void>;
 		readonly terminal: { readonly rows: number };
@@ -446,14 +447,15 @@ export async function runPauseScreen(host: PauseScreenHost, options?: PauseScree
 				// holding a focused, full-screen PAUSED frame over a running
 				// session — the very defect the paint below exists to prevent.
 				overlay.hide();
-				// `overlay.hide()` only schedules a frame, `resume()` wakes every
-				// parked agent loop in the same tick, and a native (TSP) surface
-				// keeps a frame back while the terminal owes acknowledgements —
-				// the PAUSED sheet is one of its overlays, so the terminal would
-				// go on showing it. Paint, then wait for the terminal to take
-				// the dismissal, before the gate opens: no agent may touch the
-				// repo while the screen still says PAUSED. The wait is bounded,
-				// so it cannot strand the pause either.
+				// `overlay.hide()` only schedules a frame and `resume()` wakes
+				// every parked agent loop in the same tick, while painting the
+				// dismissal does not put it on the screen: a native (TSP)
+				// surface keeps the frame back until the terminal has credits,
+				// and a row paint only hands its bytes to the off-thread
+				// writer. Either way the terminal goes on showing PAUSED, so
+				// wait for it to take the dismissal before the gate opens: no
+				// agent may touch the repo behind that screen. The wait is
+				// bounded, so it cannot strand the pause either.
 				await host.ui.renderNowAccepted();
 			}
 		}
