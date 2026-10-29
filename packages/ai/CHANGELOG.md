@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Changed
+
 - Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
@@ -69,7 +69,6 @@
 
 ## [18.14.0] - 2026-10-29
 
-- `auth.accountPolicies` `priority` now outranks a momentarily missing usage report, so new sessions stay on the preferred account ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
 ### Breaking Changes
 
 - Moved Anthropic header and endpoint helpers, along with Codex session/transport inspection and OpenAI Responses replay/storage helpers, to dedicated provider modules. Update imports from the previous locations.
@@ -80,7 +79,6 @@
 - Added mTLS support for Anthropic connections through the `CLAUDE_CODE_CLIENT_CERT` and `CLAUDE_CODE_CLIENT_KEY` environment variables.
 
 ### Changed
-- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Provider implementations are now loaded on demand, reducing startup and memory overhead while preserving existing stream timeouts, cancellation, and host overrides.
 - Account policy `priority` now takes precedence when usage information is temporarily unavailable, keeping new sessions on the preferred account.
