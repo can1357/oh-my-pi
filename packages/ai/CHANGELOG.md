@@ -69,6 +69,9 @@
 
 ## [18.14.0] - 2026-10-29
 
+### Changed
+
+- `auth.accountPolicies` `priority` now outranks a momentarily missing usage report, so new sessions stay on the preferred account ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
 ### Breaking Changes
 
 - Moved Anthropic header and endpoint helpers, along with Codex session/transport inspection and OpenAI Responses replay/storage helpers, to dedicated provider modules. Update imports from the previous locations.
