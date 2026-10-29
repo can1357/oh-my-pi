@@ -1644,4 +1644,88 @@ describe("AgentSession triggerTurn aside", () => {
 		expect(mock.calls).toHaveLength(2);
 		expect(requestsContaining(mock, "CARD_QUEUED_BEHIND_RUN")).toBe(1);
 	});
+
+	it("is not ended by a second send's failure while a live wake still holds its records", async () => {
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			await harness.session.sendCustomMessage(card("CARD_IN_WAKE"), { deliverAs: "aside", triggerTurn: true });
+		});
+		const { session, mock, agentEnds } = harness;
+		// Hold the stranded aside's turn at the work-pool yield join: its record has left every IRC
+		// queue and lives only inside the wake, where nothing else can see that it still owes a turn.
+		const turnWaiting = Promise.withResolvers<void>();
+		const yieldChange = Promise.withResolvers<void>();
+		const yieldSpy = spyOn(session, "whenWorkPoolYieldSettled").mockImplementation(() => {
+			turnWaiting.resolve();
+			return yieldChange.promise;
+		});
+		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			throw new Error("image normalization failed");
+		});
+		let extensionTurn: Promise<boolean> | undefined;
+		try {
+			extensionTurn = session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+			await turnWaiting.promise;
+
+			// A second `triggerTurn` aside that never reaches a queue. Cancelling its own promise is
+			// right; deciding the first record's, which is still on its way to a turn, is not.
+			await expect(
+				session.sendCustomMessage(
+					{
+						customType: "ext-card",
+						content: [
+							{ type: "text", text: "CARD_THAT_FAILS" },
+							{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+						],
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: "aside", triggerTurn: true },
+				),
+			).rejects.toThrow("image normalization failed");
+
+			yieldChange.resolve();
+			await extensionTurn;
+			await settle(session);
+		} finally {
+			yieldChange.resolve();
+			normalizeSpy.mockRestore();
+			yieldSpy.mockRestore();
+			await extensionTurn?.catch(() => {});
+		}
+
+		expect(mock.calls).toHaveLength(2);
+		expect(requestsContaining(mock, "CARD_IN_WAKE")).toBe(1);
+		// One terminal end, published by the turn that actually ran. A second one from the failed
+		// send would tell every subscriber the run was over while that turn was still coming.
+		expect(agentEnds).toEqual([false, true]);
+	});
+
+	it("gets a terminal end when disposal cancels the turn a mode exit had parked", async () => {
+		let sent = false;
+		const harness = await createHarness(async () => {
+			if (sent) return;
+			sent = true;
+			await harness.session.sendCustomMessage(card("CARD_AT_DISPOSE"), {
+				deliverAs: "aside",
+				triggerTurn: true,
+			});
+		});
+		const { session, mock, agentEnds } = harness;
+
+		// The teardown's suppression parks the stranded record; disposing inside it is the one
+		// cancellation no resume follows, so nothing else is left to publish the end.
+		await session.runModeExitTeardown(async () => {
+			await session.sendCustomMessage(card("EXTENSION_TURN"), { triggerTurn: true });
+			session.beginDispose();
+		});
+		await settle(session);
+
+		expect(mock.calls).toHaveLength(1);
+		expect(persisted(session, "CARD_AT_DISPOSE")).toBe(true);
+		expect(agentEnds).toEqual([false, true]);
+	});
 });

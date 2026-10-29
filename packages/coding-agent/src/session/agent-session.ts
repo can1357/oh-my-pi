@@ -769,6 +769,18 @@ type TurnRequestingAsideAdmission = {
 	settle: () => void;
 };
 
+/**
+ * Records a wake took out of the IRC queues and has not yet handed to a turn or put back; see
+ * {@link AgentSession} `#wakeForIrc`. While one is held, the `agent_end` those records carry is
+ * visible to nothing but this custody, so only its release may decide that end.
+ */
+type WakeCustody = {
+	/** Decides the open end unless something else still owes the turn; safe to call more than once. */
+	release: () => void;
+	/** Gives the records to a turn, whose own end decides instead; safe to call more than once. */
+	handOff: () => void;
+};
+
 /** One turn bracketed by the installed turn observer; see {@link AgentSession} `#startTurnObservation`. */
 type TurnObservation = {
 	finish: (error?: unknown) => void | Promise<void>;
@@ -1287,6 +1299,8 @@ export class AgentSession implements SettingsScope {
 	readonly #turnRequestingAsides = new WeakMap<AgentMessage, number>();
 	/** `triggerTurn` asides sent but not yet queued, folded or prompted (see {@link #admitTurnRequestingAside}). */
 	readonly #admittedTurnRequestingAsides = new Set<TurnRequestingAsideAdmission>();
+	/** Wake records out of every IRC queue and not yet given to a turn (see {@link #wakeForIrc}). */
+	#wakeRecordsInCustody = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -1503,12 +1517,17 @@ export class AgentSession implements SettingsScope {
 		if (this.#acpDefersAgentInitiatedTurns()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		// Parked wake records resume alongside ordinary stranded asides; they were
-		// already decided wake-intended at deferral time.
-		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
-		const wake = this.#foldStrandedIrcAsidesBeforeWake(records);
-		if (wake.length > 0) this.#wakeForIrc(wake);
-		// Every record folded, so no wake can settle the end a promised turn kept open.
-		else this.#settleCancelledContinuation();
+		// already decided wake-intended at deferral time. From the drain until the custody is
+		// released the records are in no queue, so only this bracket may decide the end they
+		// carry — and its release decides it whether they woke, folded, or were parked again.
+		const custody = this.#takeWakeCustody();
+		try {
+			const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
+			const wake = this.#foldStrandedIrcAsidesBeforeWake(records);
+			if (wake.length > 0) this.#wakeForIrc(wake);
+		} finally {
+			custody.release();
+		}
 	}
 
 	/**
@@ -1516,20 +1535,22 @@ export class AgentSession implements SettingsScope {
 	 * records left in the IRC queues: its bump discards them ({@link #discardOutgoingIrcRecords})
 	 * and a rollback restores them without draining. Resume once the transition settles, so a
 	 * restored record waits for a turn of its own instead of for the next unrelated prompt. A
-	 * commit leaves no record and no turn, so settle the end an earlier run held open for the turn
-	 * they promised instead; the generation tells the two apart, because a rollback restores it and
-	 * its records still wake.
+	 * commit leaves no record and no turn, so the decision below publishes the end an earlier run
+	 * held open for the turn they promised; the generation tells the two apart, because a rollback
+	 * restores it and its records still wake.
 	 */
 	#resumeIrcRecordsAfterSessionTransition(sessionGeneration: number): void {
 		void this.waitForSessionTransition()
 			.then(async () => {
-				if (await this.#sessionGenerationChanged(sessionGeneration)) {
-					this.#settleCancelledContinuation();
-					return;
-				}
+				if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 				this.#resumeStrandedIrcAsides();
 			})
-			.catch(error => logger.warn("IRC record resume after a session transition failed", { error: String(error) }));
+			.catch(error => logger.warn("IRC record resume after a session transition failed", { error: String(error) }))
+			// Every way out of the wait — the records went with a committed transcript, they woke,
+			// they folded, or the wait itself failed — ends here, so none of them can leave the end
+			// they carried open. A record that still wakes, or a wake that now holds them, makes
+			// this a no-op.
+			.finally(() => this.#settleCancelledContinuation());
 	}
 
 	/**
@@ -1614,12 +1635,28 @@ export class AgentSession implements SettingsScope {
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
 	 *  route here. Wrapped in #beginInFlight/#endInFlight so the turn is tracked and its settle
-	 *  re-drains anything that stranded during it. A user interrupt may have intentionally left a
-	 *  follow-up queued behind an invalid tail (seam #5); the wake turn's loop would otherwise drain
-	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
-	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
-	 *  in effect, even though the wake left a provider-valid tail. */
+	 *  re-drains anything that stranded during it.
+	 *
+	 *  The wake takes custody of its records for its whole run. From here they are in no IRC
+	 *  queue, so {@link #ircContinuationOwed} can no longer see the `agent_end` they carry as a
+	 *  pending record — the custody stands in for them, which is both why no other path may decide
+	 *  that end while the wake lives and why the single release below is where it is decided.
+	 *  Every way {@link #runIrcWake} can end reaches that release: a park, a drop, a deferral, an
+	 *  interrupt that folds the records, a prompt that fails. */
 	#wakeForIrc(wakeRecords: AgentMessage[]): void {
+		const custody = this.#takeWakeCustody();
+		void this.#runIrcWake(wakeRecords, custody)
+			.catch(error => logger.warn("IRC wake failed before its turn", { error: String(error) }))
+			.finally(() => custody.release());
+	}
+
+	/** The body of one {@link #wakeForIrc}; see that method for the custody contract. A user
+	 *  interrupt may have intentionally left a follow-up queued behind an invalid tail (seam #5);
+	 *  the wake turn's loop would otherwise drain it, so park the follow-up queue across the wake
+	 *  and restore it after. It stays queued post-wake because #canAutoContinueForFollowUp
+	 *  suppresses follow-up auto-resume while a user interrupt is in effect, even though the wake
+	 *  left a provider-valid tail. */
+	async #runIrcWake(wakeRecords: AgentMessage[], custody: WakeCustody): Promise<void> {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(wakeRecords);
 			return;
@@ -1633,44 +1670,41 @@ export class AgentSession implements SettingsScope {
 			const promptGeneration = this.#promptGeneration;
 			const sessionGeneration = this.#sessionGeneration;
 			this.#ircWakesAwaitingIdleCompaction++;
-			void idleCompaction
-				.then(async () => {
-					// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
-					// let it settle first: only then does the session generation say which transcript is live.
-					if (this.isSessionTransitioning) await this.waitForSessionTransition();
-					// The transcript these records were sent to was replaced (/new, /clear, a switch): drop them with it.
-					if (
-						this.#sessionGeneration !== sessionGeneration &&
-						(await this.#sessionGenerationChanged(sessionGeneration))
-					) {
-						// Nothing remains to run the turn these records promised, so settle the end the
-						// run that scheduled this wake left open for it — as the yield-wait arm below does.
-						this.#settleCancelledContinuation();
-						return;
-					}
-					if (this.#isDisposed) return;
-					if (this.hasAdmittedSubmission) {
-						// Input admitted during the compaction goes first. Prompt setup folds pending IRC
-						// into its turn; whatever is still pending once it settles wakes as usual.
-						this.#irc.queueAside(wakeRecords);
-						await this.waitForAdmittedSubmissions();
-						this.#resumeStrandedIrcAsides();
-						return;
-					}
-					if (this.#promptGeneration !== promptGeneration) {
-						// An abort during the wait never saw this wake start, so it does not cancel it: the records
-						// take the stranded-aside path, which wakes for IRC messages as a delivery right after the
-						// abort would, and folds other asides while the user's interrupt holds.
-						this.#irc.queueAside(wakeRecords);
-						this.#resumeStrandedIrcAsides();
-						return;
-					}
-					this.#wakeForIrc(wakeRecords);
-				})
-				.catch(error => logger.warn("IRC wake after idle compaction failed", { error: String(error) }))
-				.finally(() => {
-					this.#ircWakesAwaitingIdleCompaction--;
-				});
+			try {
+				await idleCompaction;
+				// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
+				// let it settle first: only then does the session generation say which transcript is live.
+				if (this.isSessionTransitioning) await this.waitForSessionTransition();
+				// The transcript these records were sent to was replaced (/new, /clear, a switch): drop them with it.
+				if (
+					this.#sessionGeneration !== sessionGeneration &&
+					(await this.#sessionGenerationChanged(sessionGeneration))
+				) {
+					return;
+				}
+				if (this.#isDisposed) return;
+				if (this.hasAdmittedSubmission) {
+					// Input admitted during the compaction goes first. Prompt setup folds pending IRC
+					// into its turn; whatever is still pending once it settles wakes as usual.
+					this.#irc.queueAside(wakeRecords);
+					await this.waitForAdmittedSubmissions();
+					this.#resumeStrandedIrcAsides();
+					return;
+				}
+				if (this.#promptGeneration !== promptGeneration) {
+					// An abort during the wait never saw this wake start, so it does not cancel it: the records
+					// take the stranded-aside path, which wakes for IRC messages as a delivery right after the
+					// abort would, and folds other asides while the user's interrupt holds.
+					this.#irc.queueAside(wakeRecords);
+					this.#resumeStrandedIrcAsides();
+					return;
+				}
+				this.#wakeForIrc(wakeRecords);
+			} catch (error) {
+				logger.warn("IRC wake after idle compaction failed", { error: String(error) });
+			} finally {
+				this.#ircWakesAwaitingIdleCompaction--;
+			}
 			return;
 		}
 		// While a driven run holds wakes, its monitor would take this turn's answer
@@ -1716,122 +1750,111 @@ export class AgentSession implements SettingsScope {
 		const userInterruptCount = this.#userInterruptCount;
 		const inFlightEpoch = this.#beginInFlight();
 		let turnError: unknown;
-		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
-		// in flight when the wake lands. Starting the turn on the stale prompt would
-		// advertise one yield schema while the runtime enforces the other, so join
-		// the transition before building the turn from a consistent contract.
-		void this.whenWorkPoolYieldSettled()
-			.then(async () => {
-				// A session transition (/new, switchSession) can commit during the wait above: it
-				// clears the IRC queues and bumps #sessionGeneration so the outgoing transcript's
-				// records stay out of the new one. These records left those queues before the wait,
-				// so drop them here instead of prompting them into the new session. A rolled-back
-				// switch restores the generation, so wait that transition out before deciding.
-				if (
-					this.#sessionGeneration !== sessionGeneration &&
-					(await this.#sessionGenerationChanged(sessionGeneration))
-				) {
-					// The run that scheduled this wake left its end open for the turn these records
-					// promised. They go with the transcript they were sent to, so nothing remains to
-					// publish that end: settle it instead of leaving a subscriber waiting.
-					this.#settleCancelledContinuation();
-					logger.debug("IRC wake turn dropped with its session");
-					return;
-				}
-				// A transition that disconnected the agent has not reached its reset yet: leave the
-				// records queued, where it clears them on success and restores them on rollback. A
-				// pooled contract still owns this worker, so park them where its turns cannot flush
-				// them unobserved, exactly as the pooled branch below and the AgentBusyError path do.
-				if (this.#unsubscribeAgent === undefined) {
-					if (this.#workPoolYieldItems.length > 0) this.#irc.queueDeferredWake(records);
-					else this.#irc.queueAside(records);
-					this.#resumeIrcRecordsAfterSessionTransition(sessionGeneration);
-					return;
-				}
-				// The checks below are synchronous and atomic with the dispatch:
-				// agent.prompt() claims streaming with no await in between, and the
-				// yield contract above mutates synchronously, so no install can
-				// interleave here.
+		try {
+			// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
+			// in flight when the wake lands. Starting the turn on the stale prompt would
+			// advertise one yield schema while the runtime enforces the other, so join
+			// the transition before building the turn from a consistent contract.
+			await this.whenWorkPoolYieldSettled();
+			// A session transition (/new, switchSession) can commit during the wait above: it
+			// clears the IRC queues and bumps #sessionGeneration so the outgoing transcript's
+			// records stay out of the new one. These records left those queues before the wait,
+			// so drop them here instead of prompting them into the new session. A rolled-back
+			// switch restores the generation, so wait that transition out before deciding.
+			if (
+				this.#sessionGeneration !== sessionGeneration &&
+				(await this.#sessionGenerationChanged(sessionGeneration))
+			) {
+				logger.debug("IRC wake turn dropped with its session");
+				return;
+			}
+			// A transition that disconnected the agent has not reached its reset yet: leave the
+			// records queued, where it clears them on success and restores them on rollback. A
+			// pooled contract still owns this worker, so park them where its turns cannot flush
+			// them unobserved, exactly as the pooled branch below and the AgentBusyError path do.
+			if (this.#unsubscribeAgent === undefined) {
+				if (this.#workPoolYieldItems.length > 0) this.#irc.queueDeferredWake(records);
+				else this.#irc.queueAside(records);
+				this.#resumeIrcRecordsAfterSessionTransition(sessionGeneration);
+				return;
+			}
+			// The checks below are synchronous and atomic with the dispatch:
+			// agent.prompt() claims streaming with no await in between, and the
+			// yield contract above mutates synchronously, so no install can
+			// interleave here.
+			if (this.#workPoolYieldItems.length > 0) {
+				// A pooled turn owns this worker (installed, running, or
+				// dispatch-imminent): park wake-intended records where pooled
+				// turns cannot flush them, for a monitored wake after clearing.
+				// Flushing them as ordinary asides would feed them to the batch
+				// with no observer to reply to the sender.
+				this.#irc.queueDeferredWake(records);
+				logger.debug("IRC wake turn parked while pooled");
+				return;
+			}
+			if (this.agent.state.isStreaming) {
+				this.#irc.queueAside(records);
+				logger.debug("IRC wake turn deferred behind the running turn");
+				return;
+			}
+			// The client prompt that owned the session can have released ownership during the
+			// wait above, after the busy branch of #dispatchCustomMessage checked it. A turn
+			// started now is one the ACP client can neither show nor cancel, so keep the records
+			// for its next turn; the drain leaves them queued while ownership is released.
+			if (this.#acpDefersAgentInitiatedTurns()) {
+				this.#irc.queueAside(records);
+				logger.debug("IRC wake turn deferred to the ACP client's next turn");
+				return;
+			}
+			// A user interrupt during the wait above folds the records it would have folded
+			// had it come first: a triggerTurn aside sent before it no longer starts this turn.
+			if (this.#userInterruptCount !== userInterruptCount) {
+				records = this.#foldStrandedIrcAsidesBeforeWake(records);
+				if (records.length === 0) return;
+			}
+			observation = this.#startTurnObservation(records);
+			// The turn owns the records from here, and its own `agent_end` is what a subscriber
+			// waits for. Hand the custody over before the prompt rather than holding it across the
+			// turn, where it would make that turn's end look as if it had a continuation of its own.
+			custody.handOff();
+			await this.agent.prompt(records);
+		} catch (error) {
+			if (error instanceof AgentBusyError) {
+				// Lost the prompt race after passing the checks above: an
+				// ordinary running turn takes these as asides, but a pooled
+				// turn must not flush them, so park them instead.
 				if (this.#workPoolYieldItems.length > 0) {
-					// A pooled turn owns this worker (installed, running, or
-					// dispatch-imminent): park wake-intended records where pooled
-					// turns cannot flush them, for a monitored wake after clearing.
-					// Flushing them as ordinary asides would feed them to the batch
-					// with no observer to reply to the sender.
 					this.#irc.queueDeferredWake(records);
 					logger.debug("IRC wake turn parked while pooled");
-					return;
-				}
-				if (this.agent.state.isStreaming) {
+				} else {
 					this.#irc.queueAside(records);
 					logger.debug("IRC wake turn deferred behind the running turn");
-					return;
 				}
-				// The client prompt that owned the session can have released ownership during the
-				// wait above, after the busy branch of #dispatchCustomMessage checked it. A turn
-				// started now is one the ACP client can neither show nor cancel, so keep the records
-				// for its next turn; the drain leaves them queued while ownership is released.
-				if (this.#acpDefersAgentInitiatedTurns()) {
-					this.#irc.queueAside(records);
-					// The records wait for a prompt only the client can send, and the drain refuses
-					// to wake while ACP defers, so no turn of this run's follows: settle the end it
-					// left open. The records still reach the client's next turn as context.
-					this.#settleCancelledContinuation();
-					logger.debug("IRC wake turn deferred to the ACP client's next turn");
-					return;
-				}
-				// A user interrupt during the wait above folds the records it would have folded
-				// had it come first: a triggerTurn aside sent before it no longer starts this turn.
-				if (this.#userInterruptCount !== userInterruptCount) {
-					records = this.#foldStrandedIrcAsidesBeforeWake(records);
-					if (records.length === 0) {
-						// The run that scheduled this wake published its end non-terminal for the
-						// turn these records promised. Nothing will run it now, so settle that end.
-						this.#settleCancelledContinuation();
-						return;
-					}
-				}
-				observation = this.#startTurnObservation(records);
-				return this.agent.prompt(records);
-			})
-			.catch(error => {
-				if (error instanceof AgentBusyError) {
-					// Lost the prompt race after passing the checks above: an
-					// ordinary running turn takes these as asides, but a pooled
-					// turn must not flush them, so park them instead.
-					if (this.#workPoolYieldItems.length > 0) {
-						this.#irc.queueDeferredWake(records);
-						logger.debug("IRC wake turn parked while pooled");
-					} else {
-						this.#irc.queueAside(records);
-						logger.debug("IRC wake turn deferred behind the running turn");
-					}
-					return;
-				}
+			} else {
 				turnError = error;
 				logger.warn("IRC wake turn failed", { error: String(error) });
-			})
-			.finally(async () => {
-				try {
-					await this.#waitForPostPromptRecovery(generation);
-				} catch (error) {
-					turnError ??= error;
-					logger.warn("IRC wake turn recovery failed", { error: String(error) });
-				}
-				// The follow-up this wake parked belongs to the session that parked it: a transition
-				// that committed during the wait above dropped that session's queues on purpose. A
-				// switch that rolls back restores the generation, so wait that out before deciding.
-				if (parkedFollowUps.length > 0 && !(await this.#sessionGenerationChanged(sessionGeneration))) {
-					this.agent.replaceQueues(
-						[...this.agent.peekSteeringQueue()],
-						[...parkedFollowUps, ...this.agent.peekFollowUpQueue()],
-					);
-					this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
-				}
-				// Release the in-flight bracket BEFORE settling owned async work.
-				this.#endInFlight(inFlightEpoch);
-				await this.#finishTurnObservation(observation, turnError);
-			});
+			}
+		} finally {
+			try {
+				await this.#waitForPostPromptRecovery(generation);
+			} catch (error) {
+				turnError ??= error;
+				logger.warn("IRC wake turn recovery failed", { error: String(error) });
+			}
+			// The follow-up this wake parked belongs to the session that parked it: a transition
+			// that committed during the wait above dropped that session's queues on purpose. A
+			// switch that rolls back restores the generation, so wait that out before deciding.
+			if (parkedFollowUps.length > 0 && !(await this.#sessionGenerationChanged(sessionGeneration))) {
+				this.agent.replaceQueues(
+					[...this.agent.peekSteeringQueue()],
+					[...parkedFollowUps, ...this.agent.peekFollowUpQueue()],
+				);
+				this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
+			}
+			// Release the in-flight bracket BEFORE settling owned async work.
+			this.#endInFlight(inFlightEpoch);
+			await this.#finishTurnObservation(observation, turnError);
+		}
 	}
 
 	/**
@@ -1994,34 +2017,18 @@ export class AgentSession implements SettingsScope {
 		// so both count during an abort: a send that reaches the session while the abort unwinds
 		// (an extension timer, an `agent_end` handler, an SDK caller) carries the interrupt count
 		// abort() took before its awaits, so the drain starts the turn that send asked for.
-		// Stranded IRC counts only for the records the settle drain will
-		// wake (#strandedRecordWakes): plan mode and a user interrupt fold the rest into
-		// context instead of waking, and an ACP client that owns the turn lifecycle keeps them
-		// queued for its next turn. A `triggerTurn` aside whose send is still in flight
-		// (#admittedTurnRequestingAsides, e.g. image normalization outlasting this run) has no
-		// record queued yet, and counts for the turn it was promised.
-		// A mode exit (#modeExitDrainSuppressionDepth) suppresses both drains only for the length of
-		// its teardown: runModeExitTeardown re-schedules the queue drain and resumes the stranded
-		// records the moment the depth returns to zero. Work parked behind it is therefore a
-		// continuation, not a stop, and tagging this end terminal would run that turn after it.
+		// What the IRC side still owes is #ircContinuationOwed's single rule, shared with the
+		// decision that later publishes this end terminal. A mode exit
+		// (#modeExitDrainSuppressionDepth) suppresses the queue drain only for the length of its
+		// teardown — runModeExitTeardown re-schedules it the moment the depth returns to zero — so
+		// work parked behind it is a continuation, not a stop, and `canDrain` does not count it.
 		const canDrain = this.#unsubscribeAgent !== undefined;
 		const queuedContinuation =
 			canDrain &&
 			!this.#queuedMessageDrainBlocked &&
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
-		// In an ACP session that defers agent-initiated turns, an admitted aside lands in the
-		// client's run or its next turn (the aside branches of #dispatchCustomMessage), never in a
-		// turn of its own, so it holds no agent_end open there.
-		const admittedAsideTurn =
-			!(this.#clientBridge?.deferAgentInitiatedTurns === true && !this.#allowAcpAgentInitiatedTurns) &&
-			this.#hasAdmittedAsideTurn();
-		const ircContinuation =
-			canDrain &&
-			!this.#isDisposed &&
-			((!this.#acpDefersAgentInitiatedTurns() &&
-				this.#irc.somePending(record => this.#strandedRecordWakes(record))) ||
-				admittedAsideTurn);
+		const ircContinuation = this.#ircContinuationOwed();
 		const emitted = queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending;
 		// A queued steer or follow-up runs on its own and settles with its own end; only the IRC
 		// continuation can be folded away by an interrupt before any turn starts.
@@ -2046,21 +2053,64 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Publish the terminal end of a run whose promised continuation an interrupt folded away.
-	 * No-op when no end is open, when a later run settled one, or when the continuation ran.
+	 * Publish the terminal end of a run whose promised continuation nothing will run after all.
+	 * No-op when no end is open, when a later run settled one, and — the point of the single
+	 * predicate — when anything still owes that turn, so one path's failure can never decide an
+	 * end another live record owns.
 	 */
 	#settleCancelledContinuation(): void {
 		const open = this.#continuationAgentEnd;
 		if (!open) return;
-		// Another record or admitted aside still carries the promise: its own settle ends the run.
-		// While an ACP client owns the turn lifecycle the drain leaves records queued for its next
-		// prompt instead of waking them, so a pending record carries nothing — the same condition
-		// #flushPendingAgentEnd weighs when it decides to tag an end non-terminal.
-		if (!this.#acpDefersAgentInitiatedTurns() && this.#irc.somePending(record => this.#strandedRecordWakes(record)))
-			return;
-		if (this.#hasAdmittedAsideTurn()) return;
+		if (this.#ircContinuationOwed()) return;
 		this.#continuationAgentEnd = undefined;
 		this.#emit({ ...open, isTerminal: true });
+	}
+
+	/**
+	 * Whether anything still owes this session the turn an `agent_end` is (or would be) left open
+	 * for: an IRC record queued for a wake, a `triggerTurn` aside whose send is still in flight
+	 * ({@link #admitTurnRequestingAside}), or records a wake holds between the queues and their
+	 * turn ({@link #wakeForIrc}). {@link #flushPendingAgentEnd} asks this when it tags an end
+	 * non-terminal and {@link #settleCancelledContinuation} when it decides to publish that end
+	 * terminal, so the promise is recorded and decided against one rule and cannot be recorded by
+	 * one reading and forgotten by another.
+	 *
+	 * A pause does not cancel: a mode exit's teardown, a transition that has not committed and a
+	 * pooled yield contract each hold the turn back and then resume it, so it is still owed. Only
+	 * disposal, and an ACP client that owns the turn lifecycle (it can neither show nor cancel a
+	 * turn the agent starts, so the records wait for its next prompt as context), end the promise.
+	 */
+	#ircContinuationOwed(): boolean {
+		if (this.#isDisposed) return false;
+		if (this.#wakeRecordsInCustody > 0) return true;
+		if (!this.#acpDefersAgentInitiatedTurns() && this.#irc.somePending(record => this.#strandedRecordWakes(record))) {
+			return true;
+		}
+		// In an ACP session that defers agent-initiated turns, an admitted aside lands in the
+		// client's run or its next turn (the aside branches of #dispatchCustomMessage), never in a
+		// turn of its own, so it holds no agent_end open there.
+		return (
+			!(this.#clientBridge?.deferAgentInitiatedTurns === true && !this.#allowAcpAgentInitiatedTurns) &&
+			this.#hasAdmittedAsideTurn()
+		);
+	}
+
+	/** @see #wakeForIrc for what custody means and why its release is the only decision point. */
+	#takeWakeCustody(): WakeCustody {
+		this.#wakeRecordsInCustody++;
+		let held = true;
+		const drop = (): void => {
+			if (!held) return;
+			held = false;
+			this.#wakeRecordsInCustody--;
+		};
+		return {
+			handOff: drop,
+			release: () => {
+				drop();
+				this.#settleCancelledContinuation();
+			},
+		};
 	}
 
 	/**
@@ -6399,6 +6449,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// Disposal is the one cancellation no resume follows: the records below are flushed into
+		// the transcript with no turn, and #resumeStrandedIrcAsides refuses from here on. Decide
+		// the end an earlier run left open for that turn now, while listeners are still attached,
+		// rather than leaving a subscriber waiting for a settle that can no longer come.
+		this.#settleCancelledContinuation();
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -10504,9 +10559,10 @@ export class AgentSession implements SettingsScope {
 				// The user interrupted after the send, during the awaits above. Since #17243 such an
 				// interrupt latches auto-resume suppression only when it stops a run or queued work,
 				// so the suppression branch below misses an Esc on an otherwise idle session: fold
-				// the turn the user overtook, and settle the end the fold leaves open.
+				// the turn the user overtook. The end that fold leaves open is decided by the
+				// send's own `finally` (sendCustomMessage), which every triggerTurn aside exits
+				// through, so no branch here repeats it.
 				this.#recordWithoutTurn([normalizedAppMessage]);
-				this.#settleCancelledContinuation();
 				return false;
 			}
 			if (!turnRequested && this.#planModeState?.enabled) {
