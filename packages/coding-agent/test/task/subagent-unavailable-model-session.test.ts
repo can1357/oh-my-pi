@@ -17,6 +17,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -211,6 +212,23 @@ it("runs on the parent's model and says so when no chain key owns the declared m
 	expect(result.resolvedModel).toBe("mock/mock-model");
 	expect(result.resolvedModelIsFallback).toBe(true);
 	expect(result.resolvedModelFallbackReason).toContain(`Fallback: ${DECLARED} -> mock/mock-model`);
+}, 30_000);
+
+it("carries the substitution into the task result a reader gets, not only the settled fields", async () => {
+	// The settled fields the tests above assert, and `formatTaskResultSummary`'s
+	// own hand-built fixtures, each pass while the wiring between them is broken.
+	// This envelope is the parent's only record that a model other than the one
+	// it dispatched answered: lose `served`, `requested` or the reason here and a
+	// substituted run reads as the model the agent names, with nothing in the
+	// child's own artifact to contradict it.
+	const { result } = await spawnWithoutCredentials({}, false);
+
+	const summary = formatTaskResultSummary(result, { totalDurationMs: 5 });
+	const line = /<model\b[^>]*>(?:([\s\S]*?)<\/model>)?/.exec(summary);
+	expect(line?.[0]).toContain('fallback="true"');
+	expect(line?.[0]).toContain('served="mock/mock-model"');
+	expect(line?.[0]).toContain(`requested="${DECLARED}"`);
+	expect(line?.[1]).toContain("has no working credentials");
 }, 30_000);
 
 it("refuses the spawn under an empty own chain when only the child's account pool shuts the declared model out", async () => {
