@@ -32,10 +32,18 @@ const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
 	"napi",
 ] as const satisfies readonly string[];
+// grep-searcher's upstream ripgrep code predates the workspace clippy policy, but
+// the fork's own `search_push` (src/searcher/push.rs, see its README.md) carries
+// tests, so it is exempt from the lint gates only and still runs under test:rs.
+const LINT_EXEMPT_FORK_EXCLUDES = [
+	...VENDORED_FORK_EXCLUDES,
+	"--exclude",
+	"grep-searcher",
+] as const satisfies readonly string[];
 const TASK_COMMANDS = {
 	"check:rs": [
 		["cargo", "fmt", "--all", "--", "--check"],
-		["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"],
+		["cargo", "clippy", "--workspace", ...LINT_EXEMPT_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"],
 	],
 	"fix:rs": [
 		["cargo", "fmt", "--all"],
@@ -43,7 +51,7 @@ const TASK_COMMANDS = {
 			"cargo",
 			"clippy",
 			"--workspace",
-			...VENDORED_FORK_EXCLUDES,
+			...LINT_EXEMPT_FORK_EXCLUDES,
 			"--fix",
 			"--allow-dirty",
 			"--no-deps",
@@ -52,7 +60,7 @@ const TASK_COMMANDS = {
 		],
 	],
 	"fmt:rs": [["cargo", "fmt", "--all"]],
-	"lint:rs": [["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"]],
+	"lint:rs": [["cargo", "clippy", "--workspace", ...LINT_EXEMPT_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"]],
 	"test:rs": [
 		[
 			"cargo",

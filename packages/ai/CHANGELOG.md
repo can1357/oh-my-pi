@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Moved Anthropic header and endpoint helpers, along with Codex session/transport inspection and OpenAI Responses replay/storage helpers, to dedicated provider modules. Update imports from the previous locations.
@@ -15,6 +17,8 @@
 
 - Provider implementations are now loaded on demand, reducing startup and memory overhead while preserving existing stream timeouts, cancellation, and host overrides.
 - Account policy `priority` now takes precedence when usage information is temporarily unavailable, keeping new sessions on the preferred account.
+- Improved provider-specific credential usage lookups so they no longer wait for unrelated providers, while preserving cache freshness, cancellation isolation, and complete aggregate reports. The corresponding server-side latency improvement requires an updated auth broker.
+- Credential usage is now prefetched during session setup without selecting, pinning, or advancing the OAuth account rotation.
 
 ### Fixed
 
@@ -36,10 +40,8 @@
 - Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); gateway runs now offer Cursor only the client's tools, so each call reaches the client as one of its own and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 120 s; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Mistral thinking-message replay requests that could be rejected by LiteLLM with a `422 extra_forbidden` error.
-- Added the `omp/<version>` User-Agent to native Judge API requests so omp usage is correctly identified in upstream statistics.
-- Preserved provider-supplied `Retry-After` delays for Codex capacity errors over WebSocket and SSE, preventing retries from occurring too early.
-- Improved provider-specific credential usage lookups so they no longer wait for unrelated providers, while preserving cache freshness, cancellation isolation, and complete aggregate reports. The corresponding server-side latency improvement requires an updated auth broker.
-- Added safe credential-usage prefetching during session setup without selecting, pinning, or advancing the OAuth account rotation.
+- Fixed native Judge API requests missing the `omp/<version>` User-Agent, so omp usage is correctly identified in upstream statistics.
+- Fixed Codex capacity-error retries over WebSocket and SSE ignoring provider-supplied `Retry-After` delays and retrying too early.
 - Fixed cancelled OAuth refresh requests aborting the entire session, and ensured requests joining an existing refresh can still use the refreshed credential when the original request is cancelled.
 - Fixed Cursor models losing omp system-prompt context, including context files, skills, and rules, on subsequent turns or when earlier messages precede the active turn.
 - Fixed short-lived commands that refresh OAuth credentials, such as `omp token --force-refresh`, remaining open for several seconds after completing.

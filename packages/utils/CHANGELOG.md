@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Added
 
 - Added `logger.withContext(fields, fn)` to attach contextual fields to all records produced during a function and its asynchronous work, plus `logger.withoutContext(fn)` for work that should not inherit caller context.

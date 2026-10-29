@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Removed the `invalidateFsScanCache` API and the associated filesystem scan cache environment variables (`FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES`); filesystem listing caches are now managed automatically.
