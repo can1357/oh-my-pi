@@ -38,48 +38,24 @@ pub struct MermaidRenderOptions {
 	pub theme:              Option<MermaidTheme>,
 }
 
-impl MermaidRenderOptions {
-	fn resolve(self) -> napi::Result<RenderOptions> {
-		let defaults = RenderOptions::default();
-		let direction = match self.direction.as_deref() {
-			None => None,
-			Some(token) => Some(
-				Direction::parse(token)
-					.ok_or_else(|| NapiError::from_reason(format!("unknown direction: {token}")))?,
-			),
-		};
-		let color_mode = match self.color_mode.as_deref() {
-			None | Some("auto") => None,
-			Some("none") => Some(ColorMode::None),
-			Some("ansi16") => Some(ColorMode::Ansi16),
-			Some("ansi256") => Some(ColorMode::Ansi256),
-			Some("truecolor") => Some(ColorMode::Truecolor),
-			Some("html") => Some(ColorMode::Html),
-			Some(other) => return Err(NapiError::from_reason(format!("unknown color mode: {other}"))),
-		};
-		let mut theme = defaults.theme;
-		if let Some(overrides) = self.theme {
-			let MermaidTheme { fg, border, line, arrow, accent, bg, corner, junction } = overrides;
-			theme.fg = fg.unwrap_or(theme.fg);
-			theme.border = border.unwrap_or(theme.border);
-			theme.line = line.unwrap_or(theme.line);
-			theme.arrow = arrow.unwrap_or(theme.arrow);
-			theme.accent = accent.or(theme.accent);
-			theme.bg = bg.or(theme.bg);
-			theme.corner = corner.or(theme.corner);
-			theme.junction = junction.or(theme.junction);
+impl From<MermaidTheme> for ThemeSpec {
+	fn from(theme: MermaidTheme) -> Self {
+		let MermaidTheme { fg, border, line, arrow, accent, bg, corner, junction } = theme;
+		Self { fg, border, line, arrow, accent, bg, corner, junction }
+	}
+}
+
+impl From<MermaidRenderOptions> for RenderOptionsSpec {
+	fn from(options: MermaidRenderOptions) -> Self {
+		Self {
+			use_ascii:          options.use_ascii,
+			padding_x:          options.padding_x,
+			padding_y:          options.padding_y,
+			box_border_padding: options.box_border_padding,
+			direction:          options.direction,
+			color_mode:         options.color_mode,
+			theme:              options.theme.map(ThemeSpec::from),
 		}
-		Ok(RenderOptions {
-			use_ascii: self.use_ascii.unwrap_or(defaults.use_ascii),
-			padding_x: self.padding_x.unwrap_or(defaults.padding_x),
-			padding_y: self.padding_y.unwrap_or(defaults.padding_y),
-			box_border_padding: self
-				.box_border_padding
-				.unwrap_or(defaults.box_border_padding),
-			direction,
-			color_mode,
-			theme,
-		})
 	}
 }
 
@@ -94,6 +70,8 @@ pub fn render_mermaid_ascii(
 	text: String,
 	options: Option<MermaidRenderOptions>,
 ) -> napi::Result<String> {
-	let options = options.unwrap_or_default().resolve()?;
+	let options = RenderOptionsSpec::from(options.unwrap_or_default())
+		.resolve()
+		.map_err(NapiError::from_reason)?;
 	render(&text, &options).map_err(|err| NapiError::from_reason(err.0))
 }
