@@ -158,4 +158,37 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
 	});
+
+	it("keeps reporting an unanswered dialog when a run starts behind it", async () => {
+		// An MCP sign-in or a reserve prompt can be open when the next run starts
+		// (a queued prompt, an extension turn). The person still owes an answer,
+		// so the title and the OSC record must not report progress over it.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+		const prompt = "an MCP sign-in for linear";
+
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		await controller.handleEvent(AGENT_START);
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("keeps an unanswered dialog across the cleanup of a run that ended beside it", async () => {
+		// The run's cleanup clears the per-call prompt map. A session dialog
+		// outlives the run, so the settled run must not be the last word and the
+		// answer that arrives later must still be honoured.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+		const prompt = "an MCP sign-in for linear";
+
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(agentEnd([assistant("stop")]));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
+	});
 });

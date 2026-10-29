@@ -108,9 +108,6 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
  */
 const MAX_LIVE_IRC_CARDS = 4;
 
-/** `#blockingPrompts` key for the session-level dialog bracket; no tool call id can collide with it. */
-const SESSION_USER_WAIT_KEY = "session:user-wait";
-
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
 function hasNestedTodo(details: unknown): boolean {
@@ -221,12 +218,18 @@ export class EventController {
 	 * the call's `tool_execution_end` carries its `running` start result.
 	 */
 	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
-	/** Prompts waiting on the user, with the `blocked` status each reports; a
-	 *  tool call (an approval prompt or `ask`) is keyed by its call id and
-	 *  cleared at its tool_execution_end, and a session-level dialog
-	 *  (`user_wait_start`) by {@link SESSION_USER_WAIT_KEY}. The run returns to
-	 *  `working` once none is left. */
+	/** Tool calls waiting on the user (an approval prompt or `ask`), with the
+	 *  `blocked` status each reports; cleared at their tool_execution_end so the
+	 *  run returns to `working` once none is left. */
 	#blockingPrompts = new Map<string, RunStatus>();
+	/**
+	 * The session-level dialog (`user_wait_start`) waiting on a person, if one
+	 * is open. It outlives a run: a dialog can open with no run behind it (an
+	 * MCP sign-in) and stay open while a run starts, ends and is cleaned up, so
+	 * it is kept out of {@link #blockingPrompts}, which `#finishAgentEnd`
+	 * clears.
+	 */
+	#sessionUserWait: RunStatus | undefined;
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -428,21 +431,14 @@ export class EventController {
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			user_wait_start: async event => {
-				this.#blockingPrompts.set(SESSION_USER_WAIT_KEY, {
-					state: "blocked",
-					kind: "question",
-					msg: event.prompt,
-				});
-				setRunStatus({ state: "blocked", kind: "question", msg: event.prompt });
+				this.#sessionUserWait = { state: "blocked", kind: "question", msg: event.prompt };
+				setRunStatus(this.#sessionUserWait);
 				this.ctx.ui.requestRender();
 			},
 			user_wait_end: async () => {
-				if (!this.#blockingPrompts.delete(SESSION_USER_WAIT_KEY)) return;
-				// Unlike a tool call's prompt, a session dialog can open with no run
-				// behind it (an MCP re-auth, auto-QA consent), so the run only goes
-				// back to `working` when one is actually in flight.
-				const next = this.#blockingPrompts.values().next().value;
-				setRunStatus(next ?? (this.#runActive ? { state: "working" } : { state: "idle" }));
+				if (!this.#sessionUserWait) return;
+				this.#sessionUserWait = undefined;
+				setRunStatus(this.#statusWithNoSessionWait());
 				this.ctx.ui.requestRender();
 			},
 			notice: e => this.#handleNotice(e),
@@ -1030,6 +1026,18 @@ export class EventController {
 	}
 
 	/**
+	 * What the run reports when no session dialog is open: a tool call still
+	 * waiting on the user outranks the run, and with nothing waiting the report
+	 * follows the run — a dialog that opened outside any run leaves the session
+	 * idle rather than claiming work nobody started.
+	 */
+	#statusWithNoSessionWait(): RunStatus {
+		return (
+			this.#blockingPrompts.values().next().value ?? (this.#runActive ? { state: "working" } : { state: "idle" })
+		);
+	}
+
+	/**
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
 	 * components, timers, and stream-reveal state all reference the previous
@@ -1057,6 +1065,8 @@ export class EventController {
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
 		this.#blockingPrompts.clear();
+		// The dialog belongs to the session being left behind.
+		this.#sessionUserWait = undefined;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -1237,7 +1247,10 @@ export class EventController {
 		this.ctx.ensureLoadingAnimation();
 		this.#runActive = true;
 		this.#syncComposerActivity();
-		setRunStatus({ state: "working" });
+		// A session dialog can already be open when a run starts (an MCP sign-in
+		// answered at leisure, a queued prompt). It still needs the person, so the
+		// title and the OSC record must not report progress over it.
+		setRunStatus(this.#sessionUserWait ?? { state: "working" });
 		this.ctx.ui.requestRender();
 	}
 
@@ -2241,7 +2254,8 @@ export class EventController {
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
-			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
+			// A session dialog outranks the run here too.
+			setRunStatus(this.#sessionUserWait ?? this.#blockingPrompts.values().next().value ?? { state: "working" });
 		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
@@ -2609,6 +2623,10 @@ export class EventController {
 		// When the interrupted/failed turn died on a tool call, this replaces the
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
+		// The callers above report the settled run (`done`, `idle`) before this
+		// cleanup. A session dialog outlives the run that ran beside it, so the
+		// person still owes an answer and the report has to say so.
+		if (this.#sessionUserWait) setRunStatus(this.#sessionUserWait);
 		this.ctx.ui.requestRender();
 		// The user stopped the run themselves: no prediction or toast for it.
 		if (options?.interrupted) return;
