@@ -87,11 +87,7 @@ fn symlink_target(path: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 fn require_dir(path: &Path) -> io::Result<()> {
-	if fs::metadata(path)?.is_dir() {
-		Ok(())
-	} else {
-		Err(not_a_directory())
-	}
+	fs::metadata(path)?.is_dir().ok_or_else(not_a_directory)
 }
 
 impl Resolver for NativeResolver {

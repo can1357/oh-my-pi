@@ -181,7 +181,12 @@ stdenv.mkDerivation {
 
     install -Dm755 packages/coding-agent/dist/omp "$out/bin/omp"
     install -Dm644 LICENSE "$out/share/doc/omp/LICENSE"
-    install -Dm644 THIRD-PARTY-NOTICES.txt "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
+    # The executable embeds the CLI and the native addon; ship both notices.
+    {
+      cat packages/coding-agent/THIRD-PARTY-NOTICES.txt
+      echo
+      cat packages/natives/THIRD-PARTY-NOTICES.txt
+    } > "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
 
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # The addon is gzip-compressed inside the compiled binary, so its linked

@@ -160,7 +160,7 @@ struct Reader<'a> {
 
 impl Reader<'_> {
 	fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
-		let value = self.bytes.get(self.at..self.at + N)?.try_into().ok()?;
+		let value = *self.bytes[self.at..].first_chunk()?;
 		self.at += N;
 		Some(value)
 	}

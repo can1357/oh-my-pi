@@ -155,8 +155,10 @@ export interface TspCommonProps {
 	 * right after another tooltip or card), anchored below it (above without
 	 * room) and clamped to the window. It stays open while the pointer is over
 	 * the node or the card, closes on leave (short grace), press, key or scroll,
-	 * and replaces the node's `title` tooltip while open. Terminals that don't
-	 * know it ignore it and keep showing `title`.
+	 * and replaces the node's `title` tooltip while open. A lone `md` card is a
+	 * wide read-only preview the pointer passes through (open only over the
+	 * node). On an `agent` it opens over the row, not the children. Terminals
+	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
 }

@@ -37,10 +37,11 @@ export interface TableChartRequest {
 }
 
 /**
- * Picks the chart for a multi-series table under `smart`: a plan, or `null`
- * for no chart. A rejection falls back to the local guess.
+ * Picks the chart for a table under `smart`: a plan, or `null` for no chart.
+ * A rejection falls back to the local guess; `undefined` (no judge to ask
+ * right now) keeps the guess at once, exactly as `always` would draw it.
  */
-export type TableChartPlanner = (request: TableChartRequest) => Promise<ChartPlan | null>;
+export type TableChartPlanner = (request: TableChartRequest) => Promise<ChartPlan | null> | undefined;
 
 /**
  * The chart under a table: its SVG, colored with figure tokens (`var(--accent)`, …)
@@ -126,7 +127,12 @@ export function lookupTableChart(table: Tokens.Table): ChartLookup {
 	if (entry.chart !== undefined) return entry.chart;
 	if (entry.pending) return entry.pending;
 	const { analysis, guess } = entry;
-	entry.pending = chartPlanner!({ markdown: table.raw, table: analysis, guess: guess! }).then(
+	const pick = chartPlanner!({ markdown: table.raw, table: analysis, guess: guess! });
+	if (!pick) {
+		entry.chart = drawChart(analysis, guess!, true);
+		return entry.chart;
+	}
+	entry.pending = pick.then(
 		plan => {
 			entry.chart = plan ? drawChart(analysis, plan) : null;
 		},

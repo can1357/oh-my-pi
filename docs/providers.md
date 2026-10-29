@@ -18,7 +18,7 @@ Use subscription OAuth for this provider. It does not discover credentials from 
 
 The roster ships as KDL (`packages/catalog/src/compat/rules/providers/factory-droid.kdl`, with each model's wire and billing pool in `rules/runtime/behavior.kdl`), maintained by hand against the Droid CLI version pinned by `FACTORY_DROID_CLIENT_VERSION` (`packages/catalog/src/wire/factory-droid.ts`). It contains concrete CLI models, not the Factory Auto Model router or app-only Flex variants. Account feature flags, hard-deprecation gates, organization policy (including explicit opt-in requirements), and serving region narrow it live; new model IDs require a catalog update. Until discovery has succeeded online, feature-gated and consent-gated models stay hidden. Offline or failed discovery can retain a cached snapshot, which is not a guarantee of current entitlement.
 
-The roster includes Factory's `generate_image` models (`gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gemini-3-pro-image-preview`) for the `image` role. They appear only after discovery reads the organization's managed settings: `imageGenerationEnabled: false` hides all of them, and `imageGenerationAllowedModelIds` narrows them (an empty list hides all). Image calls bill to the Standard Credits pool.
+The roster includes Factory's `generate_image` models (`gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gemini-3-pro-image-preview`), which close the `image` role's defaults so a Factory login alone can generate images. They appear only after discovery reads the organization's managed settings: `imageGenerationEnabled: false` hides all of them, and `imageGenerationAllowedModelIds` narrows them (an empty list hides all). Image calls bill to the Standard Credits pool.
 
 Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
 
@@ -90,15 +90,15 @@ A custom provider's `apiKey` is resolved as **environment-variable-name-or-liter
 ```yaml
 # ~/.omp/agent/models.yml
 providers:
-  my-gateway:
-    baseUrl: https://gateway.example.com/v1
-    api: openai-completions
-    apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
-    models:
-      - id: claude-sonnet
-        name: Claude Sonnet via Gateway
-        contextWindow: 200000
-        maxTokens: 8192
+   my-gateway:
+      baseUrl: https://gateway.example.com/v1
+      api: openai-completions
+      apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
+      models:
+         - id: claude-sonnet
+           name: Claude Sonnet via Gateway
+           contextWindow: 200000
+           maxTokens: 8192
 ```
 
 If `authHeader: true` is set on a custom provider, the resolved key is injected as an `Authorization: Bearer <key>` header on every request to that provider.
@@ -109,94 +109,94 @@ The variables below supply credentials after runtime/config overrides and stored
 
 ### Core providers
 
-| Provider ID      | Environment variable(s)                                                                                                                          |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `anthropic`      | `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (Foundry mode prefers `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY=true`)         |
-| `openai`         | `OPENAI_API_KEY`                                                                                                                                 |
-| `openai-codex`   | `OPENAI_CODEX_OAUTH_TOKEN`                                                                                                                       |
-| `google`         | `GEMINI_API_KEY`                                                                                                                                 |
+| Provider ID      | Environment variable(s)                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anthropic`      | `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (Foundry mode prefers `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY=true`)                |
+| `openai`         | `OPENAI_API_KEY`                                                                                                                                        |
+| `openai-codex`   | `OPENAI_CODEX_OAUTH_TOKEN`                                                                                                                              |
+| `google`         | `GEMINI_API_KEY`                                                                                                                                        |
 | `google-vertex`  | `GOOGLE_CLOUD_API_KEY`, or ADC (explicit `GOOGLE_APPLICATION_CREDENTIALS` or gcloud's default ADC file, plus project and location variables; see below) |
-| `groq`           | `GROQ_API_KEY`                                                                                                                                   |
-| `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                             |
-| `mistral`        | `MISTRAL_API_KEY`                                                                                                                                |
-| `xai`            | `XAI_API_KEY`                                                                                                                                    |
-| `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                            |
-| `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                           |
-| `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                            |
-| `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                           |
-| `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, AWS profiles, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA/EC2 credential chain                        |
+| `groq`           | `GROQ_API_KEY`                                                                                                                                          |
+| `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                                    |
+| `mistral`        | `MISTRAL_API_KEY`                                                                                                                                       |
+| `xai`            | `XAI_API_KEY`                                                                                                                                           |
+| `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                                   |
+| `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                                  |
+| `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                                   |
+| `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                                  |
+| `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, AWS profiles, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA/EC2 credential chain                            |
 
 ### Additional hosted providers
 
-| Provider ID                      | Environment variable(s)                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------- |
-| `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                       |
-| `aiand`                          | `AIAND_API_KEY`                                                               |
-| `cerebras`                       | `CEREBRAS_API_KEY`                                                            |
-| `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
-| `baseten`                        | `BASETEN_API_KEY`                                                             |
-| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                 |
-| `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                            |
-| `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                   |
-| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
-| `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
-| `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
-| `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
-| `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
-| `together`                       | `TOGETHER_API_KEY`                                                            |
-| `typesafe`                       | `TYPESAFE_API_KEY`                                                            |
-| `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                     |
-| `nvidia`                         | `NVIDIA_API_KEY`                                                              |
-| `devin`                          | `DEVIN_API_KEY`                                                               |
-| `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
-| `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
-| `inception`                      | `INCEPTION_API_KEY`                                                           |
-| `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
-| `stepfun`                        | `STEPFUN_API_KEY`                                                             |
-| `helmcode`                       | `HELMCODE_API_KEY`                                                            |
-| `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
-| `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
-| `novita`                         | `NOVITA_API_KEY`                                                              |
-| `venice`                         | `VENICE_API_KEY`                                                              |
-| `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
+| Provider ID                      | Environment variable(s)                                                             |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                            |
+| `aiand`                          | `AIAND_API_KEY`                                                                     |
+| `cerebras`                       | `CEREBRAS_API_KEY`                                                                  |
+| `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
+| `baseten`                        | `BASETEN_API_KEY`                                                                   |
+| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                      |
+| `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                                  |
+| `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                         |
+| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                                 |
+| `deepseek`                       | `DEEPSEEK_API_KEY`                                                                  |
+| `siliconflow`                    | `SILICONFLOW_API_KEY`                                                               |
+| `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
+| `fireworks`                      | `FIREWORKS_API_KEY`                                                                 |
+| `together`                       | `TOGETHER_API_KEY`                                                                  |
+| `typesafe`                       | `TYPESAFE_API_KEY`                                                                  |
+| `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                           |
+| `nvidia`                         | `NVIDIA_API_KEY`                                                                    |
+| `devin`                          | `DEVIN_API_KEY`                                                                     |
+| `gmi-cloud`                      | `GMI_API_KEY`                                                                       |
+| `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                            |
+| `inception`                      | `INCEPTION_API_KEY`                                                                 |
+| `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                             |
+| `stepfun`                        | `STEPFUN_API_KEY`                                                                   |
+| `helmcode`                       | `HELMCODE_API_KEY`                                                                  |
+| `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                                |
+| `nanogpt`                        | `NANO_GPT_API_KEY`                                                                  |
+| `novita`                         | `NOVITA_API_KEY`                                                                    |
+| `venice`                         | `VENICE_API_KEY`                                                                    |
+| `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery)       |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
-| `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID` |
-| `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                         |
-| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
-| `kilo`                           | `KILO_API_KEY`                                                                |
-| `zai`                            | `ZAI_API_KEY`                                                                 |
-| `zenmux`                         | `ZENMUX_API_KEY`                                                              |
-| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                               |
-| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                |
-| `qianfan`                        | `QIANFAN_API_KEY`                                                             |
-| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                |
-| `synthetic`                      | `SYNTHETIC_API_KEY`                                                           |
-| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                        |
-| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                     |
-| `minimax`                        | `MINIMAX_API_KEY`                                                             |
-| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                 |
-| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
-| `sambanova`                      | `SAMBANOVA_API_KEY`                                                           |
-| `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
-| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
-| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
-| `cline-pass`                     | `CLINE_API_KEY`                                                               |
-| `factory-droid`                  | none — use `/login factory-droid`                                             |
-| `firepass`                       | `FIREPASS_API_KEY`                                                            |
-| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
-| `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
-| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                               |
-| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                |
-| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                               |
-| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                        |
-| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)            |
-| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
-| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
-| `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
-| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
-| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
-| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
-| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
+| `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID`     |
+| `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                               |
+| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
+| `kilo`                           | `KILO_API_KEY`                                                                      |
+| `zai`                            | `ZAI_API_KEY`                                                                       |
+| `zenmux`                         | `ZENMUX_API_KEY`                                                                    |
+| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                                     |
+| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                      |
+| `qianfan`                        | `QIANFAN_API_KEY`                                                                   |
+| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                      |
+| `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
+| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
+| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |
+| `minimax`                        | `MINIMAX_API_KEY`                                                                   |
+| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                       |
+| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
+| `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
+| `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
+| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
+| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
+| `cline-pass`                     | `CLINE_API_KEY`                                                                     |
+| `factory-droid`                  | none — use `/login factory-droid`                                                   |
+| `firepass`                       | `FIREPASS_API_KEY`                                                                  |
+| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                          |
+| `xiaomi`                         | `XIAOMI_API_KEY`                                                                    |
+| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                                     |
+| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                      |
+| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                                     |
+| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                              |
+| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)                  |
+| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                                  |
+| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                            |
+| `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                       |
+| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                                 |
+| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                         |
+| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                        |
+| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                       |
 
 Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
 
@@ -250,11 +250,11 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 Ollama, llama.cpp, and LM Studio are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
 
-| Provider ID | Base URL (env override → default)                                                 | Notes                                           |
-| ----------- | --------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `ollama`    | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                             |
-| `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured.    |
-| `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                             |
+| Provider ID | Base URL (env override → default)                                                 | Notes                                        |
+| ----------- | --------------------------------------------------------------------------------- | -------------------------------------------- |
+| `ollama`    | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                          |
+| `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured. |
+| `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                          |
 
 Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio uses `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-models`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or build without the bridge yields no models. Its on-device context can be too small for the standard prompt plus project instructions, so OMP does not auto-select it; use `--model apple/on-device` or `/model` to opt in.
 
@@ -272,10 +272,10 @@ Use the `disabledProviders` setting to remove a provider's models from selection
 ```yaml
 # ~/.omp/agent/config.yml or <project>/.omp/config.yml
 disabledProviders:
-  - anthropic
-  - openai
-  - google
-  - groq
+   - anthropic
+   - openai
+   - google
+   - groq
 ```
 
 Provider IDs are matched exactly. Disable `google` to hide the Google Gemini API provider; the OAuth-backed Google providers `google-gemini-cli` and `google-antigravity` are separate IDs and must be disabled individually. Disable `ollama`, `llama.cpp`, or `lm-studio` to stop local discovery for that engine.
@@ -297,8 +297,8 @@ Project settings live in `<project>/.omp/config.yml`. Use them when one reposito
 ```yaml
 # <project>/.omp/config.yml
 disabledProviders:
-  - openai
-  - openrouter
+   - openai
+   - openrouter
 ```
 
 Settings arrays are **replaced** wholesale by the higher-precedence layer, not merged or appended. If the global file disables three providers and the project file disables one, the project sees only the project list:
@@ -306,13 +306,13 @@ Settings arrays are **replaced** wholesale by the higher-precedence layer, not m
 ```yaml
 # ~/.omp/agent/config.yml
 disabledProviders:
-  - anthropic
-  - openai
-  - google
+   - anthropic
+   - openai
+   - google
 
 # <project>/.omp/config.yml
 disabledProviders:
-  - groq
+   - groq
 ```
 
 Effective result inside the project:
@@ -329,16 +329,16 @@ The project array re-enables `anthropic`, `openai`, and `google` for sessions la
 
 ```yaml
 disabledProviders:
-  - ollama
-  - path: ~/projects/sensitive
-    providers:
-      - anthropic
-      - openai
-  - paths:
-      - ~/work/client-a
-      - ~/work/client-b
-    values:
-      - openrouter
+   - ollama
+   - path: ~/projects/sensitive
+     providers:
+        - anthropic
+        - openai
+   - paths:
+        - ~/work/client-a
+        - ~/work/client-b
+     values:
+        - openrouter
 ```
 
 - Bare string entries always apply.
@@ -378,15 +378,15 @@ Minimal OpenAI-compatible provider:
 
 ```yaml
 providers:
-  my-openai-compatible:
-    baseUrl: https://api.example.com/v1
-    api: openai-completions
-    apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
-    models:
-      - id: fast-chat
-        name: Fast Chat
-        contextWindow: 128000
-        maxTokens: 8192
+   my-openai-compatible:
+      baseUrl: https://api.example.com/v1
+      api: openai-completions
+      apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
+      models:
+         - id: fast-chat
+           name: Fast Chat
+           contextWindow: 128000
+           maxTokens: 8192
 ```
 
 ### Zhipu BigModel account-balance keys
@@ -397,13 +397,13 @@ Use a custom provider for an API key issued from a standard BigModel account bal
 
 ```yaml
 providers:
-  bigmodel:
-    baseUrl: https://open.bigmodel.cn/api/paas/v4
-    api: openai-completions
-    apiKey: BIGMODEL_API_KEY
-    models:
-      - id: glm-4.6
-        name: GLM-4.6 (BigModel)
+   bigmodel:
+      baseUrl: https://open.bigmodel.cn/api/paas/v4
+      api: openai-completions
+      apiKey: BIGMODEL_API_KEY
+      models:
+         - id: glm-4.6
+           name: GLM-4.6 (BigModel)
 ```
 
 Set `BIGMODEL_API_KEY` to the `<id>.<secret>` key before starting `omp`, then select `bigmodel/glm-4.6`. The key does not use an `sk-` prefix.
@@ -412,28 +412,28 @@ Keyless local provider (no credentials required):
 
 ```yaml
 providers:
-  local-proxy:
-    baseUrl: http://127.0.0.1:4000/v1
-    api: openai-completions
-    auth: none
-    models:
-      - id: local-model
-        name: Local Model
-        contextWindow: 32768
-        maxTokens: 4096
+   local-proxy:
+      baseUrl: http://127.0.0.1:4000/v1
+      api: openai-completions
+      auth: none
+      models:
+         - id: local-model
+           name: Local Model
+           contextWindow: 32768
+           maxTokens: 4096
 ```
 
 Discovery-enabled provider (models fetched from the endpoint at runtime):
 
 ```yaml
 providers:
-  team-proxy:
-    baseUrl: https://models.example.com/v1
-    apiKey: TEAM_PROXY_API_KEY
-    authHeader: true # send Authorization: Bearer <resolved key>
-    disableStrictTools: true
-    discovery:
-      type: proxy
+   team-proxy:
+      baseUrl: https://models.example.com/v1
+      apiKey: TEAM_PROXY_API_KEY
+      authHeader: true # send Authorization: Bearer <resolved key>
+      disableStrictTools: true
+      discovery:
+         type: proxy
 ```
 
 For the full schema, all allowed `api` values, discovery `type`s, model overrides, and equivalence settings, see [Model and Provider Configuration](./models.md).
@@ -442,8 +442,8 @@ To disable a custom provider, list its ID exactly:
 
 ```yaml
 disabledProviders:
-  - my-openai-compatible
-  - team-proxy
+   - my-openai-compatible
+   - team-proxy
 ```
 
 ## Troubleshooting

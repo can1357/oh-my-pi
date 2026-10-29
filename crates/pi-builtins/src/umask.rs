@@ -69,16 +69,14 @@ fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat
 		saw_clause = true;
 
 		let mut who_bits = 0;
-		while let Some(&ch) = chars.peek() {
-			let bits = match ch {
-				'u' => 0o700,
-				'g' => 0o070,
-				'o' => 0o007,
-				'a' => 0o777,
-				_ => break,
-			};
+		while let Some(bits) = chars.next_if_map(|ch| match ch {
+			'u' => Ok(0o700),
+			'g' => Ok(0o070),
+			'o' => Ok(0o007),
+			'a' => Ok(0o777),
+			_ => Err(ch),
+		}) {
 			who_bits |= bits;
-			chars.next();
 		}
 		if who_bits == 0 {
 			who_bits = 0o777;

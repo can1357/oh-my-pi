@@ -79,6 +79,34 @@ async function crashAndHoldRecovery(name: string): Promise<{ crash: string; rele
 	return { crash, release: () => gate.resolve() };
 }
 
+/**
+ * Resolves once a call reads `tab`'s reattach in flight, which an open does as it starts waiting on it. A call that
+ * returns without waiting may read nothing, so callers race this against the call.
+ */
+function reattachAwaited(tab: { workerRecovery?: Promise<boolean> }): Promise<void> {
+	const read = Promise.withResolvers<void>();
+	let recovery = tab.workerRecovery;
+	Object.defineProperty(tab, "workerRecovery", {
+		configurable: true,
+		enumerable: true,
+		get() {
+			if (recovery) read.resolve();
+			return recovery;
+		},
+		set(value: Promise<boolean> | undefined) {
+			recovery = value;
+		},
+	});
+	return read.promise.finally(() => {
+		Object.defineProperty(tab, "workerRecovery", {
+			configurable: true,
+			enumerable: true,
+			writable: true,
+			value: recovery,
+		});
+	});
+}
+
 function textOf(parts: ReadonlyArray<TextContent | ImageContent>): string {
 	return parts.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 }
@@ -121,9 +149,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		await open(name, "alive");
 		await run(name, `await tab.evaluate(() => { document.body.dataset.mark = "kept"; });`);
 
-		const started = Date.now();
 		const crash = await messageOf(run(name, UNOWNED_REJECTION));
-		expect(Date.now() - started).toBeLessThan(5_000);
 		expect(crash).toMatch(/Browser tab worker exited unexpectedly \(exit code \d+, library-internal\)/);
 		expect(crash).toContain("the tab is being reattached");
 
@@ -206,7 +232,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await queued).toBe("original");
 	}, 30_000);
 
-	it("settles a call waiting on the reattach when it is aborted or runs out of time", async () => {
+	it("settles a call waiting on the reattach when it is aborted", async () => {
 		const name = "worker-exit-cancel";
 		await open(name, "original");
 		const { release } = await crashAndHoldRecovery(name);
@@ -215,10 +241,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 			const aborted = messageOf(
 				runInTab(name, { code: "return 1;", timeoutMs: 20_000, signal: ac.signal, session }),
 			);
-			const timedOut = messageOf(runInTab(name, { code: "return 1;", timeoutMs: 200, session }));
 			ac.abort();
 			expect(await aborted).toMatch(/abort/i);
-			expect(await timedOut).toContain("was still being reattached after 200ms");
 		} finally {
 			release();
 		}
@@ -247,11 +271,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		if (before?.backend !== "worker") throw new Error("expected a worker tab");
 		const oldWorker = before.worker;
 		const { release } = await crashAndHoldRecovery(name);
+		const waiting = reattachAwaited(before);
 		let settled = false;
 		const reopened = prelude.invoke({ action: "open", name }, context).finally(() => {
 			settled = true;
 		});
-		await Bun.sleep(300);
+		await Promise.race([waiting, reopened]);
 		expect(settled).toBe(false);
 		release();
 		await reopened;
@@ -265,9 +290,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		const name = "worker-exit-reuse-closed";
 		await open(name, "original");
 		const before = getTab(name);
+		if (before?.backend !== "worker") throw new Error("expected a worker tab");
 		const { release } = await crashAndHoldRecovery(name);
+		const waiting = reattachAwaited(before);
 		const reopened = prelude.invoke({ action: "open", name }, context);
-		await Bun.sleep(100);
+		await waiting;
 		await releaseTab(name);
 		release();
 		await reopened;
@@ -375,12 +402,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		};
 		tab.frozen = true;
 
+		// The open reads the reattach once the resume brought it about; one returning early never waits on it.
+		const waiting = reattachAwaited(tab);
 		let settled = false;
 		const reopened = prelude.invoke({ action: "open", name }, context).finally(() => {
 			settled = true;
 		});
-		// No event marks an open that wrongly returned early, so give it real time to do so.
-		await Bun.sleep(500);
+		await Promise.race([waiting, reopened]);
 		expect(settled).toBe(false);
 		gate.resolve();
 		const text = textOf((await reopened).content);

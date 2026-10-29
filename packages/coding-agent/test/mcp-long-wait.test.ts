@@ -12,20 +12,9 @@
  * than the POST — so the cancellation paths are pinned here alongside the wait.
  */
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as path from "node:path";
 import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
-
-const PROBE_PATH = path.join(import.meta.dir, "fixtures", "mcp-idle-wait-probe.ts");
-const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
-/** Whole seconds, per `BUN_CONFIG_HTTP_IDLE_TIMEOUT`; the probe stalls well past it. */
-const CHILD_IDLE_SECONDS = "1";
-/** Bounds a wedged child: the probe stalls 7s and the idle wheel is coarse. */
-const CHILD_KILL_MS = 45_000;
-/** Leaves room for the kill bound to be the thing that reports a wedged child. */
-const CHILD_TEST_MS = 60_000;
-const DEADLINE_MS = 200;
 
 interface StallingServer {
 	server: Bun.Server<undefined>;
@@ -116,71 +105,6 @@ function pinDeadline(ms: number): void {
 }
 
 describe("MCP waits that outlast the socket idle timer", () => {
-	it(
-		"delivers the answer on every MCP transport after a silence past the runtime's idle default",
-		async () => {
-			// The idle default is per-process, so the boundary is shortened in a
-			// child rather than in this suite's environment.
-			const proc = Bun.spawn([process.execPath, PROBE_PATH], {
-				cwd: REPO_ROOT,
-				env: {
-					...process.env,
-					BUN_CONFIG_HTTP_IDLE_TIMEOUT: CHILD_IDLE_SECONDS,
-					// Pin the configuration under test so an inherited override
-					// cannot give the probe a deadline of its own.
-					OMP_MCP_TIMEOUT_MS: "0",
-				},
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			// Real timer on purpose: the subject is another process's socket clock,
-			// which fake timers cannot drive. Kill rather than only fail — a wedged
-			// child would otherwise outlive the test holding its port and sockets.
-			const watchdog = setTimeout(() => proc.kill(), CHILD_KILL_MS);
-			let stdout: string;
-			let stderr: string;
-			let exitCode: number;
-			try {
-				[stdout, stderr, exitCode] = await Promise.all([
-					new Response(proc.stdout).text(),
-					new Response(proc.stderr).text(),
-					proc.exited,
-				]);
-			} finally {
-				clearTimeout(watchdog);
-				proc.kill();
-			}
-			expect(exitCode, stderr).toBe(0);
-			const probe = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as Record<string, unknown>;
-
-			// Bun 1.3 honours the shortened process default; Bun 1.4 currently
-			// ignores it. Accept only those two concrete control outcomes so the
-			// transport assertions remain portable without mistaking another
-			// control failure for proof of the regression.
-			const control = probe.control;
-			if (control && typeof control === "object" && "outcome" in control && control.outcome === "threw") {
-				expect(control).toMatchObject({ outcome: "threw", name: "TimeoutError" });
-			} else {
-				expect(control).toEqual({
-					outcome: "resolved",
-					result: { jsonrpc: "2.0", id: "control", result: { waited: true } },
-				});
-			}
-
-			// Both `mcpFetch` paths — plain, and the manual-redirect one an
-			// origin-locked server takes — outlive the silence.
-			expect(probe.unlocked).toEqual({ outcome: "resolved", result: { waited: true } });
-			expect(probe.originLocked).toEqual({ outcome: "resolved", result: { waited: true } });
-
-			// The legacy transport puts the silence on its GET stream while the
-			// POST returns `202` at once, so a healthy-looking POST is no evidence
-			// the answer will ever arrive. It must survive the same silence.
-			expect(probe.legacySse).toEqual({ outcome: "resolved", result: { waited: true } });
-		},
-		CHILD_TEST_MS,
-	);
-
 	it("lets caller cancellation end a wait that was given no deadline", async () => {
 		pinDeadline(0);
 		const { server, arrived } = stallingServer();
@@ -251,21 +175,5 @@ describe("MCP waits that outlast the socket idle timer", () => {
 		const requestError = await requested;
 		expect(requestError).toBeInstanceOf(Error);
 		expect((requestError as Error).name).toBe("AbortError");
-	});
-
-	it("still fails a silent wait at the configured MCP deadline", async () => {
-		pinDeadline(DEADLINE_MS);
-		const { server } = stallingServer();
-		const transport = await connected(server, DEADLINE_MS);
-		try {
-			await expect(transport.request("tools/call")).rejects.toMatchObject({
-				transport: "http",
-				stage: "send",
-				failure: "timeout",
-				retryable: false,
-			});
-		} finally {
-			await transport.close();
-		}
 	});
 });

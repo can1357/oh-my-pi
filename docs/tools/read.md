@@ -44,7 +44,7 @@ For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.
 | `:N` / `:LN` / `:N-` / `:N..` | Start at 1-indexed line `N`, open-ended.                                                                                                       |
 | `:A-B` / `:LA-LB` / `:A..B`   | Inclusive 1-indexed line range (`..` is a forgiving alias normalized to `-`).                                                                  |
 | `:A+C` / `:LA+LC`             | `C` lines starting at `A`; tool converts this to end line `A + C - 1`.                                                                         |
-| `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw` and with ranges in a comma list (`:1-12,-15`). |
+| `:-N`                         | Last `N` lines; `N` must be positive. Also combines with `:raw` and with ranges in a comma list (`:1-12,-15`).                                 |
 | `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`).                                                               |
 | `:range:raw` or `:raw:range`  | Same line selection, but raw output. Exception: a lone bare `N` is the single line `N` (`:17:raw`); `:N-:raw` stays open-ended.                |
 
@@ -265,7 +265,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Internal URLs
 
-- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
+- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `out://` (write-only; reads fail), `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
    - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
    - `agent://<id>` reads a subagent's latest completed output, including a successful message-result follow-up after revival that the parent requested or the user typed into the focused subagent session; while a newer turn runs, the previous output is marked superseded. Agents without published output return status and progress. `/key/index` extracts from the latest published JSON result. Peer-woken message replies and cancelled or empty message-result follow-ups do not replace the accepted result, nor do structured wakes without a `yield`. `agent://all` is write-only. Bare `history://` lists registered agents and persisted subagents; `history://<id>` reads a transcript across turns.
    - `proc://` lists caller-visible background jobs (including running agents without job rows) and project services; `proc://<id>` returns status and available output/logs without consuming async-result delivery. A running subagent's row also shows its latest requests, cost, context fill, completion estimate and stage, as in `wait`. Service log files are searchable with `grep proc://<id>`.

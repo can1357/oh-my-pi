@@ -199,11 +199,11 @@ mod tests {
 			},
 			|| false,
 			|| {
-				writes.set(writes.get() + 1);
+				writes.update(|v| v + 1);
 				Ok(())
 			},
 			|| {
-				reads.set(reads.get() + 1);
+				reads.update(|v| v + 1);
 				range(reads.get(), settled.get())
 			},
 			|| Some(value.to_owned()),

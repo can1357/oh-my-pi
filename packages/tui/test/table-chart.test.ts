@@ -768,15 +768,21 @@ describe("table charts in assistant Markdown", () => {
 		}
 	});
 
-	it("asks the smart planner only for multi-series tables, once per table", async () => {
-		const planner = vi.fn<TableChartPlanner>(async request => ({ ...request.guess, kind: "heatmap" }));
+	it("asks the smart planner once per table the guess would chart, single series included", async () => {
+		const planner = vi.fn<TableChartPlanner>(async request =>
+			request.table.measures.length > 1 ? { ...request.guess, kind: "heatmap" } : null,
+		);
 		setTableCharts("smart", planner);
-		expect(lookupTableChart(table(TIMINGS))).toContain("bar chart of");
+		// Three rows of one measure draw nothing locally: nothing for the judge to veto or refine.
+		expect(lookupTableChart(table("| Step | Time |\n|---|---|\n| a | 1 s |\n| b | 2 s |\n| c | 3 s |"))).toBeNull();
+		// One measure the guess would draw, which the judge may still read as references rather than quantities.
+		await lookupTableChart(table(TIMINGS));
+		expect(lookupTableChart(table(TIMINGS))).toBeNull();
 		const pick = lookupTableChart(table(BEFORE_AFTER));
 		expect(pick).toBeInstanceOf(Promise);
 		await pick;
 		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("heatmap chart of");
-		expect(planner).toHaveBeenCalledTimes(1);
+		expect(planner).toHaveBeenCalledTimes(2);
 	});
 
 	it("draws no chart when the planner declines, and the local guess when it fails", async () => {
@@ -790,5 +796,10 @@ describe("table charts in assistant Markdown", () => {
 		});
 		await lookupTableChart(table(BEFORE_AFTER));
 		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+
+		// No judge to ask (`auto` without a native one): the guess at once, held to the gate `always` applies.
+		setTableCharts("smart", () => undefined);
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+		expect(lookupTableChart(table(RUNS))).toBeNull();
 	});
 });

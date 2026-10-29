@@ -30,9 +30,9 @@ export interface ComputerSessionSnapshot {
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 /**
- * The host's answer to a `control.acquire` confirmation: the user approved or declined, nobody could be
- * asked because the session has no interactive UI (a subagent, print mode or another headless run), or
- * nobody answered before the confirmation's `timeoutMs` closed it.
+ * The host's answer to a `control.acquire` confirmation: the user, or their `tools.approval["computer.control"]`
+ * policy, approved or declined, nobody could be asked because the session has no interactive UI (a subagent,
+ * print mode or another headless run), or nobody answered before the confirmation's `timeoutMs` closed it.
  */
 export type ControlVerdict = "approved" | "denied" | "no-ui" | "unanswered";
 

@@ -19,13 +19,14 @@ members = [
    "crates/vendor/brush-core",
    "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/grep-searcher",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.13.3"
+version = "18.14.0"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -40,6 +41,10 @@ brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# grep-searcher 0.1.17 (latest release) searches either a blocking `io::Read`
+# or a whole slice; the vendored copy adds the chunk-fed `search_push` (see its
+# README.md).
+grep-searcher = { path = "crates/vendor/grep-searcher" }
 # napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
 # of never-torn-down envs; the vendored copy releases them (see its README.md).
 napi = { path = "crates/vendor/napi" }
@@ -66,6 +71,11 @@ strip = true
 # (see crates/pi-natives/src/crash_handler.rs).
 panic = "unwind"
 
+# Share host and target dependency units in release builds.
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
+
 [profile.ci]
 inherits = "release"
 lto = "thin"
@@ -76,12 +86,20 @@ strip = "symbols"
 # copy this line into a profile that sets `debug` — see [profile.dev] below.
 split-debuginfo = "off"
 
+[profile.ci.package."*"]
+opt-level = 3
+codegen-units = 16
+
 [profile.local]
 inherits = "release"
 lto = "thin"
 codegen-units = 16
 incremental = true
 strip = false
+[profile.local.package."*"]
+opt-level = 3
+codegen-units = 16
+
 # `release` codegen with symbols kept for `perf`/`samply`/Instruments. Full
 # opt-level so timings match production; only the binary size differs.
 # `cargo build --profile profiling`.
@@ -108,6 +126,7 @@ split-debuginfo = "unpacked"
 # Deps compile optimized once and cache; your own crates stay fast.
 [profile.dev.package."*"]
 opt-level = 2
+codegen-units = 256
 debug = false
 
 [workspace.lints.rust]
@@ -307,7 +326,6 @@ webrtc = "0.17.2"
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
 libc = "0.2"
-os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
    "Win32_Globalization",
@@ -391,7 +409,8 @@ syntect = { version = "5.3", default-features = false, features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
-html-escape = "0.2.15"
+# The version html-to-markdown-rs builds on; bump with it.
+html-escape = "0.3"
 html-to-markdown-rs = { version = "3.18.3", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -399,7 +418,8 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 xutf = "1.5"
 zstd = "0.14"
-fancy-regex = "0.16"
+# The version brush-core builds on; bump with it.
+fancy-regex = "0.17"
 tiktoken-rs = "0.12"
 
 # ──────────────────────────────────────────────────────────────────────────────
