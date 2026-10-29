@@ -21,6 +21,16 @@
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).
 - Fixed `read` showing a zip, tar, asar or ISO archive's old contents after a same-size rewrite within milliseconds of its previous write, on filesystems with coarse timestamps such as Linux ext4 ([#17389](https://github.com/can1357/oh-my-pi/pull/17389) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `fill` in Chrome replaces the text of rich-text editors such as Slate (Discord) and Lexical instead of leaving the old text in place or breaking the editor, and an empty fill clears them ([#17417](https://github.com/can1357/oh-my-pi/pull/17417) by [@will-bogusz](https://github.com/will-bogusz))
+- `omp gc --restore <session id or archive path>` brings an archived session back to its own path with its artifacts, names what restoring cannot bring back, refuses an ambiguous id prefix, and exits non-zero when the artifacts did not come back ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- A session archived by `omp gc --archive` resumes and exports again: `omp --resume <id>` finds it and brings it back, and `omp --export=<file>.jsonl.gz` reads it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` no longer deletes the prompt history, session title, recap and usage-stats rows of a session it only moves to the archive ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` now proves each archive readable before dropping the transcript, finishes a move a killed run left half-done, archives a symlinked transcript by content and leaves the file it points at alone, and skips a session a live process owns ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- Resuming an archived session waits for a running `omp gc` instead of failing, and a damaged archive is reported as unreadable rather than as a session that does not exist ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --blobs` no longer deletes a blob that only a symlinked transcript references ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` now reclaims the half-written archive a killed `gc --archive` left in the archive root ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
@@ -49,7 +59,6 @@
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
 - Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 - Set `prewalk.from` and `prewalk.into` to choose the planning model and handoff target (default `@default` → `@smol`), so `/prewalk restart` can cycle e.g. slow → default; `/prewalk [into]` and `/prewalk restart [from] [into]` override them for one command ([#17373](https://github.com/can1357/oh-my-pi/pull/17373) by [@H4vC](https://github.com/H4vC))
-- `omp gc --restore <session id or archive path>` brings an archived session back to its own path with its artifacts, names what restoring cannot bring back, refuses an ambiguous id prefix, and exits non-zero when the artifacts did not come back ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -104,14 +113,8 @@
 - Fixed unavailable configured default or dictation models being silently replaced; omp now warns and identifies the fallback model.
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
-- `omp gc --apply` now reclaims the half-written archive a killed `gc --archive` left in the archive root ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
-- A session archived by `omp gc --archive` resumes and exports again: `omp --resume <id>` finds it and brings it back, and `omp --export=<file>.jsonl.gz` reads it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
-- `omp gc --archive` no longer deletes the prompt history, session title, recap and usage-stats rows of a session it only moves to the archive ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
-- `omp gc --archive` now proves each archive readable before dropping the transcript, finishes a move a killed run left half-done, archives a symlinked transcript by content and leaves the file it points at alone, and skips a session a live process owns ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
-- Resuming an archived session waits for a running `omp gc` instead of failing, and a damaged archive is reported as unreadable rather than as a session that does not exist ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
-- `omp gc --blobs` no longer deletes a blob that only a symlinked transcript references ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
 - Fixed text typed in Tern while omp is still starting appearing all at once when startup finishes; it shows as you type, and a draft restored on resume keeps what you typed after it
 - Fixed `pr://` metadata and diffs staying stale after successful `git push` calls through `bash` ([#17183](https://github.com/can1357/oh-my-pi/pull/17183) by [@alphastorm](https://github.com/alphastorm))
