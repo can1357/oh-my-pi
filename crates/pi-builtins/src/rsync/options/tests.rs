@@ -17,7 +17,7 @@ fn no_env(_: &str) -> Option<String> {
 
 fn parse_env(args: &[&str], env: &[(&str, &str)]) -> Result<Parsed, RsyncError> {
 	let map: HashMap<String, String> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-	parse(&argv(args), &move |k: &str| map.get(k).cloned())
+	parse(&argv(args), &move |k: &str| map.get(k).cloned()).map_err(|e| e.error)
 }
 
 fn run(args: &[&str]) -> Options {
@@ -29,7 +29,7 @@ fn run(args: &[&str]) -> Options {
 
 fn err(args: &[&str]) -> RsyncError {
 	match parse(&argv(args), &no_env) {
-		Err(e) => e,
+		Err(e) => e.error,
 		Ok(other) => panic!("{args:?}: expected an error, got {other:?}"),
 	}
 }
@@ -196,7 +196,7 @@ fn h_is_help_only_when_alone() {
 
 #[test]
 fn usage_errors_and_meta_requests() {
-	let e = parse(&[], &no_env).unwrap_err();
+	let e = parse(&[], &no_env).unwrap_err().error;
 	assert_eq!((e.code, e.site), (RERR_SYNTAX, Some(("main.c", 1898))));
 	let text = e.message.unwrap_or_default();
 	assert!(text.ends_with("See https://rsync.samba.org/ for updates, bug reports, and answers"));

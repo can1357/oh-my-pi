@@ -19,7 +19,7 @@
 //! Every scenario here was run against rsync 3.5.1 repeatedly to confirm its
 //! normalized output and resulting trees are deterministic.
 
-use super::{C_LOCALE, Case, UNKNOWN_LOCALE, c, cl, u};
+use super::{C_LOCALE, Case, UNKNOWN_LOCALE, UTF8_LOCALE, c, cl, u};
 
 /// Local transfers: both halves in one invocation.
 pub(super) const LOCAL: &[Case] = &[
@@ -180,6 +180,12 @@ pub(super) const LOCAL: &[Case] = &[
 	c("missing_source_partial", 23, "", &["-ai", "src/missing", "src/small.txt", "dst/"]),
 	c("both_remote", 1, "", &["a:x", "b:y"]),
 	c("bad_option", 1, "", &["--bogus", "src/", "dst/"]),
+	// An option name neither side can parse: the message is written before
+	// either client has a locale charset to check it against, so it is escaped
+	// by printability unless an earlier `-8` says otherwise.
+	cl("bad_option_non_ascii", C_LOCALE, 1, "", &["--bogus-ün", "src/", "dst/"]),
+	cl("bad_option_non_ascii_utf8_locale", UTF8_LOCALE, 1, "", &["--bogus-ün", "src/", "dst/"]),
+	cl("bad_option_non_ascii_8bit", C_LOCALE, 1, "", &["-8", "--bogus-ün", "src/", "dst/"]),
 	c("bad_chmod", 1, "", &["--chmod=Zx", "src/", "dst/"]),
 	c("bad_compress_choice", 4, "", &["-z", "--compress-choice=bogus", "src/", "dst/"]),
 	c("bad_checksum_choice", 4, "", &["--checksum-choice=bogus", "src/", "dst/"]),

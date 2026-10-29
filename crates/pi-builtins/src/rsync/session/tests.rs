@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
-use crate::host::run_util;
+use crate::host::{run_util, run_util_env};
 use crate::rsync::Rsync;
 
 fn run(argv: &[&str], cwd: &Path) -> (i32, String, String) {
@@ -94,6 +94,30 @@ fn daemon_mode_is_refused() {
 	assert_eq!(code, 4);
 	assert!(err.starts_with("rsync: --daemon is not supported by this rsync\n"), "{err}");
 	assert!(err.contains("(code 4) at main.c(1954)"), "{err}");
+}
+
+/// Captured from rsync 3.5.1 with `env -i LC_ALL=… rsync … --bogus-ün src dst`:
+/// the option error is written before the locale charset is set up, so it is
+/// escaped by printability in the C locale *and* in a UTF-8 one, and only the
+/// `-8` the parser already saw prints the bytes.
+#[test]
+fn option_errors_escape_unless_8_bit_output_was_parsed() {
+	let dir = tempfile::tempdir().unwrap();
+	let escaped = "rsync: --bogus-\\#303\\#274n: unknown option\n";
+	for locale in ["C", "C.UTF-8"] {
+		let (code, cap) =
+			run_util_env::<Rsync>(&["--bogus-ün", "src/", "dst/"], "", dir.path(), &[("LC_ALL", locale)]);
+		assert_eq!(code, 1);
+		assert!(cap.err().starts_with(escaped), "{locale}: {}", cap.err());
+	}
+	let (code, cap) = run_util_env::<Rsync>(
+		&["-8", "--bogus-ün", "src/", "dst/"],
+		"",
+		dir.path(),
+		&[("LC_ALL", "C")],
+	);
+	assert_eq!(code, 1);
+	assert!(cap.err().starts_with("rsync: --bogus-ün: unknown option\n"), "{}", cap.err());
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.

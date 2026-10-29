@@ -540,8 +540,9 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 			io.print(&OutLevels::debug_help());
 			0
 		}
-		Err(err) => {
-			let logger = startup_logger(&io, server_like);
+		Err(failure) => {
+			let logger = startup_logger(&io, server_like, failure.allow_8bit_chars);
+			let err = failure.error;
 			report(&logger, &err);
 			logger.finish(err.code, err.site, &Stats::default(), false);
 			err.code
@@ -563,12 +564,18 @@ fn msg_charset(io: &HostIo) -> MsgCharset {
 	MsgCharset::for_locale(&iconv::locale_charset(&|key: &str| io.getenv(key)))
 }
 
-/// A logger for diagnostics before the run's own logger exists.
-fn startup_logger(io: &HostIo, am_server: bool) -> Logger {
+/// A logger for diagnostics before the run's own logger exists. Upstream
+/// parses the options before `setup_iconv`, so there is no `ic_chck` to check
+/// a message against yet and `filtered_fwrite` escapes by printability:
+/// `env -i LC_ALL=C rsync --bad-ün` and the same under `C.UTF-8` both print
+/// `--bad-\#303\#274n`, while `rsync -8 --bad-ün` prints the bytes, so the
+/// `-8` the parser had already seen decides.
+fn startup_logger(io: &HostIo, am_server: bool, eight_bit_output: bool) -> Logger {
 	let cfg = LogConfig {
 		am_server,
 		human_readable: 1,
-		charset: msg_charset(io),
+		eight_bit_output,
+		charset: MsgCharset::Bytes,
 		time_zone: Some(io.tz.clone()),
 		..LogConfig::default()
 	};
@@ -1918,7 +1925,7 @@ struct LocalServer {
 }
 
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
-	let startup = startup_logger(io, true);
+	let startup = startup_logger(io, true, opts.allow_8bit_chars);
 	if opts.am_daemon {
 		return daemon_refusal(&startup.with_role(Role::PreReceiver), 1975);
 	}
