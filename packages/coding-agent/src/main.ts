@@ -7,7 +7,6 @@
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
@@ -49,7 +48,6 @@ import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
-	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
 	expandRoleAlias,
 	getModelMatchPreferences,
@@ -193,6 +191,7 @@ import {
 	cfgHideThinkingBlock,
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
+	cfgPrewalkInto,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
@@ -444,7 +443,6 @@ export async function submitInteractiveInput(
 	}
 
 	try {
-		using _keepalive = new EventLoopKeepalive();
 		// Honor the submission's queue intent, defaulting to followUp. Reading
 		// `session.isStreaming` to decide queue-vs-fresh is NOT atomic with the
 		// eventual `agent.prompt()` call inside `session.prompt()`: a background turn
@@ -804,7 +802,6 @@ async function runInteractiveMode(
 
 	if (startupRestore) {
 		try {
-			using _keepalive = new EventLoopKeepalive();
 			const { turn, subagents } = await startupRestore();
 			const agents = subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
 			mode.showStatus(
@@ -823,7 +820,6 @@ async function runInteractiveMode(
 
 	if (initialMessage !== undefined) {
 		try {
-			using _keepalive = new EventLoopKeepalive();
 			// `steer` covers the race where the user submits a prompt of their own
 			// before this dispatch runs (the composer accepts input as soon as the
 			// first turn starts): the CLI message queues into that turn instead of
@@ -837,7 +833,6 @@ async function runInteractiveMode(
 
 	for (const message of initialMessages) {
 		try {
-			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(message, { streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -1539,7 +1534,21 @@ export async function buildSessionOptions(
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
+			if (
+				parsed.provider &&
+				!parsed.model.includes(":") &&
+				// Provider-level knowledge: a discovery provider may hold no rows until refresh.
+				(modelRegistry.hasProvider(parsed.provider) || modelRegistry.hasProvider(parsed.provider.toLowerCase()))
+			) {
+				// Same deferral as `provider/id` for a known provider: extensions and account
+				// discovery may still add the id. An unknown `--provider` still fails here.
+				options.modelPattern = parsed.model.toLowerCase().startsWith(`${parsed.provider.toLowerCase()}/`)
+					? parsed.model
+					: `${parsed.provider}/${parsed.model}`;
+			} else if (
+				!parsed.provider &&
+				((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
+			) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
@@ -1632,29 +1641,25 @@ export async function buildSessionOptions(
 			? true
 			: !restoringSession && cfgPrewalkEnabled.get(activeSettings);
 	if (prewalkEnabled) {
-		const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-		let targetPatterns: string[];
+		const target = parsed.prewalkInto ?? cfgPrewalkInto.get(activeSettings);
+		// `--model` mutates only the session default role. Resolve an explicit
+		// `--prewalk-into` against the pre-mutation default while leaving all
+		// other role lookups live; the configured `prewalk.into` keeps resolving
+		// against the live settings.
+		const roleLookup =
+			parsed.prewalkInto === undefined
+				? activeSettings
+				: {
+						getModelRole: (role: string) =>
+							role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
+					};
 
-		if (parsed.prewalkInto === undefined) {
-			// Preserve the existing default-prewalk behavior; this PR only needs
-			// pre-override role semantics for an explicit target.
-			targetPatterns = [expandRoleAlias(DEFAULT_PREWALK_TARGET, activeSettings)];
-		} else {
-			// `--model` mutates only the session default role. Resolve explicit
-			// prewalk aliases against the pre-mutation default while leaving all
-			// other role lookups live.
-			const preModelOverrideRoleLookup = {
-				getModelRole: (role: string) =>
-					role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
-			};
-
-			// Bare `default` is a backwards-compatible special selector handled
-			// by expandRoleAlias rather than the prefixed role-alias grammar.
-			const targetSelector =
-				target.trim() === "default" ? expandRoleAlias(target, preModelOverrideRoleLookup) : target;
-			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup);
-			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
-		}
+		// Bare `default` is a backwards-compatible special selector handled
+		// by expandRoleAlias rather than the prefixed role-alias grammar.
+		const targetSelector = target.trim() === "default" ? expandRoleAlias(target, roleLookup) : target;
+		// Keep every role candidate so a later authenticated fallback can still arm prewalk.
+		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
+		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
@@ -2719,6 +2724,12 @@ export async function runRootCommand(
 
 			if (modelFallbackMessage) {
 				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				// Non-interactive runs have no notification surface: a model that still
+				// started in place of the requested one is reported on stderr, keeping
+				// structured stdout clean. A run with no model reports it below.
+				if (!isInteractive && session.model) {
+					process.stderr.write(`${chalk.yellow(`Warning: ${modelFallbackMessage}`)}\n`);
+				}
 			}
 
 			const modelRegistryError = modelRegistry.getError();
@@ -2743,11 +2754,22 @@ export async function runRootCommand(
 				if (parsedArgs.model && availableModels.length > 0) {
 					// Credentials work; the requested selector is what failed. Point at
 					// the nearest usable models instead of an API-key checklist.
-					const suggestions = fuzzyFilter(
-						availableModels.map(model => `${model.provider}/${model.id}`),
-						parsedArgs.model,
-						selector => selector,
-					).slice(0, 5);
+					// A provider-qualified request names an exact id: its message carries
+					// that provider's near ids, if any. The cross-provider list is for bare ones.
+					const slashIndex = parsedArgs.model.indexOf("/");
+					const namedProvider =
+						slashIndex === -1 ? undefined : parsedArgs.model.slice(0, slashIndex).toLowerCase();
+					const qualified =
+						Boolean(parsedArgs.provider) ||
+						(namedProvider !== undefined &&
+							modelRegistry.getAll().some(model => model.provider.toLowerCase() === namedProvider));
+					const suggestions = qualified
+						? []
+						: fuzzyFilter(
+								availableModels.map(model => `${model.provider}/${model.id}`),
+								parsedArgs.model,
+								selector => selector,
+							).slice(0, 5);
 					if (suggestions.length > 0) {
 						process.stderr.write(`${chalk.yellow("\nDid you mean:")}\n`);
 						for (const selector of suggestions) process.stderr.write(`  ${selector}\n`);

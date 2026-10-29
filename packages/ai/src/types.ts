@@ -811,7 +811,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
-	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not

@@ -208,7 +208,10 @@ export function maybeStartSharpshooterExtraction(options: {
 
 		const run = runSharpshooterExtraction(options, envelope)
 			.catch(error => {
-				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
+				logger.debug("Sharpshooter extraction failed", {
+					error: String(error),
+					providerSessionId: session.sessionId,
+				});
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;

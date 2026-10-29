@@ -1,10 +1,6 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
-import {
-	COMPOSER_DEFAULTS,
-	Composer,
-	type ComposerPreferences,
-	type ComposerWelcomeUpdate,
-} from "@oh-my-pi/pi-tui/prompt/composer";
+import type { Composer, ComposerPreferences, ComposerWelcomeUpdate } from "@oh-my-pi/pi-tui/prompt/composer";
+import type * as ComposerRuntime from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	type ComposerCache,
 	type ComposerThemePreferences,
@@ -68,6 +64,8 @@ export class ComposerLease {
 /** Start the canonical Composer with speculative cached state. */
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
+	// Headless launches share the lease helpers, but never need the editor graph.
+	const { Composer, COMPOSER_DEFAULTS }: typeof ComposerRuntime = require("@oh-my-pi/pi-tui/prompt/composer.js");
 	const cwd = options.cwd ?? process.cwd();
 	const cache = options.cache === false ? undefined : sharedComposerCache();
 	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };

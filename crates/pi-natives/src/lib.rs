@@ -22,6 +22,10 @@
 #![allow(clippy::trivially_copy_pass_by_ref, reason = "napi env idiom")]
 #![feature(alloc_error_hook)]
 
+// Match the host feature set of terminfo's phf generator.
+#[cfg(unix)]
+use phf_shared as _;
+
 pub mod appearance;
 pub mod applefm;
 pub mod ast;

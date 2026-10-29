@@ -650,7 +650,7 @@ not an allowlist of model transports.
 
 - exact `provider/modelId`
 - exact model id (provider inferred)
-- fuzzy/substring matching
+- fuzzy/substring matching for bare ids (`opus`, `gpt-5.2`); a `provider/modelId` selector must match exactly
 - glob scope patterns in `--models` (e.g. `openai/*`, `*sonnet*`)
 - optional `:thinkingLevel` suffix (`off|minimal|low|medium|high|xhigh|max|auto|inherit`)
 - `@upstream` routing suffix on OpenRouter and Vercel Gateway selectors (for example, `openrouter/anthropic/claude-sonnet-5@anthropic:high`); an exact literal model id still wins
@@ -663,7 +663,9 @@ Resolution precedence for exact selectors:
 1. exact `provider/modelId` reference
 2. exact bare id (case-insensitive); when several providers carry the same id, a preference ranking picks the winner (see below)
 3. retired effort-tier variant alias (collapsed catalog entries, e.g. `X`/`X-thinking` twins)
-4. provider-scoped fuzzy match, then substring matching with an alias-vs-dated pick
+4. substring matching with an alias-vs-dated pick (bare ids only)
+
+A `provider/modelId` selector whose provider is known stops after the exact phases: it never runs a similarly named sibling. A miss fails with `Model "…" not found`, which suggests up to three close ids from that provider. A configured default model that misses produces a warning naming it and the model that runs instead, unless a configured `retry.fallbackChains` entry takes over; a configured dictation model that misses warns the same way.
 
 Glob scope patterns (used by `enabledModels` and CLI `--models`) run separately over concrete models after exact matching.
 
