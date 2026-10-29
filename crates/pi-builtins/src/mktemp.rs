@@ -224,8 +224,7 @@ impl Params {
 		// Combine a suffix embedded in the template with `--suffix`.
 		let suffix_from_option = options
 			.suffix
-			.map(|s| s.to_string_lossy().into_owned())
-			.unwrap_or_default();
+			.map_or_default(|s| s.to_string_lossy().into_owned());
 		let suffix_from_template = &template_str[j..];
 		let suffix = format!("{suffix_from_template}{suffix_from_option}");
 		if suffix.contains(is_separator) {
@@ -449,7 +448,7 @@ fn dry_exec(tmpdir: &Path, prefix: &str, rand: usize, suffix: &str) -> PathBuf {
 
 	let bytes = &mut buf[prefix.len()..prefix.len() + rand];
 	SmallRng::try_from_rng(&mut rngs::SysRng)
-		.unwrap_or_else(|_| SmallRng::seed_from_u64(bytes.as_ptr() as usize as u64))
+		.unwrap_or_else(|_| SmallRng::seed_from_u64(bytes.as_ptr().addr() as u64))
 		.fill(bytes);
 	for byte in bytes {
 		*byte = match *byte % 62 {

@@ -141,9 +141,9 @@ Behavior:
 - Both `.json` and `.jsonc` are parsed as JSONC.
 - Caches load result until `invalidate()`.
 - Returns tri-state result via `tryLoad()`:
-  - `ok`
-  - `not-found`
-  - `error` (`ConfigError` with schema/parse context)
+   - `ok`
+   - `not-found`
+   - `error` (`ConfigError` with schema/parse context)
 
 Legacy migration still supported:
 

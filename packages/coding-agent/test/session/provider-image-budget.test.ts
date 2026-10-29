@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { Context, ImageContent, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { factoryDroidWireBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
@@ -10,6 +13,7 @@ import {
 	clampProviderContextImageBytes,
 	clampProviderContextImages,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -121,6 +125,87 @@ function textData(context: Context): string[] {
 		}
 	}
 	return data;
+}
+
+/**
+ * One OpenAI computer-use step: the call and its screenshot result, which carries the screenshot both as content
+ * (`shown`, by default the same image) and as `providerMetadata`.
+ */
+function computerTurn(index: number, screenshot: string, shown: ImageContent[] = [image(screenshot)]): Message[] {
+	const id = `call_${index}|cu_${index}`;
+	return [
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id,
+					name: "computer",
+					arguments: {},
+					providerMetadata: {
+						type: "computer",
+						providerItemId: `cu_${index}`,
+						actions: [{ type: "screenshot" }],
+						pendingSafetyChecks: [],
+					},
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: OPENAI_RESPONSES_MODEL.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: index * 2 + 1,
+		},
+		{
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "computer",
+			content: [text(`result-${index}`), ...shown],
+			isError: false,
+			timestamp: index * 2 + 2,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${screenshot}` },
+				acknowledgedSafetyChecks: [],
+			},
+		},
+	];
+}
+
+/** Factory GPT: its requests take the Responses wire, and the model has no native computer use. */
+function factoryGptModel() {
+	const entry = factoryDroidRegistry().find(model => model.spec.id === "gpt-5.6-terra");
+	if (!entry) throw new Error("Factory registry lost gpt-5.6-terra");
+	return buildModel(buildFactoryDroidModel(entry));
+}
+
+/** The request body `context` produces on `model`'s Factory route, as sent. */
+async function factoryRequestBody(model: Model<"factory-droid-agent">, context: Context): Promise<string> {
+	let body = "";
+	const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+		body = typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array);
+		const completed = { type: "response.completed", response: { status: "completed", usage: {} } };
+		return new Response(`data: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`, {
+			headers: { "Content-Type": "text/event-stream" },
+		});
+	};
+	const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
+		Buffer.from(JSON.stringify(part)).toString("base64url"),
+	);
+	await streamFactoryDroid(model, context, {
+		apiKey: `${header}.${claims}.sig`,
+		fetch: fetch as typeof globalThis.fetch,
+	}).result();
+	if (!body) throw new Error("Factory request was not sent");
+	return body;
 }
 
 describe("provider context image budgets", () => {
@@ -468,6 +553,179 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(counted, hosted);
 		expect(imageData(clamped)).toHaveLength(3);
 		expect(clamped.messages.slice(2).every(message => message.content.length === 2)).toBe(true);
+	});
+
+	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
+		// An OpenAI computer-use transcript continued on a Factory GPT model, which has no native computer use: the
+		// Responses wire sends each result's metadata screenshot (in an assistant note), not its content image.
+		const screenshot = "A".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...Array.from({ length: 5 }, (_, index) => computerTurn(index, screenshot)).flat(),
+			],
+		};
+		const hosted = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(clampProviderContextImages(context, hosted), hosted);
+		expect(imageData(clamped)).toHaveLength(3);
+
+		const body = await factoryRequestBody(hosted, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body.split(screenshot)).toHaveLength(4);
+		// The two evicted results still report their text.
+		expect(body).toContain("result-0");
+		expect(body).toContain("result-1");
+		const request: unknown = JSON.parse(body);
+		if (!isRecord(request) || !Array.isArray(request.input)) throw new Error("Responses request without input");
+		const input = request.input.filter(isRecord);
+		const calls = new Set(input.filter(item => item.type === "function_call").map(item => item.call_id));
+		// An evicted screenshot's result is not left as an output with no call to pair with.
+		expect(input.filter(item => item.type === "function_call_output" && !calls.has(item.call_id))).toEqual([]);
+	});
+
+	it("charges a computer screenshot once when reserving room for a fresh Factory image", async () => {
+		const fresh = "C".repeat(3_600_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, "A".repeat(1_000_000)),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const hosted = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toEqual([fresh]);
+		const body = await factoryRequestBody(hosted, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body).toContain(fresh);
+	});
+
+	it("charges a computer result its metadata screenshot when that copy is larger than its content image", async () => {
+		const screenshot = "A".repeat(1_000_000);
+		const fresh = "C".repeat(3_600_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, screenshot, [image("p".repeat(1_000))]),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body).toContain(fresh);
+		expect(body).not.toContain(screenshot);
+	});
+
+	it("evicts computer screenshots that only the metadata holds inline", async () => {
+		const screenshot = "A".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...Array.from({ length: 5 }, (_, index) => computerTurn(index, screenshot, [])).flat(),
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body.split(screenshot)).toHaveLength(4);
+	});
+
+	it("does not charge computer metadata screenshots on a route that sends only content", () => {
+		// Factory Claude takes the Messages wire, which sends a tool result's content and never its metadata.
+		const thumbnail = "p".repeat(1_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 4 }, (_, index) =>
+				computerTurn(index, "A".repeat(1_000_000), [image(thumbnail)]),
+			).flat(),
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual(Array(4).fill(thumbnail));
+	});
+
+	it("keeps a computer screenshot that fits Anthropic's inline budget exactly", () => {
+		const screenshot = "A".repeat(1_000_000);
+		const fresh = "C".repeat(23_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, screenshot),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toEqual([screenshot, fresh]);
+	});
+
+	it("keeps a small computer screenshot on Factory's Responses route beside a large unsent content image", async () => {
+		// The Responses wire sends the 1 KB metadata screenshot; the 4 MB content image never travels, so this request
+		// carries about 1 MB of images, and the fresh image after it leaves no room to protect a 4 MB charge.
+		const screenshot = "A".repeat(1_000);
+		const fresh = "C".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...computerTurn(0, screenshot, [image("B".repeat(4_000_000))]),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(body).toContain(`data:image/png;base64,${screenshot}`);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(1_100_000);
+	});
+
+	it("leaves a computer result's unsent text out of the room reserved on Factory's Responses route", async () => {
+		// A result whose content became 1 MB of text: the Responses wire sends only its 2 MB metadata screenshot, so the
+		// screenshot and a fresh 2 MB image fit the route together.
+		const screenshot = "A".repeat(2_000_000);
+		const fresh = "C".repeat(2_000_000);
+		const messages = computerTurn(0, screenshot, []);
+		const result = messages[1];
+		if (result.role !== "toolResult") throw new Error("computerTurn lost its result");
+		messages[1] = { ...result, content: [text("x".repeat(1_000_000))] };
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [...messages, { role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 }],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(body).toContain(screenshot);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("counts a computer result as its one sent screenshot on Factory's Responses route", async () => {
+		// Six content thumbnails exceed Factory's five-image count, but the Responses wire sends only the screenshot.
+		const screenshot = "A".repeat(1_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...computerTurn(
+					0,
+					screenshot,
+					Array.from({ length: 6 }, () => image("p".repeat(100))),
+				),
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImages(context, hosted));
+		expect(body).toContain(`data:image/png;base64,${screenshot}`);
+		expect(body).not.toContain("p".repeat(100));
 	});
 
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {

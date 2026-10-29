@@ -220,13 +220,6 @@ function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
 }
 
 /**
- * Reserved click-candidate id for the pinned HUD expander row. Checked before
- * any registry lookup: its `@…:…` charset cannot collide with generated agent
- * ids (word names, numeric and `-N` suffixes, dotted nesting).
- */
-export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
-
-/**
  * Nested background opens inside a hovered row. The band wraps the line, so a
  * surviving nested open would paint over it for every cell it covers; the
  * matching closes stay and become band resumes via bgFill.

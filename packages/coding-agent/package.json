@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.13.3",
+	"version": "18.14.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -29,21 +29,20 @@
 	},
 	"files": [
 		"src",
+		"!src/export/html/shell.html",
+		"!src/export/html/template.css",
+		"!src/export/html/template.js",
+		"!src/export/html/share-loader.js",
 		"dist/cli.js",
 		"dist/docs-index.generated.txt",
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
 		"dist/*.json-*.zst",
-		"dist/template-*.css",
-		"dist/template-*.html",
-		"dist/template-*.js",
-		"dist/tool-views.generated-*.js",
-		"dist/marked.min-*.js",
-		"dist/highlight.min-*.js",
 		"scripts",
 		"examples",
 		"README.md",
-		"CHANGELOG.md"
+		"CHANGELOG.md",
+		"THIRD-PARTY-NOTICES.txt"
 	],
 	"type": "module",
 	"main": "./src/index.ts",
@@ -529,10 +528,10 @@
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
 		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run format-prompts",
 		"format-prompts": "bun scripts/format-prompts.ts",
-		"gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
+		"gen:export-viewer": "bun --cwd=../collab-web run gen:export-viewer",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
 		"gen:rpc": "bun scripts/gen-rpc/index.ts",
-		"prepack": "bun run gen:tool-views && bun run gen:bundle",
+		"prepack": "bun run gen:export-viewer && bun run gen:bundle",
 		"bench:guard": "bun scripts/bench-guard.ts"
 	},
 	"dependencies": {

@@ -74,8 +74,7 @@ impl Utility for Tee {
 		let files = self
 			.matches
 			.get_many::<OsString>(options::FILE)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let options = Options {
 			append: self.matches.get_flag(options::APPEND),
 			files,
