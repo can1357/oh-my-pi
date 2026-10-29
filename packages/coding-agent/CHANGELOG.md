@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unreachable default loopback model servers (Ollama, LM Studio, llama.cpp) you never configured no longer print a `model discovery failed` warning at startup ([#14592](https://github.com/can1357/oh-my-pi/pull/14592) by [@tahakotil](https://github.com/tahakotil), fixes [#12156](https://github.com/can1357/oh-my-pi/issues/12156)).
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
