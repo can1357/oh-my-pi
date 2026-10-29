@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Classifier refusals without an active fallback now continue on the same model with a hidden neutral reminder, preserving useful visible text while excluding refusal metadata and private thinking; empty refusals retry within `retry.maxRetries`, and turns with tools or media remain terminal ([#17413](https://github.com/can1357/oh-my-pi/pull/17413) by [@szybnev](https://github.com/szybnev)).
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
