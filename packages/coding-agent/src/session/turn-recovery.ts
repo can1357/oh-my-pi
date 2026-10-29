@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isUnexpectedSocketCloseMessage, logger, MAX_TIMER_DELAY_MS, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -2151,28 +2151,24 @@ export class TurnRecovery {
 		const timeoutSeconds = Math.max(0, cfgRetryUsageReserveConfirmTimeout.get(this.#host.settings));
 		const unattended = new AbortController();
 		const expired = Promise.withResolvers<boolean>();
-		let timer: NodeJS.Timeout | undefined;
+		// Cancels the deadline in the `finally` below, so a dialog that settles
+		// first leaves no pending wait behind.
+		const deadlineCancelled = new AbortController();
 		if (timeoutSeconds > 0) {
-			// A delay over MAX_TIMER_DELAY_MS does not fit a 32-bit timer and would
-			// fire a millisecond in, so the deadline is re-armed in chunks against a
-			// monotonic target. `sleepLong` chunks the same way, but awaits
-			// `scheduler.wait` without `{ ref: false }` and takes no argument to pass
-			// one, so a month-long deadline would hold the process open; this timer
-			// deliberately does not.
-			const deadline = performance.now() + timeoutSeconds * 1000;
-			const arm = () => {
-				const remaining = deadline - performance.now();
-				if (remaining <= 0) {
+			// `sleepLong` owns the 32-bit chunking and the monotonic deadline: a
+			// raw `setTimeout(timeoutSeconds * 1000)` overflows above ~24.9 days
+			// and fires a millisecond in. `ref: false` keeps the pending deadline
+			// from holding the process open on its own.
+			void sleepLong(timeoutSeconds * 1000, deadlineCancelled.signal, { ref: false }).then(
+				() => {
 					// Close the dialog AND stop waiting on it: a confirmer that ignores
 					// its signal must not be able to hold the turn past the deadline.
 					unattended.abort();
 					expired.resolve(false);
-					return;
-				}
-				timer = setTimeout(arm, Math.min(remaining, MAX_TIMER_DELAY_MS));
-				timer.unref();
-			};
-			arm();
+				},
+				// Cancelled with the dialog's answer; nothing is owed.
+				() => {},
+			);
 		}
 		const aborted = Promise.withResolvers<boolean>();
 		const onAbort = () => aborted.resolve(false);
@@ -2192,7 +2188,7 @@ export class TurnRecovery {
 			});
 			return false;
 		} finally {
-			clearTimeout(timer);
+			deadlineCancelled.abort();
 			signal.removeEventListener("abort", onAbort);
 		}
 	}
