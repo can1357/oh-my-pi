@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- A `models.yml` that names an input modality the catalog does not know yet (for example `video`) ignores that modality and keeps loading, instead of aborting startup ([#16342](https://github.com/can1357/oh-my-pi/issues/16342)).
+- A `models.yml` that names an input modality the catalog does not know yet (for example `video`) ignores that modality and keeps loading, instead of aborting startup ([#17419](https://github.com/can1357/oh-my-pi/pull/17419) by [@jonasboos](https://github.com/jonasboos)).
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
 ## [18.14.0] - 2026-10-29
