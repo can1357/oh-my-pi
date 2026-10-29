@@ -10,7 +10,7 @@
 - Extensions can start `/live` voice sessions with the audio on their own WebRTC peer, such as a phone browser, through `ctx.startLive({ sdpOffer })`; the RPC `live_connect` command does the same for RPC clients ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
 - Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
-- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported
+- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -26,8 +26,8 @@
 
 ### Fixed
 
-- Resuming a session another live omp process is writing — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id and then recording that still-running session as continued
-- A session forced off its file now logs what copying its artifacts cost — entries, bytes, and the largest of them — so a move that duplicates gigabytes is visible before the free space is
+- Resuming a session another live omp process is writing — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id and then recording that still-running session as continued ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- A session forced off its file now logs what copying its artifacts cost — entries, bytes, and the largest of them — so a move that duplicates gigabytes is visible before the free space is ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
