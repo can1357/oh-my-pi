@@ -4853,17 +4853,27 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": true,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 5,
 			"retry.maxRetries": 5,
 			"retry.modelFallback": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
 		const sessionManager = SessionManager.inMemory();
+		const emitSessionStop = vi.fn().mockResolvedValue(undefined);
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop,
+		} as unknown as ExtensionRunner;
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
+			extensionRunner,
 		});
 
 		await session.prompt("Plan G5 through G7");
@@ -4901,9 +4911,98 @@ describe("AgentSession retry fallback", () => {
 		expect(getLastAssistantMessage(session).content).toEqual([
 			{ type: "text", text: "G6 maps to the credential/session broker work." },
 		]);
+		expect(emitSessionStop).toHaveBeenCalledTimes(1);
+		expect(emitSessionStop.mock.calls[0]?.[0]?.last_assistant_message?.stopReason).toBe("stop");
 	});
 
-	it("continues five progressing classifier refusals within the configured retry budget", async () => {
+	it("suppresses usage-aware fallback for only the first refusal-continuation request", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled primary and fallback models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryUsage: "healthy" | "reserve" = "healthy";
+		let call = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				call++;
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (call === 1) {
+					primaryUsage = "reserve";
+					agent.followUp({
+						role: "user",
+						content: "Queued work should use normal preflight after the continuation.",
+						timestamp: Date.now(),
+					});
+					mock.push({
+						content: ["Partial work on the primary."],
+						stopReason: "error",
+						stopDetails: {
+							type: "refusal",
+							category: "cyber",
+							explanation: "This request triggered cyber-related safeguards.",
+						},
+						errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
+					});
+				} else if (call === 2) {
+					mock.push({ content: ["Primary finished the refused response."] });
+				} else if (call === 3) {
+					mock.push({ content: ["Fallback handled the queued work."] });
+				} else {
+					throw new Error(`Unexpected request ${call} on ${requestedModel.provider}/${requestedModel.id}`);
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 2,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "auto",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) =>
+			options.modelId === primaryModel.id
+				? {
+						state: primaryUsage,
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: primaryUsage,
+								remainingFraction: primaryUsage === "healthy" ? 0.8 : 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Start on the primary");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+	});
+
+	it("continues five progressing classifier refusals within the configured continuation cap", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -4934,6 +5033,8 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": true,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 5,
 			"retry.maxRetries": 5,
 			"retry.modelFallback": false,
 		});
@@ -4953,7 +5054,7 @@ describe("AgentSession retry fallback", () => {
 		expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "Planning complete." }]);
 	});
 
-	it("continues five empty classifier refusals within the configured retry budget", async () => {
+	it("continues five empty classifier refusals within the configured continuation cap", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -4984,6 +5085,8 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": true,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 5,
 			"retry.maxRetries": 5,
 			"retry.modelFallback": false,
 		});
@@ -5013,7 +5116,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it("stops same-model refusal continuation at retry.maxRetries", async () => {
+	it("stops same-model refusal continuation at retry.maxClassifierRefusalContinuations", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -5039,6 +5142,8 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": true,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 2,
 			"retry.maxRetries": 2,
 			"retry.modelFallback": false,
 		});
@@ -5089,6 +5194,8 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": true,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 5,
 			"retry.maxRetries": 5,
 			"retry.modelFallback": false,
 		});
@@ -5136,18 +5243,26 @@ describe("AgentSession retry fallback", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.enabled": false,
+			"retry.enabled": true,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
 			"retry.modelFallback": false,
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const emitSessionStop = vi.fn().mockResolvedValue(undefined);
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop,
+		} as unknown as ExtensionRunner;
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			extensionRunner,
 		});
 
 		await session.prompt("Trigger classifier refusal");
@@ -5161,6 +5276,11 @@ describe("AgentSession retry fallback", () => {
 		expect(settled?.stopReason).toBe("error");
 		expect(settled?.errorMessage).toBe("Refusal (cyber): Declined.");
 		expect(settled?.stopDetails).toEqual({ type: "refusal", category: "cyber", explanation: "Declined." });
+		expect(emitSessionStop).toHaveBeenCalledTimes(1);
+		expect(emitSessionStop.mock.calls[0]?.[0]?.last_assistant_message).toMatchObject({
+			stopReason: "error",
+			stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+		});
 
 		await session.prompt("Next prompt supersedes the pruned refusal");
 		await session.waitForIdle();
@@ -5168,6 +5288,7 @@ describe("AgentSession retry fallback", () => {
 		const recovered = session.getLastAssistantMessage();
 		expect(recovered?.stopReason).toBe("stop");
 		expect(recovered?.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(emitSessionStop).toHaveBeenCalledTimes(2);
 	});
 
 	it("keeps walking the chain on a refusal after the retry budget is spent, each model once", async () => {
@@ -5704,6 +5825,8 @@ describe("AgentSession retry fallback", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 2,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 2,
 		});

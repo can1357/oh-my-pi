@@ -720,6 +720,8 @@ export class TurnRecovery {
 	handleClassifierRefusalContinuation(message: AssistantMessage): boolean {
 		if (!this.isClassifierRefusal(message)) return false;
 		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		const retrySettings = cfgRetry.get(this.#host.settings);
+		if (!retrySettings.continueClassifierRefusals) return false;
 		if (this.#activeRetryFallback) return false;
 
 		const text: string[] = [];
@@ -742,9 +744,9 @@ export class TurnRecovery {
 			partialText = "";
 		}
 
-		const maxRetries = cfgRetry.get(this.#host.settings).maxRetries;
+		const maxContinuations = retrySettings.maxClassifierRefusalContinuations;
 		this.#classifierRefusalContinueCount++;
-		if (this.#classifierRefusalContinueCount > maxRetries) {
+		if (this.#classifierRefusalContinueCount > maxContinuations) {
 			logger.warn("Classifier refusals continued past retry cap", {
 				attempts: this.#classifierRefusalContinueCount - 1,
 				model: message.model,
@@ -769,11 +771,11 @@ export class TurnRecovery {
 						? prompt.render(classifierRefusalContinueTemplate, {
 								partialText,
 								retryCount: this.#classifierRefusalContinueCount,
-								maxRetries,
+								maxRetries: maxContinuations,
 							})
 						: prompt.render(classifierRefusalRetryTemplate, {
 								retryCount: this.#classifierRefusalContinueCount,
-								maxRetries,
+								maxRetries: maxContinuations,
 							}),
 				},
 			],

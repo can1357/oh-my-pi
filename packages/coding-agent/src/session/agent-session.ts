@@ -2181,10 +2181,9 @@ export class AgentSession implements SettingsScope {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (
-				!cfgRetryUsageAwareFallback.get(this.settings) ||
-				this.#usagePreflightSuppressedForClassifierContinuation
-			) {
+			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
+			if (this.#usagePreflightSuppressedForClassifierContinuation) {
+				this.#usagePreflightSuppressedForClassifierContinuation = false;
 				return;
 			}
 			if (this.#usagePreflightReadyForNextModelCall) {
@@ -5095,21 +5094,29 @@ export class AgentSession implements SettingsScope {
 				maintenanceRoute("classifier-refusal-continued");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!retryableTurn && this.#recovery.handleMalformedFunctionCallStop(msg)) {
+			} else if (
+				!requestBodyTimeoutTerminal &&
+				!retryableTurn &&
+				this.#recovery.handleMalformedFunctionCallStop(msg)
+			) {
 				// A malformed call with committed text cannot be replayed, but it
 				// never executed anything either: keep the turn and continue with a
 				// corrective reminder rather than stopping on a pinned error.
 				maintenanceRoute("malformed-function-call-handled");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!retryableTurn && this.#recovery.handleCommittedTextStreamStall(msg)) {
+			} else if (
+				!requestBodyTimeoutTerminal &&
+				!retryableTurn &&
+				this.#recovery.handleCommittedTextStreamStall(msg)
+			) {
 				// The stream died after text rendered: replay would duplicate it and
 				// a trailing assistant prefill is rejected, so keep the partial turn
 				// and continue from where it stopped.
 				maintenanceRoute("committed-text-stream-stall-continued");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!retryableTurn && this.#recovery.isHardErrorFallbackEligible(msg)) {
+			} else if (!requestBodyTimeoutTerminal && !retryableTurn && this.#recovery.isHardErrorFallbackEligible(msg)) {
 				// A non-retryable hard error on a model covered by a configured
 				// fallback chain: retrying the SAME model is pointless, but a
 				// DIFFERENT model is a fresh chance — consult the chain before

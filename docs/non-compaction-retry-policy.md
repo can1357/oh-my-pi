@@ -68,7 +68,7 @@ The normalized classifier recognizes the transient categories above from structu
 
 Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry engine when no user, dispose, or streaming-edit-guard abort is in progress. An interrupted turn whose tool calls already have matching results can also be continued safely: the failed assistant/tool-result sequence is preserved so completed side effects are not replayed. Resolved stream stalls and HTTP/2 stream resets (`NGHTTP2_INTERNAL_ERROR`, `NGHTTP2_REFUSED_STREAM`, `HTTP2StreamReset`) use the same preserve-and-continue path. Cursor idle-stall recovery continues after every emitted tool call has a result; the Connect stream is already closed by the idle abort. An HTTP/2 RST is the same: the stream is already dead. A text-only turn (no tool calls) that fails mid-stream after its reply text rendered cannot be replayed without duplicating that text, so it keeps the partial turn and continues with a developer reminder (`stream-stall-continue.md`) to resume where it stopped, up to 3 attempts per prompt while auto-retry is enabled (`TurnRecovery.handleCommittedTextStreamStall`).
 
-A classifier refusal follows a separate same-model continuation path when retry is enabled and no configured fallback recovered it. The refused assistant is removed from model context. Useful committed text is carried in a hidden developer reminder; empty, diagnostic-only, and thinking-only refusals receive a neutral retry reminder. Both forms name neither the refusal nor its category and add no synthetic user message. Thinking blocks are discarded, and any tool call, image, or server-tool block excludes the turn from this recovery. The path is bounded by `retry.maxRetries` per prompt.
+When `retry.continueClassifierRefusals` is enabled, a classifier refusal follows a separate same-model continuation path if no configured fallback recovered it. This setting is opt-in and defaults to `false`; the existing terminal refusal policy remains the default. The refused assistant is removed from model context. Useful committed text is carried in a hidden developer reminder; empty, diagnostic-only, and thinking-only refusals receive a neutral retry reminder. Both forms name neither the refusal nor its category and add no synthetic user message. Thinking blocks are discarded, and any tool call, image, server-tool block, or active fallback excludes the turn from this recovery. The path is bounded independently by `retry.maxClassifierRefusalContinuations` per prompt.
 
 Non-retryable hard errors may consult a configured fallback chain when switching models is the recovery; without a successful switch they do not back off and retry the same failing model. `retry.fallbackOn` narrows which errors consult a chain: `usage-limit` keeps every other error on the current model (retryable ones back off and retry until the budget runs out, hard errors surface), and `except-usage-limit` keeps usage limits off the chain. Fireworks Fast-to-base degradation is an intrinsic one-shot safety net and can run even when `retry.enabled` is false.
 
@@ -112,6 +112,8 @@ Settings:
 
 - `retry.enabled` (default `true`)
 - `retry.maxRetries` (default `10`)
+- `retry.continueClassifierRefusals` (default `false`)
+- `retry.maxClassifierRefusalContinuations` (default `2`)
 - `retry.baseDelayMs` (default `500`)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)
