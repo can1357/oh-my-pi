@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, MAX_TIMER_DELAY_MS, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -2153,13 +2153,25 @@ export class TurnRecovery {
 		const expired = Promise.withResolvers<boolean>();
 		let timer: NodeJS.Timeout | undefined;
 		if (timeoutSeconds > 0) {
-			timer = setTimeout(() => {
-				// Close the dialog AND stop waiting on it: a confirmer that ignores
-				// its signal must not be able to hold the turn past the deadline.
-				unattended.abort();
-				expired.resolve(false);
-			}, timeoutSeconds * 1000);
-			timer.unref();
+			// A delay over MAX_TIMER_DELAY_MS does not fit a 32-bit timer and would
+			// fire a millisecond in, so the deadline is re-armed in chunks against a
+			// monotonic target. `sleepLong` chunks the same way but waits on
+			// `scheduler.wait`, which cannot be unref'ed: a month-long deadline would
+			// then hold the process open, which this timer deliberately does not.
+			const deadline = performance.now() + timeoutSeconds * 1000;
+			const arm = () => {
+				const remaining = deadline - performance.now();
+				if (remaining <= 0) {
+					// Close the dialog AND stop waiting on it: a confirmer that ignores
+					// its signal must not be able to hold the turn past the deadline.
+					unattended.abort();
+					expired.resolve(false);
+					return;
+				}
+				timer = setTimeout(arm, Math.min(remaining, MAX_TIMER_DELAY_MS));
+				timer.unref();
+			};
+			arm();
 		}
 		const aborted = Promise.withResolvers<boolean>();
 		const onAbort = () => aborted.resolve(false);
