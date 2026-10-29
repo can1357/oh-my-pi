@@ -12631,10 +12631,17 @@ export class AgentSession implements SettingsScope {
 	 * A side turn runs outside `agentLoop`, so `/pause` — which every agent loop
 	 * polls before a model call — would not otherwise stop it, and a paused
 	 * session kept paying for automatic titles, composer predictions and idle
-	 * recaps. The turn waits for the resume and then snapshots; the gate is
-	 * tested before awaiting so a running session pays no microtask for it.
+	 * recaps. The turn waits for the resume at entry and again at each call that
+	 * spends, because the preparation between them awaits; the gate is tested
+	 * before awaiting so a running session pays no microtask for it.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		// Entry is not enough: the preparation below awaits image normalization,
+		// history conversion and the side-context hooks, and `/pause` engaged
+		// during any of them would otherwise still reach a provider. Hold again
+		// at each call that spends — the vision request and the side stream.
+		// Each site tests the gate before awaiting, so a running session pays no
+		// microtask for a pause nobody engaged.
 		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
 		const model = this.model;
 		if (!model) {
@@ -12676,6 +12683,9 @@ export class AgentSession implements SettingsScope {
 		// Images, those of earlier side turns too, get a prompt's handling: normalized
 		// for the model, and described by a vision model for a text-only one.
 		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
+		// `#normalizeImagesForModel` above already awaited, so the gate can have
+		// closed since the entry test; the description is itself a paid request.
+		if (promptImages?.length && agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
 		const imageDescriptionNotice = promptImages?.length
 			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
 			: undefined;
@@ -12758,6 +12768,10 @@ export class AgentSession implements SettingsScope {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
+		// The provider boundary: every await above could have spanned a `/pause`,
+		// and `assertEphemeralTurnReady` after the hold rejects a model or
+		// session that changed while the gate held this turn.
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
 		assertEphemeralTurnReady();
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);

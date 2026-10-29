@@ -155,6 +155,26 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
+	// The entry test is passed by the time `/pause` arrives here: the turn is
+	// already awaiting its image, history and side-context preparation, and the
+	// provider request is what must not start.
+	it("holds an ephemeral side turn paused after it began preparing", async () => {
+		let streams = 0;
+		const session = sideSession(["A"], false, () => {
+			streams++;
+		});
+		const turn = session.runEphemeralTurn({ promptText: "Question?" });
+		agentPauseGate.pause();
+		try {
+			for (let tick = 0; tick < 200; tick++) await Promise.resolve();
+			expect(streams).toBe(0);
+		} finally {
+			agentPauseGate.resume();
+		}
+		expect((await turn).replyText).toBe("A");
+		expect(streams).toBe(1);
+	});
+
 	function capturingAnthropicSideSession(model: Model) {
 		const bodies: Array<{
 			messages: Array<{ role: string; content: string | Array<{ text?: string; cache_control?: unknown }> }>;
