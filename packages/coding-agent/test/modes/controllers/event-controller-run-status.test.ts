@@ -191,4 +191,25 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
 	});
+
+	it("keeps naming an unanswered dialog when a blocking tool starts behind it", async () => {
+		// A run can reach an `ask` (or an approval prompt) while a session dialog
+		// is still unanswered. The dialog outranks the run's own prompt, so the
+		// OSC record must keep naming the dialog instead of the tool's question,
+		// and the answer that arrives later must still be honoured.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+		const prompt = "an MCP sign-in for linear";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		await controller.handleEvent(toolStart("ask-1", "ask", askArgs("Use Postgres?")));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
+
+		await controller.handleEvent(toolEnd("ask-1", "ask"));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
 });

@@ -2010,7 +2010,10 @@ export class EventController {
 		const blocked = this.#blockingPrompt(renderToolName, event.args);
 		if (blocked) {
 			this.#blockingPrompts.set(event.toolCallId, blocked);
-			setRunStatus(blocked);
+			// A session dialog outranks the run's own prompt, the same way the
+			// tool-execution-end path below resolves it: the person still owes an
+			// answer to the dialog, and the title and OSC record must name it.
+			setRunStatus(this.#sessionUserWait ?? blocked);
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
