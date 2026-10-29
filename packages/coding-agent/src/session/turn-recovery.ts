@@ -316,8 +316,21 @@ export interface TurnRecoveryHost {
 	 * Spend an eligible saved reset for the blocked provider pool.
 	 * `activeBlockUnblockAtMs` is the absolute unblock time parsed from the live
 	 * usage-limit error and never substitutes for live grant eligibility.
+	 * `beforeTakeover` is set for the pass that runs while a sibling could take
+	 * over (`restoreBeforeReserve`): it spends only within the session's account
+	 * pool and stops before spending once its signal aborts.
 	 */
-	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
+	maybeAutoRedeemReset(
+		activeBlockUnblockAtMs?: number,
+		beforeTakeover?: { signal: AbortSignal },
+	): Promise<ResetRecoveryResult>;
+	/**
+	 * With a sibling credential able to take over a usage-limited turn, whether
+	 * to try {@link maybeAutoRedeemReset} first: the provider's reset policy
+	 * enables auto-redeem and `restoreBeforeReserve`, and every other account the
+	 * session may use is inside its usage reserve.
+	 */
+	shouldRedeemBeforeTakeover(signal: AbortSignal): Promise<boolean>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -812,6 +825,16 @@ export class TurnRecovery {
 	/** Applies automatic retry, credential rotation, and model fallback policy. */
 	handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
 		return this.#handleRetryableError(message, options);
+	}
+
+	/**
+	 * Whether a usage-limit failure arriving now would reach the credential
+	 * branch of {@link handleRetryableError} with retry budget left, so a sibling
+	 * takeover deferred to it still happens there.
+	 */
+	canRecoverUsageLimit(): boolean {
+		const retrySettings = cfgRetry.get(this.#host.settings);
+		return retrySettings.enabled && this.#retryAttempt < retrySettings.maxRetries;
 	}
 
 	/**
@@ -2726,21 +2749,29 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
-			if (!rotated) {
-				const resetAbortController = new AbortController();
-				this.#retryAbortController?.abort();
-				this.#retryAbortController = resetAbortController;
-				const startedAtMs = Date.now();
-				const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
-				try {
+			const resetAbortController = new AbortController();
+			this.#retryAbortController?.abort();
+			this.#retryAbortController = resetAbortController;
+			try {
+				// With `restoreBeforeReserve`, a sibling that can serve only inside its
+				// usage reserve is a protected backup: spend a saved reset first, and
+				// rotate onto the backup only when none is spent.
+				if (!rotated || (await this.#host.shouldRedeemBeforeTakeover(resetAbortController.signal))) {
+					resetAbortController.signal.throwIfAborted();
+					const startedAtMs = Date.now();
+					const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
 					for (let attempt = 0; ; attempt++) {
-						const result = await this.#host.maybeAutoRedeemReset(unblockAtMs);
+						const result = await this.#host.maybeAutoRedeemReset(
+							unblockAtMs,
+							rotated ? { signal: resetAbortController.signal } : undefined,
+						);
 						resetAbortController.signal.throwIfAborted();
 						if (result.restored) {
 							restored = true;
 							break;
 						}
-						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						// With a sibling to rotate to, never wait to re-read eligibility.
+						if (rotated || result.retryAfterMs === undefined || attempt >= maxRetries) break;
 						// Only retry the safe eligibility read, never the reset mutation or
 						// model request. Respect provider pacing within the configured wait cap.
 						const readDelayMs = Math.max(
@@ -2752,13 +2783,13 @@ export class TurnRecovery {
 							break;
 						await sleepLong(readDelayMs, resetAbortController.signal);
 					}
-				} catch (error) {
-					if (!resetAbortController.signal.aborted) throw error;
-					if (this.#retryAbortController !== resetAbortController) return false;
-					return this.#endCancelledRetry();
-				} finally {
-					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 				}
+			} catch (error) {
+				if (!resetAbortController.signal.aborted) throw error;
+				if (this.#retryAbortController !== resetAbortController) return false;
+				return this.#endCancelledRetry();
+			} finally {
+				if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 			}
 			if (rotated || restored) {
 				switchedCredential = true;

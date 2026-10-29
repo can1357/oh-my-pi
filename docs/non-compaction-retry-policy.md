@@ -91,6 +91,8 @@ Flow (`#handleRetryableError`):
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
 10.   Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
+With the provider's `codexResets.restoreBeforeReserve` or `claudeResets.restoreBeforeReserve` on, retries enabled and retry budget left, a usage limit that only a sibling inside its usage reserve could take over skips the in-stream credential rotation and reaches step 5, where the banked reset is tried first; the switch applies only if none is spent.
+
 ### What resets retry counters
 
 `#retryAttempt` resets to `0` in these cases:

@@ -24,9 +24,10 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { type ApiKeyResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -1640,6 +1641,8 @@ export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
+	/** Credentials for the capture; defaults to the source agent's resolver. */
+	getApiKey?: AgentOptions["getApiKey"];
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -1698,7 +1701,7 @@ export function createAutoLearnCaptureRunner(
 			sessionId: captureSessionId,
 			promptCacheKey: captureSessionId,
 			providerSessionState: captureProviderSessionState,
-			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
+			getApiKey: options.getApiKey ?? (requestModel => options.sourceAgent.getApiKey?.(requestModel)),
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
 		});
@@ -2308,9 +2311,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let contextFiles = initialContextFiles;
 
 	let agent: Agent;
-	const effectiveGetApiKey =
-		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
+	// Requests without turn recovery (cache-warming replays, auto-learn captures)
+	// cannot spend a saved reset, so they keep the stream's own sibling rotation.
+	const registryGetApiKey = (requestModel: Model): ApiKeyResolver =>
+		modelRegistry.resolver(requestModel, agent.sessionId);
+	const effectiveGetApiKey =
+		options.getApiKey ??
+		((requestModel: Model): ApiKeyResolver => {
+			const resolve = registryGetApiKey(requestModel);
+			// A usage limit only a sibling inside its reserve could take over skips
+			// the in-stream rotation when turn recovery can still take it over, so
+			// a saved reset can be spent first.
+			return async context =>
+				context.lastChance &&
+				AIError.isUsageLimit(context.error, requestModel.api) &&
+				(await session.shouldDeferUsageLimitTakeover(requestModel, context.signal))
+					? undefined
+					: resolve(context);
+		});
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -4704,8 +4723,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Every request through this streamFn is this session's own main
 				// loop (side-channel, advisor, and maintenance requests use
 				// dedicated wrappers), so it owns the warmer. The replay omits the
-				// one-shot fallback-credit redemption.
-				session.startCacheWarming(streamModel, context, merged);
+				// one-shot fallback-credit redemption and rotates credentials itself.
+				session.startCacheWarming(
+					streamModel,
+					context,
+					options.getApiKey ? merged : { ...merged, apiKey: registryGetApiKey(streamModel) },
+				);
 				return stream;
 			},
 			cursorExecHandlers,
@@ -5501,6 +5524,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
+			getApiKey: options.getApiKey ?? registryGetApiKey,
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))

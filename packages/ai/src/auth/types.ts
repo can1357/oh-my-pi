@@ -807,7 +807,13 @@ export type ListResetCreditsOptions = {
 export type RedeemResetCreditOptions = {
 	target: ResetCreditTarget;
 	baseUrlResolver?: (provider: string) => string | undefined;
+	/** Bounds the whole redeem, including the reset request once sent. */
 	signal?: AbortSignal;
+	/**
+	 * Cancels only the steps before the reset request is sent (access, offer
+	 * re-listing); redeem then rejects with this signal's `reason` and spends nothing.
+	 */
+	preflightSignal?: AbortSignal;
 };
 
 /** Controller accepted by {@link OAuthApi.login}; onAuth/onPrompt are required. */
