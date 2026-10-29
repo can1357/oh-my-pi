@@ -745,9 +745,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * Appends the edit tags for the numbered file rows the command printed to
 	 * `text`, the result the model receives now, and records those rows. Past the
 	 * spill threshold the inline cap or the artifact spill cuts the result, so it
-	 * vouches for nothing.
+	 * vouches for nothing. Neither does a run under a shell prefix
+	 * (`PI_SHELL_PREFIX`), which may read its files from another directory or host.
 	 */
 	async #tagNumberedRows(text: string, view: NumberedView): Promise<string> {
+		if (this.session.settings.getShellConfig().prefix) return text;
 		const spillThreshold = resolveArtifactSpillThreshold(this.session.settings);
 		if (Buffer.byteLength(text) > spillThreshold) return text;
 		const tags = await planNumberedFileTags(

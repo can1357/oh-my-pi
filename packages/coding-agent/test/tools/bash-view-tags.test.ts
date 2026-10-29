@@ -501,6 +501,19 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(await bash("cd missing; grep -n target b.ts")).not.toContain("Edit tags for the numbered lines above:");
 	});
 
+	it("names no tag for a command a shell prefix runs, which may read another directory's files", async () => {
+		await fs.mkdir(path.join(cwd, "other"));
+		await Bun.write(path.join(cwd, "a.ts"), "target\n");
+		await Bun.write(path.join(cwd, "other", "a.ts"), "target\n");
+		const shellConfig = session.settings.getShellConfig();
+		spyOn(session.settings, "getShellConfig").mockReturnValue({ ...shellConfig, prefix: "cd other &&" });
+		// The prefix runs grep on other/a.ts; the row reads like a.ts's own row 1.
+		const output = await bash("grep -n target a.ts");
+		expect(output).toContain("1:target");
+		expect(output).not.toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
+	});
+
 	it("tags every row of a long listing of short lines", async () => {
 		await Bun.write(path.join(cwd, "blank.txt"), "\n".repeat(5000));
 		const output = await bash("grep -n '^$' blank.txt");
