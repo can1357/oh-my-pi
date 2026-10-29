@@ -294,6 +294,36 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(prompts).toEqual([UNNAMED_USER_WAIT_PROMPT]);
 	});
 
+	it("names the dialog still open after the one it published settles", async () => {
+		// Two dialogs overlap (an MCP sign-in behind a reserve prompt). When the
+		// published one is answered first, the surfaces that report run state —
+		// and the replay a focus attach reads — must name the dialog that is
+		// still waiting, not the one that is gone.
+		const target = createSession([{ content: ["done"] }]);
+		const events: string[] = [];
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "user_wait_start") events.push(`start:${event.prompt}`);
+			if (event.type === "user_wait_end") events.push("end");
+		});
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		const firstWait = target.waitForUser(() => first.promise, "first");
+		const secondWait = target.waitForUser(() => second.promise, "second");
+		expect(events).toEqual(["start:first"]);
+		expect(target.activeUserWait()?.prompt).toBe("first");
+
+		first.resolve();
+		await firstWait;
+		expect(events).toEqual(["start:first", "start:second"]);
+		expect(target.activeUserWait()?.prompt).toBe("second");
+
+		second.resolve();
+		await secondWait;
+		unsubscribe();
+		expect(events).toEqual(["start:first", "start:second", "end"]);
+		expect(target.activeUserWait()).toBeUndefined();
+	});
+
 	it("marks no turn in a subagent, so its runs keep the grace period", async () => {
 		const target = createSession([step, { content: ["done"] }], "sub");
 		await target.prompt("go");

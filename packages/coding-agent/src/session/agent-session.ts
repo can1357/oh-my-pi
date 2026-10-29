@@ -1234,12 +1234,19 @@ export class AgentSession implements SettingsScope {
 	 * dropped by the ACP host).
 	 */
 	#clientPromptInFlightCount = 0;
-	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
-	#userWaitCount = 0;
 	/**
-	 * The `user_wait_start` frame published for the open dialogs, kept so a
-	 * surface that attaches mid-wait (a focus rebuild) can replay it; undefined
-	 * while no dialog waits.
+	 * Every dialog open and waiting for the user's answer, keyed by a per-wait
+	 * id, in the order the dialogs opened. While any is open the computer turn
+	 * is ended. The oldest is the one published and replayed: when it settles
+	 * while others are still open, the next one is published in its place, so no
+	 * surface keeps naming a dialog that is gone.
+	 */
+	#openUserWaits = new Map<number, string>();
+	#userWaitSeq = 0;
+	/**
+	 * The `user_wait_start` frame currently published for the open dialogs, kept
+	 * so a surface that attaches mid-wait (a focus rebuild) can replay it;
+	 * undefined while no dialog waits.
 	 */
 	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
@@ -1394,24 +1401,42 @@ export class AgentSession implements SettingsScope {
 	 * with no `prompt`, which a strict wire decoder would reject.
 	 */
 	async waitForUser<T>(dialog: () => Promise<T>, prompt?: string): Promise<T> {
-		if (this.#userWaitCount++ === 0) {
+		const waitId = ++this.#userWaitSeq;
+		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
-			this.#openUserWait = { type: "user_wait_start", prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT };
-			this.#emit(this.#openUserWait);
 		}
+		this.#openUserWaits.set(waitId, prompt ?? UNNAMED_USER_WAIT_PROMPT);
+		this.#publishOpenUserWait();
 		try {
 			return await dialog();
 		} finally {
-			if (--this.#userWaitCount === 0) {
+			this.#openUserWaits.delete(waitId);
+			if (this.#openUserWaits.size === 0) {
 				this.#openUserWait = undefined;
 				this.#emit({ type: "user_wait_end" });
 				if (this.#promptInFlightCount > 0) {
 					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
 					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
 				}
+			} else {
+				// The dialog that was named may be the one that just settled; the
+				// oldest one still open takes its place.
+				this.#publishOpenUserWait();
 			}
 		}
+	}
+
+	/**
+	 * Publish the oldest open dialog as the session's wait, if it is not the one
+	 * already published. A second dialog opening behind the first changes
+	 * nothing; the first one settling behind a second republishes.
+	 */
+	#publishOpenUserWait(): void {
+		const prompt = this.#openUserWaits.values().next().value;
+		if (prompt === undefined || prompt === this.#openUserWait?.prompt) return;
+		this.#openUserWait = { type: "user_wait_start", prompt };
+		this.#emit(this.#openUserWait);
 	}
 
 	/**
@@ -1419,7 +1444,7 @@ export class AgentSession implements SettingsScope {
 	 * subagent's turn can end mid-way through its parent's, so its runs keep the native grace period instead.
 	 */
 	#beginComputerTurn(): void {
-		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
+		if (this.#agentKind !== "main" || this.#openUserWaits.size > 0) return;
 		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
