@@ -668,25 +668,31 @@ fn pressable(role: &str) -> bool {
 /// platform's vocabulary.
 fn shown_actions(props: &AxProps) -> Option<String> {
 	let role = props.role.as_str();
-	let mut names: Vec<_> = props
+	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
+	let mut names: Vec<String> = props
 		.actions
 		.iter()
-		.filter_map(|action| action.strip_prefix("AX"))
+		.filter_map(|action| {
+			let prefix = action.get(..2)?;
+			prefix
+				.eq_ignore_ascii_case("AX")
+				.then(|| action[2..].to_ascii_lowercase())
+		})
 		.collect();
-	if !pressable(role) || names.contains(&"Press") {
+	if !pressable(role) || names.iter().any(|name| name == "press") {
 		names.retain(|name| {
-			let implied = match *name {
-				"Press" => pressable(role),
-				"Confirm" | "Cancel" => matches!(role, "textfield" | "textarea" | "combobox"),
-				"ScrollToVisible" | "ShowMenu" | "Raise" | "ShowAlternateUI" | "ShowDefaultUI"
-				| "ZoomWindow" | "ScrollUpByPage" | "ScrollDownByPage" | "ScrollLeftByPage"
-				| "ScrollRightByPage" => true,
+			let implied = match name.as_str() {
+				"press" => pressable(role),
+				"confirm" | "cancel" => matches!(role, "textfield" | "textarea" | "combobox"),
+				"scrolltovisible" | "showmenu" | "raise" | "showalternateui" | "showdefaultui"
+				| "zoomwindow" | "scrollupbypage" | "scrolldownbypage" | "scrollleftbypage"
+				| "scrollrightbypage" => true,
 				_ => false,
 			};
 			!implied
 		});
 	}
-	(!names.is_empty()).then(|| names.join(",").to_ascii_lowercase())
+	(!names.is_empty()).then(|| names.join(","))
 }
 
 pub fn node_to_napi(reference: String, props: AxProps) -> AxNode {
@@ -2073,9 +2079,11 @@ mod tests {
 				(7, with("popover", "Details", &["AXCancel"])),
 				(8, with("button", "Native", &["press", "invoke"])),
 				(9, with("button", "Download", &["AXPress", "AXOpen"])),
+				(10, with("image", "b.pdf", &["axopen", "AXshowMenu"])),
+				(11, with("button", "Upload", &["axpress", "AxOpen"])),
 			]
 			.into(),
-			children: [(1, (2..=9).collect())].into(),
+			children: [(1, (2..=11).collect())].into(),
 			..Default::default()
 		};
 		let text = tree(&mut m);
@@ -2094,6 +2102,10 @@ mod tests {
 		// A button that presses and opens lists only the open; its press is the
 		// role's own and still performs.
 		assert_eq!(actions("e9"), Some("open"));
+		// An app that spells a standard action in another case gets it listed and
+		// filtered the same, as `perform()` runs it in any case.
+		assert_eq!(actions("e10"), Some("open"));
+		assert_eq!(actions("e11"), Some("open"));
 	}
 	#[test]
 	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
