@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -163,13 +163,36 @@ test("gc --restore refuses an id prefix that matches two archived sessions", asy
 
 test("gc --restore dry run reports the refusal instead of promising a restore", async () => {
 	await archiveEverything();
-	// A live file back under the archived name: --apply would refuse this.
-	await Bun.write(sessionFile, sessionBody(SESSION_ID, PROMPT, root));
+	// Another session's turns under the archived name: --apply would refuse this.
+	await Bun.write(sessionFile, sessionBody(SESSION_ID, "a different conversation", root));
 
 	const result = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
 
 	expect(result.restore?.sessionPath).toBeUndefined();
-	expect(result.restore?.errors.join("\n")).toContain("already exists");
+	expect(result.restore?.errors.join("\n")).toContain("a different session file already exists");
+});
+
+test("gc --restore dry run reports the artifact recovery --apply would finish", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	await archiveEverything();
+	// What an interrupted restore leaves: the transcript live and carried on,
+	// the artifact tree still in the archive. `--apply` finishes that; the dry
+	// run must not report an error for work applying performs.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await fs.appendFile(
+		sessionFile,
+		`${JSON.stringify({ type: "message", id: "m3", message: { role: "user", content: "later" } })}\n`,
+	);
+
+	const result = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+
+	expect(result.restore?.errors).toEqual([]);
+	expect(result.restore?.sessionPath).toBe(sessionFile);
+	// A dry run changes nothing.
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).exists()).toBe(false);
 });
 
 test("gc --restore refuses to run beside a phase it would silently skip", async () => {
@@ -574,4 +597,54 @@ test("opening a session whose artifact tree could not be restored fails instead 
 	);
 	// The archive is kept, so the retry the error names has both halves.
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("an empty --restore is refused instead of running the configured phases", async () => {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+
+	await expect(
+		runGcCommand({
+			flags: {
+				agentDir: root,
+				restore: "",
+				apply: true,
+				json: true,
+				coldArchiveAfterDays: 0,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+			},
+		}),
+	).rejects.toThrow("--restore needs a session id");
+	// Nothing was archived under cover of a restore that named no session.
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("an artifact tree that cannot be dropped leaves the archive complete, not deleted", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	await fs.mkdir(artifacts, { recursive: true });
+	await Bun.write(path.join(artifacts, "sub.jsonl"), sessionBody("sub-1", "nested", root));
+	const realRm = fs.rm;
+	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+		// A locked artifact: the copy into the archive succeeded, dropping the
+		// live tree did not.
+		if (String(target) === artifacts) {
+			throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		}
+		return await realRm(target, options);
+	});
+	try {
+		const result = await archiveEverything();
+
+		expect(result.archive).toMatchObject({ archived: 1, errors: [] });
+		expect(result.archive?.leftoverArtifactTrees).toEqual([artifacts]);
+		// The session is recoverable: the archive holds the transcript and the tree.
+		expect(await Bun.file(archiveFile).exists()).toBe(true);
+		expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toContain(
+			"nested",
+		);
+	} finally {
+		rm.mockRestore();
+	}
 });

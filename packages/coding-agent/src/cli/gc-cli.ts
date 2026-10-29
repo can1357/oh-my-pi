@@ -28,6 +28,7 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import {
+	archiveIsPrefixOfLive,
 	findArchivedSessionFiles,
 	getArchivedSessionsDir,
 	inflateArchivedBytes,
@@ -147,6 +148,12 @@ export interface ArchiveGcResult {
 	 * does not delete them.
 	 */
 	orphanedTargets: string[];
+	/**
+	 * Live artifact trees the archive holds a complete copy of, which could not
+	 * be removed (a locked file, a read-only directory). The session is
+	 * archived; these are bytes still to reclaim by hand.
+	 */
+	leftoverArtifactTrees: string[];
 	errors: string[];
 }
 
@@ -297,6 +304,12 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
+	// An empty `--restore` names no session. Reading it as "no --restore given"
+	// would run the configured phases instead — archiving sessions and sweeping
+	// blobs for a command that asked for a restore.
+	if (flags.restore !== undefined && flags.restore.trim() === "") {
+		throw new Error("--restore needs a session id or the path of a file in the archive");
+	}
 	const selected =
 		flags.blobs === true ||
 		flags.archive === true ||
@@ -325,7 +338,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
-		restoreTarget: flags.restore?.trim() || undefined,
+		restoreTarget: flags.restore?.trim(),
 		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
 			phase => flags[phase] === true,
 		),
@@ -1026,10 +1039,20 @@ async function restoreGzipSessionFile(source: string, destination: string): Prom
  *
  * A link whose target is already gone is skipped and counted: dereferencing
  * it throws, and one broken link must not make a session unarchivable
- * forever. A failure part-way removes what it had copied, so a retry never
- * finds a stray tree in the archive with no transcript beside it.
+ * forever. A failure part-way through the copy removes what it had copied,
+ * so a retry never finds a stray tree in the archive with no transcript
+ * beside it.
+ *
+ * Once the copy is complete the archive holds the session, and a failure to
+ * drop the live tree (a locked file, a read-only directory) is reported as a
+ * leftover rather than thrown: rolling the move back from here would delete
+ * the archive — the only complete copy — and leave the half-removed live tree
+ * behind.
  */
-async function moveArtifactsTree(source: string, destination: string): Promise<{ brokenLinks: number }> {
+async function moveArtifactsTree(
+	source: string,
+	destination: string,
+): Promise<{ brokenLinks: number; leftoverSource?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	let brokenLinks = 0;
 	try {
@@ -1049,7 +1072,11 @@ async function moveArtifactsTree(source: string, destination: string): Promise<{
 		await fs.rm(destination, { recursive: true, force: true });
 		throw error;
 	}
-	await fs.rm(source, { recursive: true, force: true });
+	try {
+		await fs.rm(source, { recursive: true, force: true });
+	} catch {
+		return { brokenLinks, leftoverSource: source };
+	}
 	return { brokenLinks };
 }
 
@@ -1079,7 +1106,7 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
  */
 async function moveSessionWithArtifacts(
 	candidate: ArchiveCandidate,
-): Promise<{ orphanedTarget?: string; brokenLinks: number }> {
+): Promise<{ orphanedTarget?: string; brokenLinks: number; leftoverSource?: string }> {
 	const sourceSession = candidate.session.path;
 	const destSession = candidate.destinationPath;
 	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
@@ -1094,6 +1121,7 @@ async function moveSessionWithArtifacts(
 	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
 	let orphanedTarget: string | undefined;
 	let brokenLinks = 0;
+	let leftoverSource: string | undefined;
 	try {
 		if (alreadyArchived) {
 			// The archive is verified identical, so dropping the transcript only
@@ -1106,7 +1134,9 @@ async function moveSessionWithArtifacts(
 		}
 		moved.push({ source: sourceSession, destination: destSession, compressed: true });
 		if (await pathExists(sourceArtifacts)) {
-			brokenLinks = (await moveArtifactsTree(sourceArtifacts, destArtifacts)).brokenLinks;
+			const tree = await moveArtifactsTree(sourceArtifacts, destArtifacts);
+			brokenLinks = tree.brokenLinks;
+			leftoverSource = tree.leftoverSource;
 			moved.push({ source: sourceArtifacts, destination: destArtifacts });
 		}
 	} catch (error) {
@@ -1123,7 +1153,7 @@ async function moveSessionWithArtifacts(
 		}
 		throw error;
 	}
-	return { orphanedTarget, brokenLinks };
+	return { orphanedTarget, brokenLinks, leftoverSource };
 }
 
 function sqliteNumber(value: number | bigint | null | undefined): number {
@@ -1250,6 +1280,7 @@ async function runArchiveGc(
 		tempBytes: 0,
 		brokenLinks: 0,
 		orphanedTargets: [],
+		leftoverArtifactTrees: [],
 		errors: [],
 	};
 	const candidates: ArchiveCandidate[] = [];
@@ -1313,10 +1344,11 @@ async function runArchiveGc(
 			}
 			result.wouldArchive += 1;
 			if (!options.apply) continue;
-			const { orphanedTarget, brokenLinks } = await moveSessionWithArtifacts(candidate);
+			const { orphanedTarget, brokenLinks, leftoverSource } = await moveSessionWithArtifacts(candidate);
 			result.archived += 1;
 			result.brokenLinks += brokenLinks;
 			if (orphanedTarget) result.orphanedTargets.push(orphanedTarget);
+			if (leftoverSource) result.leftoverArtifactTrees.push(leftoverSource);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		} finally {
@@ -1568,6 +1600,9 @@ function renderText(result: GcResult): string {
 		for (const target of result.archive.orphanedTargets) {
 			lines.push(`archived by content, its link target left in place: ${target}`);
 		}
+		for (const tree of result.archive.leftoverArtifactTrees) {
+			lines.push(`archived, but its live artifact tree could not be removed: ${tree}`);
+		}
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.wouldDeleteTemps > 0) {
 			lines.push(
@@ -1663,7 +1698,15 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			return result;
 		}
 		if (await pathExists(sessionPath)) {
-			result.errors.push(`a session file already exists at ${sessionPath}; nothing would be restored`);
+			// `--apply` finishes an interrupted restore: the transcript landed,
+			// the artifact tree did not, and the live file is this very session
+			// carried on. Refusing here would report an error for an operation
+			// that applying performs.
+			if (!(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
+				result.errors.push(`a different session file already exists at ${sessionPath}; nothing would be restored`);
+				return result;
+			}
+			result.sessionPath = sessionPath;
 			return result;
 		}
 		try {
