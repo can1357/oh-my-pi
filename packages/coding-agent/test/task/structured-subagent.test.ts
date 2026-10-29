@@ -25,6 +25,7 @@ import {
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -1273,6 +1274,59 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("ends a kept-alive child's caller hold with the child, not with its run", async () => {
+		// What the parent holds for a child — the retained eval kernel its
+		// `tools=[…]` run on — must outlive the run: the child stays idle and
+		// wakeable, and a revived turn calls those tools on the same kernel.
+		mockDiscovery();
+		const childSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: childSession,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: childSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: false,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => childSession,
+				onRelease: options.onRelease,
+			});
+			return { ...result(), id: options.id };
+		});
+		let released = 0;
+
+		const settled = await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
+
+		expect(released).toBe(0);
+		expect(await AgentLifecycleManager.global().release(settled.result.id)).toBe(true);
+		expect(released).toBe(1);
+	});
+
+	it("runs the caller hold's release when the spawn fails before any child exists", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		let released = 0;
+
+		await expect(
+			runStructuredSubagent(request({ agent: "ghost", onRelease: () => void (released += 1) })),
+		).rejects.toThrow('Unknown agent "ghost"');
+
+		expect(run).not.toHaveBeenCalled();
+		expect(released).toBe(1);
 	});
 });
 

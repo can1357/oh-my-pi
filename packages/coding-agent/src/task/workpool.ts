@@ -93,12 +93,16 @@ export interface WorkPoolCreateOptions {
 	context?: string;
 	customTools?: CustomTool[];
 	/**
-	 * Run once the pool can no longer start a turn, whether it drained, was
-	 * closed, or its owning session ended. Releases whatever the creating cell
-	 * held for the pool's workers, such as the retained eval kernel their
-	 * kernel-defined tools run on.
+	 * Takes a hold on whatever the pool's {@link customTools} are defined in —
+	 * the creating session's retained eval kernel — and returns its release.
+	 *
+	 * Called once for the pool itself, released when the pool can no longer
+	 * start a turn (drain, close, abort, or its owning session ending), and
+	 * once more per spawned worker, released with that worker's lifecycle: a
+	 * kept-alive worker stays wakeable through IRC after the pool is gone, and
+	 * its tool calls still run on the creating session's kernel.
 	 */
-	onRelease?: () => void;
+	borrowKernels?: () => () => void;
 }
 
 interface TurnOutcome {
@@ -132,6 +136,8 @@ export class WorkPool {
 	#lastCardTs = 0;
 	#dispatchChain: Promise<void> = Promise.resolve();
 	#poolJobStarted = false;
+	readonly #borrowKernels: (() => () => void) | undefined;
+	/** The pool's own hold, released once no new turn can start. */
 	#onRelease: (() => void) | undefined;
 	readonly #drainWaiters: PromiseWithResolvers<void>[] = [];
 	readonly #freshQueue: WorkPoolItem[] = [];
@@ -143,7 +149,7 @@ export class WorkPool {
 		this.policy = options.policy;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
-		this.#onRelease = options.onRelease;
+		this.#borrowKernels = options.borrowKernels;
 		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
@@ -151,6 +157,10 @@ export class WorkPool {
 		if (session.asyncJobManager.getJob(this.name)) {
 			throw new ToolError(`workpool job id "${this.name}" already exists`);
 		}
+		// Last, so a pool that fails to construct holds nothing. Taken before
+		// any worker exists, because a worker spawned later still gets tools
+		// defined in the creating session's kernel.
+		this.#onRelease = options.borrowKernels?.();
 	}
 
 	/** Current worker ceiling from the live `task.maxConcurrency` setting. */
@@ -405,6 +415,11 @@ export class WorkPool {
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,
+							// A worker outlives the pool: `#finishTurn` leaves it idle
+							// and wakeable, and a later turn still calls these tools
+							// on the creating session's kernel. The hold ends with
+							// the worker, not with the pool or this turn.
+							...(this.#borrowKernels ? { onRelease: this.#borrowKernels() } : {}),
 						});
 						result = execution.result;
 					} else {
@@ -596,7 +611,12 @@ export class WorkPool {
 		};
 	}
 
-	/** Run the creator's release exactly once, however the pool ended. */
+	/**
+	 * Drop the pool's own hold exactly once, however the pool ended. It covers
+	 * the worker the pool has not spawned yet; a turn still running, and a
+	 * worker left idle and wakeable, hold their own until their lifecycle ends,
+	 * so this never pulls the kernel out from under one.
+	 */
 	#release(): void {
 		const release = this.#onRelease;
 		this.#onRelease = undefined;

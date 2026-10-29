@@ -190,8 +190,11 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		? await describeEvalTools(options.session, parsed.tools, options.signal)
 		: undefined;
 	const customTools = descriptors ? createEvalCustomTools(options.session, descriptors) : undefined;
-	// Held until the subagent can no longer call these tools, so the parent's
-	// next cell elsewhere cannot reclaim the kernel they run on.
+	// Held until the agent can no longer call these tools: it is registered with
+	// `keepAlive`, so it stays wakeable by id after its first job ends, and the
+	// parent's next cell elsewhere must not reclaim the kernel they run on
+	// under it. `runStructuredSubagent` runs this exactly once, at the end of
+	// that agent's lifecycle.
 	const releaseKernels = descriptors ? borrowEvalToolKernels(options.session, descriptors) : () => {};
 
 	try {
@@ -230,6 +233,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
 						keepAlive: true,
+						onRelease: releaseKernels,
 						signal,
 						onProgress: progress => {
 							latestProgress = progress;
@@ -245,14 +249,14 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				} catch (error) {
 					if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 					throw error;
-				} finally {
-					releaseKernels();
 				}
 			},
 			{ id, agentId: id, ownerId },
 		);
 		return { id, agent: policy.agentName };
 	} catch (error) {
+		// Only reached before the job exists; from registration on, the child's
+		// lifecycle owns the release.
 		releaseKernels();
 		if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 		throw error;

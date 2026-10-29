@@ -5139,6 +5139,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						deferCleanup(completion);
 					},
 				});
+			} else {
+				// No child session was ever created, so none of what the caller
+				// held for it is still needed, and no lifecycle will end to
+				// release it later.
+				try {
+					await options.onRelease?.();
+				} catch (error) {
+					logger.warn("Subagent lifecycle resource cleanup failed", { id, error: String(error) });
+				}
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {

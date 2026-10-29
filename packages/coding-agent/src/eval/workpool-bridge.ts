@@ -95,21 +95,15 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			}
 		}
 		// Workers call these tools on the creating session's kernel long after
-		// this cell ends; hold it until the pool can no longer start a turn.
-		const releaseKernels = borrowEvalToolKernels(options.session, descriptors);
-		let pool: WorkPool;
-		try {
-			pool = registry.create(options.session, {
-				name,
-				policy,
-				...(context ? { context } : {}),
-				customTools,
-				onRelease: releaseKernels,
-			});
-		} catch (error) {
-			releaseKernels();
-			throw error;
-		}
+		// this cell ends: the pool holds it until no new turn can start, and
+		// each worker holds it again for its own lifecycle.
+		const pool = registry.create(options.session, {
+			name,
+			policy,
+			...(context ? { context } : {}),
+			customTools,
+			borrowKernels: () => borrowEvalToolKernels(options.session, descriptors),
+		});
 		options.emitStatus?.({ op: "workpool", action: "create", pool: name, count: pool.limit() });
 		return { name, agent: policy.agentName, limit: pool.limit() };
 	}

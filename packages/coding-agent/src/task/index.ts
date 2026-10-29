@@ -1863,15 +1863,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params.taskFile !== undefined ? { taskFile: params.taskFile, taskFileSha256: params.taskFileSha256 } : {};
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		let latestProgress: AgentProgress | undefined;
-		const evalToolDescriptors = params.tools?.length
-			? await describeEvalTools(this.session, params.tools, signal)
-			: undefined;
-		// Held for the child's whole run: it calls these tools on this session's
-		// kernel, which a later cell of ours in another directory would reclaim.
-		const releaseEvalToolKernels = evalToolDescriptors
-			? borrowEvalToolKernels(this.session, evalToolDescriptors)
-			: () => {};
 		try {
+			// Inside the try: a failed describe (kernel gone between preflight and
+			// spawn, unknown tool, abort) is this spawn's `Task execution failed`
+			// result, not a rejection out of a `SpawnRun`.
+			const evalToolDescriptors = params.tools?.length
+				? await describeEvalTools(this.session, params.tools, signal)
+				: undefined;
 			const execution = await runStructuredSubagent({
 				session: this.session,
 				invocationKind: "task",
@@ -1918,6 +1916,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 					});
 				},
+				// Last, and taken last: a task child defaults to kept-alive, so it
+				// can still call these tools on this session's kernel on a revived
+				// turn long after this run. The hold ends with the child, and
+				// nothing between here and the call can throw and strand it.
+				...(evalToolDescriptors ? { onRelease: borrowEvalToolKernels(this.session, evalToolDescriptors) } : {}),
 			});
 			return this.#buildResultPayload(
 				{ ...execution.result, ...taskFileMetadata },
@@ -1951,8 +1954,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};
-		} finally {
-			releaseEvalToolKernels();
 		}
 	}
 

@@ -456,4 +456,44 @@ describe("WorkPool dispatch", () => {
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
 	});
+
+	it("keeps a worker's kernel hold past close and past the pool, and drops the pool's own", async () => {
+		const session = makeSession([], 1);
+		const holds: Array<{ released: boolean }> = [];
+		const borrowKernels = (): (() => void) => {
+			const hold = { released: false };
+			holds.push(hold);
+			return () => {
+				hold.released = true;
+			};
+		};
+		const first = Promise.withResolvers<void>();
+		let workerRelease: (() => void | Promise<void>) | undefined;
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			// The child's lifecycle takes the hold over; nothing releases it at
+			// the end of the turn.
+			workerRelease = request.onRelease;
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = new WorkPool(session, { name: "held", policy: POLICY, borrowKernels });
+		workpool.push(["running"]);
+		await until(() => holds.length === 2 && workerRelease !== undefined);
+
+		// Closing stops new turns, so the pool's own hold goes; the turn still
+		// running keeps calling kernel-defined tools on the one it was given.
+		workpool.close();
+		expect(holds[0]?.released).toBe(true);
+		expect(holds[1]?.released).toBe(false);
+
+		first.resolve();
+		await finishPool(session, workpool);
+		// The worker is idle and wakeable through IRC, so its hold outlives the
+		// pool and ends only with the worker.
+		expect(holds[1]?.released).toBe(false);
+		await workerRelease?.();
+		expect(holds[1]?.released).toBe(true);
+	});
 });

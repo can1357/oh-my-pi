@@ -10,6 +10,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EvalKernelNotRunningError } from "@oh-my-pi/pi-coding-agent/eval/executor-base";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
@@ -17,6 +18,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as evalTools from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -212,5 +214,37 @@ describe("failed child evidence", () => {
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
+	});
+
+	it("returns the call's failure when a spawn's eval tools stop resolving after preflight", async () => {
+		// `tools=[…]` is resolved twice: once at dispatch preflight, once in the
+		// spawn itself. The kernel can die in between, and an abort or a tool
+		// undefined in that window lands the same way. The second failure is
+		// this call's error result — `SpawnRun.result` rejects only when the
+		// permit does (`spawn-run.ts`), so a throw there escapes the tool call.
+		using tempDir = TempDir.createSync("@omp-failed-child-");
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
+		const spawn = vi.spyOn(executorModule, "runSubprocess");
+		let describes = 0;
+		vi.spyOn(evalTools, "describeEvalTools").mockImplementation(async () => {
+			describes += 1;
+			if (describes === 1) return [{ name: "ghost_tool", description: "d", parameters: {}, language: "python" }];
+			throw new EvalKernelNotRunningError("Python");
+		});
+
+		const tool = await TaskTool.create(
+			createSession(tempDir.path(), { "task.isolation.enabled": false, "async.enabled": false }),
+		);
+		const result = await tool.execute("tc-eval-tools", {
+			agent: "worker",
+			task: "Inspect the target.",
+			tools: ["ghost_tool"],
+		} as TaskParams);
+
+		const text = result.content.find(part => part.type === "text");
+		expect(describes).toBe(2);
+		expect(result.isError).toBe(true);
+		expect(text?.type === "text" ? text.text : "").toContain("Python kernel is not running");
+		expect(spawn).not.toHaveBeenCalled();
 	});
 });

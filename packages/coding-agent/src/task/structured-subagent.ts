@@ -157,6 +157,15 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	/** Kernel-defined tools explicitly exposed to this child. */
 	customTools?: CustomTool[];
+	/**
+	 * Releases what the caller holds on the child's behalf — the retained eval
+	 * kernel its {@link customTools} run on, say. Run once the child can no
+	 * longer call them: at the end of its *lifecycle* for a kept-alive agent,
+	 * which stays wakeable (IRC, `agent://<id>`) long after this call returns,
+	 * and at the end of the run for one that does not. Never run twice, and
+	 * never skipped: a run that fails before the child exists runs it here.
+	 */
+	onRelease?: () => void | Promise<void>;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 	signal?: AbortSignal;
@@ -577,11 +586,29 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+/**
+ * One release for the child's lifecycle out of the caller's and this module's.
+ * Each runs at most once, and the first one's failure never skips the second.
+ */
+function composeLifecycleRelease(
+	callerRelease: (() => void | Promise<void>) | undefined,
+	artifactsRelease: (() => Promise<void>) | undefined,
+): (() => Promise<void>) | undefined {
+	if (!callerRelease) return artifactsRelease;
+	if (!artifactsRelease) return async () => await callerRelease();
+	return async () => {
+		const settled = await Promise.allSettled([callerRelease(), artifactsRelease()]);
+		const failure = settled.find(result => result.status === "rejected");
+		if (failure?.status === "rejected") throw failure.reason;
+	};
+}
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
+	callerRelease: (() => Promise<void>) | undefined,
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
@@ -671,13 +698,15 @@ function buildExecutorOptions(
 		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		onRelease:
+		onRelease: composeLifecycleRelease(
+			callerRelease,
 			preparedSession !== undefined && lease.temporary
 				? async () => {
 						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
 						lease.unregister?.();
 					}
 				: undefined,
+		),
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
@@ -823,8 +852,37 @@ function describeSalvagedWork(result: SingleResult): string {
 /**
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
+ *
+ * {@link StructuredSubagentRequest.onRelease} runs exactly once: the executor
+ * takes it over the moment the child is dispatched — a kept-alive child holds
+ * it until its lifecycle ends — and every path that never dispatches one runs
+ * it here instead.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+	const callerRelease = request.onRelease;
+	let callerReleased = false;
+	const releaseOnce = callerRelease
+		? async (): Promise<void> => {
+				if (callerReleased) return;
+				callerReleased = true;
+				await callerRelease();
+			}
+		: undefined;
+	let childOwnsRelease = false;
+	try {
+		return await runStructuredSubagentDispatch(request, releaseOnce, () => {
+			childOwnsRelease = true;
+		});
+	} finally {
+		if (!childOwnsRelease) await releaseOnce?.();
+	}
+}
+
+async function runStructuredSubagentDispatch(
+	request: StructuredSubagentRequest,
+	onRelease: (() => Promise<void>) | undefined,
+	markDispatched: () => void,
+): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
@@ -848,7 +906,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const baseOptions = buildExecutorOptions(request, policy, lease, id, onRelease);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};
@@ -877,6 +935,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					)
 				: undefined;
 		let result: SingleResult;
+		// The child owns the caller's release from here: `finalizeSubagentLifecycle`
+		// hands it to the lifecycle manager for a kept-alive agent and runs it
+		// itself otherwise, including when no child session was ever created.
+		markDispatched();
 		try {
 			if (!isolationContext) {
 				result = await runSubprocess(baseOptions);
