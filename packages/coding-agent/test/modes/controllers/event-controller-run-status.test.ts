@@ -11,6 +11,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
+import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -211,5 +212,28 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("keeps the title's attention mark while a dialog waits across an async-work settle", async () => {
+		// A run that hands control to a background job settles non-terminally and
+		// the title goes idle — but an unanswered dialog outranks it: the OSC
+		// record reports `blocked`, and the title must not drop the attention mark
+		// the person is owed while the background work runs.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const titleState = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+		const prompt = "an MCP sign-in for linear";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		await controller.handleEvent({
+			type: "agent_end",
+			messages: [],
+			isTerminal: false,
+			awaitingAsyncWork: true,
+		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
+
+		expect(titleState).toHaveBeenLastCalledWith("attention");
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
 	});
 });

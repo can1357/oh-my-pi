@@ -2434,9 +2434,12 @@ export class EventController {
 			// background-job result can resume it. The title tracks the model, so it
 			// goes idle now — before any await, so a wake landing mid-flush keeps the
 			// `working` its `agent_start` sets. The OSC 7501 record stays `working`:
-			// the run is not over, it resumes or settles without the user.
+			// the run is not over, it resumes or settles without the user. A session
+			// dialog is the exception: it outranks the run on both surfaces, and the
+			// record still reports `blocked`, so the title keeps its attention mark
+			// until the person answers.
 			if (event.awaitingAsyncWork === true) {
-				setTerminalTitleState("idle");
+				setTerminalTitleState(this.#sessionUserWait ? "attention" : "idle");
 				this.#showAsyncWait(event);
 			}
 			void this.#finishWhenRunSettles(event);
