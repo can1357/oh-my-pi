@@ -2723,6 +2723,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// startup; early dialog answers do not require that readiness signal.
 		if (options.autoStartCollab === true) this.collabController.autoStart();
 
+		// Subscribe to agent events before the startup hooks run: a `session_start`
+		// hook can raise a dialog only a person can answer, and that dialog holds
+		// init here. Its `user_wait_start`/`user_wait_end` bracket is published
+		// once, when the dialog opens and settles, so a subscription installed
+		// after the hooks returns would miss both and leave the title and the OSC
+		// record reporting an idle session while the dialog stands.
+		this.#subscribeToAgent();
+
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
@@ -2775,9 +2783,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (err) {
 			logger.warn("Failed to restore session draft", { error: String(err) });
 		}
-
-		// Subscribe to agent events
-		this.#subscribeToAgent();
 
 		// Job widgets refresh in the background; repaint the HUD and status line glance when one changes.
 		this.#syncJobWidgetsListener();
