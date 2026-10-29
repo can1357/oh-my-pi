@@ -39,6 +39,9 @@
 - Sessions with computer use enabled receive the desktop guide before the first computer call.
 - The Tern interface now presents warnings, errors, update notices, file reads, and completed background work consistently with chat messages.
 - Muted live voice sessions remain visibly muted while the voice model starts work.
+### Added
+
+- The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ### Fixed
 
