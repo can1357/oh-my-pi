@@ -4815,101 +4815,296 @@ describe("AgentSession retry fallback", () => {
 		},
 	);
 
-	it("drops classifier refusal messages before later prompts", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!primaryModel) {
-			throw new Error("Expected bundled test model to exist");
+	it("continues useful text from a classifier refusal on the same model without exposing the refusal", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
+		const partialText = "G5 is decided. Next I need to map the G6 session-broker issue.";
+		const requestContexts: Message[][] = [];
+		const requestedModels: string[] = [];
 		const mock = createMockModel({
 			responses: [
 				{
-					content: ["Classifier declined this turn."],
+					content: [{ type: "thinking", thinking: "Private planning that must not be replayed." }, partialText],
 					stopReason: "error",
 					stopDetails: {
 						type: "refusal",
-						category: "bio",
-						explanation: "Classifier declined this turn.",
+						category: "cyber",
+						explanation: "This request triggered cyber-related safeguards.",
 					},
-					errorMessage: "Refusal (bio): Classifier declined this turn.",
+					errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
 				},
-				context => {
-					const replayedAssistantText = context.messages
-						.filter((message): message is AssistantMessage => message.role === "assistant")
-						.flatMap(message => message.content)
-						.filter(block => block.type === "text")
-						.map(block => block.text)
-						.join("\n");
-					return {
-						content: [replayedAssistantText.includes("Classifier declined this turn.") ? "polluted" : "clean"],
-					};
-				},
+				{ content: ["G6 maps to the credential/session broker work."] },
 			],
 		});
 		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: {
-				model: primaryModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				requestContexts.push([...context.messages]);
+				return mock.stream(requestedModel, context, options);
 			},
-			streamFn: (model, context, options) => mock.stream(model, context, options),
 		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
+			"retry.enabled": true,
+			"retry.maxRetries": 5,
 			"retry.modelFallback": false,
 		});
-		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		const sessionStopCalls: number[] = [];
-		const sessionStopLastAssistantMessages: Array<AssistantMessage | undefined> = [];
-		const extensionRunner = {
-			emit: vi.fn().mockResolvedValue(undefined),
-			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
-			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
-			emitSessionStop: vi.fn((event: { last_assistant_message?: AssistantMessage }) => {
-				sessionStopCalls.push(mock.calls.length);
-				sessionStopLastAssistantMessages.push(event.last_assistant_message);
-				return Promise.resolve(undefined);
-			}),
-		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Plan G5 through G7");
+		await session.waitForIdle();
+
+		expect(requestContexts).toHaveLength(2);
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(requestContexts[1]?.map(message => message.role)).toEqual(["user", "developer"]);
+		const continuationContext = requestContexts[1]
+			?.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join(""),
+			)
+			.join("\n");
+		expect(continuationContext).toContain(partialText);
+		expect(continuationContext).not.toMatch(/refusal|cyber|safeguard/i);
+		expect(continuationContext).not.toContain("Private planning that must not be replayed.");
+		const persistedMessages = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message);
+		expect(persistedMessages.map(message => message.role)).toEqual(["user", "developer", "assistant"]);
+		const persistedContext = persistedMessages
+			.map(message => {
+				if (!("content" in message)) return "";
+				return typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join("");
+			})
+			.join("\n");
+		expect(persistedContext).toContain(partialText);
+		expect(persistedContext).not.toMatch(/refusal|cyber|safeguard|Private planning/i);
+		expect(session.messages.map(message => message.role)).toEqual(["user", "developer", "assistant"]);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "G6 maps to the credential/session broker work." },
+		]);
+	});
+
+	it("continues five progressing classifier refusals within the configured retry budget", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const partials = Array.from({ length: 5 }, (_, index) => `Completed planning step ${index + 1}.`);
+		const mock = createMockModel({
+			responses: [
+				...partials.map(text => ({
+					content: [text],
+					stopReason: "error" as const,
+					stopDetails: {
+						type: "refusal" as const,
+						category: "cyber",
+						explanation: "This request triggered cyber-related safeguards.",
+					},
+					errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
+				})),
+				{ content: ["Planning complete."] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.maxRetries": 5,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			extensionRunner,
 		});
 
-		await session.prompt("Trigger classifier refusal");
-		await session.waitForIdle();
-		await session.prompt("Next prompt should not replay the refusal");
+		await session.prompt("Finish all planning steps");
 		await session.waitForIdle();
 
-		expect(mock.calls).toHaveLength(2);
-		const replayedAssistantText = mock.calls[1]?.context.messages
-			.filter((message): message is AssistantMessage => message.role === "assistant")
-			.flatMap(message => message.content)
-			.filter(block => block.type === "text")
-			.map(block => block.text)
+		expect(mock.calls).toHaveLength(6);
+		expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "Planning complete." }]);
+	});
+
+	it("continues five empty classifier refusals within the configured retry budget", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const refusal: MockResponse = {
+			stopReason: "error",
+			stopDetails: {
+				type: "refusal",
+				category: "cyber",
+				explanation: "This request triggered cyber-related safeguards.",
+			},
+			errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
+		};
+		const requestContexts: Message[][] = [];
+		const mock = createMockModel({
+			responses: [refusal, refusal, refusal, refusal, refusal, { content: ["Recovered after empty refusals."] }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				requestContexts.push([...context.messages]);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.maxRetries": 5,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Keep working");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(6);
+		const modelFacingContext = requestContexts
+			.flat()
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join(""),
+			)
 			.join("\n");
-		expect(replayedAssistantText).not.toContain("Classifier declined this turn.");
-		expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "clean" }]);
-		// session_stop hooks must fire after each settled turn — including the
-		// refusal turn (regression: prior to PR #3594's review fix, the refusal
-		// branch short-circuited before `#emitSessionStopEvent`).
-		expect(sessionStopCalls).toEqual([1, 2]);
-		expect(sessionStopLastAssistantMessages[0]?.stopReason).toBe("error");
-		expect(sessionStopLastAssistantMessages[0]?.stopDetails).toEqual({
-			type: "refusal",
-			category: "bio",
-			explanation: "Classifier declined this turn.",
+		expect(modelFacingContext).not.toMatch(/refusal|cyber|safeguard/i);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "Recovered after empty refusals." },
+		]);
+	});
+
+	it("stops same-model refusal continuation at retry.maxRetries", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const refusal = (step: number): MockResponse => ({
+			content: [`Completed planning step ${step}.`],
+			stopReason: "error",
+			stopDetails: {
+				type: "refusal",
+				category: "cyber",
+				explanation: "This request triggered cyber-related safeguards.",
+			},
+			errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
 		});
+		const mock = createMockModel({ responses: [refusal(1), refusal(2), refusal(3)] });
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Keep planning");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(session.getLastAssistantMessage()?.stopDetails?.type).toBe("refusal");
+	});
+
+	it("does not auto-continue a classifier refusal that emitted a tool call", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						"Started a file read.",
+						{ type: "toolCall", id: "refused-read", name: "read", arguments: { path: "notes.txt" } },
+					],
+					stopReason: "error",
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "This request triggered cyber-related safeguards.",
+					},
+					errorMessage: "Refusal (cyber): This request triggered cyber-related safeguards.",
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.maxRetries": 5,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Read notes.txt");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(session.getLastAssistantMessage()?.stopDetails?.type).toBe("refusal");
 	});
 
 	it("keeps the pruned refusal visible to getLastAssistantMessage until the next run", async () => {
@@ -4941,6 +5136,7 @@ describe("AgentSession retry fallback", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			"retry.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
 			"retry.modelFallback": false,
@@ -5457,7 +5653,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it("emits auto_retry_end when a mid-saga classifier refusal has no fallback to switch to", async () => {
+	it("closes a retry saga before continuing a no-fallback classifier refusal", async () => {
 		// Regression: `#handleRetryableError`'s classifier-refusal branch used to
 		// return `false` without emitting `auto_retry_end` whenever no fallback
 		// model was available to switch to. A saga that already announced
@@ -5497,8 +5693,10 @@ describe("AgentSession retry fallback", () => {
 						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
 						errorMessage: refusalMessage,
 					});
+				} else if (calls === 3) {
+					mock.push({ content: ["Recovered after the retry saga closed."] });
 				} else {
-					throw new Error(`Unexpected model call after the classifier refusal settled: call ${calls}`);
+					throw new Error(`Unexpected model call after refusal recovery: call ${calls}`);
 				}
 				return mock.stream(model, context, options);
 			},
@@ -5525,6 +5723,7 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
 		]);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]?.attempt).toBe(1);
@@ -5535,6 +5734,9 @@ describe("AgentSession retry fallback", () => {
 				attempt: 1,
 				finalError: refusalMessage,
 			},
+		]);
+		expect(getLastAssistantMessage(session).content).toEqual([
+			{ type: "text", text: "Recovered after the retry saga closed." },
 		]);
 	});
 
