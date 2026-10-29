@@ -42,7 +42,7 @@
 
 ### Fixed
 
-- An eval kernel a session moves away from now shuts down after a two-minute idle grace instead of holding memory for the process lifetime; returning within the grace keeps its namespace, while a kernel another agent, a borrower, or a running cell holds is kept.
+- An eval kernel a session moves away from now shuts down after a two-minute idle grace instead of holding memory for the process lifetime; returning within the grace keeps its namespace, while a kernel another agent, a borrower, or a running cell holds is kept ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
 - Fixed chart recommendations that incorrectly inferred whether higher or lower values were better from row or column names; smart charting now uses the judge and avoids charting unsuitable numeric text such as page or step numbers.
