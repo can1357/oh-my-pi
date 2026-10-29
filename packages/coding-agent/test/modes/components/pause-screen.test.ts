@@ -625,9 +625,7 @@ describe("pause screen", () => {
 		});
 
 		it("resumes on space and enter encoded by modifyOtherKeys or the Kitty protocol", async () => {
-			// tmux with `extended-keys on` sends the key as an escape sequence,
-			// so a pane there answered only Escape: the operator pressed Space,
-			// nothing happened, and the screen said it should have.
+			// This test feeds xterm modifyOtherKeys and Kitty CSI-u encodings for Space and Enter.
 			for (const key of [
 				"\x1b[27;1;32~", // modifyOtherKeys space
 				"\x1b[27;1;13~", // modifyOtherKeys enter

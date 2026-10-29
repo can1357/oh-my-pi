@@ -97,12 +97,9 @@ describe("matchesKey", () => {
 	});
 
 	it("matches xterm modifyOtherKeys sequences, as parseKey already named them", () => {
-		// Regression: tmux with `extended-keys on` sends every key of a pane
-		// that asked for modifyOtherKeys as `CSI 27;mod;code~`. The native
-		// matcher only reads the Kitty form, so matchesKey answered false for
-		// every key id while parseKey named the key — the pause screen's space
-		// and enter arms then never fired, and only Escape, which resolves
-		// through the keybinding registry's parseKey, still resumed.
+		// Regression: `parseKey` decoded the unmodified `CSI 27;1;code~` form,
+		// but `matchesKey` rejected it. These assertions keep the two in agreement
+		// on the same bytes while preserving modifier distinctions.
 		for (const kitty of [false, true]) {
 			setKittyProtocolActive(kitty);
 			expect(matchesKey("\x1b[27;1;32~", "space")).toBe(true);

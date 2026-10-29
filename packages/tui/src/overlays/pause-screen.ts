@@ -435,17 +435,10 @@ export async function runPauseScreen(host: PauseScreenHost, options?: PauseScree
 			component.dispose();
 			host.ui.setFocus(component);
 			overlay.hide();
-			// Paint before the gate opens, never after. `overlay.hide()` only
-			// *schedules* a frame (one scheduler hop, then the frame cadence and
-			// the adaptive floor), while `resume()` wakes every parked agent loop
-			// in the same tick: their microtasks, and everything those loops
-			// queue, run ahead of that frame. Until it lands the terminal still
-			// holds the frame this overlay drew PAUSED on, so a reader of the
-			// pane — a person, or an operator running `tmux capture-pane` — sees
-			// a session that is already working as still held. Measured
-			// 2026-10-28 on pane %11 of the grouped `agents` sessions: the gate
-			// opened 2.0 s after the resume key and the pane still showed the
-			// overlay, hold timer frozen, 4.4 s after it.
+			// `overlay.hide()` only schedules a frame, while `resume()` wakes every
+			// parked agent loop in the same tick. Paint synchronously before opening
+			// the gate so the terminal cannot retain the PAUSED frame while resumed
+			// work runs.
 			host.ui.renderNow();
 		}
 	} finally {
