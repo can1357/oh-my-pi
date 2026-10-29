@@ -158,7 +158,11 @@ describe("maybeStartSharpshooterExtraction", () => {
 			message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
 		]);
 		const pending = Promise.withResolvers<AssistantMessage>();
-		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pending.promise);
+		const called = Promise.withResolvers<void>();
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			called.resolve();
+			return pending.promise;
+		});
 
 		maybeStartSharpshooterExtraction({
 			agentDir: path.join(os.tmpdir(), "sharpshooter-in-flight-agent"),
@@ -166,7 +170,7 @@ describe("maybeStartSharpshooterExtraction", () => {
 			session: deps.session,
 			settings: deps.settings,
 		});
-		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		await called.promise;
 		maybeStartSharpshooterExtraction({
 			agentDir: path.join(os.tmpdir(), "sharpshooter-in-flight-agent"),
 			modelRegistry: deps.modelRegistry,
@@ -176,9 +180,7 @@ describe("maybeStartSharpshooterExtraction", () => {
 
 		expect(completion).toHaveBeenCalledTimes(1);
 		pending.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
-		await pending.promise;
-		await Promise.resolve();
-		await Promise.resolve();
+		await flushSharpshooterExtraction(deps.session);
 	});
 
 	it("gates short prompts on sharpshooter.minPromptLength, counting user-perceived characters", async () => {
