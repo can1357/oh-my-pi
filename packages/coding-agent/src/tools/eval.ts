@@ -404,7 +404,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 			perCallModel,
-			perCallModelAdvertisement: perCallModel ? getPerCallModelAdvertisement(session.settings) : undefined,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.())
+				: undefined,
 			toolNames: session.getEvalBridgeToolNames?.(),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};

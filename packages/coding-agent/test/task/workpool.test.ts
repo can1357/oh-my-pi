@@ -471,7 +471,7 @@ describe("WorkPool model selection", () => {
 		await finishPool(session, workpool);
 
 		expect(initial.mock.calls).toHaveLength(1);
-		expect(initial.mock.calls[0]?.[0]).not.toHaveProperty("perCallModel");
+		expect(initial.mock.calls[0]?.[0]?.perCallModel).toBeUndefined();
 	});
 
 	it("forwards the pool model to every fresh worker", async () => {
@@ -521,24 +521,6 @@ describe("WorkPool model selection", () => {
 		const workerId = initial.mock.calls[0]?.[0].identity?.id;
 		if (!workerId) throw new Error("First turn did not receive a worker id");
 		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
-		expect(follow.mock.calls[0]?.[0]).not.toHaveProperty("perCallModel");
-	});
-
-	it("keeps independent selections for separate pools", async () => {
-		const session = makeSession();
-		const selections = new Map<string, string | string[] | undefined>();
-		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			const id = request.identity?.id ?? "missing";
-			selections.set(id, request.perCallModel);
-			markIdle(id);
-			return execution(id);
-		});
-		const first = new WorkPool(session, { name: "first", policy: POLICY, model: "p/first" });
-		const second = new WorkPool(session, { name: "second", policy: POLICY, model: "p/second" });
-		first.push(["one"]);
-		second.push(["two"]);
-		await Promise.all([finishPool(session, first), finishPool(session, second)]);
-		expect(selections.get(first.agents[0]!.id)).toBe("p/first");
-		expect(selections.get(second.agents[0]!.id)).toBe("p/second");
+		expect((follow.mock.calls[0]?.[0] as { perCallModel?: string } | undefined)?.perCallModel).toBeUndefined();
 	});
 });

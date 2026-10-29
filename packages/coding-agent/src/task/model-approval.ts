@@ -95,6 +95,8 @@ export function parentModelGrantPattern(model: Model<Api>): string | undefined {
 export interface PerCallModelAdvertisement {
 	roles: { role: string; patterns: string[] }[];
 	allowlist: string[];
+	/** True when the caller's live model cannot be written as one selector, so the own-model clause never grants. */
+	parentModelWithheld: boolean;
 }
 
 /**
@@ -120,12 +122,52 @@ function configuredRoleGrantPatterns(settings: Settings): PerCallModelAdvertisem
 	});
 }
 
+/**
+ * Whether an allowlist entry could admit a model matched by this role's grant
+ * pattern. Syntactic only, mirroring the dispatch checks: the advertisement is
+ * built without a registry, so a glob pattern is kept whenever an entry could
+ * name a model it matches.
+ */
+function allowEntryCouldAdmitPattern(role: string, pattern: string, entry: string): boolean {
+	const selector = entry.trim().toLowerCase();
+	if (selector.length === 0) return false;
+	if (selector.startsWith("@")) return selector.slice(1) === role.toLowerCase();
+	const source = pattern.toLowerCase();
+	// A `:level` suffix narrows the spawn, never the model identity an entry names.
+	const base = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base.toLowerCase();
+	for (const candidate of base === source ? [source] : [source, base]) {
+		if (candidate === selector) return true;
+		if (!/[*?]/.test(candidate)) continue;
+		// Two globs cannot be intersected syntactically; keep the pattern rather than hide it.
+		if (/[*?]/.test(selector)) return true;
+		const expression = candidate.replace(/[\\^$.*+?()[\]{}|]/g, char =>
+			char === "*" ? "[^@]*" : char === "?" ? "[^@]" : `\\${char}`,
+		);
+		const slash = selector.indexOf("/");
+		const target = candidate.includes("/") || slash < 0 ? selector : selector.slice(slash + 1);
+		if (new RegExp(`^${expression}$`).test(target)) return true;
+	}
+	return false;
+}
+
 /** Stable prompt data: only operator-owned settings grant or narrow the advertised selectors. */
-export function getPerCallModelAdvertisement(settings: Settings): PerCallModelAdvertisement {
+export function getPerCallModelAdvertisement(settings: Settings, parentModel?: Model<Api>): PerCallModelAdvertisement {
 	const authority = settings.grantAuthority();
+	const allow = cfgTaskPerCallModelAllow.get(authority);
+	const roles = configuredRoleGrantPatterns(authority)
+		.map(({ role, patterns }) => ({
+			role,
+			// Advertise only patterns the allowlist could admit, so the prompt never names a model dispatch refuses.
+			patterns:
+				allow.length === 0
+					? patterns
+					: patterns.filter(pattern => allow.some(entry => allowEntryCouldAdmitPattern(role, pattern, entry))),
+		}))
+		.filter(({ patterns }) => patterns.length > 0);
 	return {
-		roles: configuredRoleGrantPatterns(authority),
-		allowlist: [...new Set(cfgTaskPerCallModelAllow.get(authority).map(entry => entry.trim()))],
+		roles,
+		allowlist: [...new Set(allow.map(entry => entry.trim()))],
+		parentModelWithheld: parentModel !== undefined && parentModelGrantPattern(parentModel) === undefined,
 	};
 }
 

@@ -141,7 +141,7 @@ describe("eval tool description", () => {
 			expect((tool.docTopics().agents ?? "").match(/model\?=None/g)).toHaveLength(2);
 			for (const text of [tool.docTopics().agents ?? "", tool.description]) {
 				expect(text).toContain(
-					"Approved roles: `@smol` (`anthropic/claude-haiku-4-5`), `@slow` (`openai/gpt-5.5`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
+					"Approved roles: `@slow` (`openai/gpt-5.5`). Also approved: your own current model; the selected bundled/user agent's own configured model.",
 				);
 				expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
 				expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
@@ -223,6 +223,7 @@ describe("eval tool description", () => {
 			perCallModelAdvertisement: {
 				roles: [{ role: "review", patterns: ["custom/first", "custom/*"] }],
 				allowlist: ["custom/first"],
+				parentModelWithheld: false,
 			},
 		};
 		for (const text of [getEvalDocTopics(options).agents ?? "", getEvalToolDescription(options)]) {
