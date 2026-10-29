@@ -82,6 +82,30 @@ pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 	true
 }
 
+/// The codeset `nl_langinfo(CODESET)` reports once `locale` is loaded for
+/// `LC_CTYPE`, in libc's own spelling: `ISO-8859-1` for an alias like a
+/// generated bare `en_US`, whose name carries no codeset at all. `None` when
+/// the system cannot load the name, which is what `setlocale` does there —
+/// it fails and leaves the C locale in place.
+#[cfg(unix)]
+pub(crate) fn loaded_codeset(locale: &str) -> Option<String> {
+	let locale = std::ffi::CString::new(locale).ok()?;
+	// SAFETY: `locale` is a valid NUL-terminated string; the locale object is
+	// used only for this query and freed before returning, and the codeset
+	// string it lends out is copied first.
+	unsafe {
+		let handle = libc::newlocale(libc::LC_CTYPE_MASK, locale.as_ptr(), std::ptr::null_mut());
+		if handle.is_null() {
+			return None;
+		}
+		let codeset = libc::nl_langinfo_l(libc::CODESET, handle);
+		let codeset = (!codeset.is_null())
+			.then(|| std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned());
+		libc::freelocale(handle);
+		codeset
+	}
+}
+
 /// Single-byte decimal point and thousands separator of a numeric locale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NumericSymbols {

@@ -36,12 +36,11 @@ pub(crate) fn side_charset(spec: &[u8], am_server: bool) -> &[u8] {
 
 /// The locale charset from the environment (`LC_ALL`, then `LC_CTYPE`, then
 /// `LANG`), the way `nl_langinfo(CODESET)` reports it after
-/// `setlocale(LC_CTYPE, "")`: the codeset after `.` (without an `@modifier`),
-/// ASCII for the C/POSIX locale, and `""` (iconv's own default) otherwise.
-///
-/// A name libc cannot load is ASCII too: `setlocale` fails there and leaves
-/// the C locale in place, so `LC_ALL=en_US.UTF-8` on an image without that
-/// locale escapes high-bit bytes instead of passing them.
+/// `setlocale(LC_CTYPE, "")`: on Unix the codeset of the loaded locale
+/// object, so an alias whose name carries no codeset (a generated bare
+/// `en_US`, `ISO-8859-1`) reads as the charset it really has, and a name libc
+/// cannot load reads as the C locale's ASCII, which is what `setlocale`
+/// leaves behind when it fails.
 pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
 	let value = ["LC_ALL", "LC_CTYPE", "LANG"]
 		.iter()
@@ -49,19 +48,21 @@ pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
 	let Some(value) = value else {
 		return ascii_codeset().to_owned();
 	};
-	if value == "C" || value == "POSIX" {
-		return ascii_codeset().to_owned();
-	}
 	#[cfg(unix)]
-	if !crate::locale::locale_loadable(&value, libc::LC_CTYPE_MASK) {
-		return ascii_codeset().to_owned();
+	return crate::locale::loaded_codeset(&value).unwrap_or_else(|| ascii_codeset().to_owned());
+	#[cfg(not(unix))]
+	{
+		if value == "C" || value == "POSIX" {
+			return ascii_codeset().to_owned();
+		}
+		codeset_of(&value)
 	}
-	codeset_of(&value)
 }
 
-/// The codeset a locale name names, as `nl_langinfo(CODESET)` reports it once
-/// that locale is active: what follows the `.` (without an `@modifier`), and
-/// `""` — iconv's own "current locale" default — for a name without one.
+/// The codeset a locale name spells out: what follows the `.` (without an
+/// `@modifier`), and `""` — iconv's own "current locale" default — for a name
+/// without one. Windows has no locale object to ask.
+#[cfg(not(unix))]
 fn codeset_of(name: &str) -> String {
 	let name = name.split('@').next().unwrap_or("");
 	match name.split_once('.') {
@@ -392,12 +393,32 @@ mod tests {
 		assert_eq!(side_charset(b"", false), b"");
 	}
 
+	/// Windows has no locale object, so there the name is all there is.
+	#[cfg(not(unix))]
 	#[test]
 	fn codeset_of_a_locale_name() {
 		assert_eq!(codeset_of("en_US.UTF-8"), "UTF-8");
 		assert_eq!(codeset_of("de_DE.ISO8859-1@euro"), "ISO8859-1");
 		assert_eq!(codeset_of("UTF-8"), "UTF-8");
 		assert_eq!(codeset_of("en_US"), "");
+	}
+
+	/// The charset is the loaded locale's `nl_langinfo(CODESET)`, not the
+	/// codeset its name spells: libc reports `C.utf8` as `UTF-8`, and an alias
+	/// carrying no codeset at all (a generated bare `en_US`, measured as
+	/// `ISO-8859-1`) would otherwise read as "no charset" and escape bytes the
+	/// locale accepts.
+	#[cfg(unix)]
+	#[test]
+	fn charset_comes_from_the_loaded_locale() {
+		for name in ["C.utf8", "C.UTF-8", "en_US.utf8"] {
+			if crate::locale::locale_loadable(name, libc::LC_CTYPE_MASK) {
+				let charset = locale_charset(&|k: &str| (k == "LC_ALL").then(|| name.to_owned()));
+				assert_eq!(charset, "UTF-8", "{name}");
+			}
+		}
+		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()));
+		assert_eq!(c, ascii_codeset());
 	}
 
 	/// `setlocale` picks `LC_ALL` over `LANG`, and a name the system cannot
