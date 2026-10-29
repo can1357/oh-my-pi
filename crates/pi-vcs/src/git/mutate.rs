@@ -1775,10 +1775,6 @@ fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	config
 		.set_raw_value(key, value)
 		.map_err(|e| Error::backend("git config", e))?;
-	write_config_file(path, &config)
-}
-
-fn write_config_file(path: &Path, config: &gix::config::File<'_>) -> Result<()> {
 	let mut bytes = Vec::new();
 	config.write_to(&mut bytes)?;
 	fs::write(path, bytes)?;

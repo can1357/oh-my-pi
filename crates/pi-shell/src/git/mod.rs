@@ -605,12 +605,9 @@ fn resolve_flag(repo: &GitRepo, flag: Option<bool>, key: &str) -> pi_vcs::Result
 	flag.map_or_else(|| config_true(repo, key), Ok)
 }
 
-/// Reads a git boolean; valueless and unparsable entries count as unset.
+/// Read Git's boolean semantics, defaulting only missing keys to false.
 fn config_true(repo: &GitRepo, key: &str) -> pi_vcs::Result<bool> {
-	Ok(repo.config_get(key)?.is_some_and(|value| {
-		matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "on")
-			|| value.parse::<i64>().is_ok_and(|number| number != 0)
-	}))
+	Ok(repo.config_boolean(key)?.unwrap_or(false))
 }
 
 /// Whether git may create a worktree at `path`: missing, or an empty directory.
@@ -907,6 +904,57 @@ mod tests {
 			.expect("post-checkout ran");
 		assert_eq!(hook_log.trim(), format!("{} {head} 1 {}", "0".repeat(head.len()), wt.display()));
 		assert_cloned(&wt);
+	}
+
+	/// A valueless guessRemote setting must check out the remote tip and set
+	/// its upstream, rather than silently branching from the local HEAD.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn guess_remote_valueless_config_tracks_remote_unless_explicitly_disabled() {
+		let (_temp, repo) = fixture();
+		let local_head = git(&repo, &["rev-parse", "HEAD"]);
+		let remote_head =
+			git(&repo, &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "remote tip"]);
+		git(&repo, &["remote", "add", "origin", "."]);
+		for branch in ["topic", "local"] {
+			git(&repo, &["update-ref", &format!("refs/remotes/origin/{branch}"), remote_head.trim()]);
+		}
+		let config = repo.join(".git/config");
+		let mut text = std::fs::read_to_string(&config).expect("read config");
+		text.push_str("\n[worktree]\n\tguessRemote\n");
+		std::fs::write(&config, text).expect("write config");
+
+		let (code, output) = run(&repo, "git worktree add ../topic").await;
+		assert_eq!(code, Some(0), "{output}");
+		let topic = repo.parent().expect("parent").join("topic");
+		assert_eq!(git(&topic, &["rev-parse", "HEAD"]), remote_head);
+		assert_eq!(git(&topic, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(), "origin/topic");
+
+		let (code, output) = run(&repo, "git worktree add --no-guess-remote ../local").await;
+		assert_eq!(code, Some(0), "{output}");
+		let local = repo.parent().expect("parent").join("local");
+		assert_eq!(git(&local, &["rev-parse", "HEAD"]), local_head);
+		assert_eq!(
+			git(&repo, &["for-each-ref", "--format=%(upstream)", "refs/heads/local"]).trim(),
+			""
+		);
+	}
+
+	/// Invalid booleans must retain Git's failure without creating a branch
+	/// or checkout from a setting the builtin silently interpreted as false.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn guess_remote_invalid_config_preserves_git_error_without_creating_worktree() {
+		let (_temp, repo) = fixture();
+		git(&repo, &["config", "worktree.guessRemote", "invalid"]);
+		let (expected_code, expected_output) =
+			run_with(&repo, "LC_ALL=C git worktree add ../topic", &[]).await;
+		assert_eq!(expected_code, Some(128), "{expected_output}");
+		let (code, output) = run(&repo, "LC_ALL=C git worktree add ../topic").await;
+		assert_eq!(code, expected_code, "{output}");
+		assert_eq!(output, expected_output);
+		assert!(!repo.parent().expect("parent").join("topic").exists());
+		assert_eq!(git(&repo, &["branch", "--list", "topic"]), "");
 	}
 
 	/// An explicit absolute-path request must beat a configured relative-path
