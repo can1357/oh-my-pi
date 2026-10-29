@@ -4,6 +4,7 @@ import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
 import { writeFileAtomicallySync } from "../utils/atomic-file";
+import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -17,6 +18,50 @@ interface ConfigSchemaError {
  * the migration over and over on the boot path.
  */
 const migratedPaths = new Set<string>();
+
+/** Diagnose failures using source ranges, never JavaScript error call-site coordinates. */
+function configErrorLine(content: string, keyPath?: readonly unknown[]): number | undefined {
+	try {
+		const document = parseDocument(content, { prettyErrors: false });
+		let offset: number | undefined;
+		if (keyPath) {
+			if (document.errors.length > 0) return undefined;
+			let node: unknown = document.contents;
+			for (const key of keyPath) {
+				if (isMap(node)) {
+					const pair = node.items.find(item => isScalar(item.key) && item.key.value === key);
+					if (!pair) break;
+					if (isScalar(pair.key)) offset = pair.key.range?.[0] ?? offset;
+					node = pair.value;
+				} else if (isSeq(node)) {
+					const index = typeof key === "number" ? key : Number(key);
+					if (!Number.isInteger(index) || index < 0 || index >= node.items.length) break;
+					const item = node.items[index];
+					// A schema failure on the element itself must report that element's line.
+					const range = (item as { range?: readonly number[] | null } | null)?.range;
+					if (range) offset = range[0] ?? offset;
+					node = item;
+				} else {
+					break;
+				}
+			}
+		} else {
+			offset = document.errors[0]?.pos[0];
+		}
+		if (offset === undefined || !Number.isInteger(offset) || offset < 0 || offset > content.length) {
+			return undefined;
+		}
+		// EOF errors belong to the last content line, not a synthetic line after its final newline.
+		const end = Math.min(offset, content.trimEnd().length);
+		let line = 1;
+		for (let i = 0; i < end; i++) {
+			if (content[i] === "\n") line++;
+		}
+		return line;
+	} catch {
+		return undefined;
+	}
+}
 
 function migrationKey(jsonPath: string, ymlPath: string): string {
 	return `${jsonPath}\u0000${ymlPath}`;
@@ -70,10 +115,15 @@ export interface IConfigFile<T> {
 
 export class ConfigError extends Error {
 	readonly #message: string;
+	readonly filePath?: string;
+	readonly line?: number;
+
 	constructor(
 		public readonly id: string,
 		public readonly schemaErrors: ConfigSchemaError[] | null | undefined,
 		public readonly other?: { err: unknown; stage: string },
+		filePath?: string,
+		line?: number,
 	) {
 		let messages: string[] | undefined;
 		let cause: Error | undefined;
@@ -110,6 +160,8 @@ export class ConfigError extends Error {
 		super(message, { cause });
 		this.name = "LoadError";
 		this.#message = message;
+		this.filePath = filePath;
+		this.line = line;
 	}
 
 	override get message(): string {
@@ -133,6 +185,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	readonly #yamlFallbackPath: string | null;
 	readonly #jsonMigrationPath: string | null;
 	readonly #schemaSource: ConfigSchemaSource;
+	#formatPath: string;
 	#resolvedSchema?: Type;
 	#cache?: LoadResult<T>;
 	#auxValidate?: (value: T) => void;
@@ -144,6 +197,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	) {
 		this.#schemaSource = typeof schema === "function" ? { kind: "eager", schema } : schema;
 		this.#basePath = configPath;
+		this.#formatPath = configPath;
 		if (configPath.endsWith(".yml")) {
 			this.#yamlFallbackPath = `${configPath.slice(0, -4)}.yaml`;
 			this.#jsonMigrationPath = `${configPath.slice(0, -4)}.json`;
@@ -178,9 +232,11 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		migrateJsonToYml(this.#jsonMigrationPath, this.#basePath);
 	}
 
-	relocate(configPath?: string): ConfigFile<T> {
-		if (!configPath || configPath === this.#basePath) return this;
+	/** Relocate storage while optionally retaining the source configuration format. */
+	relocate(configPath?: string, formatPath?: string): ConfigFile<T> {
+		if (!configPath || (configPath === this.#basePath && !formatPath)) return this;
 		const result = new ConfigFile<T>(this.id, this.#schemaSource, configPath);
+		result.#formatPath = formatPath ?? configPath;
 		result.#auxValidate = this.#auxValidate;
 		result.#resolvedSchema = this.#resolvedSchema;
 		result.#ensureMigrated();
@@ -239,9 +295,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		try {
 			let parsed: unknown;
 			const readPath = this.#resolveReadPath();
-			if (readPath.endsWith(".json") || readPath.endsWith(".jsonc")) {
+			if (this.#formatPath.endsWith(".json") || this.#formatPath.endsWith(".jsonc")) {
 				parsed = JSONC.parse(content);
-			} else if (readPath.endsWith(".yml") || readPath.endsWith(".yaml")) {
+			} else if (this.#formatPath.endsWith(".yml") || this.#formatPath.endsWith(".yaml")) {
 				parsed = YAML.parse(content);
 			} else {
 				throw new Error(`Invalid config file path: ${readPath}`);
@@ -253,7 +309,8 @@ export class ConfigFile<T> implements IConfigFile<T> {
 					instancePath: error.path.length === 0 ? "root" : error.path.join("."),
 					message: error.problem,
 				}));
-				const error = new ConfigError(this.id, schemaErrors);
+				const line = configErrorLine(content, checked[0]?.path);
+				const error = new ConfigError(this.id, schemaErrors, undefined, readPath, line);
 				logger.warn("Failed to parse config file", { path: this.path(), error });
 				return this.#storeCache({ error, status: "error" });
 			}
@@ -269,9 +326,11 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			}
 			return this.#storeCache({ value, status: "ok" });
 		} catch (error) {
+			const readPath = this.#resolveReadPath();
+			const line = configErrorLine(content);
 			logger.warn("Failed to parse config file", { path: this.path(), error });
 			return this.#storeCache({
-				error: new ConfigError(this.id, undefined, { err: error, stage: "Unexpected" }),
+				error: new ConfigError(this.id, undefined, { err: error, stage: "Unexpected" }, readPath, line),
 				status: "error",
 			});
 		}
@@ -283,7 +342,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 		let content: string;
 		try {
-			content = fs.readFileSync(this.#resolveReadPath(), "utf-8").trim();
+			content = fs.readFileSync(this.#resolveReadPath(), "utf-8");
 		} catch (error) {
 			if (isEnoent(error)) {
 				return this.#storeCache({ status: "not-found" });

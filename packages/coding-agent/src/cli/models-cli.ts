@@ -95,8 +95,14 @@ function writeLine(line = ""): void {
 	process.stdout.write(`${line}\n`);
 }
 
-function writeModelsConfigError(error: Error): void {
-	writeLine(chalk.yellow("Warning: models.yml validation failed — custom providers disabled"));
+function modelsConfigWarning(error: ConfigError, recovered: boolean): string {
+	const fileLine = error.filePath && error.line ? ` at ${error.filePath}:${error.line}` : "";
+	const status = recovered ? " — keeping last-good custom providers" : " — custom providers disabled";
+	return `Warning: models.yml validation failed${fileLine}${status}`;
+}
+
+function writeModelsConfigError(error: ConfigError, recovered: boolean): void {
+	writeLine(chalk.yellow(modelsConfigWarning(error, recovered)));
 	for (const line of error.message.split("\n")) {
 		writeLine(`  ${line}`);
 	}
@@ -187,6 +193,7 @@ export interface ModelsListingSource {
 	/** Return models available for the selected catalog kind, or every kind for `all`. */
 	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
 	getError(): ConfigError | undefined;
+	isUsingLastGoodConfig(): boolean;
 }
 
 /**
@@ -229,7 +236,7 @@ export function renderProviderModels(
 	if (json) {
 		if (configError) {
 			process.stderr.write(
-				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
+				`${modelsConfigWarning(configError, source.isUsingLastGoodConfig())}\n${configError.message}\n`,
 			);
 		}
 		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
@@ -238,7 +245,7 @@ export function renderProviderModels(
 	}
 
 	if (configError) {
-		writeModelsConfigError(configError);
+		writeModelsConfigError(configError, source.isUsingLastGoodConfig());
 	}
 
 	if (available.length === 0) {
