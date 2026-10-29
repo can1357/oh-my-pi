@@ -21,6 +21,8 @@ rust_test(
     name = "pi-mermaid_test",
     compile_data = ["fixtures/mermaid.json"],
     crate = ":pi-mermaid",
+    # rust_test does not inherit the library's crate_features.
+    crate_features = ["xutf"],
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     deps = all_crate_deps(normal_dev = True),

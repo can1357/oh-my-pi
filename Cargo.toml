@@ -252,7 +252,9 @@ pi-ast = { path = "crates/pi-ast", default-features = false }
 pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
-pi-mermaid = { path = "crates/pi-mermaid" }
+# default-features off here because a member's `default-features = false`
+# cannot override an inherited default; pi-natives picks `xutf` itself.
+pi-mermaid = { path = "crates/pi-mermaid", default-features = false }
 pi-shell = { path = "crates/pi-shell" }
 pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
@@ -419,6 +421,8 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
 xutf = "1.5"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 zstd = "0.14"
 # The version brush-core builds on; bump with it.
 fancy-regex = "0.17"
