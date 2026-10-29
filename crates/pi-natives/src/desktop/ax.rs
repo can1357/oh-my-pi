@@ -663,6 +663,10 @@ fn pressable(role: &str) -> bool {
 /// run to 17 characters (`ScrollRightByPage`).
 const MAX_SHOWN_ACTION: usize = 32;
 
+/// Most actions a line lists: more than an element offers in practice, few
+/// enough that no app can make a line arbitrarily long.
+const MAX_SHOWN_ACTIONS: usize = 16;
+
 /// What a line lists after `actions=`: the macOS actions an element offers
 /// beyond what its role implies. A control's press, a text field's confirm
 /// and cancel, and the actions nearly every element has (scroll into view,
@@ -671,9 +675,12 @@ const MAX_SHOWN_ACTION: usize = 32;
 /// cannot be performed by name and stay unlisted, as does any other
 /// platform's vocabulary, and so does a name that is not one ASCII word of at
 /// most [`MAX_SHOWN_ACTION`] characters, which an app could otherwise use to
-/// write its own lines into the tree.
-fn shown_actions(props: &AxProps) -> Option<String> {
+/// write its own lines into the tree. Each name is listed once, and past
+/// [`MAX_SHOWN_ACTIONS`] the list ends with how many it left out and the call
+/// that lists them all, so no app can make one line arbitrarily long.
+fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
 	let role = props.role.as_str();
+	let mut seen = HashSet::new();
 	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
 	let mut names: Vec<String> = props
 		.actions
@@ -688,6 +695,7 @@ fn shown_actions(props: &AxProps) -> Option<String> {
 				&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 			.then(|| name.to_ascii_lowercase())
 		})
+		.filter(|name| seen.insert(name.clone()))
 		.collect();
 	if !pressable(role) || names.iter().any(|name| name == "press") {
 		names.retain(|name| {
@@ -702,7 +710,16 @@ fn shown_actions(props: &AxProps) -> Option<String> {
 			!implied
 		});
 	}
-	(!names.is_empty()).then(|| names.join(","))
+	if names.is_empty() {
+		return None;
+	}
+	let hidden = names.len().saturating_sub(MAX_SHOWN_ACTIONS);
+	names.truncate(MAX_SHOWN_ACTIONS);
+	let mut shown = names.join(",");
+	if hidden > 0 {
+		let _ = write!(shown, "… (+{hidden} more; (await computer.ref(\"{reference}\")).actions())");
+	}
+	Some(shown)
 }
 
 pub fn node_to_napi(reference: String, props: AxProps) -> AxNode {
@@ -810,7 +827,7 @@ fn write_line(
 	if focused {
 		text.push_str(" (focused)");
 	}
-	if let Some(actions) = shown_actions(props) {
+	if let Some(actions) = shown_actions(props, reference) {
 		let _ = write!(text, " actions={actions}");
 	}
 }
@@ -2081,6 +2098,13 @@ mod tests {
 		// A line break that would forge a line, an overlong name, and a word.
 		let forged =
 			["AXOpen\n- button \"Pay\" [ref=e99]", "AXAbcdefghijklmnopqrstuvwxyzAbcdefgh", "AXPick"];
+		// One name in three spellings, and more names than a line lists, each
+		// twice.
+		let repeated = ["AXOpen", "axopen", "AXOPEN", "AXPick"];
+		let many: Vec<String> = (0..40)
+			.flat_map(|i| [format!("AXAct{i}"), format!("axact{i}")])
+			.collect();
+		let many: Vec<&str> = many.iter().map(String::as_str).collect();
 		let mut m = Mock {
 			props: [
 				(1, p("window", Some("Title"))),
@@ -2095,9 +2119,11 @@ mod tests {
 				(10, with("image", "b.pdf", &["axopen", "AXshowMenu"])),
 				(11, with("button", "Upload", &["axpress", "AxOpen"])),
 				(12, with("image", "c.pdf", &forged)),
+				(13, with("image", "d.pdf", &repeated)),
+				(14, with("image", "e.pdf", &many)),
 			]
 			.into(),
-			children: [(1, (2..=12).collect())].into(),
+			children: [(1, (2..=14).collect())].into(),
 			..Default::default()
 		};
 		let text = tree(&mut m);
@@ -2124,6 +2150,18 @@ mod tests {
 		// cannot write a line of its own.
 		assert_eq!(actions("e12"), Some("pick"));
 		assert!(!text.contains("Pay"));
+		// Each name is listed once, and a list past the limit names what it left
+		// out and the call that lists it whole, so one element cannot fill the
+		// read.
+		assert_eq!(actions("e13"), Some("open,pick"));
+		let first: Vec<String> = (0..16).map(|i| format!("act{i}")).collect();
+		assert_eq!(
+			actions("e14"),
+			Some(
+				format!("{}… (+24 more; (await computer.ref(\"e14\")).actions())", first.join(","))
+					.as_str()
+			)
+		);
 	}
 	#[test]
 	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
