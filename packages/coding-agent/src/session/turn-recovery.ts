@@ -52,7 +52,13 @@ import type {
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn, operatorTitleText } from "./messages";
+import {
+	assistantTurnProducedOutput,
+	isEmptyAssistantStop,
+	isEmptyErrorTurn,
+	isUserAuthoredMessage,
+	operatorTitleText,
+} from "./messages";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -133,13 +139,15 @@ function hasNonWhitespace(value: string): boolean {
 }
 
 /**
- * End of the conversation in `messages`, before trailing eval runtime snapshots.
- * A session appends one at startup — right after the turn resume recovery closed
- * — and on display-context rebuilds, so it trails a failed turn without ending it.
+ * End of the conversation in `messages`, before trailing context-only custom
+ * messages: eval runtime snapshots (appended at startup and on display-context
+ * rebuilds) and deliveries folded in without a turn — e.g. an `async-result`
+ * landing while a user interrupt suppresses auto-resume. They trail a failed
+ * turn without ending it. A user-authored custom prompt is conversation.
  */
 function conversationEnd(messages: readonly AgentMessage[]): number {
 	let end = messages.length;
-	while (end > 0 && isEvalStateContext(messages[end - 1])) end--;
+	while (end > 0 && messages[end - 1].role === "custom" && !isUserAuthoredMessage(messages[end - 1])) end--;
 	return end;
 }
 
@@ -201,10 +209,15 @@ function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
  * partially successful batch never qualifies: re-running a completed call
  * would repeat its side effects. Synthetic placeholder tails never qualify
  * either — their anchor is the aborted turn itself and its arguments may be
- * truncated, so those are re-generated via a fresh model call instead.
+ * truncated, so those are re-generated via a fresh model call instead. Nor
+ * does a tail carrying a delivery other than an eval snapshot: the strip
+ * would erase it from history, while a fresh model call keeps it in context.
  */
 function toolReplayStart(messages: readonly AgentMessage[]): number | undefined {
 	let end = conversationEnd(messages);
+	for (let i = end; i < messages.length; i++) {
+		if (!isEvalStateContext(messages[i])) return undefined;
+	}
 	const tail = messages[end - 1];
 	if (tail?.role === "assistant") {
 		if (tail.stopReason !== "aborted" && tail.stopReason !== "error") return undefined;
@@ -3370,7 +3383,7 @@ export class TurnRecovery {
 			} else {
 				// Remove the failed/aborted assistant message plus its synthetic tool
 				// results (same as auto-retry does before re-attempting), keeping the
-				// trailing eval snapshot the continuation is sent with.
+				// trailing context deliveries the continuation is sent with.
 				this.#host.agent.replaceMessages([
 					...messages.slice(0, activeTurnEnd - 1),
 					...messages.slice(conversationEnd(messages)),

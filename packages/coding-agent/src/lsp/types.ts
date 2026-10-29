@@ -427,6 +427,7 @@ export interface LspServerCapabilities {
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
 	diagnosticProvider?: boolean | Record<string, unknown>;
+	workspace?: { workspaceFolders?: { supported?: boolean; changeNotifications?: boolean | string } };
 	[key: string]: unknown;
 }
 

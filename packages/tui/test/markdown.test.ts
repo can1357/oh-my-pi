@@ -2335,6 +2335,40 @@ describe("Module-level LRU render cache", () => {
 		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
 	});
 
+	it("settles an open fence's finished lines so a long block can retire", () => {
+		// A fenced block never reaches a "\n\n" boundary, so the block walk alone
+		// settles nothing for it and a long streamed SQL/log block stays in the
+		// mutable viewport, losing every row that leaves the screen (#9780).
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		// The last two lines stay live: the newest is still being written, and the
+		// cut keeps one more so the publisher always has a tail to extend.
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\n");
+
+		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("clears the settled fence text when a non-append edit rewinds it", () => {
+		// Regression: the stored prefix survived a rewind, so every later frame
+		// failed the prefix check and the block stayed unretirable for the rest
+		// of the stream.
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nold\nrow\n", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nold\n");
+
+		markdown.setText("```sql\nnew\nrow\n");
+		markdown.render(80);
+		markdown.setText("```sql\nnew\nrow\nthird\nfourth\n");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nnew\nrow\nthird\n");
+	});
+
 	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
 		clearRenderCache();
 		const themeWithStream = {
