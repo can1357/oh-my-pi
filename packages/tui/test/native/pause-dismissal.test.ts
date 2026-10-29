@@ -115,4 +115,38 @@ describe("native pause dismissal", () => {
 		expect(pauseSheet(h)).toBeUndefined();
 		expect(agentPauseGate.paused).toBe(false);
 	});
+
+	it("opens the gate on the dismissal's own frame, not on paints queued after it", async () => {
+		const body = new Probe(text("one"));
+		harness = await TspHarness.start(tui => tui.addChild(body), { credits: 4, autoAck: false });
+		const h = harness;
+		const host: PauseScreenHost = { ui: h.tui, showStatus: () => {} };
+		h.terminal.ackAll();
+		h.flush();
+
+		const run = runPauseScreen(host);
+		h.flush();
+		h.terminal.ackAll();
+		h.flush();
+		const shown = h.tui.overlayStack.at(-1)?.component;
+		if (!(shown instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+
+		shown.handleInput("\x1b");
+		await Bun.sleep(1);
+		h.flush();
+		const dismissal = h.frames.at(-1);
+		if (!dismissal) throw new Error("no dismissal frame");
+		expect(pauseSheet(h)).toBeUndefined();
+
+		// A paint of something else, left unacknowledged: the pause waits on its
+		// own frame, not on whatever the session queues behind it.
+		body.current = text("two");
+		await h.render();
+		expect(h.frames.at(-1)?.s).toBe(dismissal.s + 1);
+
+		h.event({ ev: "ack", sf: dismissal.sf, s: dismissal.s });
+		const settled = await Promise.race([run.then(() => "resumed"), Bun.sleep(20).then(() => "held")]);
+		expect(settled).toBe("resumed");
+		expect(agentPauseGate.paused).toBe(false);
+	});
 });

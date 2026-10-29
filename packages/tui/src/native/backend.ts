@@ -134,10 +134,12 @@ interface BlobQuery {
 	timer: RenderTimer | undefined;
 }
 
-/** One pending {@link NativeBackend.acknowledged} wait; `timer` is its stall-span ceiling. */
+/** One pending {@link NativeBackend.acknowledged} wait: the frame each surface owes it, and its stall-span ceiling. */
 interface AckWait {
 	readonly resolve: () => void;
 	timer: RenderTimer | undefined;
+	/** Per surface, the sequence number whose acknowledgement ends this wait. */
+	readonly marks: ReadonlyMap<Surface, number>;
 }
 
 /**
@@ -396,7 +398,7 @@ export class NativeBackend {
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// The surfaces are closed: no ack can arrive, so no caller may keep waiting for one.
-		this.#settleAcks(true);
+		for (const wait of this.#ackWaits.slice()) this.#endWait(wait);
 		// Replies no longer reach the backend: forget the queries outright.
 		this.#resetBlobs();
 		this.#blobQueries = [];
@@ -529,9 +531,10 @@ export class NativeBackend {
 	}
 
 	/**
-	 * Resolve once the terminal holds everything described so far: no surface
-	 * keeps a frame deferred by flow control, and every frame sent is
-	 * acknowledged.
+	 * Resolve once the terminal has acknowledged what is described right now:
+	 * per surface, the frame carrying it (the one deferred by flow control, or
+	 * the last one sent). Frames the session queues afterwards are somebody
+	 * else's wait and never hold this one back.
 	 *
 	 * For a caller whose next step must not run behind a stale frame — the
 	 * `/pause` screen opens the agent gate only once the terminal has dropped
@@ -541,37 +544,55 @@ export class NativeBackend {
 	 * much at most instead of parking it.
 	 */
 	async acknowledged(): Promise<void> {
-		if (!this.#live || this.#allAcked()) return;
+		if (!this.#live) return;
+		const marks = new Map<Surface, number>();
+		for (const surface of this.#surfaces()) marks.set(surface, surface.seq + (surface.dirty ? 1 : 0));
 		const { promise, resolve } = Promise.withResolvers<void>();
-		const wait: AckWait = { resolve, timer: undefined };
+		const wait: AckWait = { resolve, timer: undefined, marks };
+		if (this.#answered(wait)) return;
 		wait.timer = this.#scheduler.scheduleRender(() => {
 			logger.warn("TSP: terminal did not take a frame within the stall span; continuing", {
 				sf: this.#inline.id,
 				s: this.#inline.seq,
 				acked: this.#inline.acked,
 			});
-			// Every wait is on the same surfaces, so one stall span ends them all.
-			this.#settleAcks(true);
+			this.#endWait(wait);
 		}, STALLED_ACK_MS);
 		this.#ackWaits.push(wait);
 		await promise;
 	}
 
-	/** Whether no surface holds a deferred or unacknowledged frame. */
-	#allAcked(): boolean {
-		for (const surface of this.#screen ? [this.#inline, this.#screen] : [this.#inline]) {
-			if (surface.dirty || surface.unacked.length > 0) return false;
+	/** The surfaces frames can still reach. */
+	#surfaces(): readonly Surface[] {
+		return this.#screen ? [this.#inline, this.#screen] : [this.#inline];
+	}
+
+	/** Whether every surface `wait` marked has answered for the frame it waits on. */
+	#answered(wait: AckWait): boolean {
+		const live = this.#surfaces();
+		for (const [surface, mark] of wait.marks) {
+			// A closed surface answers nothing more.
+			if (!live.includes(surface)) continue;
+			if (surface.acked >= mark) continue;
+			// The frame the mark counted on carried nothing in the end.
+			if (!surface.dirty && surface.unacked.length === 0) continue;
+			return false;
 		}
 		return true;
 	}
 
-	/** End the waits of {@link NativeBackend.acknowledged} the terminal has answered (every one of them when `force`). */
-	#settleAcks(force = false): void {
-		if (this.#ackWaits.length === 0 || !(force || this.#allAcked())) return;
-		for (const wait of this.#ackWaits.splice(0)) {
-			wait.timer?.cancel();
-			wait.resolve();
-		}
+	/** Drop `wait` from the list and resolve its caller. */
+	#endWait(wait: AckWait): void {
+		const index = this.#ackWaits.indexOf(wait);
+		if (index !== -1) this.#ackWaits.splice(index, 1);
+		wait.timer?.cancel();
+		wait.timer = undefined;
+		wait.resolve();
+	}
+
+	/** End every wait of {@link NativeBackend.acknowledged} the terminal has answered. */
+	#settleAcks(): void {
+		for (const wait of this.#ackWaits.slice()) if (this.#answered(wait)) this.#endWait(wait);
 	}
 
 	/**

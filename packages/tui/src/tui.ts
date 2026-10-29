@@ -2814,15 +2814,16 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Paint one frame now and resolve once the terminal holds it.
+	 * Paint one frame now and resolve once the terminal holds *that* frame.
 	 *
 	 * Neither renderer puts the frame on the screen before it returns. A
 	 * native (TSP) surface keeps a frame back while the terminal owes
 	 * acknowledgements, so there the wait ends when the terminal acknowledges
-	 * what this paint described. The row renderer hands its bytes to the
-	 * terminal, which on a unix TTY only queues them on the off-thread writer
-	 * (`ProcessTerminal.pendingOutputBytes`), so there the wait ends when that
-	 * backlog has drained. Either way it also ends after
+	 * the frame this paint described. The row renderer hands its bytes to the
+	 * terminal, which on a unix TTY only queues them on the off-thread writer,
+	 * so there the wait ends when the writer has delivered as many bytes as it
+	 * had accepted when the paint returned. Whatever the session queues behind
+	 * that frame is somebody else's wait. Either way it also ends after
 	 * {@link TUI.#FRAME_ACCEPT_TIMEOUT_MS}, so a terminal that reads nothing
 	 * can delay a caller but never park it.
 	 *
@@ -2837,23 +2838,27 @@ export class TUI extends Container {
 			await this.#native!.acknowledged();
 			return;
 		}
-		await this.#outputDrained();
+		await this.#outputDelivered();
 	}
 
 	/**
-	 * Resolve once the terminal reports no output left to deliver, or after
-	 * {@link TUI.#FRAME_ACCEPT_TIMEOUT_MS}. A terminal that cannot report a
-	 * backlog (a custom one, or stdout that is not a TTY) writes
+	 * Resolve once the terminal's writer has delivered everything it had
+	 * accepted when this was called, or after
+	 * {@link TUI.#FRAME_ACCEPT_TIMEOUT_MS}. A terminal that reports neither
+	 * counter (a custom one, or stdout that is not a TTY) writes
 	 * synchronously as far as this process can tell, so the wait is over at
 	 * once.
 	 */
-	async #outputDrained(): Promise<void> {
-		if (this.terminal.pendingOutputBytes === undefined) return;
+	async #outputDelivered(): Promise<void> {
+		const mark = this.terminal.outputBytesAccepted;
+		if (mark === undefined || this.terminal.pendingOutputBytes === undefined) return;
+		const delivered = (): number =>
+			(this.terminal.outputBytesAccepted ?? mark) - (this.terminal.pendingOutputBytes ?? 0);
 		const deadline = this.#renderScheduler.now() + TUI.#FRAME_ACCEPT_TIMEOUT_MS;
-		while (!this.#stopped && (this.terminal.pendingOutputBytes ?? 0) > 0) {
+		while (!this.#stopped && delivered() < mark) {
 			if (this.#renderScheduler.now() >= deadline) {
 				logger.warn("Terminal did not take a frame within the accept span; continuing", {
-					pending: this.terminal.pendingOutputBytes,
+					undelivered: mark - delivered(),
 				});
 				return;
 			}

@@ -16,7 +16,8 @@ import { ManualScheduler } from "./native/tsp-harness";
 /** A TTY whose writer only delivers what the test tells it to deliver. */
 class QueuedTerminal implements Terminal {
 	readonly written: string[] = [];
-	#pending = 0;
+	#accepted = 0;
+	#delivered = 0;
 
 	get columns(): number {
 		return 80;
@@ -26,7 +27,11 @@ class QueuedTerminal implements Terminal {
 	}
 	/** Bytes the writer has accepted but not yet handed to the terminal. */
 	get pendingOutputBytes(): number {
-		return this.#pending;
+		return this.#accepted - this.#delivered;
+	}
+	/** Every byte the writer has accepted since it started. */
+	get outputBytesAccepted(): number {
+		return this.#accepted;
 	}
 	get kittyProtocolActive(): boolean {
 		return false;
@@ -40,12 +45,17 @@ class QueuedTerminal implements Terminal {
 
 	/** The writer thread caught up with everything queued so far. */
 	deliver(): void {
-		this.#pending = 0;
+		this.#delivered = this.#accepted;
+	}
+
+	/** The writer got as far as `mark` bytes and no further. */
+	deliverTo(mark: number): void {
+		this.#delivered = Math.max(this.#delivered, Math.min(mark, this.#accepted));
 	}
 
 	write(data: string): void {
 		this.written.push(data);
-		this.#pending += Buffer.byteLength(data, "utf8");
+		this.#accepted += Buffer.byteLength(data, "utf8");
 	}
 
 	start(): void {}
@@ -63,8 +73,9 @@ class QueuedTerminal implements Terminal {
 }
 
 class Rows implements Component {
+	text = "session";
 	render(): readonly string[] {
-		return ["session"];
+		return [this.text];
 	}
 }
 
@@ -72,6 +83,7 @@ interface Harness {
 	tui: TUI;
 	terminal: QueuedTerminal;
 	scheduler: ManualScheduler;
+	body: Rows;
 	host: PauseScreenHost;
 	/** Run queued renders and let the teardown's awaits resume. */
 	settle(): Promise<void>;
@@ -81,7 +93,8 @@ function start(): Harness {
 	const terminal = new QueuedTerminal();
 	const scheduler = new ManualScheduler();
 	const tui = new TUI(terminal, false, { renderScheduler: scheduler });
-	tui.addChild(new Rows());
+	const body = new Rows();
+	tui.addChild(body);
 	tui.start();
 	const settle = async (): Promise<void> => {
 		for (let round = 0; round < 8; round++) {
@@ -90,7 +103,7 @@ function start(): Harness {
 			await Bun.sleep(1);
 		}
 	};
-	return { tui, terminal, scheduler, host: { ui: tui, showStatus: () => {} }, settle };
+	return { tui, terminal, scheduler, body, host: { ui: tui, showStatus: () => {} }, settle };
 }
 
 let stop: (() => void) | undefined;
@@ -149,6 +162,37 @@ describe("pause dismissal on a row-rendered terminal", () => {
 		// A terminal that reads nothing may delay the resume by the accept
 		// span, never strand it.
 		h.scheduler.advance(5_000);
+		await h.settle();
+		await run;
+		expect(h.terminal.pendingOutputBytes).toBeGreaterThan(0);
+		expect(agentPauseGate.paused).toBe(false);
+	});
+
+	it("opens the gate on the dismissal's own bytes, not on paints queued after it", async () => {
+		const h = start();
+		stop = () => h.tui.stop();
+		await h.settle();
+		h.terminal.deliver();
+
+		const run = runPauseScreen(h.host);
+		await h.settle();
+		const shown = h.tui.overlayStack.at(-1)?.component;
+		if (!(shown instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+		h.terminal.deliver();
+
+		shown.handleInput("\x1b");
+		await h.settle();
+		const dismissalMark = h.terminal.outputBytesAccepted;
+		expect(agentPauseGate.paused).toBe(true);
+
+		// A paint of something else queues behind the dismissal and is never
+		// delivered: the pause waits on its own bytes, not on the whole queue.
+		h.body.text = "later";
+		h.tui.renderNow();
+		await h.settle();
+		expect(h.terminal.outputBytesAccepted).toBeGreaterThan(dismissalMark);
+
+		h.terminal.deliverTo(dismissalMark);
 		await h.settle();
 		await run;
 		expect(h.terminal.pendingOutputBytes).toBeGreaterThan(0);
