@@ -147,7 +147,8 @@ export class SessionMailbox {
 	#recover: string | undefined;
 	#session: AgentSession | undefined;
 	#interval: NodeJS.Timeout | undefined;
-	#polling = false;
+	/** The pass in flight; the interval starts none while it runs. */
+	#pass: Promise<void> | undefined;
 	#stopped = false;
 	readonly #inFlight = new Map<string, InFlight>();
 	/** Mail ids already logged as held by Esc, to log each once. */
@@ -178,15 +179,24 @@ export class SessionMailbox {
 		if (!this.#deliver) return;
 		session.setHeldMailProvider(() => this.#takeHeldMail());
 		this.#interval = setInterval(() => {
-			if (this.#polling) return;
-			this.#polling = true;
-			this.#poll()
-				.catch(error => logger.warn("session mailbox poll failed", { error: String(error) }))
-				.finally(() => {
-					this.#polling = false;
-				});
+			if (!this.#pass) void this.poll();
 		}, POLL_MS);
 		this.#interval.unref();
+	}
+
+	/**
+	 * Check the mailbox now: settle claims in flight, then deliver what can be
+	 * delivered. Resolves once a pass that started after the call has finished;
+	 * the interval runs one every second.
+	 */
+	async poll(): Promise<void> {
+		while (this.#pass) await this.#pass;
+		this.#pass = this.#poll()
+			.catch(error => logger.warn("session mailbox poll failed", { error: String(error) }))
+			.finally(() => {
+				this.#pass = undefined;
+			});
+		await this.#pass;
 	}
 
 	/** Withdraw presence and stop delivering. Idempotent. */

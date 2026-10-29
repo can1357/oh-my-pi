@@ -40,17 +40,6 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
-/** The watcher polls once a second; generous enough for several polls. */
-const DELIVERY_TIMEOUT_MS = 10_000;
-
-async function until(condition: () => boolean, what: string): Promise<void> {
-	const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-		await Bun.sleep(50);
-	}
-}
-
 /** Text of every message one model request carried, in order. */
 function requestTexts(context: Context): string[] {
 	return context.messages.map(message =>
@@ -94,6 +83,26 @@ describe("session mailbox delivery", () => {
 		else Bun.env[MAILBOX_ENV] = previousSwitch;
 		tempDir.removeSync();
 	});
+
+	/**
+	 * Poll `mailbox` until `condition` holds. Between polls the turns a poll
+	 * started finish and their entries reach the session file.
+	 */
+	async function pollUntil(mailbox: SessionMailbox, condition: () => boolean): Promise<void> {
+		while (!condition()) {
+			await mailbox.poll();
+			for (const opened of sessions) {
+				if (opened.isDisposed) continue;
+				await opened.waitForIdle();
+				// One test keeps the file unwritable while it polls.
+				await opened.sessionManager.flush().catch(() => {});
+			}
+			// A poll with nothing to read settles in microtasks; let I/O run before the next.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+		}
+	}
 
 	/** A session file written by an earlier process, closed again. */
 	async function savedSessionFile(): Promise<string> {
@@ -204,26 +213,26 @@ describe("session mailbox delivery", () => {
 	}
 
 	it("starts a turn in an idle session and records the mail as delivered", async () => {
-		const { session: opened } = openSession();
+		const { session: opened, mailbox } = openSession();
 		const sessionId = opened.sessionManager.getSessionId();
 		expect(deliveryTarget(sessionId)).toMatchObject({ kind: "live", host: "test" });
 
 		const mailId = await poke(sessionId, "BUILD_FINISHED");
-		await until(() => isMailDone(sessionId, mailId), "the poke to reach the transcript");
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 
 		expect(contexts).toHaveLength(1);
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("BUILD_FINISHED");
 	});
 
 	it("after Esc, delivers a --force poke at once and holds a plain one for the user's next message, ahead of it in the same request", async () => {
-		const { session: opened } = openSession();
+		const { session: opened, mailbox } = openSession();
 		const sessionId = opened.sessionManager.getSessionId();
 		await interrupt(opened);
 
 		const heldId = await poke(sessionId, "HELD_POKE");
 		const forcedId = await poke(sessionId, "FORCED_POKE", true);
 		// Every poll that sees the forced poke also lists the held one, posted first.
-		await until(() => isMailDone(sessionId, forcedId), "the forced poke to reach the transcript");
+		await pollUntil(mailbox, () => isMailDone(sessionId, forcedId));
 		expect(contexts).toHaveLength(1);
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("FORCED_POKE");
 		expect(listNewMail(sessionId)).toEqual([`${heldId}.json`]);
@@ -234,7 +243,7 @@ describe("session mailbox delivery", () => {
 		const pokeAt = texts.findIndex(text => text.includes("HELD_POKE"));
 		expect(pokeAt).toBeGreaterThan(-1);
 		expect(texts.indexOf("NEXT_USER_MESSAGE")).toBeGreaterThan(pokeAt);
-		await until(() => isMailDone(sessionId, heldId), "the held poke to be recorded as delivered");
+		await pollUntil(mailbox, () => isMailDone(sessionId, heldId));
 	});
 
 	it("takes no waiting mail for a prompt that fails because a turn is running", async () => {
@@ -292,7 +301,7 @@ describe("session mailbox delivery", () => {
 	});
 
 	it("moves a malformed message to failed/, leaves one only a newer omp reads, and delivers the mail behind both", async () => {
-		const { session: opened } = openSession();
+		const { session: opened, mailbox } = openSession();
 		const sessionId = opened.sessionManager.getSessionId();
 		const newDir = path.join(mailDir(sessionId), "new");
 		fs.mkdirSync(newDir, { recursive: true });
@@ -304,7 +313,7 @@ describe("session mailbox delivery", () => {
 		);
 
 		const mailId = await poke(sessionId, "BEHIND_BAD_MAIL");
-		await until(() => isMailDone(sessionId, mailId), "the poke behind the bad files to reach the transcript");
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("BEHIND_BAD_MAIL");
 		expect(fs.readdirSync(path.join(mailDir(sessionId), "failed"))).toEqual(["a-truncated.json"]);
 		expect(listNewMail(sessionId)).toEqual(["a-future.json"]);
@@ -318,8 +327,8 @@ describe("session mailbox delivery", () => {
 		claimMail(sessionId, name);
 		for (let attempt = 0; attempt < MAX_MAIL_ATTEMPTS; attempt++) recordMailAttempt(sessionId, name);
 
-		openSession(await SessionManager.open(file));
-		await until(() => listClaimedMail(sessionId).length === 0, "the left-behind claim to be settled");
+		const { mailbox } = openSession(await SessionManager.open(file));
+		await pollUntil(mailbox, () => listClaimedMail(sessionId).length === 0);
 		expect(await leaseFromAnotherProcess(sessionId)).toBe("free");
 		expect(fs.readdirSync(path.join(mailDir(sessionId), "failed"))).toEqual([name]);
 		expect(listNewMail(sessionId)).toEqual([]);
@@ -328,7 +337,7 @@ describe("session mailbox delivery", () => {
 
 	it("lets one of two session managers in a process consume the session's mail, so a poke is delivered once", async () => {
 		const file = await savedSessionFile();
-		const { session: first } = openSession(await SessionManager.open(file));
+		const { session: first, mailbox } = openSession(await SessionManager.open(file));
 		const { session: second } = openSession(await SessionManager.open(file));
 		const sessionId = first.sessionManager.getSessionId();
 		expect(second.sessionManager.getSessionId()).toBe(sessionId);
@@ -339,27 +348,23 @@ describe("session mailbox delivery", () => {
 		).toEqual([false, true]);
 
 		const mailId = await poke(sessionId, "ONE_CONSUMER");
-		await until(() => isMailDone(sessionId, mailId), "the poke to reach the session file");
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 		expect(
 			contexts.filter(context => requestTexts(context).some(text => text.includes("ONE_CONSUMER"))),
 		).toHaveLength(1);
 	});
 
 	it("does not claim mail while extensions load, so a session switched to meanwhile never receives it", async () => {
-		const { session: opened } = openSession();
+		const { session: opened, mailbox } = openSession();
 		await opened.prompt("seed");
 		const oldId = opened.sessionManager.getSessionId();
-		const loading = Promise.withResolvers<void>();
 		const loaded = Promise.withResolvers<void>();
-		opened.setDeferredExtensionLoader(() => {
-			loading.resolve();
-			return loaded.promise;
-		});
+		opened.setDeferredExtensionLoader(() => loaded.promise);
 		contexts.length = 0;
 
 		const mailId = await poke(oldId, "OLD_SESSION_POKE");
-		// A claimed poke would start the extension load within a poll; give it two.
-		await Promise.race([loading.promise, Bun.sleep(2_500)]);
+		// A poll that claimed the poke would hand it to the session that is current once extensions load.
+		await mailbox.poll();
 		await opened.newSession();
 		loaded.resolve();
 		await opened.prompt("in the new session");
@@ -376,8 +381,8 @@ describe("session mailbox delivery", () => {
 		// A consumer that died after claiming, before the message reached the file.
 		claimMail(sessionId, `${mailId}.json`);
 
-		openSession(await SessionManager.open(file));
-		await until(() => isMailDone(sessionId, mailId), "the recovered poke to reach the session file");
+		const { mailbox } = openSession(await SessionManager.open(file));
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 		expect(contexts).toHaveLength(1);
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("LEFT_BEHIND");
 		expect(listClaimedMail(sessionId)).toEqual([]);
@@ -394,8 +399,8 @@ describe("session mailbox delivery", () => {
 		await poke(sessionId, "ECHOED_POKE", false, mailId);
 		claimMail(sessionId, `${mailId}.json`);
 
-		openSession(await SessionManager.open(file));
-		await until(() => isMailDone(sessionId, mailId), "the recovered poke to reach the session file");
+		const { mailbox } = openSession(await SessionManager.open(file));
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 		expect(contexts).toHaveLength(1);
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("ECHOED_POKE");
 	});
@@ -403,7 +408,7 @@ describe("session mailbox delivery", () => {
 	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 		"counts a poke as delivered only once its entry is in the session file",
 		async () => {
-			const { session: opened } = openSession();
+			const { session: opened, mailbox } = openSession();
 			await opened.prompt("seed");
 			const sessionId = opened.sessionManager.getSessionId();
 			const file = opened.sessionManager.getSessionFile()!;
@@ -413,13 +418,11 @@ describe("session mailbox delivery", () => {
 			let mailId: string;
 			try {
 				mailId = await poke(sessionId, "DISK_FULL_POKE");
-				await until(
-					() => contexts.some(context => requestTexts(context).at(-1)?.includes("DISK_FULL_POKE")),
-					"delivery",
+				await pollUntil(mailbox, () =>
+					contexts.some(context => requestTexts(context).at(-1)?.includes("DISK_FULL_POKE")),
 				);
 				await opened.waitForIdle();
-				// Absence can only be observed across polls: give the watcher two.
-				await Bun.sleep(2_500);
+				await mailbox.poll();
 				expect(isMailDone(sessionId, mailId)).toBe(false);
 			} finally {
 				fs.chmodSync(path.dirname(file), 0o755);
@@ -427,27 +430,27 @@ describe("session mailbox delivery", () => {
 			}
 			await opened.prompt("disk is back").catch(() => {});
 			await opened.sessionManager.flush().catch(() => {});
-			await until(() => isMailDone(sessionId, mailId), "the poke to be confirmed once it is in the file");
+			await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 			expect(await Bun.file(file).text()).toContain(mailId);
 		},
 	);
 
 	it("reports an ACP client that keeps agent turns off as taking the poke with its next prompt, and starts no turn", async () => {
-		const { session: opened } = openSession(undefined, { capabilities: {}, deferAgentInitiatedTurns: true });
+		const { session: opened, mailbox } = openSession(undefined, { capabilities: {}, deferAgentInitiatedTurns: true });
 		await opened.prompt("seed");
 		const sessionId = opened.sessionManager.getSessionId();
 		contexts.length = 0;
-		await until(() => {
+		await pollUntil(mailbox, () => {
 			const target = deliveryTarget(sessionId);
 			return target.kind === "live" && target.deferred;
-		}, "the deferred flag");
+		});
 
 		const mailId = await poke(sessionId, "ACP_POKE");
-		await until(() => listNewMail(sessionId).length === 0, "the poke to be claimed");
+		await pollUntil(mailbox, () => listNewMail(sessionId).length === 0);
 		expect(contexts).toHaveLength(0);
 
 		await opened.prompt("client prompt");
 		expect(requestTexts(contexts[0]!).some(text => text.includes("ACP_POKE"))).toBe(true);
-		await until(() => isMailDone(sessionId, mailId), "the poke to reach the session file");
+		await pollUntil(mailbox, () => isMailDone(sessionId, mailId));
 	});
 });
