@@ -47,6 +47,7 @@ use tokio::{
 	process::Command,
 	sync::{mpsc, oneshot, watch},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::task;
 
@@ -60,6 +61,10 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// the sidecar's stdout pipe instead of buffering its whole output in memory
 /// (mirrors `shell`'s bridge queue; see #4078).
 const CHUNK_QUEUE_CHUNKS: usize = 64;
+
+/// Largest single payload handed to the JS `on_chunk` callback.
+const MAX_BATCH_BYTES: usize = 64 * 1024;
+const INITIAL_BATCH_CAP: usize = 8 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire protocol
@@ -117,6 +122,18 @@ struct Pending {
 	done_tx:  oneshot::Sender<DoneInfo>,
 }
 
+/// Exec routing table. `closed` flips once supervision ends, under the same
+/// lock that registers new execs, so no run can register after the sidecar
+/// died and then wait for a `done` frame that will never arrive.
+#[derive(Default)]
+struct PendingTable {
+	closed:  bool,
+	entries: HashMap<u32, Pending>,
+}
+
+/// Startup handshake state. `Failed` is terminal: supervision sets it when
+/// the sidecar exits for any reason, so `start()` on a crashed or disposed
+/// host rejects instead of reporting a stale PID.
 #[derive(Clone)]
 enum ReadyState {
 	Pending,
@@ -394,7 +411,7 @@ struct HostCore {
 	started:        AtomicBool,
 	req_tx:         mpsc::UnboundedSender<Vec<u8>>,
 	req_rx:         Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
-	pending:        Mutex<HashMap<u32, Pending>>,
+	pending:        Mutex<PendingTable>,
 	process:        Mutex<Option<core_process::Process>>,
 	#[cfg_attr(
 		not(windows),
@@ -404,6 +421,11 @@ struct HostCore {
 	ready_tx:       watch::Sender<ReadyState>,
 	ready_rx:       watch::Receiver<ReadyState>,
 	stderr_tail:    Mutex<String>,
+	/// Cancelled to force-kill the sidecar tree: startup timeout, `dispose()`,
+	/// or the JS handle being dropped without `dispose()`.
+	shutdown:       CancellationToken,
+	/// Cancelled by `supervise` once the sidecar has exited and been reaped.
+	terminated:     CancellationToken,
 	/// Set (and reset) by `supervise` while the stderr pump is running.
 	/// `exec()` uses this to rendezvous with the pump task before draining
 	/// `stderr_tail`, so bytes the OS already delivered to the pipe by the
@@ -451,7 +473,14 @@ impl HostCore {
 			.current_id
 			.compare_exchange(id, 0, Ordering::Relaxed, Ordering::Relaxed)
 			.ok();
-		self.pending.lock().remove(&id);
+		self.pending.lock().entries.remove(&id);
+	}
+
+	/// Refuse new execs and fail every awaiting one (their `done_tx` drops).
+	fn close_pending(&self) {
+		let mut pending = self.pending.lock();
+		pending.closed = true;
+		pending.entries.clear();
 	}
 
 	/// Take and terminate the sidecar's Windows job object, reaping every
@@ -521,6 +550,15 @@ impl HostCore {
 				exec_id: 0,
 			});
 		}
+		if env.as_ref().is_some_and(|entries| {
+			entries
+				.keys()
+				.any(|key| key.is_empty() || key.contains('='))
+		}) {
+			return Err(Error::from_reason(
+				"PowerShell environment variable names must be non-empty and cannot contain '='",
+			));
+		}
 		// Ids start at 1: `current_id == 0` is the "nothing in flight" sentinel
 		// read by abort(), hence the double increment.
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
@@ -530,10 +568,13 @@ impl HostCore {
 		// entry's own sender, so the stderr forward below (after abandon) can
 		// still deliver.
 		let stderr_chunk_tx = chunk_tx.clone();
-		self
-			.pending
-			.lock()
-			.insert(id, Pending { chunk_tx, done_tx });
+		{
+			let mut pending = self.pending.lock();
+			if pending.closed {
+				return Err(Error::from_reason("PowerShell host has exited"));
+			}
+			pending.entries.insert(id, Pending { chunk_tx, done_tx });
+		}
 		self.current_id.store(id, Ordering::Relaxed);
 
 		// Clear BEFORE the exec frame is sent (not after): `self.send()` only
@@ -556,16 +597,6 @@ impl HostCore {
 		// frame are actually delivered) remains possible but is now a
 		// sub-millisecond race instead of a real "did the pump already
 		// capture this exec's own output" ordering bug.
-		if env.as_ref().is_some_and(|entries| {
-			entries
-				.keys()
-				.any(|key| key.is_empty() || key.contains('='))
-		}) {
-			self.abandon(id);
-			return Err(Error::from_reason(
-				"PowerShell environment variable names must be non-empty and cannot contain '='",
-			));
-		}
 
 		self.stderr_tail.lock().clear();
 		let exec = match encode_frame(&HostRequest::Exec {
@@ -828,9 +859,20 @@ fn ensure_bootstrap() -> Result<PathBuf> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Persistent PowerShell host backed by a long-lived `pwsh` sidecar.
+///
+/// Dropping the handle without [`PsHost::dispose`] force-kills the sidecar
+/// tree; callers must keep the handle reachable while a `run()` is pending.
 #[napi]
 pub struct PsHost {
 	core: Arc<HostCore>,
+}
+
+impl Drop for PsHost {
+	fn drop(&mut self) {
+		// `supervise` and in-flight runs retain `HostCore`, so waiting for the
+		// last Arc would keep an undisposed sidecar alive until process exit.
+		self.core.shutdown.cancel();
+	}
 }
 
 #[napi]
@@ -859,12 +901,14 @@ impl PsHost {
 			started: AtomicBool::new(false),
 			req_tx,
 			req_rx: Mutex::new(Some(req_rx)),
-			pending: Mutex::new(HashMap::new()),
+			pending: Mutex::new(PendingTable::default()),
 			process: Mutex::new(None),
 			job: Mutex::new(None),
 			ready_tx,
 			ready_rx,
 			stderr_tail: Mutex::new(String::new()),
+			shutdown: CancellationToken::new(),
+			terminated: CancellationToken::new(),
 			stderr_sync_tx: Mutex::new(None),
 			exec_lock: tokio::sync::Mutex::new(()),
 		});
@@ -874,6 +918,8 @@ impl PsHost {
 	/// Launch the sidecar (idempotent) and wait for its ready handshake.
 	///
 	/// Returns the sidecar PID, usable with `Enter-PSHostProcess` for debugging.
+	/// A host is one-shot: once its sidecar has exited (crash, startup
+	/// timeout, or [`PsHost::dispose`]), `start()` rejects; create a new host.
 	#[napi]
 	pub async fn start(&self) -> Result<i32> {
 		if !self.core.started.swap(true, Ordering::SeqCst) {
@@ -904,7 +950,13 @@ impl PsHost {
 		match waited {
 			Ok(Ok(pid)) => Ok(pid),
 			Ok(Err(err)) => Err(Error::from_reason(err)),
-			Err(_) => Err(Error::from_reason("PowerShell host startup timed out")),
+			Err(_) => {
+				// A bootstrap that never reports ready must not outlive the
+				// failed start: kill it and wait until it has been reaped.
+				self.core.shutdown.cancel();
+				self.core.terminated.cancelled().await;
+				Err(Error::from_reason("PowerShell host startup timed out"))
+			},
 		}
 	}
 
@@ -958,7 +1010,9 @@ impl PsHost {
 			let result = core
 				.exec(command, cwd, cmd_env, width, cancel, chunk_tx)
 				.await;
-			let _ = drain.await;
+			if let Some(drain) = drain {
+				let _ = drain.await;
+			}
 			result
 		})
 	}
@@ -979,9 +1033,11 @@ impl PsHost {
 	}
 
 	/// Gracefully shut down the sidecar: send `exit`, wait briefly, then
-	/// hard-kill the process tree if it has not exited.
+	/// hard-kill the process tree if it has not exited. The host is terminal
+	/// afterwards: `start()` and `run()` reject.
 	#[napi]
 	pub async fn dispose(&self) -> Result<()> {
+		self.core.close_pending();
 		let process = self.core.process.lock().clone();
 		// Snapshot the root's direct children AND process group id BEFORE
 		// requesting exit: on Unix/macOS, `Process::children()`/`group_id()`
@@ -995,8 +1051,7 @@ impl PsHost {
 		// we know, still alive.
 		let children_before_exit = process
 			.as_ref()
-			.map(core_process::Process::children)
-			.unwrap_or_default();
+			.map_or_else(Vec::new, core_process::Process::children);
 		let pgid_before_exit = process.as_ref().and_then(core_process::Process::group_id);
 		if let Ok(frame) = encode_frame(&HostRequest::Exit) {
 			let _ = self.core.send(frame);
@@ -1055,103 +1110,90 @@ impl PsHost {
 				}
 			}
 		}
-		self.core.pending.lock().clear();
+		self.core.shutdown.cancel();
 		Ok(())
 	}
 }
 
 /// Forward per-exec chunk text to the JS callback, coalescing bursts so the JS
 /// main thread never sees a multi-MB single call (mirrors
-/// `shell::bridge_chunks`). Always spawns and drains `rx` to completion, even
-/// with no callback: dropping `rx` outright (as an early `on_chunk?` return
-/// once did) leaves every subsequent `chunk_tx.send()` in `read_events`
-/// failing fast and silently discarded rather than blocking — tokio's
-/// bounded `mpsc::Sender::send` errors immediately once every `Receiver` is
-/// dropped, it does not wait for one. No hang either way, but the public
-/// `on_chunk` parameter is optional, and a caller of `PsHost::run()` without
-/// one deserves the same delivery semantics (chunks actually consumed, not
-/// merely fail-fast-discarded) rather than depending on `read_events`
-/// continuing to discard the `Result` it gets back from a dead channel.
+/// `shell::bridge_chunks`). Without a callback `rx` is dropped: producers'
+/// sends then fail immediately and the output is discarded.
 fn spawn_chunk_forwarder(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
-	mut rx: mpsc::Receiver<String>,
-) -> tokio::task::JoinHandle<()> {
-	tokio::spawn(async move {
-		let Some(on_chunk) = on_chunk else {
-			// No callback: drain and discard so the bounded channel never fills.
-			while rx.recv().await.is_some() {}
-			return;
-		};
-		const MAX_BATCH_BYTES: usize = 64 * 1024;
-		const INITIAL_BATCH_CAP: usize = 8 * 1024;
-		let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-		// A single PowerShell frame can be up to ~4M chars (multiple MB — see
-		// Write-Chunk's $sliceChars in pshost_bootstrap.ps1). Every item pulled
-		// here — the first (blocking recv) and every subsequent one coalesced
-		// via non-blocking try_recv — goes through the SAME oversized check
-		// before being appended to `batch`: an earlier version only checked
-		// the first item, so a small chunk followed by a queued multi-MB one
-		// still sailed through unsplit via the coalescing branch, silently
-		// breaking the "JS main thread never sees a multi-MB single call"
-		// contract for exactly the sequence codex flagged (small progress
-		// chunk immediately followed by one large output chunk).
-		'outer: while let Some(first) = rx.recv().await {
-			let mut pending = Some(first);
-			loop {
-				let item = match pending.take() {
-					Some(item) => item,
-					None => match rx.try_recv() {
-						Ok(item) => item,
-						Err(_) => break, // nothing more immediately available
-					},
-				};
+	rx: mpsc::Receiver<String>,
+) -> Option<tokio::task::JoinHandle<()>> {
+	let on_chunk = Arc::new(on_chunk?);
+	Some(tokio::spawn(forward_chunks(rx, move |payload| {
+		let on_chunk = Arc::clone(&on_chunk);
+		// `call_async` resolves only after the JS callback ran, so `run()`
+		// (which awaits this task) cannot resolve until every batch is
+		// delivered, and the JS consumption rate backpressures the bounded
+		// channel and the sidecar's stdout pipe. Err means the JS side is
+		// gone (env teardown): stop forwarding.
+		async move { on_chunk.call_async(Ok(payload)).await.is_ok() }
+	})))
+}
 
-				if item.len() > MAX_BATCH_BYTES {
-					// Flush whatever was already pending first, so delivery
-					// order is preserved across the split.
-					if !batch.is_empty() {
-						let flushed =
-							std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-						if on_chunk.call_async(Ok(flushed)).await.is_err() {
-							break 'outer;
-						}
-					}
-					let mut rest = item.as_str();
-					while !rest.is_empty() {
-						let split = floor_char_boundary(rest, MAX_BATCH_BYTES);
-						let (piece, remainder) = rest.split_at(split);
-						if on_chunk.call_async(Ok(piece.to_string())).await.is_err() {
-							break 'outer;
-						}
-						rest = remainder;
-					}
-					continue;
-				}
+/// Coalesce queued chunks into `deliver` calls of at most [`MAX_BATCH_BYTES`],
+/// preserving byte order. Oversized items (a PowerShell frame can carry
+/// several MB — see `Write-Chunk` in `pshost_bootstrap.ps1`) are split on UTF-8
+/// boundaries, whether they arrive first or are coalesced behind a smaller
+/// chunk. Stops when `rx` closes or `deliver` returns `false`.
+async fn forward_chunks<F, Fut>(mut rx: mpsc::Receiver<String>, mut deliver: F)
+where
+	F: FnMut(String) -> Fut,
+	Fut: Future<Output = bool>,
+{
+	let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
+	'outer: while let Some(first) = rx.recv().await {
+		let mut pending = Some(first);
+		loop {
+			let item = match pending.take() {
+				Some(item) => item,
+				None => match rx.try_recv() {
+					Ok(item) => item,
+					Err(_) => break, // nothing more immediately available
+				},
+			};
 
-				if !batch.is_empty() && batch.len() + item.len() > MAX_BATCH_BYTES {
+			if item.len() > MAX_BATCH_BYTES {
+				// Flush whatever was already pending first, so delivery order
+				// is preserved across the split.
+				if !batch.is_empty() {
 					let flushed =
 						std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-					if on_chunk.call_async(Ok(flushed)).await.is_err() {
+					if !deliver(flushed).await {
 						break 'outer;
 					}
 				}
-				batch.push_str(&item);
+				let mut rest = item.as_str();
+				while !rest.is_empty() {
+					let split = floor_char_boundary(rest, MAX_BATCH_BYTES);
+					let (piece, remainder) = rest.split_at(split);
+					if !deliver(piece.to_string()).await {
+						break 'outer;
+					}
+					rest = remainder;
+				}
+				continue;
 			}
-			if !batch.is_empty() {
-				let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-				// `call_async` resolves only after the JS callback ran, so
-				// `run()` (which awaits this task) cannot resolve until every
-				// batch is delivered — no truncated `sink.dump()` — and at
-				// most one batch sits in the napi queue, so the JS
-				// consumption rate backpressures the bounded channel and the
-				// sidecar's stdout pipe. Err means the JS side is gone (env
-				// teardown): stop forwarding.
-				if on_chunk.call_async(Ok(payload)).await.is_err() {
-					break;
+
+			if !batch.is_empty() && batch.len() + item.len() > MAX_BATCH_BYTES {
+				let flushed = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+				if !deliver(flushed).await {
+					break 'outer;
 				}
 			}
+			batch.push_str(&item);
 		}
-	})
+		if !batch.is_empty() {
+			let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+			if !deliver(payload).await {
+				break;
+			}
+		}
+	}
 }
 
 /// Largest byte index `<= index` that lands on a UTF-8 char boundary in `s`.
@@ -1170,8 +1212,26 @@ const fn floor_char_boundary(s: &str, index: usize) -> usize {
 }
 
 /// Supervisor: spawn the sidecar, wire stdio pumps, and route events until the
-/// process exits or its stdout closes.
+/// process exits, its stdout closes, or `shutdown` is cancelled. Always leaves
+/// the host terminal (`ReadyState::Failed`, pending closed) and signals
+/// `terminated` once the child has been reaped.
 async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+	run_sidecar(&core, req_rx).await;
+	core.close_pending();
+	core.ready_tx.send_if_modified(|state| {
+		if matches!(state, ReadyState::Failed(_)) {
+			return false;
+		}
+		*state = ReadyState::Failed("PowerShell host has exited".to_string());
+		true
+	});
+	core.terminated.cancel();
+}
+
+async fn run_sidecar(core: &Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+	if core.shutdown.is_cancelled() {
+		return;
+	}
 	let mut command = Command::new(&core.config.shell_path);
 	command
 		.arg("-NoLogo")
@@ -1228,12 +1288,26 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 	let stderr = child.stderr.take().expect("child stderr piped");
 
 	let writer = tokio::spawn(pump_writer(stdin, req_rx));
-	let stderr_core = Arc::clone(&core);
+	let stderr_core = Arc::clone(core);
 	let (stderr_sync_tx, stderr_sync_rx) = mpsc::unbounded_channel();
 	*core.stderr_sync_tx.lock() = Some(stderr_sync_tx);
 	let stderr_pump = tokio::spawn(pump_stderr(stderr, stderr_core, stderr_sync_rx));
 
-	read_events(stdout, &core).await;
+	tokio::select! {
+		() = read_events(stdout, core) => {},
+		() = core.shutdown.cancelled() => {
+			// Startup timeout, dispose, or an undisposed handle: reap the whole
+			// tree, not just the root, exactly like the other force-kill paths.
+			let process = core.process.lock().clone();
+			if let Some(process) = process {
+				let _ = process
+					.terminate_tree(true, 0, 5_000, core_cancel::CancelToken::default())
+					.await;
+			}
+			core.kill_windows_job();
+			let _ = child.start_kill();
+		},
+	}
 
 	// stdout closed: the host is gone. Surface a startup failure if we never
 	// became ready, and fail every awaiting exec so callers don't hang.
@@ -1246,7 +1320,7 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 		};
 		core.ready_tx.send_replace(ReadyState::Failed(detail));
 	}
-	core.pending.lock().clear();
+	core.close_pending();
 
 	// A ready host that died mid-command may still have stderr bytes sitting
 	// unread in the OS pipe buffer -- exec()'s stderr-forward path (woken by
@@ -1381,6 +1455,7 @@ async fn read_events(stdout: tokio::process::ChildStdout, core: &Arc<HostCore>) 
 				let chunk_tx = core
 					.pending
 					.lock()
+					.entries
 					.get(&id)
 					.map(|pending| pending.chunk_tx.clone());
 				if let Some(chunk_tx) = chunk_tx {
@@ -1388,7 +1463,7 @@ async fn read_events(stdout: tokio::process::ChildStdout, core: &Arc<HostCore>) 
 				}
 			},
 			HostEvent::Done { id, exit_code, had_errors, stopped } => {
-				let pending = core.pending.lock().remove(&id);
+				let pending = core.pending.lock().entries.remove(&id);
 				if let Some(pending) = pending {
 					let _ = pending
 						.done_tx
@@ -1405,7 +1480,7 @@ mod tests {
 
 	use tokio::sync::mpsc;
 
-	use super::{CHUNK_QUEUE_CHUNKS, PsHost, PsHostOptions, spawn_chunk_forwarder};
+	use super::{CHUNK_QUEUE_CHUNKS, MAX_BATCH_BYTES, PsHost, PsHostOptions, forward_chunks};
 	use crate::task;
 
 	/// Skip the suite when no `pwsh` is reachable (CI without PowerShell).
@@ -1454,43 +1529,6 @@ mod tests {
 			.expect("exec returns a result");
 		let output = collector.await.expect("chunk collector joins");
 		(output.trim().to_string(), result)
-	}
-
-	/// `on_chunk: None` must still drain (and discard) the bounded channel — no
-	/// pwsh required, this exercises spawn_chunk_forwarder() directly against a
-	/// synthetic producer standing in for read_events(). The review finding
-	/// this guards against claimed the pre-fix None-early-return would hang
-	/// `chunk_tx.send()` once the bounded channel filled; empirically that
-	/// specific mechanism did not reproduce here (tokio's bounded
-	/// `mpsc::Sender::send` fails FAST, not blocks, once every `Receiver` is
-	/// dropped — verified by simulating the pre-fix early-return and observing
-	/// an immediate `SendError` on the very first send, not a timeout). What
-	/// the pre-fix code actually did: `rx` dropped the instant
-	/// spawn_chunk_forwarder returned `None`, so read_events's
-	/// `let _ = chunk_tx.send(text).await;` silently discarded every chunk via
-	/// a failed send from the first call. No hang, but a caller of the public
-	/// PsHost.run() API without a callback got zero visibility into command
-	/// output — the fix makes that explicit (drain-and-discard) rather than
-	/// incidental, so it stays correct if read_events ever stops discarding
-	/// the send Result.
-	#[tokio::test]
-	async fn forwarder_drains_bounded_channel_with_no_callback() {
-		let (tx, rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
-		let drain = spawn_chunk_forwarder(None, rx);
-
-		let producer = tokio::time::timeout(Duration::from_secs(5), async move {
-			// Well past capacity: proves sends succeed (and are drained) rather
-			// than relying on discarded SendErrors from a dropped receiver.
-			for i in 0..(CHUNK_QUEUE_CHUNKS * 4) {
-				tx.send(format!("chunk-{i}")).await.expect("receiver alive");
-			}
-			// Dropping tx closes the channel, letting the drain loop exit.
-		})
-		.await;
-		assert!(producer.is_ok(), "producer must not block on an undrained bounded channel");
-
-		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
-		assert!(drained.is_ok(), "forwarder task must exit once the channel closes");
 	}
 
 	/// A previous command's fire-and-forget child (started without waiting
@@ -1590,8 +1628,8 @@ mod tests {
 	/// `floor_char_boundary` must never slice through a multi-byte UTF-8
 	/// codepoint (which panics `str::split_at`), and splitting on its result
 	/// repeatedly must reconstruct the original string exactly (no lost or
-	/// duplicated bytes) -- the property `spawn_chunk_forwarder`'s oversized-
-	/// chunk split depends on.
+	/// duplicated bytes) -- the property `forward_chunks`'s oversized-chunk
+	/// split depends on.
 	#[test]
 	fn floor_char_boundary_splits_without_corrupting_utf8() {
 		use super::floor_char_boundary;
@@ -1719,28 +1757,145 @@ mod tests {
 		);
 	}
 
-	/// A single oversized item (e.g. PowerShell's up-to-4M-char frames) must
-	/// be SPLIT into `<= MAX_BATCH_BYTES`-ish pieces before reaching the JS
-	/// callback, not forwarded whole. `call_async` needs a real N-API `Env`
-	/// (can't construct a `ThreadsafeFunction` in a plain unit test), so this
-	/// exercises the split path's producer/consumer plumbing around
-	/// `spawn_chunk_forwarder(None, ...)` -- proving an oversized single send
-	/// still completes promptly and every byte is drained -- while the actual
-	/// per-call payload-size bound is verified end-to-end from JS (host.run()
-	/// smoke test, see PR discussion).
+	/// A small chunk followed by queued oversized ones (PowerShell frames can
+	/// carry several MB) must reach the consumer as `<= MAX_BATCH_BYTES`
+	/// calls, in order, without losing or splitting through multi-byte chars.
 	#[tokio::test]
-	async fn forwarder_accepts_an_oversized_single_chunk() {
+	async fn forwarder_splits_oversized_chunks_in_order() {
 		let (tx, rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
-		let drain = spawn_chunk_forwarder(None, rx);
-
-		// Larger than MAX_BATCH_BYTES (64KiB) by construction.
-		let huge = "x".repeat(200 * 1024);
-		let sent = tokio::time::timeout(Duration::from_secs(5), tx.send(huge)).await;
-		assert!(sent.is_ok() && sent.unwrap().is_ok(), "oversized single send completes");
+		// Queue everything before the forwarder runs so the oversized items
+		// arrive through the coalescing `try_recv` path, not only `recv`.
+		let inputs = [
+			"head".to_string(),
+			"é".repeat(100 * 1024),
+			"mid".to_string(),
+			"x".repeat(150 * 1024),
+			"tail".to_string(),
+		];
+		for input in &inputs {
+			tx.send(input.clone()).await.expect("queue chunk");
+		}
 		drop(tx);
 
-		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
-		assert!(drained.is_ok(), "forwarder task must exit after draining the oversized item");
+		let delivered = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+		let sink = std::sync::Arc::clone(&delivered);
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			forward_chunks(rx, move |payload| {
+				sink.lock().push(payload);
+				async { true }
+			}),
+		)
+		.await
+		.expect("forwarder finishes once the channel closes");
+
+		let delivered = delivered.lock();
+		assert!(delivered.len() > 3, "oversized chunks were split: {} calls", delivered.len());
+		for payload in delivered.iter() {
+			assert!(
+				payload.len() <= MAX_BATCH_BYTES,
+				"payload of {} bytes exceeds the cap",
+				payload.len()
+			);
+		}
+		assert_eq!(delivered.concat(), inputs.concat(), "bytes arrive complete and in order");
+	}
+
+	/// A consumer that goes away (JS env teardown) stops forwarding instead of
+	/// pushing the rest of the backlog into a dead callback.
+	#[tokio::test]
+	async fn forwarder_stops_when_the_consumer_is_gone() {
+		let (tx, rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
+		tx.send("x".repeat(MAX_BATCH_BYTES * 4))
+			.await
+			.expect("queue chunk");
+		drop(tx);
+
+		let mut calls = 0;
+		forward_chunks(rx, |_| {
+			calls += 1;
+			async { false }
+		})
+		.await;
+		assert_eq!(calls, 1, "no delivery after the consumer reported failure");
+	}
+
+	/// Startup that never reaches `ready` within the timeout must kill and
+	/// reap the sidecar, and leave the host terminal.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn startup_timeout_reaps_the_sidecar() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = PsHost::new(PsHostOptions {
+			shell_path:         None,
+			cwd:                None,
+			session_env:        None,
+			parent_pid:         Some(std::process::id() as i32),
+			history_depth:      None,
+			startup_timeout_ms: Some(1),
+		})
+		.expect("construct PsHost");
+		let err = host
+			.start()
+			.await
+			.expect_err("1ms is shorter than pwsh startup");
+		assert!(err.reason.contains("timed out"), "{}", err.reason);
+		assert!(!host.alive(), "timed-out sidecar is reaped before start() returns");
+		assert!(host.start().await.is_err(), "a timed-out host stays terminal");
+	}
+
+	/// `start()` after `dispose()` must reject rather than hand back the old,
+	/// dead PID; `run()` must reject instead of waiting on a dead sidecar.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn disposed_host_rejects_start_and_run() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+		host.dispose().await.expect("dispose");
+		host.core.terminated.cancelled().await;
+
+		assert!(host.start().await.is_err(), "start() after dispose rejects");
+		let (chunk_tx, _chunk_rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
+		let res = tokio::time::timeout(
+			Duration::from_secs(5),
+			host
+				.core
+				.exec("1".to_string(), None, None, 200, task::CancelToken::default(), chunk_tx),
+		)
+		.await
+		.expect("run after dispose does not hang");
+		assert!(res.is_err(), "run after dispose rejects");
+	}
+
+	/// Dropping the handle without `dispose()` must not leak the sidecar:
+	/// `supervise` keeps `HostCore` alive, so only the drop hook can stop it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dropping_an_undisposed_host_kills_the_sidecar() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+		let core = std::sync::Arc::clone(&host.core);
+		let process = core.process.lock().clone().expect("sidecar process");
+		drop(host);
+
+		tokio::time::timeout(Duration::from_secs(10), core.terminated.cancelled())
+			.await
+			.expect("supervision ends after the handle drops");
+		assert!(
+			!matches!(process.status(), pi_shell::process::ProcessStatus::Running),
+			"sidecar is gone after the handle drops"
+		);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -1787,7 +1942,8 @@ mod tests {
 		assert_eq!(res.exit_code, Some(7), "native exit code propagates");
 
 		// Repeating the identical native exit must still be attributed to this
-		// invocation (LASTEXITCODE write tracking; a value change alone can't see it).
+		// invocation (LASTEXITCODE write tracking; a value change alone can't see
+		// it).
 		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, Some(7), "repeated identical native exit is reported");
 
@@ -1957,6 +2113,23 @@ mod tests {
 			)
 			.await;
 		assert!(res.is_err(), "host death mid-exec surfaces as an error");
+
+		// Once supervision has observed the death, the host is terminal: a
+		// new run rejects immediately and start() does not report the old PID.
+		tokio::time::timeout(Duration::from_secs(10), host.core.terminated.cancelled())
+			.await
+			.expect("supervision ends after the sidecar exits");
+		let (chunk_tx, _chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		let res = tokio::time::timeout(
+			Duration::from_secs(5),
+			host
+				.core
+				.exec("1".to_string(), None, None, 200, task::CancelToken::default(), chunk_tx),
+		)
+		.await
+		.expect("run on a dead host does not hang");
+		assert!(res.is_err(), "run on a dead host rejects");
+		assert!(host.start().await.is_err(), "start() on a dead host rejects");
 	}
 
 	/// A ready host that dies mid-command right after an inherited child
@@ -2210,7 +2383,8 @@ mod tests {
 		let host = test_host();
 		host.start().await.expect("host starts");
 
-		// Write-Host -> Information stream (previously dropped); surfaced verbatim.
+		// Write-Host -> Information stream (previously dropped); surfaced
+		// verbatim.
 		let (out, res) = run_cmd(&host, "Write-Host 'host-line'", task::CancelToken::default()).await;
 		assert!(out.contains("host-line"), "Write-Host output captured: {out:?}");
 		assert!(!res.had_errors, "Write-Host is not an error");
