@@ -82,13 +82,43 @@ pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 	true
 }
 
+/// Where libc looks for locale data that is not in the system archive:
+/// `LOCPATH` on glibc and musl, `PATH_LOCALE` on the BSDs. Both are read from
+/// the *process* environment, which the shell's exported variables never
+/// reach (see [`Host::var`]), so a locale only the shell can see has to be
+/// resolved somewhere that does see them.
+#[cfg(unix)]
+const LOCALE_PATH_VARS: [&str; 2] = ["LOCPATH", "PATH_LOCALE"];
+
 /// The codeset `nl_langinfo(CODESET)` reports once `locale` is loaded for
 /// `LC_CTYPE`, in libc's own spelling: `ISO-8859-1` for an alias like a
 /// generated bare `en_US`, whose name carries no codeset at all. `None` when
 /// the system cannot load the name, which is what `setlocale` does there —
 /// it fails and leaves the C locale in place.
+///
+/// `env` is the shell's environment. While its locale search path matches the
+/// process's, the answer comes from `newlocale` here; when the shell exports
+/// a different one, it comes from `locale charmap` run with that environment,
+/// because libc takes the search path from the environment only (`newlocale`
+/// and `setlocale` both refuse a path-shaped locale name) and setting it
+/// around the call would be a process-wide write other threads can read.
 #[cfg(unix)]
-pub(crate) fn loaded_codeset(locale: &str) -> Option<String> {
+pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+	let shell_path = LOCALE_PATH_VARS.map(|name| env(name).filter(|value| !value.is_empty()));
+	let ours_differs = LOCALE_PATH_VARS.iter().zip(&shell_path).any(|(name, shell)| {
+		*shell != std::env::var(name).ok().filter(|value| !value.is_empty())
+	});
+	if ours_differs {
+		if let Some(codeset) = codeset_from_locale_command(locale, &shell_path) {
+			return Some(codeset);
+		}
+	}
+	loaded_codeset_here(locale)
+}
+
+/// [`loaded_codeset`] through this process's own locale data.
+#[cfg(unix)]
+fn loaded_codeset_here(locale: &str) -> Option<String> {
 	let locale = std::ffi::CString::new(locale).ok()?;
 	// SAFETY: `locale` is a valid NUL-terminated string; the locale object is
 	// used only for this query and freed before returning, and the codeset
@@ -104,6 +134,28 @@ pub(crate) fn loaded_codeset(locale: &str) -> Option<String> {
 		libc::freelocale(handle);
 		codeset
 	}
+}
+
+/// `locale charmap` under the shell's locale environment: the POSIX way to ask
+/// libc for the codeset of a locale an environment makes visible. A locale it
+/// cannot load leaves the C locale, whose charmap it prints, which is the
+/// answer that locale deserves. `None` when no `locale` command answers.
+#[cfg(unix)]
+fn codeset_from_locale_command(locale: &str, path: &[Option<String>; 2]) -> Option<String> {
+	let mut command = std::process::Command::new("locale");
+	command.arg("charmap").env_clear().env("LC_ALL", locale);
+	for (name, value) in LOCALE_PATH_VARS.iter().zip(path) {
+		if let Some(value) = value {
+			command.env(name, value);
+		}
+	}
+	let output = command.output().ok()?;
+	if !output.status.success() {
+		return None;
+	}
+	let codeset = String::from_utf8(output.stdout).ok()?;
+	let codeset = codeset.lines().next()?.trim();
+	(!codeset.is_empty()).then(|| codeset.to_owned())
 }
 
 /// Single-byte decimal point and thousands separator of a numeric locale.

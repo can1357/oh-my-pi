@@ -49,7 +49,7 @@ pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> String {
 		return ascii_codeset().to_owned();
 	};
 	#[cfg(unix)]
-	return crate::locale::loaded_codeset(&value).unwrap_or_else(|| ascii_codeset().to_owned());
+	return crate::locale::loaded_codeset(&value, env).unwrap_or_else(|| ascii_codeset().to_owned());
 	#[cfg(not(unix))]
 	{
 		if value == "C" || value == "POSIX" {

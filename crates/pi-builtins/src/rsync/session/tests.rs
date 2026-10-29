@@ -120,6 +120,37 @@ fn option_errors_escape_unless_8_bit_output_was_parsed() {
 	assert!(cap.err().starts_with("rsync: --bogus-ün: unknown option\n"), "{}", cap.err());
 }
 
+/// A locale only the shell knows about: generated with `localedef` into a
+/// temporary directory, reachable through `LOCPATH`, which libc reads from the
+/// process environment the builtin does not share with its shell. The locale
+/// is ISO-8859-1, which represents every byte, so rsync 3.5.1 under it prints
+/// a non-ASCII name's bytes (measured: `env -i LOCPATH=… LC_ALL=en_US rsync
+/// -ai "src/ünï cødé.txt" dst/` prints them), and the builtin must too rather
+/// than fall back to the C locale's escaping.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_locale_only_the_shell_exports_is_honoured() {
+	let dir = tempfile::tempdir().unwrap();
+	let locales = dir.path().join("locales");
+	fs::create_dir_all(locales.join("en_US")).unwrap();
+	let built = Command::new("localedef")
+		.args(["-i", "en_US", "-f", "ISO-8859-1"])
+		.arg(locales.join("en_US"))
+		.output();
+	let has_locale_command = Command::new("locale").arg("charmap").output().is_ok_and(|o| o.status.success());
+	// Hosts without locale sources or the POSIX `locale` command cannot host
+	// this scenario at all; nothing to compare there.
+	if !built.is_ok_and(|o| o.status.success()) || !has_locale_command {
+		return;
+	}
+	fs::create_dir_all(dir.path().join("src")).unwrap();
+	fs::write(dir.path().join("src/ünï.txt"), b"x\n").unwrap();
+	let env = [("LC_ALL", "en_US"), ("LOCPATH", locales.to_str().unwrap())];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst/"], "", dir.path(), &env);
+	assert_eq!(code, 0, "{}", cap.err());
+	assert!(cap.out().contains("ünï.txt"), "{}", cap.out());
+}
+
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
 #[test]
 fn too_old_protocol_is_a_mismatch() {
