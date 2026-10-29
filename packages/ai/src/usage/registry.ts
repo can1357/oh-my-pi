@@ -13,7 +13,7 @@ import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { museCodeUsageProvider } from "./muse-code";
-import { minimaxCodeUsageProvider } from "./minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./openai-codex";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./opencode-go";
@@ -31,6 +31,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
 	minimaxCodeUsageProvider,
+	minimaxCodeCnUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
 	googleGeminiCliUsageProvider,
