@@ -13,6 +13,7 @@
  */
 import * as path from "node:path";
 import {
+	agentPauseGate,
 	type AgentTelemetry,
 	type AgentTelemetryConfig,
 	instrumentedCompleteSimple,
@@ -158,8 +159,14 @@ async function describeImage(
 	telemetry: AgentTelemetry | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
-	if (deps.costGate?.check()) return null;
 	try {
+		// The caller holds before this helper, but reaching here crosses the
+		// api-key resolution and the image's save — awaits long enough for a
+		// `/pause` to land (an OAuth refresh, a slow disk). This call is paid,
+		// so it holds at the gate itself rather than following an older test.
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+		signal?.throwIfAborted();
+		if (deps.costGate?.check()) return null;
 		const response = await instrumentedCompleteSimple(
 			visionModel,
 			{
