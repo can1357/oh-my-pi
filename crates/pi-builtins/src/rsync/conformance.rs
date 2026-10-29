@@ -25,10 +25,13 @@
 //! them; the failure report names how many distinct reference outcomes were
 //! seen and diffs ours against the first.
 //!
-//! The reference runs with an empty environment (plus `TZ` when set, so
-//! local-time output uses one zone on both sides), matching the test host's
+//! The reference client runs with an empty environment (plus `TZ` when set, so
+//! local-time output uses one zone on both sides, and [`UTF8_LOCALE`], so both
+//! sides print non-ASCII file names the same way), matching the test host's
 //! empty shell environment; the fake remote shell, the reference server, and
-//! the password files are named by the same absolute paths on both sides.
+//! the password files are named by the same absolute paths on both sides. The
+//! reference daemon keeps the bare empty environment: one is started per side
+//! from the same binary, so whatever it prints, it prints alike for both.
 //! The suite skips itself when no rsync 3.5.1 is installed. Set
 //! `RSYNC_CONFORMANCE_FILTER=<substring>` to run only matching scenarios.
 #![cfg(unix)]
@@ -104,6 +107,21 @@ struct Outcome {
 	tree: Snapshot,
 }
 
+/// The locale the reference client runs under — and, through the fake remote
+/// shell, both sides' remote servers: the C locale with a UTF-8 charmap, in
+/// libc's spelling (glibc and musl: `C.UTF-8`; Darwin: `UTF-8`).
+///
+/// A cleared environment leaves the reference in the C locale, where no byte
+/// above 0x7F is printable, so it escapes every one of them in the names it
+/// prints (`ünï cødé.txt` becomes `\#303\#274n\#303\#257 c\#303\#270d\#303\#251.txt`),
+/// while the builtin prints file names as the UTF-8 text they are. Naming one
+/// fixed locale keeps the run hermetic — nothing ambient reaches either side —
+/// while pinning the one setting they disagreed about. The builtin reads
+/// `LC_ALL`/`LC_CTYPE`/`LANG` in one other place, the default charset of
+/// `--iconv` (`iconv::locale_charset`), which no scenario exercises; one that
+/// did would have to give the builtin the same locale rather than assume it.
+const UTF8_LOCALE: &str = if cfg!(target_os = "macos") { "UTF-8" } else { "C.UTF-8" };
+
 /// The reference rsync 3.5.1 binary, when one is installed. Other versions
 /// are skipped: the builtin's output is byte-for-byte 3.5.1's.
 fn reference() -> Option<PathBuf> {
@@ -136,9 +154,14 @@ impl Bench {
 		fs::create_dir_all(&bin).unwrap();
 		// Like ssh, the fake remote shell drops the host name and hands the
 		// rest to a shell as one command line (so `--old-args` word splitting
-		// happens remotely). The remote command runs in the client's cwd.
+		// happens remotely). The remote command runs in the client's cwd. It
+		// sets the locale itself because each client hands its own environment
+		// down: the builtin's remote side starts from an empty one, the
+		// reference's from UTF8_LOCALE, and a server-side message naming a
+		// non-ASCII file would otherwise be escaped on one side only.
 		let rsh = bin.join("fakersh");
-		fs::write(&rsh, "#!/bin/sh\nshift\nexec /bin/sh -c \"$*\"\n").unwrap();
+		let script = format!("#!/bin/sh\nshift\nLC_ALL={UTF8_LOCALE}\nexport LC_ALL\nexec /bin/sh -c \"$*\"\n");
+		fs::write(&rsh, script).unwrap();
 		fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
 		for (name, password) in [("pw", "sekrit\n"), ("badpw", "wrong\n")] {
 			let file = bin.join(name);
@@ -185,7 +208,7 @@ impl Bench {
 			}
 			Client::Reference => {
 				let mut cmd = Command::new(&self.reference);
-				cmd.args(&argv).current_dir(&w).env_clear();
+				cmd.args(&argv).current_dir(&w).env_clear().env("LC_ALL", UTF8_LOCALE);
 				if let Some(tz) = std::env::var_os("TZ") {
 					cmd.env("TZ", tz);
 				}
