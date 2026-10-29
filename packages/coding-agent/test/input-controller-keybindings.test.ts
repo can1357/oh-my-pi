@@ -253,6 +253,7 @@ async function createContext() {
 		showError,
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
+		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -745,6 +746,258 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).toHaveBeenCalledWith("queue full");
 		expect(editor.getText()).toBe("queued during stream");
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
+	});
+
+	function withCompactionQueue(ctx: InteractiveModeContext) {
+		const handleCompactCommand = vi.fn(async () => "ok" as const);
+		const queueCompactionMessage = vi.fn((text: string, mode: "steer" | "followUp") => {
+			ctx.compactionQueuedMessages.push({ text, mode });
+		});
+		Object.assign(ctx, {
+			compactionQueuedMessages: [],
+			yieldCompaction: undefined,
+			handleCompactCommand,
+			queueCompactionMessage,
+			runYieldCompaction: vi.fn(),
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getLeafId: () => "entry-7",
+				getBranch: () => [{ id: "entry-7" }],
+			},
+		});
+		return { handleCompactCommand, queueCompactionMessage };
+	}
+
+	it("queues a follow-up /compact for the next yield instead of interrupting the run", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const { handleCompactCommand, queueCompactionMessage } = withCompactionQueue(ctx);
+		// Session queues popped like `AgentSession.popLastQueuedMessage`: steering first, then follow-ups.
+		const steering: string[] = [];
+		const followUp = ["sent before the compaction"];
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			getQueuedMessages: () => ({ steering: [...steering], followUp: [...followUp], liveSteered: 0 }),
+			popLastQueuedMessage: () => {
+				const text = steering.pop() ?? followUp.pop();
+				return text === undefined ? undefined : { text };
+			},
+		});
+		const controller = new InputController(ctx);
+
+		editor.setText("/compact keep the API notes");
+		await controller.handleFollowUp();
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(spies.showError).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toEqual({
+			text: "/compact keep the API notes",
+			sessionId: "session-1",
+			leafId: "entry-7",
+			instructions: "keep the API notes",
+			mode: undefined,
+		});
+
+		// A follow-up sent after the queued compaction waits for it.
+		editor.setText("now continue");
+		await controller.handleFollowUp();
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(queueCompactionMessage).toHaveBeenCalledWith("now continue", "followUp", undefined, {
+			preserveDraft: true,
+		});
+
+		// A steer sent after the compaction lands before the yield.
+		steering.push("steer mid-run");
+
+		// Dequeue: the steer, then the held follow-up, then the request, then what was queued before it.
+		const restored: string[] = [];
+		for (let i = 0; i < 4; i++) {
+			editor.setText("");
+			controller.handleDequeue();
+			restored.push(editor.getText());
+		}
+		expect(restored).toEqual([
+			"steer mid-run",
+			"now continue",
+			"/compact keep the API notes",
+			"sent before the compaction",
+		]);
+		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
+	it("still compacts at once for a follow-up /compact while idle", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const { handleCompactCommand } = withCompactionQueue(ctx);
+		editor.setText("/compact");
+
+		await new InputController(ctx).handleFollowUp();
+
+		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, undefined);
+		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
+	it("keeps submission order when an input hook delays a follow-up /compact", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const { queueCompactionMessage } = withCompactionQueue(ctx);
+		const compactHook = Promise.withResolvers<void>();
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				// Slow for the `/compact`, instant for the message sent after it.
+				emitInput: async (text: string) => {
+					if (text.startsWith("/compact")) await compactHook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+
+		editor.setText("/compact");
+		const compact = controller.handleFollowUp();
+		editor.setText("after the compaction");
+		const message = controller.handleFollowUp();
+		compactHook.resolve();
+		await Promise.all([compact, message]);
+
+		expect(ctx.yieldCompaction?.text).toBe("/compact");
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(queueCompactionMessage).toHaveBeenCalledWith("after the compaction", "followUp", undefined, {
+			preserveDraft: true,
+		});
+	});
+
+	it("holds an Enter queue shorthand behind a follow-up /compact whose input hook is slower", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		const compactHook = Promise.withResolvers<void>();
+		const followUp = vi.fn(async () => {});
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				emitInput: async (text: string) => {
+					if (text.startsWith("/compact")) await compactHook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		editor.setText("/compact");
+		const compact = controller.handleFollowUp();
+		const queued = editor.onSubmit?.("=> later");
+		compactHook.resolve();
+		await Promise.all([compact, queued]);
+
+		expect(ctx.yieldCompaction?.text).toBe("/compact");
+		expect(followUp).not.toHaveBeenCalled();
+		expect(ctx.compactionQueuedMessages.map(entry => entry.text)).toEqual(["later"]);
+	});
+
+	it("returns a follow-up /compact to the editor when the conversation changed during its input hook", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const { handleCompactCommand } = withCompactionQueue(ctx);
+		const showWarning = vi.fn();
+		const sessionManager = {
+			sessionId: "session-1",
+			getSessionId: () => sessionManager.sessionId,
+			getLeafId: () => null,
+		};
+		Object.assign(ctx, { showWarning, sessionManager });
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				// The user resumes another session while the hook runs.
+				emitInput: async () => {
+					sessionManager.sessionId = "session-2";
+					return undefined;
+				},
+			},
+		});
+
+		editor.setText("/compact");
+		await new InputController(ctx).handleFollowUp();
+
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(editor.getText()).toBe("/compact");
+		expect(showWarning).toHaveBeenCalledTimes(1);
+	});
+
+	it("hands input queued during a compaction back to the editor on a session reset", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		ctx.compactionQueuedMessages.push({ text: "typed while compacting", mode: "followUp" });
+
+		new InputController(ctx).restoreCompactionQueueToEditor();
+
+		expect(editor.getText()).toBe("typed while compacting");
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+	});
+
+	it("counts a follow-up as dispatched once the session admits it", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		Object.assign(ctx.session, { isStreaming: true });
+		// Queued follow-ups resolve with the run; admission is what a queued `/compact` waits for.
+		spies.prompt.mockImplementation(() => new Promise(() => {}));
+		const controller = new InputController(ctx);
+
+		editor.setText("sent before the compaction");
+		void controller.handleFollowUp();
+		await controller.waitForSubmissionDispatches();
+
+		expect(spies.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("tracks an Enter submission until it reaches the session", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		const hook = Promise.withResolvers<void>();
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp: vi.fn(async () => {}),
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				emitInput: async () => {
+					await hook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		const submitted = editor.onSubmit?.("=> sent with Enter");
+		let dispatched = false;
+		const waiting = controller.waitForSubmissionDispatches().then(() => {
+			dispatched = true;
+		});
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(dispatched).toBe(false);
+
+		hook.resolve();
+		await Promise.all([submitted, waiting]);
+		expect(dispatched).toBe(true);
+	});
+
+	it("returns a request stranded by a switch to the editor before routing new input", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		withCompactionQueue(ctx);
+		Object.assign(ctx.session, { isStreaming: true, isSessionTransitioning: false });
+		// Queued in another conversation; an extension switch replayed nothing to release it.
+		ctx.yieldCompaction = { text: "/compact", sessionId: "previous-session", leafId: null };
+
+		editor.setText("for the new conversation");
+		await new InputController(ctx).handleFollowUp();
+
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(spies.prompt).toHaveBeenCalledWith("for the new conversation", {
+			streamingBehavior: "followUp",
+			images: undefined,
+		});
+		expect(editor.getText()).toBe("/compact");
 	});
 
 	it("continue shortcuts submit a resume instead of a prompt", async () => {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 - Add a declarative YAML workload runner for ordered tasks and templated inputs. ([#12226](https://github.com/can1357/oh-my-pi/pull/12226) by [@Xytronix](https://github.com/Xytronix)).
 
 ### Fixed
