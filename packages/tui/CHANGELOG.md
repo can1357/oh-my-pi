@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `matchesKey` now accepts the xterm `modifyOtherKeys` encoding (`CSI 27;mod;code~`) that `parseKey` already decodes, so the two agree on the same bytes. Two forms tmux does not emit still read differently in the two matchers: a shifted letter written with its shifted codepoint (`CSI 27;2;65~`), and wire modifiers carrying hyper or meta.
+- The `/pause` screen now paints the frame that drops it before it opens the gate, and releases the gate however the teardown ends. Hiding the overlay only *schedules* a frame, while resuming wakes every parked agent loop in the same tick, so the terminal could keep the full-screen PAUSED frame while the resumed session was already working.
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
@@ -18,8 +23,6 @@
 - Fixed Esc-Esc rewind in Tern selecting interrupted turns with no visible output instead of the last displayed turn.
 - Fixed streamed code blocks losing lines that scrolled off screen before the closing fence arrived; completed lines now remain available in scrollback. ([#17333](https://github.com/can1357/oh-my-pi/pull/17333) by [@gzkGit777](https://github.com/gzkGit777))
 - Fixed the LSP diagnostics view showing "No issues" for files whose language server had not reported yet; they now show as unverified ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- `matchesKey` now accepts the xterm `modifyOtherKeys` encoding (`CSI 27;mod;code~`) that `parseKey` already decodes, so the two agree on the same bytes. Two forms tmux does not emit still read differently in the two matchers: a shifted letter written with its shifted codepoint (`CSI 27;2;65~`), and wire modifiers carrying hyper or meta.
-- The `/pause` screen now paints the frame that drops it before it opens the gate, and releases the gate however the teardown ends. Hiding the overlay only *schedules* a frame, while resuming wakes every parked agent loop in the same tick, so the terminal kept the full-screen PAUSED frame until the renderer got a turn — measured at 0.10–0.14 s on an idle row-rendered pane, and as long as the resumed loops keep the event loop busy on any pane.
 
 ## [18.13.3] - 2026-10-28
 

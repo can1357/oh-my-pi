@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/pause` now stops automatic session titles, composer predictions and idle recaps as well. The gate is polled inside the agent loop, and those requests run outside it, so a paused session still called the provider. They now wait for the resume instead of declining, so a paused session is still named once it resumes.
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
@@ -76,7 +80,6 @@
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
-- `/pause` now stops automatic session titles, composer predictions and idle recaps as well. The gate is polled inside the agent loop, and those requests run outside it, so a paused session still called the provider. They now wait for the resume instead of declining, so a paused session is still named once it resumes.
 - Fixed `pr://` metadata and diffs staying stale after successful `git push` calls through `bash` ([#17183](https://github.com/can1357/oh-my-pi/pull/17183) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
 - Fixed `wait` treating a peer's "on it" acknowledgement as its answer: peers send interim notes to `agent://<id>?progress`, and the requester keeps waiting for the real reply even while the peer idles ([#17176](https://github.com/can1357/oh-my-pi/pull/17176) by [@alphastorm](https://github.com/alphastorm))
