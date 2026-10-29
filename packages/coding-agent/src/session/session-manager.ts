@@ -28,7 +28,6 @@ import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
-import { artifactCopyMode } from "./artifact-link-policy";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -170,60 +169,88 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }
 
+/** How many of the biggest entries a tally names, so one log line stays one line. */
+const ARTIFACT_COPY_LARGEST = 3;
+
 /**
- * Reproduce the artifacts directory `from` at `to`, hard-linking every entry
- * {@link artifactCopyMode} proves write-once and copying the rest. Never
- * overwrites: an entry already at the destination (a session that moved and
- * kept working) wins over the source's.
+ * What one reproduction of a session's artifacts directory cost.
  *
- * `relative` is the entry's path below the artifacts root, which is what the
- * policy reads: the depth rule lives there, not in this walk.
+ * A session that moves off its file duplicates everything beside it, and the
+ * only account of that was the free space afterwards. `largest` names the
+ * top-level entries that dominated the bytes — a subagent's directory, a tool
+ * log, whatever a later release starts writing there — so the cost is
+ * attributable to a kind rather than only to a number.
+ */
+export interface ArtifactCopyTally {
+	/** Files reproduced, at every depth. */
+	entries: number;
+	/** Their apparent size: what the copy asked of the disk. */
+	bytes: number;
+	/** The biggest top-level entries, a directory counted as its whole subtree, biggest first. */
+	largest: { name: string; bytes: number }[];
+}
+
+/**
+ * Reproduce one entry of an artifacts directory at `to`, and return the bytes
+ * it cost. Never overwrites: an entry already at the destination (a session
+ * that moved and kept working) wins over the source's.
  *
  * An entry the source lost while the walk ran (its session reaped it, a tool
  * replaced it) is skipped with a debug line, so one vanished file cannot cost
- * the destination everything after it.
+ * the destination everything after it — which a single recursive `cp` of a
+ * directory a live session is still writing could.
  */
-async function reproduceArtifactTree(from: string, to: string, relative = ""): Promise<void> {
+async function reproduceArtifactEntry(
+	entry: fs.Dirent,
+	from: string,
+	to: string,
+	counted: { entries: number },
+): Promise<number> {
+	const source = path.join(from, entry.name);
+	const destination = path.join(to, entry.name);
+	try {
+		if (entry.isDirectory()) return await reproduceArtifactTree(source, destination, counted);
+		let bytes = 0;
+		if (entry.isFile()) {
+			bytes = (await fs.promises.stat(source)).size;
+			counted.entries += 1;
+		}
+		// `cp` of one entry, not a tree: it also carries symlinks and anything
+		// else a session's artifacts directory may hold.
+		await fs.promises.cp(source, destination, { force: false, errorOnExist: false });
+		return bytes;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		logger.debug("Session artifact vanished while it was being copied", { source, destination });
+		return 0;
+	}
+}
+
+/** Reproduce the artifacts directory `from` at `to`, and return the bytes it cost. */
+async function reproduceArtifactTree(from: string, to: string, counted: { entries: number }): Promise<number> {
 	const entries = await fs.promises.readdir(from, { withFileTypes: true });
 	await fs.promises.mkdir(to, { recursive: true });
-	for (const entry of entries) {
-		const source = path.join(from, entry.name);
-		const destination = path.join(to, entry.name);
-		const entryPath = relative ? `${relative}/${entry.name}` : entry.name;
-		try {
-			if (entry.isDirectory()) {
-				await reproduceArtifactTree(source, destination, entryPath);
-				continue;
-			}
-			if (entry.isFile() && artifactCopyMode(entryPath) === "link") {
-				try {
-					await fs.promises.link(source, destination);
-					continue;
-				} catch (error) {
-					// The destination won (EEXIST), or the link is impossible here
-					// (EXDEV, a filesystem without links, a source already gone).
-					if (isEexist(error)) continue;
-				}
-			}
-			// `cp` of one entry, not a tree: it also carries symlinks and anything
-			// else a session's artifacts directory may hold.
-			await fs.promises.cp(source, destination, { force: false, errorOnExist: false });
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			logger.debug("Session artifact vanished while it was being copied", { source, destination });
-		}
-	}
+	let bytes = 0;
+	for (const entry of entries) bytes += await reproduceArtifactEntry(entry, from, to, counted);
+	return bytes;
 }
 
 /**
  * Copy a session's artifact directory to another session, matching interactive
  * `/fork`. Never overwrites: a destination file written while the copy runs
  * (a session that already moved and kept working) wins over the source's copy.
- * Write-once artifacts are hard-linked rather than duplicated — see
- * {@link artifactCopyMode} for what that means and why the rest is copied.
  * Failures are logged, never thrown.
+ *
+ * Returns what it cost and logs the same. A session forced off its file
+ * duplicates its artifacts, and a session with large ones duplicates a lot;
+ * until now neither the session nor its log said so, and the first report of
+ * it was the free space. See {@link ArtifactCopyTally}.
  */
-export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+export async function copySessionArtifacts(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+): Promise<ArtifactCopyTally> {
+	const empty: ArtifactCopyTally = { entries: 0, bytes: 0, largest: [] };
 	// Artifacts sit beside the journal's real name: a session reached through a
 	// symlink keeps them next to the link's target, not next to the link.
 	let realSource = sourceSessionFile;
@@ -232,11 +259,17 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 	} catch {}
 	const sourceArtifactsDir = artifactsDirectoryFor(realSource);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
-	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
-	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+	if (!sourceArtifactsDir || !destinationArtifactsDir) return empty;
+	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return empty;
+	const counted = { entries: 0 };
+	const perEntry: { name: string; bytes: number }[] = [];
 	try {
 		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
-			await reproduceArtifactTree(sourceArtifactsDir, destinationArtifactsDir);
+			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
+			for (const entry of await fs.promises.readdir(sourceArtifactsDir, { withFileTypes: true })) {
+				const bytes = await reproduceArtifactEntry(entry, sourceArtifactsDir, destinationArtifactsDir, counted);
+				perEntry.push({ name: entry.name, bytes });
+			}
 		}
 	} catch (error) {
 		if (!isEnoent(error)) {
@@ -247,6 +280,24 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 			});
 		}
 	}
+	const tally: ArtifactCopyTally = {
+		entries: counted.entries,
+		bytes: perEntry.reduce((total, entry) => total + entry.bytes, 0),
+		largest: perEntry
+			.filter(entry => entry.bytes > 0)
+			.sort((left, right) => right.bytes - left.bytes)
+			.slice(0, ARTIFACT_COPY_LARGEST),
+	};
+	if (tally.entries > 0) {
+		logger.info("Copied a session's artifacts", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			entries: tally.entries,
+			bytes: tally.bytes,
+			largest: tally.largest,
+		});
+	}
+	return tally;
 }
 
 /** The numeric id an artifact file name (`<id>.<tool>.log`) carries, if any. */
@@ -1071,7 +1122,7 @@ export class SessionManager {
 	 * The background artifact copy a move or branch to `sessionFile` started (see
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
 	 */
-	#pendingArtifactCopy: { sessionFile: string; done: Promise<void> } | undefined;
+	#pendingArtifactCopy: { sessionFile: string; done: Promise<ArtifactCopyTally> } | undefined;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;

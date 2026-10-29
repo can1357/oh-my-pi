@@ -9,47 +9,53 @@ const SOURCE = "2026-01-01T00-00-00-000Z_source";
 const DESTINATION = "2026-01-01T00-00-01-000Z_destination";
 
 describe("copying a session's artifacts to another session", () => {
-	it("shares write-once artifacts and duplicates everything a session can rewrite", async () => {
+	it("reports what the copy cost and which entries dominated it", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		const subagent = "2026-01-01T00-00-00-000Z_sub";
+		fs.mkdirSync(path.join(sourceArtifacts, "local"), { recursive: true });
+		fs.mkdirSync(path.join(sourceArtifacts, subagent), { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "b".repeat(100));
+		fs.writeFileSync(path.join(sourceArtifacts, "local", "PLAN.md"), "p".repeat(200));
+		// A subagent's own directory, which is what a long session's artifacts
+		// are mostly made of: the tally has to charge a directory its subtree,
+		// or the entry that costs the most is the one it never names.
+		fs.writeFileSync(path.join(sourceArtifacts, subagent, "Sub.jsonl"), "j".repeat(5000));
+		fs.writeFileSync(path.join(sourceArtifacts, subagent, "2.bash.log"), "n".repeat(400));
+
+		const tally = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+
+		expect(tally).toEqual({
+			entries: 4,
+			bytes: 5700,
+			largest: [
+				{ name: subagent, bytes: 5400 },
+				{ name: "local", bytes: 200 },
+				{ name: "1.bash.log", bytes: 100 },
+			],
+		});
+	});
+
+	it("leaves the destination's copy alone when the source session writes on", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
 		fs.mkdirSync(path.join(sourceArtifacts, "local"), { recursive: true });
-		fs.mkdirSync(path.join(sourceArtifacts, "2026-01-01T00-00-00-000Z_sub"), { recursive: true });
-		fs.writeFileSync(path.join(sourceArtifacts, "1.shake.log"), "shake recovery");
-		fs.writeFileSync(path.join(sourceArtifacts, "2.async.log"), "async job output");
-		fs.writeFileSync(path.join(sourceArtifacts, "3.bash.log"), "streamed command output");
-		fs.writeFileSync(path.join(sourceArtifacts, "4.read.log"), "fetched page");
-		fs.writeFileSync(path.join(sourceArtifacts, "Sub.jsonl"), '{"type":"session"}\n');
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "streamed command output");
 		fs.writeFileSync(path.join(sourceArtifacts, "local", "PLAN.md"), "the plan");
-		fs.writeFileSync(path.join(sourceArtifacts, "2026-01-01T00-00-00-000Z_sub", "5.shake.log"), "nested");
 
 		await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
 
-		const shared = ["1.shake.log", "2.async.log"];
-		const duplicated = [
-			"3.bash.log",
-			"4.read.log",
-			"Sub.jsonl",
-			path.join("local", "PLAN.md"),
-			path.join("2026-01-01T00-00-00-000Z_sub", "5.shake.log"),
-		];
-		for (const name of [...shared, ...duplicated]) {
-			const from = path.join(sourceArtifacts, name);
-			const to = path.join(destinationArtifacts, name);
-			expect(fs.readFileSync(to, "utf8")).toBe(fs.readFileSync(from, "utf8"));
-			const sameFile = fs.statSync(to).ino === fs.statSync(from).ino;
-			expect({ name, sameFile }).toEqual({ name, sameFile: shared.includes(name) });
-		}
-
-		// What the duplication is for: the owner goes on writing its own copy of
-		// a rewritable artifact, and none of it reaches this session's history.
-		fs.writeFileSync(path.join(sourceArtifacts, "3.bash.log"), "output of the owner's next command");
+		// The owner goes on writing its own artifacts, and none of it reaches
+		// this session's history.
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "output of the owner's next command");
 		fs.writeFileSync(path.join(sourceArtifacts, "local", "PLAN.md"), "the owner's new plan");
-		expect(fs.readFileSync(path.join(destinationArtifacts, "3.bash.log"), "utf8")).toBe("streamed command output");
+		expect(fs.readFileSync(path.join(destinationArtifacts, "1.bash.log"), "utf8")).toBe("streamed command output");
 		expect(fs.readFileSync(path.join(destinationArtifacts, "local", "PLAN.md"), "utf8")).toBe("the plan");
 	});
 
-	it("keeps an entry the destination already has, linkable or not", async () => {
+	it("keeps an entry the destination already has", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);

@@ -77,7 +77,7 @@ export class ArtifactManager {
 	readonly #dir: string;
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
-	readonly #ready: Promise<void> | undefined;
+	readonly #ready: Promise<unknown> | undefined;
 	readonly #reservedIdsDir: string | undefined;
 
 	/**
@@ -89,7 +89,7 @@ export class ArtifactManager {
 	 *   fork allocates past its source's ids so `artifact://<n>` from the inherited
 	 *   transcript keeps naming the source artifact.
 	 */
-	constructor(dir: string, ready?: Promise<void>, reservedIdsDir?: string) {
+	constructor(dir: string, ready?: Promise<unknown>, reservedIdsDir?: string) {
 		this.#dir = dir;
 		this.#ready = ready;
 		this.#reservedIdsDir = reservedIdsDir;

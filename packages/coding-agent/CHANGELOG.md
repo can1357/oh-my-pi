@@ -26,8 +26,8 @@
 
 ### Fixed
 
-- Resuming a session another live omp process is writing — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id until the first write and then moving the conversation to a sibling file recorded as the owner's continuation
-- Forking or moving a session no longer duplicates every artifact: the ones nothing can rewrite are hard-linked, while `local://` files, subagent transcripts and streamed tool output stay copies (a single wave of 55 session moves duplicated 52 GiB here)
+- Resuming a session another live omp process is writing — at startup or with `/resume` — now continues in a fork with its own id from the start, and says so in the transcript, instead of answering to the owner's session id and then recording that still-running session as continued
+- A session forced off its file now logs what copying its artifacts cost — entries, bytes, and the largest of them — so a move that duplicates gigabytes is visible before the free space is
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
