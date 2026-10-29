@@ -118,6 +118,7 @@ Hook events are strongly typed in `types.ts`.
 - `session_start`
 - `session_before_switch` → can return `{ cancel?: boolean }`
 - `session_switch`
+- `session_moved`
 - `session_before_branch` → can return `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_branch`
 - `session_before_compact` → can return `{ cancel?: boolean; compaction?: CompactionResult }`
@@ -128,6 +129,8 @@ Hook events are strongly typed in `types.ts`.
 - `session_shutdown`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_moved` fires when the session had to leave its file and carried on under a new id, which nobody chose — unlike `session_switch`, whose reasons (`new`, `resume`, `fork`) all name a deliberate transition. It carries `reason` (`"open-elsewhere"`, `"replaced"`, `"contested"`), `previousSessionId`, `sessionId`, `previousSessionFile`, and `sessionFile`. The conversation and cwd are unchanged; only the identity moved, and under `"open-elsewhere"` the previous id belongs to another live omp process that still uses it.
 
 ### Agent/context events
 

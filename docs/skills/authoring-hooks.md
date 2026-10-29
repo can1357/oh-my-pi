@@ -49,6 +49,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 | `session_start` | On initial session load | — |
 | `session_before_switch` | Before session switch | `{ cancel?: boolean }` |
 | `session_switch` | After session switch | — |
+| `session_moved` | After the session left its file and carried on under a new id (nobody chose it, unlike a switch) | — |
 | `session_before_branch` | Before session branch | `{ cancel?: boolean; skipConversationRestore?: boolean }` |
 | `session_branch` | After session branch | — |
 | `session_before_compact` | Before compaction | `{ cancel?: boolean; compaction?: CompactionResult }` |

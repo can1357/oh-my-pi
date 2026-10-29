@@ -730,9 +730,9 @@ function ownedByAnotherProcess(id: string, file: string): boolean {
  * first write and only then moves to a sibling file (`open-elsewhere`), so for
  * that window two live processes answer to one id, and the sibling records the
  * still-live owner as the session it continues — a lineage anything keyed on
- * the session id (an Envoy role claim, a scheduler, a peer's address) reads as
- * a hand-over from a session that is in fact still running. Forking here keeps
- * the owner's id with the owner, and the fork is a copy from the start.
+ * the session id (a role registry, a scheduler, a peer's address book) reads
+ * as a hand-over from a session that is in fact still running. Forking here
+ * keeps the owner's id with the owner, and the fork is a copy from the start.
  */
 export async function forkIfOwnedElsewhere(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
 	const source = manager.getSessionFile();

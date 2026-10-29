@@ -965,6 +965,7 @@ export class AgentSession implements SettingsScope {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
+	#unsubscribeSessionMoved?: () => void;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -2106,13 +2107,18 @@ export class AgentSession implements SettingsScope {
 		this.#extensionRunner = config.extensionRunner;
 		// A move-off changes this session's id without anyone asking. Until it was
 		// announced, the only trace an extension could see was the id differing
-		// from the one it last read, which reads exactly like a fork — and a
-		// consumer that carries identity across sessions then carries it away
-		// from a session that is still running (2026-10-29: eight live sessions
-		// lost their Envoy role to a copy of themselves this way).
-		this.sessionManager.onPersistenceNotice(notice => {
+		// from the one it last read, with nothing to say the predecessor is still
+		// live — so a consumer that carries identity across sessions could carry
+		// it away from a session that is still running.
+		//
+		// Only a move this session is present for: `onPersistenceNotice` replays
+		// the ones raised before it subscribed, and replaying an identity change
+		// as if it were happening now would land it before `session_start`, and
+		// again for every later `AgentSession` over the same manager.
+		let liveForMoves = false;
+		this.#unsubscribeSessionMoved = this.sessionManager.onPersistenceNotice(notice => {
 			const runner = this.#extensionRunner;
-			if (!runner) return;
+			if (!runner || !liveForMoves) return;
 			runner
 				.emit({
 					type: "session_moved",
@@ -2124,6 +2130,7 @@ export class AgentSession implements SettingsScope {
 				})
 				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }));
 		});
+		liveForMoves = true;
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -6350,6 +6357,10 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		// A move during teardown reaches no handler: this session is going away,
+		// and the subscription would otherwise outlive it in the manager.
+		this.#unsubscribeSessionMoved?.();
+		this.#unsubscribeSessionMoved = undefined;
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
 		// closing session writer.
