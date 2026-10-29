@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `@path` mentions inside HTML comments (`<!-- @protected: name -->`) in AGENTS.md and other context files are no longer treated as file imports ([#12953](https://github.com/can1357/oh-my-pi/issues/12953), [#14594](https://github.com/can1357/oh-my-pi/pull/14594) by [@tahakotil](https://github.com/tahakotil))
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
