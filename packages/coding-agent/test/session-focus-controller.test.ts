@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container } from "@oh-my-pi/pi-tui";
 import {
 	pickRecentFocusableAgentId,
@@ -7,9 +10,16 @@ import {
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 interface SessionStub {
 	session: AgentSession;
@@ -37,6 +47,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 		},
 		async settleInFlightMessagePersistence() {},
 		activeToolExecutionUpdates: () => [],
+		activeUserWait: () => undefined,
 		getQueuedMessages: () => queue,
 	};
 	return {
@@ -72,8 +83,11 @@ interface Harness {
 	};
 }
 
-function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
+function makeHarness(
+	options: { renderInitialMessages?: () => void | Promise<void>; mainSession?: AgentSession } = {},
+): Harness {
 	const main = makeSessionStub();
+	const mainSession = options.mainSession ?? main.session;
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
@@ -84,9 +98,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let mainUnsubscribe = 0;
 
 	const ctx = {
-		session: main.session,
+		session: mainSession,
 		get viewSession() {
-			return controller.target ?? main.session;
+			return controller.target ?? mainSession;
 		},
 		pendingMessagesContainer,
 		compactionQueuedMessages: [],
@@ -120,7 +134,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			await options.renderInitialMessages?.();
 		},
 		reloadTodos: async (source?: AgentSession) => {
-			reloadTodoSessions.push(source ?? main.session);
+			reloadTodoSessions.push(source ?? mainSession);
 		},
 		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
 		updateEditorBorderColor() {},
@@ -162,6 +176,42 @@ async function flushAsync(): Promise<void> {
 	for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+/** Per-live-session auth/temp state, released after each test. */
+const liveSessionCleanups: Array<() => void> = [];
+
+afterEach(() => {
+	for (const release of liveSessionCleanups.splice(0)) release();
+});
+
+/**
+ * A real AgentSession, for the paths where a stub would only mirror the
+ * controller's own call back at it (an open `waitForUser` dialog).
+ */
+function createLiveSession(): AgentSession {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("anthropic", "test-key");
+	const tempDir = TempDir.createSync("@pi-focus-user-wait-");
+	liveSessionCleanups.push(() => {
+		authStorage.close();
+		tempDir.removeSync();
+	});
+	const mock = createMockModel({ responses: [] });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		convertToLlm,
+		streamFn: (target, context, options) => mock.stream(target, context, options),
+	});
+	return new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+	});
+}
+
 describe("SessionFocusController", () => {
 	beforeAll(async () => {
 		// updatePendingMessagesDisplay renders through the global theme singleton.
@@ -187,6 +237,33 @@ describe("SessionFocusController", () => {
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
 		expect(h.handledEvents).toEqual([event]);
+	});
+
+	it("replays the main session's unanswered dialog when focus returns to it", async () => {
+		// `user_wait_start` is published once, when the dialog opens. Focusing a
+		// subagent while an MCP sign-in (or any waitForUser) is unanswered and
+		// coming back before it settles must not leave the run reported as
+		// working or idle: the attach replays the session's own open wait.
+		const liveMain = createLiveSession();
+		const h = makeHarness({ mainSession: liveMain });
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		const open = Promise.withResolvers<void>();
+		const prompt = "an MCP sign-in for linear";
+		const dialog = liveMain.waitForUser(() => open.promise, prompt);
+
+		await h.controller.focusAgent("Worker");
+		expect(h.handledEvents).toEqual([]);
+
+		await h.controller.unfocus();
+		expect(h.handledEvents).toEqual([{ type: "user_wait_start", prompt }]);
+
+		// The replayed bracket still closes through the live subscription.
+		open.resolve();
+		await dialog;
+		expect(h.handledEvents.at(-1)).toEqual({ type: "user_wait_end" });
+
+		await liveMain.dispose();
 	});
 
 	it("re-attaching the main session refreshes the todo HUD so it can't freeze at the pre-focus snapshot (#9571)", async () => {

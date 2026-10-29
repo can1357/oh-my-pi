@@ -235,6 +235,14 @@ export class SessionFocusController {
 				await this.ctx.eventController.handleEvent(event);
 				if (generation !== this.#attachGeneration) return false;
 			}
+			// `user_wait_start` was published when the dialog opened, which may be
+			// before this attach subscribed: replay it so a session still owing a
+			// person an answer reports blocked rather than working or idle.
+			const openWait = target.activeUserWait();
+			if (openWait) {
+				await this.ctx.eventController.handleEvent(openWait);
+				if (generation !== this.#attachGeneration) return false;
+			}
 			await this.ctx.reloadTodos(target);
 			if (generation !== this.#attachGeneration) return false;
 			this.ctx.updatePendingMessagesDisplay();

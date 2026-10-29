@@ -1236,6 +1236,12 @@ export class AgentSession implements SettingsScope {
 	#clientPromptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
 	#userWaitCount = 0;
+	/**
+	 * The `user_wait_start` frame published for the open dialogs, kept so a
+	 * surface that attaches mid-wait (a focus rebuild) can replay it; undefined
+	 * while no dialog waits.
+	 */
+	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
@@ -1391,12 +1397,14 @@ export class AgentSession implements SettingsScope {
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
-			this.#emit({ type: "user_wait_start", prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT });
+			this.#openUserWait = { type: "user_wait_start", prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT };
+			this.#emit(this.#openUserWait);
 		}
 		try {
 			return await dialog();
 		} finally {
 			if (--this.#userWaitCount === 0) {
+				this.#openUserWait = undefined;
 				this.#emit({ type: "user_wait_end" });
 				if (this.#promptInFlightCount > 0) {
 					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
@@ -5856,6 +5864,16 @@ export class AgentSession implements SettingsScope {
 	 */
 	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
 		return [...this.#activeToolExecutionUpdates.values()];
+	}
+
+	/**
+	 * The `user_wait_start` frame for a dialog still waiting on a person, or
+	 * undefined when none is open. `user_wait_start` is published once, when the
+	 * dialog opens, so a surface that attaches later (a focus rebuild) replays
+	 * this to report the session as blocked instead of working or idle.
+	 */
+	activeUserWait(): Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined {
+		return this.#openUserWait;
 	}
 
 	/**
