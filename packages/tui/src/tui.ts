@@ -970,6 +970,21 @@ export class TUI extends Container {
 	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
+	/**
+	 * Frame interval while the terminal reports no audience
+	 * ({@link Terminal.hasAudience} is `false`). A detached tmux pane still
+	 * drains everything written to it, so nothing throttles the spinner on its
+	 * own: a session parked on a model call keeps composing and writing frames
+	 * at the full rate into a pane no client is reading.
+	 *
+	 * Slowed rather than stopped, because the status line carries a live
+	 * elapsed-turn readout: at one frame a second a pane someone re-attaches to
+	 * is at most a second stale, where a frozen one would show a dead spinner
+	 * and a wrong clock until the next real event. Ordinary (animation) frames
+	 * only — a forced render, which is what every user action and screen-shape
+	 * change issues, still paints immediately.
+	 */
+	static readonly #NO_AUDIENCE_RENDER_INTERVAL_MS = 1_000;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
@@ -2895,9 +2910,13 @@ export class TUI extends Container {
 		const adaptiveFloor = Math.min(TUI.#MAX_ADAPTIVE_RENDER_MS, this.#lastFrameCostMs * 2);
 		const adaptiveDelay = Math.max(0, adaptiveFloor - elapsed);
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
+		// Nobody is looking at this terminal — established, not assumed: every
+		// host that cannot answer reports `undefined` and lands here at 0.
+		const audienceFloor = this.terminal.hasAudience === false ? TUI.#NO_AUDIENCE_RENDER_INTERVAL_MS : 0;
+		const audienceDelay = Math.max(0, audienceFloor - elapsed);
 		// Native frames are paced by the terminal's acknowledgements (credits),
 		// not by the row renderer's cadence.
-		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
+		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay, audienceDelay);
 		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
 	}
 

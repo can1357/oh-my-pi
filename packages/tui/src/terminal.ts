@@ -32,12 +32,17 @@ import {
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
-import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
+import {
+	canQueryTmuxAttachment,
+	setTmuxPaneApcTitles,
+	tmuxSessionHasAttachedClients,
+	tmuxSessionSpeaksTsp,
+} from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
-export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
+export { getActiveTerminal, writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
@@ -271,6 +276,42 @@ const STDOUT_STALL_TIMEOUT_MS = 60_000;
 
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
+
+/**
+ * Shortest gap between two audience probes, and the longest. The gap is chosen
+ * per machine from the probe's own wall cost (see {@link AUDIENCE_PROBE_DUTY}),
+ * because that cost is not a constant: a direct `tmux` binary answers in a few
+ * milliseconds, while a `tmux` that `PATH` resolves to a wrapper script — a
+ * version manager's shim, a login-shell alias — pays a second fork/exec first.
+ *
+ * Only an established empty audience polls at that cadence, because that is
+ * the only state an attach has to be noticed quickly in. Watched or unknown,
+ * the gap is the maximum: a detach noticed late costs a few seconds of
+ * animation nobody sees, and a pane tmux cannot answer for must not spawn a
+ * doomed child every two seconds.
+ *
+ * The floor also bounds what a passive watcher waits for: someone who attaches
+ * and touches nothing sees the no-audience cadence until the next probe. A
+ * keystroke or a resize does not wait for it (`#invalidateAudience`).
+ */
+const AUDIENCE_PROBE_MIN_INTERVAL_MS = 2_000;
+const AUDIENCE_PROBE_MAX_INTERVAL_MS = 30_000;
+
+/**
+ * Probe gap as a multiple of the last probe's wall time, so the poll can never
+ * cost more than 1% of the thread it saves, whatever an answer costs on this
+ * host. A fixed gap would be the wrong trade on both ends: too slow to notice
+ * an attach where the probe is cheap, and a visible cost where it is not.
+ */
+const AUDIENCE_PROBE_DUTY = 100;
+
+/**
+ * How long a probe may stay in flight before it is abandoned. `Bun.spawn`'s
+ * own `timeout` SIGKILLs the child, but a child stuck in an uninterruptible
+ * read never dies; without this the in-flight flag would hold for the life of
+ * the process and latch the last answer, `false` included.
+ */
+const ABANDONED_AUDIENCE_PROBE_MS = 5_000;
 
 /**
  * Bounds a never-draining stdout backlog without killing a single large but
@@ -614,6 +655,18 @@ export interface Terminal {
 	readonly pendingOutputBytes?: number;
 
 	/**
+	 * Whether anything is displaying this terminal: `false` only when the
+	 * implementation has established that nothing is (a tmux pane whose session
+	 * has no attached client), `true` when it has established that something
+	 * is, and `undefined` whenever it cannot tell — no multiplexer, a failed
+	 * probe, or a terminal that does not implement this at all. The renderer
+	 * drops to {@link TUI}'s no-audience cadence only on `false`, so every
+	 * unknown keeps the full animation rate. Optional so custom Terminals built
+	 * against older pi-tui versions keep working.
+	 */
+	readonly hasAudience?: boolean | undefined;
+
+	/**
 	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
 	 * neither the cursor nor the painted rows survive a resize under the
 	 * application's own model. Measured on Windows conhost: resizing the
@@ -913,6 +966,19 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	// Audience: whether anything displays this terminal. `undefined` until a
+	// probe has answered, and forever on a host that cannot be asked, so every
+	// reader that cannot establish an empty audience keeps the full frame rate.
+	#audience: boolean | undefined;
+	#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+	#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
+	#audienceProbeInFlight = false;
+	#audienceProbeStartedAtMs = 0;
+	// Bumped by stop(), so a probe still in flight across a stop()/start() cycle
+	// drops its answer instead of reviving it or re-arming a dead poll.
+	#audienceEpoch = 0;
+	// Resolved once at start: a host nobody can ask never spawns a probe.
+	#audienceProbeSupported = false;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -1145,6 +1211,12 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 
+		// Decide once whether this host can be asked who is watching. Everything
+		// else — a plain terminal, an ssh pty, a bare pty with no multiplexer,
+		// ACP, RPC — leaves `hasAudience` at `undefined` for the whole session
+		// and keeps the full frame rate.
+		this.#audienceProbeSupported = canQueryTmuxAttachment($env as NodeJS.ProcessEnv);
+
 		// Keep unmanaged native fd-2 writes off the viewport while we own the
 		// terminal; released in stop(). See stderr-guard in pi-utils.
 		suppressTerminalStderr();
@@ -1156,6 +1228,9 @@ export class ProcessTerminal implements Terminal {
 			// Conservative: some hosts reset modes across a resize/reattach, so
 			// re-establish cursor visibility on the next explicit call.
 			this.#cursorVisible = undefined;
+			// A resize is the signal a tmux attach delivers before any probe can
+			// run, so treat it as proof the audience question is open again.
+			this.#invalidateAudience();
 			this.#reconcileInBandGeometryOnResize();
 			this.#resizeHandler?.();
 		};
@@ -1774,6 +1849,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			// Someone is at the keyboard, which settles the audience question
+			// ahead of any probe: a pane held at the no-audience cadence returns
+			// to full speed on the first keystroke instead of at the next poll.
+			if (data) this.#invalidateAudience();
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
 			// turn one paste into thousands of writes (#15757).
@@ -2354,6 +2433,14 @@ export class ProcessTerminal implements Terminal {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
+		// A stopped terminal has no audience question: a later start() re-decides
+		// support and re-probes, and until then every reader sees `undefined`.
+		this.#audienceEpoch += 1;
+		this.#audienceProbeSupported = false;
+		this.#audience = undefined;
+		this.#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+		this.#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
+		this.#audienceProbeInFlight = false;
 		// Release stdout ownership (out-of-band writers and emergency cleanup)
 		// before headless/teardown exits, without disturbing another owner's RGB.
 		if (getActiveTerminal() === this) {
@@ -2672,6 +2759,89 @@ export class ProcessTerminal implements Terminal {
 		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	/**
+	 * Whether anything displays this terminal (see {@link Terminal.hasAudience}).
+	 *
+	 * Reading it also re-arms the probe when the cached answer has gone stale,
+	 * the way {@link pendingOutputBytes} re-reads the pump: the readers are the
+	 * animation paths, so the poll runs exactly while an animation could be
+	 * wasted and stops the moment the screen goes quiet. The probe itself is
+	 * async and never blocks this read, so the value returned is the previous
+	 * answer until the new one lands.
+	 */
+	get hasAudience(): boolean | undefined {
+		this.#refreshAudienceWhenStale();
+		return this.#audience;
+	}
+
+	/**
+	 * Re-open the audience question and answer `undefined` (watched) until the
+	 * next probe lands. Called from the signals that prove a person is there
+	 * before any poll could: a keystroke, and the resize a tmux attach sends.
+	 *
+	 * Only from the withheld state. An established audience withholds nothing,
+	 * so there is nothing to re-open and a keystroke must not cost a probe:
+	 * every render reads {@link hasAudience}, so invalidating on a `true`
+	 * answer would spawn a `tmux` child per keystroke for someone typing at a
+	 * watched pane. A client that leaves is picked up by the next poll.
+	 */
+	#invalidateAudience(): void {
+		if (this.#audience !== false) return;
+		this.#audience = undefined;
+		this.#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+	}
+
+	#refreshAudienceWhenStale(): void {
+		if (!this.#audienceProbeSupported || this.#headless || this.#dead) return;
+		const now = performance.now();
+		if (this.#audienceProbeInFlight) {
+			// A `tmux` child wedged past its own SIGKILL (an uninterruptible read
+			// on a jammed server socket) would otherwise hold the in-flight flag
+			// for the process's life and latch the last answer — `false`
+			// included. Abandon it: the answer becomes unknown, which is the
+			// full frame rate, and the next read starts a fresh probe.
+			if (now - this.#audienceProbeStartedAtMs <= ABANDONED_AUDIENCE_PROBE_MS) return;
+			this.#audienceEpoch += 1;
+			this.#audienceProbeInFlight = false;
+			this.#audience = undefined;
+		}
+		if (now - this.#audienceProbedAtMs < this.#audienceProbeIntervalMs) return;
+		this.#audienceProbeInFlight = true;
+		this.#audienceProbeStartedAtMs = now;
+		// A probe started before stop(), or abandoned above, answers later. Its
+		// epoch no longer matches, so it neither revives a stale answer nor
+		// overwrites the interval and in-flight flag that moved on without it.
+		const epoch = this.#audienceEpoch;
+		void tmuxSessionHasAttachedClients()
+			// The helper answers `undefined` for every failure it knows about;
+			// this covers the rest, because an unreachable multiplexer is not an
+			// empty audience.
+			.catch(() => undefined)
+			.then(attached => {
+				if (epoch !== this.#audienceEpoch) return;
+				this.#audience = attached;
+				const endedAtMs = performance.now();
+				// Poll at the duty-derived cadence only while frames are actually
+				// being withheld, because that is the only state an attach has to
+				// be noticed quickly in. Watched or unknown, the longest gap is
+				// right: a detach noticed late costs a few seconds of animation
+				// nobody sees, and an unanswerable pane (a `TMUX_PANE` the server
+				// no longer has) must not spawn a doomed child every two seconds.
+				this.#audienceProbeIntervalMs =
+					attached === false
+						? Math.min(
+								AUDIENCE_PROBE_MAX_INTERVAL_MS,
+								Math.max(
+									AUDIENCE_PROBE_MIN_INTERVAL_MS,
+									(endedAtMs - this.#audienceProbeStartedAtMs) * AUDIENCE_PROBE_DUTY,
+								),
+							)
+						: AUDIENCE_PROBE_MAX_INTERVAL_MS;
+				this.#audienceProbedAtMs = endedAtMs;
+				this.#audienceProbeInFlight = false;
+			});
 	}
 
 	get hostOwnsGridOnResize(): boolean {

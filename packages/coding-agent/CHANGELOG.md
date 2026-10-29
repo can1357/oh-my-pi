@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A session left working in a detached tmux pane no longer spends a slice of a core animating a screen nobody can see: the status line drops to one frame a second and the terminal-title spinner pauses until a client is watching again ([#17404](https://github.com/can1357/oh-my-pi/pull/17404) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

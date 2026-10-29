@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A tmux pane whose session has no attached client now animates at one frame a second instead of thirty; a keystroke, a resize or an attach restores the full rate, and a terminal whose audience cannot be established keeps it. `Terminal.hasAudience` reports the state ([#17404](https://github.com/can1357/oh-my-pi/pull/17404) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
