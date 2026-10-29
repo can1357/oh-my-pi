@@ -104,6 +104,7 @@
 - Fixed unavailable configured default or dictation models being silently replaced; omp now warns and identifies the fallback model.
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
+- `omp gc --apply` now reclaims the half-written archive a killed `gc --archive` left in the archive root; before it stayed on disk forever and no sweep counted it
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - A session archived by `omp gc --archive` resumes and exports again: `omp --resume <id>` finds it and brings it back, and `omp --export=<file>.jsonl.gz` reads it

@@ -39,7 +39,12 @@ import {
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
+import {
+	FileSessionStorage,
+	SESSION_STAGING_RE,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "../session/session-storage";
 import {
 	type CompressCandidate,
 	type CompressMethod,
@@ -68,8 +73,14 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const SESSION_STAGING_GLOB = new Bun.Glob("**/.*.tmp");
+const SESSION_STAGING_GLOB = new Bun.Glob("**/*.tmp");
 const ANY_FILE_GLOB = new Bun.Glob("**/*");
+/**
+ * Archive temps staged before compression moved to {@link sessionStagingPath}:
+ * `<session>.jsonl.gz.<pid>.<epoch-ms>.tmp`, beside the archive they publish.
+ * Released builds left these in the archive root, where no sweep looked.
+ */
+const LEGACY_ARCHIVE_STAGING_RE = /^.+\.jsonl\.gz\.\d+\.\d+\.tmp$/;
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -964,7 +975,9 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
  */
 async function gzipSessionFile(source: string, destination: string): Promise<{ orphanedTarget?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+	// One staging shape across the sessions tree and the archive, so the sweep
+	// that reclaims a killed writer's leftovers recognizes this one too.
+	const tempPath = sessionStagingPath(destination);
 	// Only the transcript's own link counts. `realpath` would also resolve a
 	// symlinked sessions directory and report every transcript under it as an
 	// orphan, drowning the lines that name a real one.
@@ -1121,23 +1134,57 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 }
 
 /**
- * Staging temps ({@link SESSION_STAGING_RE}) anywhere under `sessionsRoot`,
- * plus those beside exact session files recorded elsewhere (`--session`
- * paths, collab replicas). A transcript is not the only file published this
- * way: restoring an archived session stages every artifact it brings back,
- * and a killed run leaves those behind too.
+ * Staging temps directly under `root` and below it, whose basename `matches`.
+ * The scan starts at `root` and the sweep below only unlinks the entry it
+ * found — never a link's target — so nothing outside the storage gc owns is
+ * reached from here.
+ *
+ * `followSymlinks` says whether that storage continues through a symlinked
+ * directory. The archive's buckets and root are commonly links onto another
+ * filesystem, and {@link listArchivedSessionFiles} already reads the
+ * archives there, so the temps staged beside them are gc's to reclaim too.
  */
-async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFiles: string[]): Promise<string[]> {
-	const files = new Map<string, string>();
+async function collectStagingFilesUnder(
+	root: string,
+	matches: (basename: string) => boolean,
+	followSymlinks: boolean,
+	into: Map<string, string>,
+): Promise<void> {
 	try {
-		for await (const name of SESSION_STAGING_GLOB.scan({ cwd: sessionsRoot, dot: true })) {
-			if (!SESSION_STAGING_RE.test(path.basename(name))) continue;
-			const file = path.join(sessionsRoot, name);
-			files.set(normalizePathForComparison(file), file);
+		for await (const name of SESSION_STAGING_GLOB.scan({ cwd: root, dot: true, followSymlinks })) {
+			if (!matches(path.basename(name))) continue;
+			const file = path.join(root, name);
+			into.set(normalizePathForComparison(file), file);
 		}
 	} catch (error) {
 		if (codeOf(error) !== "ENOENT") throw error;
 	}
+}
+
+/**
+ * Staging temps ({@link SESSION_STAGING_RE}) anywhere under `sessionsRoot` or
+ * `archiveRoot`, plus those beside exact session files recorded elsewhere
+ * (`--session` paths, collab replicas). A transcript is not the only file
+ * published this way: restoring an archived session stages every artifact it
+ * brings back, and a killed run leaves those behind too.
+ *
+ * The archive root also answers for {@link LEGACY_ARCHIVE_STAGING_RE}, the
+ * shape released builds staged compression through. Those temps are on disk
+ * now and nothing else will ever claim them.
+ */
+async function collectSessionStagingFiles(
+	sessionsRoot: string,
+	archiveRoot: string,
+	exactSessionFiles: string[],
+): Promise<string[]> {
+	const files = new Map<string, string>();
+	await collectStagingFilesUnder(sessionsRoot, basename => SESSION_STAGING_RE.test(basename), false, files);
+	await collectStagingFilesUnder(
+		archiveRoot,
+		basename => SESSION_STAGING_RE.test(basename) || LEGACY_ARCHIVE_STAGING_RE.test(basename),
+		true,
+		files,
+	);
 	for (const sessionFile of exactSessionFiles) {
 		const target = path.basename(sessionFile);
 		for (const file of await listFilesIfPresent(path.dirname(sessionFile))) {
@@ -1151,12 +1198,16 @@ async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFile
 
 /**
  * Count, and with `--apply` delete, session staging temps past the write
- * grace. A live publish renames its temp away within milliseconds, so an
- * older one was left by a killed or crashed writer and nothing will claim it.
+ * grace. A stager writes its temp continuously and renames it away within
+ * milliseconds of the last byte, and every gc run — this one, a concurrent
+ * one, a restore — holds `<agentDir>/gc.lock` for its whole life, so a temp
+ * whose mtime has stood still for the grace belongs to no live writer and
+ * nothing will claim it.
  */
 async function sweepSessionStagingFiles(
 	options: ResolvedGcOptions,
 	sessionsRoot: string,
+	archiveRoot: string,
 	registeredSessionPaths: string[],
 	result: ArchiveGcResult,
 ): Promise<void> {
@@ -1165,7 +1216,7 @@ async function sweepSessionStagingFiles(
 		...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))),
 	];
 	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const file of await collectSessionStagingFiles(sessionsRoot, exactSessionFiles)) {
+	for (const file of await collectSessionStagingFiles(sessionsRoot, archiveRoot, exactSessionFiles)) {
 		const stat = await statIfPresent(file);
 		if (!stat?.isFile() || stat.mtimeMs > deleteBeforeMs) continue;
 		result.wouldDeleteTemps += 1;
@@ -1240,8 +1291,9 @@ async function runArchiveGc(
 		candidates.push({ ...destination, session });
 	}
 
-	// Before archiving moves transcripts away from the temps staged beside them.
-	await sweepSessionStagingFiles(options, sessionsRoot, registeredSessionPaths, result);
+	// Before archiving moves transcripts away from the temps staged beside them,
+	// and before this run stages any archive of its own.
+	await sweepSessionStagingFiles(options, sessionsRoot, archiveRoot, registeredSessionPaths, result);
 
 	// An archived session keeps every row that describes it. Its prompt-history,
 	// title and recap rows exist nowhere else, and its stats rows are only
