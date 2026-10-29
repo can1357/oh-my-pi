@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `computer` tool no longer takes over your screen for a macOS `win.drag` across the text of a native text view, such as a TextEdit document; it selects that text in the background and returns the selection ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

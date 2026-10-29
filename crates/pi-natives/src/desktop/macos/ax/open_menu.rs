@@ -105,7 +105,7 @@ pub(crate) fn role_at(pid: libc::pid_t, x: f64, y: f64) -> Option<String> {
 }
 
 /// The element of `app` at global point `(x, y)`.
-fn hit_test(app: &AXUIElement, x: f64, y: f64) -> Option<CFRetained<AXUIElement>> {
+pub(super) fn hit_test(app: &AXUIElement, x: f64, y: f64) -> Option<CFRetained<AXUIElement>> {
 	let mut output: *const AXUIElement = ptr::null();
 	// SAFETY: `output` is writable and the retained application element
 	// remains valid through the synchronous hit-test.

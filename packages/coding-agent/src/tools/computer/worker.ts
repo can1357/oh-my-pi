@@ -20,6 +20,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -42,6 +43,7 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
@@ -101,7 +103,7 @@ export interface NativeDesktopSession {
 	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<DesktopDragResult | null | void>;
 	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
 	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
@@ -1093,24 +1095,36 @@ class Win {
 		);
 	}
 
-	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
+		let selection: AxTextSelection | undefined;
 		await sendInput(
 			this.#session,
 			context,
 			"drag",
 			native.takeover,
-			fallback =>
-				this.#session.drag(
+			async fallback => {
+				const result = await this.#session.drag(
 					this.id,
 					points.map(([x, y]) => ({ x, y })),
 					{ ...native, ...fallback },
-				),
+				);
+				selection = result?.selection;
+				return result?.focusReturn;
+			},
 			this.pid,
 		);
+		if (!selection) return undefined;
+		// The whole text is in the returned selection; the output line only names it.
+		const shown = truncateToWidth(JSON.stringify(selection.text), TRUNCATE_LENGTHS.CONTENT);
+		context.output.push({
+			type: "text",
+			text: `drag selected ${shown} through accessibility instead of dragging; no mouse input was sent`,
+		});
+		return selection;
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {

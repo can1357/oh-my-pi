@@ -1438,6 +1438,14 @@ impl Worker {
 				};
 				let mode = options.mode();
 				let backend = self.backend()?;
+				// The selection comes first: it reads the front app before any
+				// probe of the target, so a target the user brings forward while
+				// the menu preflight's probes block is not taken as their front
+				// app. A press on text opens no menu; any other drag still meets
+				// the preflight before it is posted.
+				if let Some(selection) = backend.drag_selection(target, &event, mode, token)? {
+					return Ok(Response::TextSelection(selection));
+				}
 				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
 				backend.pointer(target, event, &frame, mode, token)?;
 				Ok(Response::Input(control::take_focus_return()))
@@ -2262,13 +2270,17 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Drags along `path`. A macOS background left drag across the text of one
+	/// native text element is made as that element's selection through
+	/// accessibility, with no mouse event, and resolves to the selection read
+	/// back; a drag posted as input resolves to where a takeover left focus.
 	#[napi]
 	pub fn drag(
 		&self,
 		target: String,
 		path: Vec<DesktopPoint>,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopDragResult>> {
 		let o = ParsedPointerOptions::parse(opts).map_err(napi::Error::from)?;
 		if o.menu.is_some() {
 			return Err(
@@ -2279,11 +2291,20 @@ impl DesktopSession {
 			);
 		}
 		let path = path.into_iter().map(|p| (p.x, p.y)).collect();
-		Ok(self.input("desktop.drag", move |reply| Request::Drag {
-			target: Target::parse(&target),
-			path,
-			options: o,
-			reply,
+		let target = Target::parse(&target);
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		Ok(task::blocking("desktop.drag", (), move |_| {
+			match c.call(token, |reply| Request::Drag { target, path, options: o, reply })? {
+				Response::TextSelection(v) => {
+					Ok(DesktopDragResult { selection: Some(v), focus_return: None })
+				},
+				Response::Input(report) => {
+					Ok(DesktopDragResult { selection: None, focus_return: report })
+				},
+				_ => Err(DesktopError::internal("unexpected desktop worker response")),
+			}
+			.map_err(Into::into)
 		}))
 	}
 
@@ -2746,6 +2767,8 @@ mod capture_tests {
 		input_lookups:          Arc<Mutex<u32>>,
 		/// Every click lands on a control whose menu would take the keyboard.
 		menu_control:           bool,
+		/// What a drag is made as instead of input; `None` posts it.
+		drag_selection:         Option<AxTextSelection>,
 	}
 
 	impl FakeWaylandBackend {
@@ -2803,6 +2826,7 @@ mod capture_tests {
 				name_lookups: Arc::new(Mutex::new(0)),
 				#[cfg(target_os = "macos")]
 				input_lookups: Arc::new(Mutex::new(0)),
+				drag_selection: None,
 			}
 		}
 	}
@@ -3096,6 +3120,16 @@ mod capture_tests {
 			self.clicks.lock().push(target.key().to_string());
 			self.modes.lock().push(mode);
 			Ok(())
+		}
+
+		fn drag_selection(
+			&mut self,
+			_: &Target,
+			_: &PointerEvent,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<Option<AxTextSelection>> {
+			Ok(self.drag_selection.clone())
 		}
 
 		fn pointer_menu(
@@ -4614,6 +4648,81 @@ mod capture_tests {
 		let error = worker.execute(&typed, &source.token()).err().unwrap();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(error.message.contains("still using"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_drag_made_as_a_text_selection_posts_no_pointer_input() {
+		let drag = |worker: &mut TestWorker| {
+			let token = CancellationSource::default().token();
+			let target = Target::Window(WAYLAND_ID.to_string());
+			worker
+				.process(&capture_request(target.clone()), &token)
+				.unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::Drag {
+				target,
+				path: vec![(4.0, 10.0), (30.0, 10.0)],
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			};
+			worker.process(&request, &token).unwrap()
+		};
+		let mut backend = FakeWaylandBackend::new();
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let Response::TextSelection(selection) = drag(&mut worker) else {
+			panic!("expected the selection the drag was made as")
+		};
+		assert_eq!((selection.start, selection.length, selection.text.as_str()), (4, 5, "quick"));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
+		// Any other drag is posted.
+		drop(worker);
+		let backend = FakeWaylandBackend::new();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		assert!(matches!(drag(&mut worker), Response::Input(None)));
+		assert_eq!(*clicks.lock(), [WAYLAND_ID]);
+	}
+
+	#[test]
+	fn a_drag_selection_reads_the_target_before_the_menu_preflight_probes_it() {
+		// The menu preflight probes the target, which can block; the selection
+		// reads the front app before any probe, so it runs first. A press on
+		// text opens no menu, so the refusing preflight never sees this drag.
+		let mut backend = FakeWaylandBackend::new();
+		backend.menu_control = true;
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.process(&capture_request(target.clone()), &token)
+			.unwrap();
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::Drag {
+			target,
+			path: vec![(4.0, 10.0), (30.0, 10.0)],
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				refuse_menu: Some(true),
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply,
+		};
+		assert!(matches!(worker.process(&request, &token).unwrap(), Response::TextSelection(_)));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
 	}
 
 	#[test]

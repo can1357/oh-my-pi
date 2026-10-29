@@ -41,6 +41,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -237,7 +238,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	async moveMouse(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {
 		this.takeovers.push(_opts?.takeover);
 	}
-	async drag(_target: string, _points: DesktopPoint[], _opts?: PointerOptions | null): Promise<void> {}
+	/** The selection a text drag makes, or `null` for a posted drag. */
+	dragSelection: AxTextSelection | null = null;
+	async drag(
+		_target: string,
+		_points: DesktopPoint[],
+		_opts?: PointerOptions | null,
+	): Promise<DesktopDragResult | null | void> {
+		return this.dragSelection ? { selection: this.dragSelection } : null;
+	}
 	async scroll(
 		_target: string,
 		_x: number,
@@ -2030,6 +2039,53 @@ describe("computer worker round trips", () => {
 			message: "selectText(text) requires a string, got number",
 		});
 		expect(native.selections).toEqual([]);
+	});
+
+	it("returns and reports a drag the native side made as a text selection", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.dragSelection = { start: 7, length: 7, text: "BV-2291", focused: false };
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"drag-selection",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toEqual(native.dragSelection);
+		expect(result.payload.displays).toHaveLength(1);
+		const [notice] = result.payload.displays;
+		expect(notice?.type).toBe("text");
+		const text = notice?.type === "text" ? notice.text : "";
+		expect(text).toContain("BV-2291");
+		expect(text).toContain("accessibility");
+		expect(text).toContain("no mouse input");
+		native.dragSelection = null;
+		const posted = await runWorker(
+			transport,
+			"drag-posted",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
+		expect(posted.ok && posted.payload.displays).toEqual([]);
+		// A long selection of wide or escaped characters is named within one line's width; the return value keeps it whole.
+		for (const [label, text, full] of [
+			["wide", "あ".repeat(150), "あ".repeat(150)],
+			["escaped", "\\".repeat(70), "\\\\".repeat(70)],
+		] as const) {
+			native.dragSelection = { start: 0, length: text.length, text, focused: false };
+			const long = await runWorker(
+				transport,
+				`drag-${label}`,
+				'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+			);
+			expect(long.ok && long.payload.returnValue).toEqual(native.dragSelection);
+			const longNotice = long.ok ? long.payload.displays[0] : undefined;
+			const longText = longNotice?.type === "text" ? longNotice.text : "";
+			expect(longText).toContain(full.slice(0, 4));
+			expect(longText).not.toContain(full);
+		}
 	});
 
 	describe("numeric window ids", () => {

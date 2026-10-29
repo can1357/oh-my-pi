@@ -2,17 +2,20 @@
 //!
 //! The selection is written as a range, so the value, the user's focus and
 //! the pointer stay as they were, and no key is sent. Typing or AX insertion
-//! into the app's focused element then replaces the selection.
+//! into the app's focused element then replaces the selection. A background
+//! drag across native text is made the same way ([`select_dragged`]).
 
 use std::{ptr::NonNull, time::Duration};
 
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
-use objc2_core_foundation::{CFRange, CFString};
+use objc2_core_foundation::{CFRange, CFString, CGPoint, CGRect};
+use unicode_bidi::{BidiClass, bidi_class};
 
 use super::{
-	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, Utf16Range, attribute_settable,
-	ax_result, control, copy_bool, copy_held_attribute, copy_range, copy_string, element_pid,
-	may_borrow_focus, popup::poll, skylight, utf16_slice,
+	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, TextSurface, Utf16Range,
+	attribute_settable, ax_result, control, copy_bool, copy_held_attribute, copy_parameterized,
+	copy_range, copy_string, element_pid, innermost_window_id, may_borrow_focus, open_menu,
+	popup::poll, probe_application, process, skylight, text_surface, utf16_slice,
 };
 
 const SELECTED_RANGE: &str = "AXSelectedTextRange";
@@ -46,8 +49,21 @@ pub(super) fn select(
 		)));
 	};
 	let wanted = request.locate(&before)?;
+	write_selection(element, pid, started_in_background, &before, wanted)
+}
+
+/// Writes `wanted` as the selection of `element` of `pid`, whose value read
+/// `before`, and returns the selection read back. `started_in_background`
+/// says `pid` was behind the user's app when the call began.
+fn write_selection(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	started_in_background: bool,
+	before: &str,
+	wanted: Utf16Range,
+) -> CoreResult<AxTextSelection> {
 	let applied = apply(
-		&before,
+		before,
 		wanted,
 		|action| skylight::with_background_guard(pid, action),
 		|| started_in_background && !may_borrow_focus(skylight::front_pid(), pid),
@@ -62,9 +78,174 @@ pub(super) fn select(
 	Ok(AxTextSelection {
 		start:   to_u32(applied.start)?,
 		length:  to_u32(applied.length)?,
-		text:    utf16_slice(&before, applied).unwrap_or_default().to_owned(),
+		text:    utf16_slice(before, applied).unwrap_or_default().to_owned(),
 		focused: copy_bool(element, "AXFocused").unwrap_or(false),
 	})
+}
+
+/// A background left drag from global point `start` to `end` in an app of
+/// `pid`, made as a text selection when both points lie on the text of one
+/// native text element mapping to window `wid` (an attached sheet's, or for a
+/// `remote` view such as a system Open or Save panel, the drawing process's
+/// window): the element at both points, whose `AXSelectedTextRange` is
+/// settable and which places each point on a character (`AXRangeForPosition`,
+/// `AXBoundsForRange`), outside web content and terminal grids. The selection
+/// runs between the carets a press and a release there would leave, so no
+/// mouse event is posted and no drag-and-drop session can begin. `None`, with
+/// nothing written, for any other drag, for one pressing where it could pick
+/// up an item (on selected text or on an attachment), and in text holding
+/// right-to-left script. `started_in_background` says `pid` was behind the
+/// user's app when the drag began, read before the caller's probes of the
+/// target, which can block, as `select` reads it before its own.
+pub(in crate::desktop::macos) fn select_dragged(
+	pid: libc::pid_t,
+	wid: u32,
+	remote: bool,
+	started_in_background: bool,
+	start: (f64, f64),
+	end: (f64, f64),
+) -> CoreResult<Option<AxTextSelection>> {
+	if shows_terminal_grid(remote, || process::is_terminal(pid)) {
+		return Ok(None);
+	}
+	let Some(app) = probe_application(pid) else {
+		return Ok(None);
+	};
+	let Some(element) = open_menu::hit_test(&app, start.0, start.1) else {
+		return Ok(None);
+	};
+	if open_menu::hit_test(&app, end.0, end.1).is_none_or(|other| *other != *element)
+		|| !attribute_settable(&element, SELECTED_RANGE)
+		|| innermost_window_id(&element).map(|(id, _)| id) != Some(wid)
+		|| text_surface(&element) != TextSurface::Native
+	{
+		return Ok(None);
+	}
+	let Some(before) = copy_string(&element, "AXValue") else {
+		return Ok(None);
+	};
+	let caret = |(x, y)| {
+		let character = range_at(&element, x, y)?;
+		character_caret(x, y, character, bounds_of(&element, character)?)
+	};
+	let (Some(press), Some(release)) = (caret(start), caret(end)) else {
+		return Ok(None);
+	};
+	let Some(wanted) = dragged_range(&before, press, release, read_range(&element)) else {
+		return Ok(None);
+	};
+	write_selection(&element, pid, started_in_background, &before, wanted).map(Some)
+}
+
+/// Whether the text under a drag in an app is a terminal's rendered grid
+/// (`is_terminal`, read only when needed): never for a `remote` view, such as
+/// a terminal app's Save panel, whose fields `openAndSavePanelService` draws.
+fn shows_terminal_grid(remote: bool, is_terminal: impl FnOnce() -> bool) -> bool {
+	!remote && is_terminal()
+}
+
+/// Where a press or release lands in an element's text: the character
+/// `AXRangeForPosition` names there, and the caret it leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Caret {
+	character: Utf16Range,
+	offset:    usize,
+}
+
+/// The caret a press at `(x, y)` leaves beside `character`, whose bounds are
+/// `bounds`: before it on its left half, after it on its right half, as
+/// `AppKit` text views place it in left-to-right text ([`dragged_range`] keeps
+/// right-to-left text out). `None` when the bounds are empty or the point lies
+/// off the character's line by more than half a line, as when an app answers
+/// `AXRangeForPosition` without placing the point.
+fn character_caret(x: f64, y: f64, character: Utf16Range, bounds: CGRect) -> Option<Caret> {
+	let (top, height) = (bounds.origin.y, bounds.size.height);
+	if height <= 0.0 || y < height.mul_add(-0.5, top) || y > height.mul_add(1.5, top) {
+		return None;
+	}
+	let offset = if x < bounds.origin.x + bounds.size.width / 2.0 {
+		character.start
+	} else {
+		character.start + character.length
+	};
+	Some(Caret { character, offset })
+}
+
+/// The selection a drag from `press` to `release` leaves in `value`, or
+/// `None` when its press would pick up an item instead of selecting (a press
+/// on the `current` selection drags the selected text, and a press on an
+/// attachment drags the attachment), or when `value` holds right-to-left
+/// script, where the half of a character a caret lands on depends on the
+/// direction of its run.
+fn dragged_range(
+	value: &str,
+	press: Caret,
+	release: Caret,
+	current: Option<Utf16Range>,
+) -> Option<Utf16Range> {
+	let on_selection = current.is_some_and(|selected| {
+		selected.length > 0
+			&& press.character.start < selected.start + selected.length
+			&& selected.start < press.character.start + press.character.length.max(1)
+	});
+	utf16_slice(value, release.character)?;
+	if on_selection
+		|| utf16_slice(value, press.character)?.contains(OBJECT_REPLACEMENT)
+		|| value.chars().any(right_to_left)
+	{
+		return None;
+	}
+	let start = press.offset.min(release.offset);
+	Some(Utf16Range { start, length: press.offset.max(release.offset) - start })
+}
+
+/// The character an attachment (an image, a file) stands in as in its text
+/// view's value.
+const OBJECT_REPLACEMENT: char = '\u{FFFC}';
+
+/// Whether `c` is right-to-left script, or a mark opening a right-to-left run.
+fn right_to_left(c: char) -> bool {
+	matches!(
+		bidi_class(c),
+		BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+	)
+}
+
+/// The character `element` places at global point `(x, y)`.
+fn range_at(element: &AXUIElement, x: f64, y: f64) -> Option<Utf16Range> {
+	let point = CGPoint { x, y };
+	// SAFETY: `point` is a live CGPoint, the type AXValueCreate is told to copy.
+	let point = unsafe { AXValue::new(AXValueType::CGPoint, NonNull::from(&point).cast()) }?;
+	let value = copy_parameterized(element, "AXRangeForPosition", &point)?
+		.downcast::<AXValue>()
+		.ok()?;
+	let mut range = CFRange { location: 0, length: 0 };
+	// SAFETY: The output is a live CFRange and the AXValue accessor validates
+	// the requested type before writing it.
+	if !unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) } {
+		return None;
+	}
+	Some(Utf16Range {
+		start:  usize::try_from(range.location).ok()?,
+		length: usize::try_from(range.length).ok()?,
+	})
+}
+
+/// The global bounds of `range` in `element`'s text.
+fn bounds_of(element: &AXUIElement, range: Utf16Range) -> Option<CGRect> {
+	let range = CFRange {
+		location: isize::try_from(range.start).ok()?,
+		length:   isize::try_from(range.length).ok()?,
+	};
+	// SAFETY: `range` is a live CFRange, the type AXValueCreate is told to copy.
+	let range = unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&range).cast()) }?;
+	let value = copy_parameterized(element, "AXBoundsForRange", &range)?
+		.downcast::<AXValue>()
+		.ok()?;
+	let mut rect = CGRect::default();
+	// SAFETY: The output is a live CGRect and the AXValue accessor validates
+	// the requested type before writing it.
+	unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) }.then_some(rect)
 }
 
 /// Writes `wanted` inside `guard`, lets the read-back settle there, then
@@ -172,12 +353,72 @@ mod tests {
 	};
 
 	use objc2_application_services::AXError;
+	use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-	use super::{CoreResult, Utf16Range, apply, write_result};
+	use super::{
+		Caret, CoreResult, Utf16Range, apply, character_caret, dragged_range, shows_terminal_grid,
+		write_result,
+	};
 	use crate::desktop::{control, error::ErrorCode};
 
 	const VALUE: &str = "alpha beta gamma";
 	const WANTED: Utf16Range = Utf16Range { start: 6, length: 4 };
+
+	#[test]
+	fn a_drag_point_lands_on_the_caret_beside_the_nearer_half_of_its_character() {
+		let character = Utf16Range { start: 5, length: 1 };
+		let bounds = CGRect::new(CGPoint::new(10.0, 100.0), CGSize::new(10.0, 14.0));
+		let at = |x, y| character_caret(x, y, character, bounds).map(|caret| caret.offset);
+		assert_eq!(at(12.0, 107.0), Some(5));
+		assert_eq!(at(18.0, 107.0), Some(6));
+		// Between lines still counts; a point well off the character's line,
+		// or a character with no extent, is not placed.
+		assert_eq!(at(18.0, 94.0), Some(6));
+		assert_eq!(at(12.0, 90.0), None);
+		assert_eq!(at(12.0, 130.0), None);
+		let empty = CGRect::new(CGPoint::new(0.0, 1200.0), CGSize::new(0.0, 0.0));
+		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty), None);
+	}
+
+	#[test]
+	fn a_terminal_app_s_remote_panel_is_not_its_grid() {
+		assert!(shows_terminal_grid(false, || true));
+		assert!(!shows_terminal_grid(false, || false));
+		assert!(!shows_terminal_grid(true, || panic!("a remote panel is never the grid")));
+	}
+
+	#[test]
+	fn a_drag_selects_between_its_carets_unless_its_press_would_pick_up_an_item() {
+		let caret = |start, offset| Caret { character: Utf16Range { start, length: 1 }, offset };
+		let value = "The quick brown fox";
+		let (press, release) = (caret(4, 4), caret(8, 9));
+		let quick = Some(Utf16Range { start: 4, length: 5 });
+		assert_eq!(dragged_range(value, press, release, None), quick);
+		assert_eq!(dragged_range(value, release, press, None), quick);
+		// A caret is no selection to drag.
+		let caret_only = Some(Utf16Range { start: 6, length: 0 });
+		assert_eq!(dragged_range(value, press, release, caret_only), quick);
+		// A press on selected text drags that text.
+		let selected = Some(Utf16Range { start: 0, length: 5 });
+		assert_eq!(dragged_range(value, press, release, selected), None);
+		let before = Some(Utf16Range { start: 0, length: 4 });
+		assert_eq!(dragged_range(value, press, release, before), quick);
+		// A press on an attachment drags the attachment.
+		let attached = "a\u{FFFC}b";
+		assert_eq!(dragged_range(attached, caret(1, 1), caret(2, 3), None), None);
+		assert_eq!(
+			dragged_range(attached, caret(2, 3), caret(0, 0), None),
+			Some(Utf16Range { start: 0, length: 3 })
+		);
+		// A release the app places past the end of the text is not trusted.
+		assert_eq!(dragged_range(value, press, caret(19, 20), None), None);
+		// In right-to-left text the caret's side of a character flips, so it
+		// keeps the refusal, even for a drag across a left-to-right run
+		// beside it.
+		assert_eq!(dragged_range("The quick שלום", press, release, None), None);
+		assert_eq!(dragged_range("The quick مرحبا", press, release, None), None);
+		assert_eq!(dragged_range("The quick\u{202E}brown", press, release, None), None);
+	}
 
 	/// Runs `apply` with a guard that marks when its own post-action settle has
 	/// finished, and a selection read that `range` answers from the number of

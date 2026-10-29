@@ -233,6 +233,19 @@ pub struct DesktopFocusReturn {
 	pub front_pid:    Option<u32>,
 }
 
+/// What a drag call did: made a text selection, or posted input.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct DesktopDragResult {
+	/// The selection a macOS background left drag across the text of one
+	/// native text element made through accessibility, read back; absent when
+	/// the drag was posted as input.
+	pub selection:    Option<AxTextSelection>,
+	/// Where focus ended when the drag ran in takeover; see
+	/// [`DesktopFocusReturn`].
+	pub focus_return: Option<DesktopFocusReturn>,
+}
+
 #[napi(object)]
 #[derive(Debug, Clone, Copy)]
 pub struct DesktopControlState {

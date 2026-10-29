@@ -299,6 +299,18 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
+	/// A drag `ev` made as a text selection instead of pointer input, as a
+	/// macOS background left drag across one native text element is; `None`
+	/// when `ev` is to be posted through [`Self::pointer`].
+	fn drag_selection(
+		&mut self,
+		_target: &Target,
+		_ev: &PointerEvent,
+		_mode: DeliveryMode,
+		_token: &OperationToken,
+	) -> CoreResult<Option<AxTextSelection>> {
+		Ok(None)
+	}
 	/// [`Self::pointer`] for a click that opens a menu, then chooses the item
 	/// at `path` in that menu before returning.
 	fn pointer_menu(
