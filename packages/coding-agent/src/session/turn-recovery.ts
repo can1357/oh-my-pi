@@ -2132,9 +2132,8 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Ask the operator whether to leave the reserve-bound model, and give an
-	 * unattended session the answer `retry.usageReservePolicy = "confirm"`
-	 * already promises it: keep the current model.
+	 * Ask the operator whether to leave the reserve-bound model. With a configured
+	 * deadline, keep the current model when nobody answers.
 	 *
 	 * The prompt is a real decision — a lane that pins its model pins it on
 	 * purpose — so the deadline never switches models on nobody's authority. It

@@ -890,13 +890,13 @@ export const cfgRetryUsageReservePolicy = register({
 export const cfgRetryUsageReserveConfirmTimeout = register({
 	id: "retry.usageReserveConfirmTimeout",
 	type: "number",
-	default: 300,
+	default: 0,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Reserve Confirm Timeout",
 		description:
-			"Seconds the reserve-reached prompt waits for an answer before it keeps the current model — the answer the confirm policy already promises an unattended session. 0 waits for a person forever.",
+			"Seconds the reserve-reached prompt waits before keeping the current model. 0 waits for a person forever.",
 		condition: "usageAwareFallbackEnabled",
 		options: [
 			{ value: "0", label: "Wait forever", description: "Hold the turn until someone answers" },

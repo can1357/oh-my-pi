@@ -27,7 +27,7 @@
 - Extensions can start `/live` voice sessions with the audio on their own WebRTC peer, such as a phone browser, through `ctx.startLive({ sdpOffer })`; the RPC `live_connect` command does the same for RPC clients ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
 - Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
-- Added `retry.usageReserveConfirmTimeout` (default 5 minutes, `0` waits forever): the seconds the "Coding-plan reserve reached" prompt waits for an answer before it keeps the current model, which is what `retry.usageReservePolicy = "confirm"` already promises an unattended session. It never switches models on its own, so a lane that pins its model keeps it; once the plan is truly depleted the configured fallback applies without asking
+- Added `retry.usageReserveConfirmTimeout` (default `0`, which waits forever): the optional deadline, in seconds, for an interactive "Coding-plan reserve reached" prompt. When it expires, the session keeps the current model rather than switching models; once the plan is truly depleted, the configured fallback applies without asking.
 
 ### Changed
 
@@ -82,6 +82,7 @@
 - Fixed unavailable configured default or dictation models being silently replaced; omp now warns and identifies the fallback model.
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
+- Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed a session that reached its coding-plan reserve waiting forever on the "Coding-plan reserve reached" prompt while its terminal title still showed a working run: a dialog only a person can answer (this prompt, an MCP sign-in, a `cfg://` write, a plan approval, an ACP permission request) now reports the run as blocked, so the title a tmux pane shows reads `π ! …` and the OSC 7501 record says `state=blocked:kind=question`
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
@@ -104,7 +105,6 @@
 - Fixed post-edit diagnostics showing "OK" or "no issues" when one of several language servers, or one file of a batched edit, had not reported yet ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
-- Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 
 ## [18.13.3] - 2026-10-28
 
