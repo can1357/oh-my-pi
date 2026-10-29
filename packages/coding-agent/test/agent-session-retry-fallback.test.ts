@@ -1516,9 +1516,10 @@ describe("AgentSession retry fallback", () => {
 		const confirmationStarted = Promise.withResolvers<void>();
 		// Nobody is at the machine: the dialog never settles on its own, and this
 		// confirmer ignores its abort signal the way a wedged UI would.
+		const neverAnswered = Promise.withResolvers<boolean>();
 		session.setUsageFallbackConfirmer(async () => {
 			confirmationStarted.resolve();
-			return new Promise<boolean>(() => {});
+			return neverAnswered.promise;
 		});
 
 		await session.prompt("Keep working on the same task");
