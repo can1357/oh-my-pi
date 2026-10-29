@@ -284,13 +284,13 @@ describe("describeAttachedImagesForTextModel", () => {
 			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
 			makeDeps(testDir, [textModel, visionModel], stub.fn),
 		);
-		const options = stub.calls[0]?.[2] as { beforeRedispatch?: () => Promise<void> } | undefined;
-		const beforeRedispatch = options?.beforeRedispatch;
-		if (!beforeRedispatch) throw new Error("the vision request carries no redispatch hook");
+		const options = stub.calls[0]?.[2] as { beforeDispatch?: () => Promise<void> } | undefined;
+		const beforeDispatch = options?.beforeDispatch;
+		if (!beforeDispatch) throw new Error("the vision request carries no dispatch hold");
 
 		agentPauseGate.pause();
 		let released = false;
-		const held = beforeRedispatch().then(() => {
+		const held = beforeDispatch().then(() => {
 			released = true;
 		});
 		await Bun.sleep(5);

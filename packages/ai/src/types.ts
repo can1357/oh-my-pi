@@ -502,14 +502,16 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	/**
-	 * Awaited before every request this layer sends on its own after the
-	 * caller's first one: a thinking-loop re-sample, and each attempt with a
-	 * rotated credential. The caller gates its own first dispatch, so this is
-	 * how it keeps the rest under the same rule — holding them at a gate of
-	 * its own (`/pause`), for instance. It cannot change the request, and a
-	 * throw from it fails that attempt like any other error.
+	 * Awaited immediately before every request this layer puts on the wire —
+	 * the caller's own, a thinking-loop re-sample, and each attempt with a
+	 * rotated credential alike — at the provider-dispatch chokepoint, after
+	 * the credential, any command-backed headers and the in-flight slot are
+	 * settled. A caller whose requests are gated (omp's `/pause`) holds them
+	 * here, where no await of this layer's own can still follow. It cannot
+	 * change the request, and a throw from it fails that attempt like any
+	 * other dispatch error.
 	 */
-	beforeRedispatch?: () => Promise<void> | void;
+	beforeDispatch?: () => Promise<void> | void;
 	/**
 	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
 	 * errors are not replayed above the transport, so retries share this limit.

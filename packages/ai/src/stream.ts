@@ -642,7 +642,9 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
+function withProviderInFlightLimit<
+	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
+>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 	dispatch: (limited: boolean) => AssistantMessageEventStream,
@@ -652,7 +654,12 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
+	// A caller's hold runs here for the same reason: this is the last step
+	// before the request reaches the transport, so nothing it gates — a
+	// resolved credential, a command-backed header, an in-flight slot — can
+	// have been awaited after it.
+	const hold = options?.beforeDispatch;
+	if (limit === undefined && !hold) return healLeakedThinking(model, dispatch(false));
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -679,15 +686,20 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			}
 		};
 		try {
-			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
-				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+			if (limit !== undefined) {
+				const startedWaitingAt = Date.now();
+				release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
+				if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
+					logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+				}
 			}
+			// Last, so the slot wait above cannot outlast it: a throw here fails
+			// this attempt through the catch below, as any dispatch error would.
+			await hold?.();
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
-			const inner = healLeakedThinking(model, dispatch(true));
+			const inner = healLeakedThinking(model, dispatch(limit !== undefined));
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -1024,7 +1036,6 @@ async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
 	dispatch: () => AssistantMessageEventStream,
 	onAttempt?: (message: AssistantMessage) => void,
-	beforeRedispatch?: () => Promise<void> | void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
 		const response = dispatch();
@@ -1044,8 +1055,8 @@ async function resolveWithThinkingLoopRetries(
 		signal?.throwIfAborted();
 		const delay = Math.min(THINKING_LOOP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), THINKING_LOOP_RETRY_MAX_DELAY_MS);
 		await scheduler.wait(delay, { signal });
-		// The caller gated the first dispatch; this one is ours, so it asks again.
-		await beforeRedispatch?.();
+		// The hold a caller supplies runs at the provider-dispatch chokepoint
+		// (`withProviderInFlightLimit`), which this re-sample passes through.
 		message = await dispatchAttempt();
 		thinkingLoopRetry = isRetryableThinkingLoop(message);
 	}
@@ -1058,12 +1069,7 @@ export async function complete<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
-	return resolveWithThinkingLoopRetries(
-		options?.signal,
-		() => stream(model, context, options),
-		undefined,
-		options?.beforeRedispatch,
-	);
+	return resolveWithThinkingLoopRetries(options?.signal, () => stream(model, context, options), undefined);
 }
 
 type AuthRetryFailure = {
@@ -1365,9 +1371,7 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
-				// This attempt is ours, not the caller's first: it asks again
-				// (the resolution above can have taken an OAuth refresh's time).
-				await requestOptions.beforeRedispatch?.();
+				// Any hold the caller supplied runs inside this attempt, at the dispatch chokepoint.
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
@@ -1531,7 +1535,6 @@ export async function completeSimple<TApi extends Api>(
 		options?.signal,
 		() => streamSimple(model, context, sessionOptions),
 		onAttempt,
-		options?.beforeRedispatch,
 	);
 }
 

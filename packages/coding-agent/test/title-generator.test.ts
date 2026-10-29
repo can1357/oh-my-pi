@@ -210,13 +210,13 @@ describe("title generator", () => {
 		expect(await generateSessionTitle("Investigate the resolver", createRegistry(model), createSettings(model))).toBe(
 			"Hooked Title",
 		);
-		const options = completeSimpleMock.mock.calls[0]?.[2] as { beforeRedispatch?: () => Promise<void> } | undefined;
-		const beforeRedispatch = options?.beforeRedispatch;
-		if (!beforeRedispatch) throw new Error("the title request carries no redispatch hook");
+		const options = completeSimpleMock.mock.calls[0]?.[2] as { beforeDispatch?: () => Promise<void> } | undefined;
+		const beforeDispatch = options?.beforeDispatch;
+		if (!beforeDispatch) throw new Error("the title request carries no dispatch hold");
 
 		agentPauseGate.pause();
 		let released = false;
-		const held = beforeRedispatch().then(() => {
+		const held = beforeDispatch().then(() => {
 			released = true;
 		});
 		await drainMicrotasks();
