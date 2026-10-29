@@ -166,6 +166,37 @@ describe("title generator", () => {
 		expect(agentPauseGate.paused).toBe(true);
 	});
 
+	// The check at the top of the attempt is passed before the credential is
+	// resolved, so a `/pause` entered during an OAuth refresh — or during the
+	// retry wrapper's backoff — has to be caught at the request itself.
+	it("calls no provider for a pause entered while the credential resolves", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Late Hold</title>" }],
+		} as never);
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => {
+				agentPauseGate.pause();
+				return "test-key";
+			},
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const pending = generateSessionTitle("Investigate the resolver", registry, createSettings(model));
+		await drainMicrotasks();
+		expect(await Promise.race([pending, Promise.resolve(PARKED)])).toBe(PARKED);
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+
+		agentPauseGate.resume();
+
+		expect(await pending).toBe("Late Hold");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("selects an available local-inference model from the tiny role", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");
 		if (!localModel) throw new Error("Expected bundled local tiny model");

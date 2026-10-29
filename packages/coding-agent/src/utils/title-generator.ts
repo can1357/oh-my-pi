@@ -404,8 +404,13 @@ async function generateTitleOnlineWithModels(
 			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
 
 			const response = await retryTransientCompletion(
-				() =>
-					completeSimple(
+				async () => {
+					// The provider boundary, re-tested per attempt: the credential
+					// resolution above and this wrapper's backoff both await, so a
+					// `/pause` entered after the check at the top of this loop would
+					// otherwise let the request — or its retry — start under the hold.
+					if (agentPauseGate.paused) await holdUntilResumed(signal, sessionId);
+					return completeSimple(
 						model,
 						{
 							systemPrompt,
@@ -424,7 +429,8 @@ async function generateTitleOnlineWithModels(
 							metadata,
 							signal,
 						},
-					),
+					);
+				},
 				{ signal, provider: model.provider },
 			);
 
