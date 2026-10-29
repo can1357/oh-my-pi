@@ -603,6 +603,27 @@ describe("pause screen", () => {
 			expect(agentPauseGate.paused).toBe(false);
 		});
 
+		it("dismisses and repaints the screen when a teardown step before the hide throws", async () => {
+			// The outer release runs whatever the teardown does, so a throw in a
+			// step that precedes `hide()` would otherwise open the gate while the
+			// terminal still holds the full-screen PAUSED frame — defect 1 again,
+			// by another route.
+			const { host, shown, order, hiddenCount } = makeHost();
+			let focusCalls = 0;
+			host.ui.setFocus = () => {
+				focusCalls++;
+				if (focusCalls > 1) throw new Error("setFocus failed");
+			};
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			component.handleInput("\x1b");
+			await expect(run).rejects.toThrow("setFocus failed");
+			expect(hiddenCount()).toBe(1);
+			expect(order).toEqual(["hide", "paint"]);
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
 		it("treats ctrl+c as resume, never as abort-and-stay-paused", async () => {
 			const { host, shown } = makeHost();
 			const run = runPauseScreen(host);

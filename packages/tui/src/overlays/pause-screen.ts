@@ -432,14 +432,22 @@ export async function runPauseScreen(host: PauseScreenHost, options?: PauseScree
 			host.ui.setFocus(component);
 			await component.run();
 		} finally {
-			component.dispose();
-			host.ui.setFocus(component);
-			overlay.hide();
-			// `overlay.hide()` only schedules a frame, while `resume()` wakes every
-			// parked agent loop in the same tick. Paint synchronously before opening
-			// the gate so the terminal cannot retain the PAUSED frame while resumed
-			// work runs.
-			host.ui.renderNow();
+			try {
+				component.dispose();
+				host.ui.setFocus(component);
+			} finally {
+				// Dismissal cannot depend on the steps before it. The outer
+				// `finally` opens the gate whatever happens here, so a throw in
+				// `dispose()` or `setFocus()` would otherwise leave the terminal
+				// holding a focused, full-screen PAUSED frame over a running
+				// session — the very defect the paint below exists to prevent.
+				overlay.hide();
+				// `overlay.hide()` only schedules a frame, while `resume()` wakes every
+				// parked agent loop in the same tick. Paint synchronously before opening
+				// the gate so the terminal cannot retain the PAUSED frame while resumed
+				// work runs.
+				host.ui.renderNow();
+			}
 		}
 	} finally {
 		// Every path from the engage above, so no throw in setFocus, hide or the
