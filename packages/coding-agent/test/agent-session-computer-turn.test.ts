@@ -12,6 +12,8 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { UNNAMED_USER_WAIT_PROMPT } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -321,6 +323,54 @@ describe("AgentSession computer display hold per turn", () => {
 		await secondWait;
 		unsubscribe();
 		expect(events).toEqual(["start:first", "start:second", "end"]);
+		expect(target.activeUserWait()).toBeUndefined();
+	});
+
+	it("republishes the approval still open when an overlapping one is answered", async () => {
+		// Two tool approvals overlap. Each publishes its own compact prompt and
+		// `permission`, so answering the first emits a replacement frame naming
+		// the second: a surface reporting run state never keeps the answered
+		// dialog's words, and never downgrades an approval to a question.
+		const target = createSession([{ content: ["done"] }]);
+		const frames: Array<Record<string, unknown>> = [];
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "user_wait_start") frames.push({ prompt: event.prompt, kind: event.kind });
+			if (event.type === "user_wait_end") frames.push({ end: true });
+		});
+		const first = Promise.withResolvers<"once">();
+		const second = Promise.withResolvers<"once">();
+		const answers = [first, second];
+		const ui = trackUserWaits(
+			{ approve: async () => answers.shift()!.promise } as unknown as ExtensionUIContext,
+			(dialog, frame) => target.waitForUser(dialog, frame.prompt, { kind: frame.kind }),
+		);
+
+		const firstApproval = ui.approve?.({
+			full: "Allow tool: bash\nCommand: echo first",
+			compact: "bash: echo first",
+		});
+		const secondApproval = ui.approve?.({
+			full: "Allow tool: bash\nCommand: echo second",
+			compact: "bash: echo second",
+		});
+		expect(frames).toEqual([{ prompt: "bash: echo first", kind: "permission" }]);
+
+		first.resolve("once");
+		await firstApproval;
+		expect(frames).toEqual([
+			{ prompt: "bash: echo first", kind: "permission" },
+			{ prompt: "bash: echo second", kind: "permission" },
+		]);
+		expect(target.activeUserWait()).toEqual({
+			type: "user_wait_start",
+			prompt: "bash: echo second",
+			kind: "permission",
+		});
+
+		second.resolve("once");
+		await secondApproval;
+		unsubscribe();
+		expect(frames.at(-1)).toEqual({ end: true });
 		expect(target.activeUserWait()).toBeUndefined();
 	});
 
