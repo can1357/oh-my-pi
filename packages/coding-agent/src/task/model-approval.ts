@@ -199,7 +199,12 @@ function allowlistCouldAdmitPattern(
 			? suffix.base
 			: pattern;
 	if (!/[*?]/.test(source)) {
-		const resolved = resolveGrantPattern(source, resolution.chat, resolution.catalog, resolution.matchPreferences).model;
+		const resolved = resolveGrantPattern(
+			source,
+			resolution.chat,
+			resolution.catalog,
+			resolution.matchPreferences,
+		).model;
 		const identity = resolved ? formatModelStringWithRouting(resolved) : source;
 		return allowlistAdmitsIdentity(allow, identity, settings, resolution);
 	}
