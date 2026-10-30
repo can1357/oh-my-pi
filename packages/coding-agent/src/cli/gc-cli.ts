@@ -2639,8 +2639,13 @@ function renderText(result: GcResult): string {
  * about the order of two statements.
  *
  * A write that fails is the same answer as a write that cannot finish:
- * nothing is deleted. `/dev/full` and a closed stderr already end the run
- * before the blob phase, and that is the behaviour being kept.
+ * nothing is deleted. `/dev/full` and a broken pipe already end the run
+ * before the blob phase, and that is the behaviour being kept. Not a
+ * closed descriptor 2, though: Bun replaces an inherited closed stderr
+ * with `/dev/null` before any of this runs, so the write succeeds and the
+ * run carries on — an operator who sends the warning to `/dev/null` is
+ * suppressing a diagnostic on purpose, and this does not try to outvote
+ * them.
  */
 async function writeWarningBeforeDeleting(text: string): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
