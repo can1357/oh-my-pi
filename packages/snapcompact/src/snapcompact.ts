@@ -2332,35 +2332,79 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 	};
 }
 
+const FILES_SECTION_HEAD = "FILES\n===================\n";
+const HISTORY_SECTION_HEAD = "HISTORY\n===================";
+
+/** The FILES section of a snapcompact summary as it was rendered, or `undefined` when it lists none. */
+function summaryFileSection(summary: string): string | undefined {
+	const start = summary.indexOf(FILES_SECTION_HEAD);
+	const end = summary.lastIndexOf(HISTORY_SECTION_HEAD);
+	if (start < 0 || end < start) return undefined;
+	const files = summary.slice(start + FILES_SECTION_HEAD.length, end).replace(TRAILING_LINE_BREAKS, "");
+	return files.length > 0 ? files : undefined;
+}
+
+/** Options for {@link viewWithoutFrames}. */
+export interface ViewWithoutFramesOptions {
+	/** `false` for a reader that excludes assistant reasoning ({@link readerIncludesThinking}). */
+	includeThinking?: boolean;
+}
+
 /**
  * What a reader without image input reads for a compaction whose summary is
- * `summary` and archive `archive`: the archive's kept source ({@link Archive.text})
- * as plain text in place of its frames, with the summary re-rendered without
- * the frame legend; `details` restores its file list. An archive persisted
- * without that source keeps its text edges and counts the imaged middle as
- * dropped. An archive without frames is returned as is.
+ * `summary` and archive `archive`: the archive's kept source
+ * ({@link Archive.text}) as plain text in place of its frames, and the summary
+ * re-rendered without the frame legend, its file list kept. With
+ * `includeThinking: false` the text and legend also leave out reasoning, as
+ * {@link viewWithoutThinking} does, without rendering frames this reader
+ * cannot see. An archive persisted without that source keeps its text edges
+ * and counts the imaged middle as dropped. An archive with neither frames nor
+ * reasoning to drop is returned as is.
  */
-export function viewWithoutFrames(summary: string, archive: Archive, details?: CompactionDetails): ArchiveView {
-	if (archive.frames.length === 0) return { summary, archive };
-	const framedChars = archive.frames.reduce((sum, frame) => sum + frame.chars, 0);
-	const text = archive.text;
-	const textArchive: Archive = text
-		? { frames: [], totalChars: text.length, truncatedChars: archive.truncatedChars, text, textHead: text }
-		: {
-				frames: [],
-				totalChars: Math.max(0, archive.totalChars - framedChars),
-				truncatedChars: archive.truncatedChars + framedChars,
-				...(archive.textHead ? { textHead: archive.textHead } : {}),
-				...(archive.textTail ? { textTail: archive.textTail } : {}),
-			};
-	const files = details ? formatFileList(details.readFiles, details.modifiedFiles) : "";
+export function viewWithoutFrames(
+	summary: string,
+	archive: Archive,
+	options: ViewWithoutFramesOptions = {},
+): ArchiveView {
+	const dropThinking = options.includeThinking === false && summaryIncludesThinking(summary);
+	if (archive.frames.length === 0 && !dropThinking) return { summary, archive };
+	const scrub = (text: string): string => (dropThinking ? textWithoutThinking(text) : text);
+	let textArchive: Archive;
+	if (archive.text) {
+		const text = scrub(archive.text);
+		textArchive = {
+			frames: [],
+			totalChars: text.length,
+			truncatedChars: archive.truncatedChars,
+			text,
+			textHead: text,
+		};
+	} else {
+		// Without the whole source the tail may open inside a section cut off in
+		// the dropped middle, whose scope is unknown; a reader without reasoning
+		// skips those lines (see sourceForReaderWithoutThinking).
+		const tail = archive.textTail ?? "";
+		const labelled = dropThinking ? tail.search(SECTION_START) : 0;
+		const keptTail = labelled < 0 ? "" : tail.slice(labelled);
+		const textHead = scrub(archive.textHead ?? "");
+		const textTail = scrub(keptTail);
+		const framedChars = archive.frames.reduce((sum, frame) => sum + frame.chars, 0);
+		textArchive = {
+			frames: [],
+			totalChars: textHead.length + textTail.length,
+			truncatedChars: archive.truncatedChars + framedChars + tail.length - keptTail.length,
+			...(textHead ? { textHead } : {}),
+			...(textTail ? { textTail } : {}),
+		};
+	}
+	const source = textArchive.text ?? textArchive.textHead ?? "";
 	return {
 		summary: prompt.render(snapcompactSummaryPrompt, {
 			frameCount: 0,
 			truncatedChars: textArchive.truncatedChars,
-			includedPreviousSummary: (text ?? archive.textHead ?? "").startsWith(PREVIOUS_SUMMARY_HEAD),
-			files: files.length > 0 ? files : undefined,
-			includeThinking: summaryIncludesThinking(summary),
+			includedPreviousSummary: source.startsWith(PREVIOUS_SUMMARY_HEAD),
+			files: summaryFileSection(summary),
+			includeThinking: summaryIncludesThinking(summary) && !dropThinking,
 		}),
 		archive: textArchive,
 	};

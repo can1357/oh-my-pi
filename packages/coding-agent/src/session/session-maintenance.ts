@@ -534,14 +534,6 @@ function archiveReader(model: Model): ArchiveReader {
 	return { excludeThinking, withoutFrames, key: `${excludeThinking}:${withoutFrames}` };
 }
 
-/** The file lists a snapcompact summary renders, when `entry` recorded both. */
-function compactionFileDetails(entry: CompactionEntry): snapcompact.CompactionDetails | undefined {
-	const details = entry.details as Partial<snapcompact.CompactionDetails> | undefined;
-	return Array.isArray(details?.readFiles) && Array.isArray(details?.modifiedFiles)
-		? { readFiles: details.readFiles, modifiedFiles: details.modifiedFiles }
-		: undefined;
-}
-
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
@@ -593,8 +585,13 @@ export class SessionMaintenance {
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	/** Each archive's no-reasoning view, rendered (or failed closed) once per compaction entry. */
 	readonly #withoutThinkingViews = new WeakMap<CompactionEntry, Promise<snapcompact.ArchiveView>>();
-	/** Each archive's text view for readers without image input, keyed by whether reasoning was dropped first. */
-	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<boolean, snapcompact.ArchiveView>>();
+	/** Each archive's text view for readers without image input, keyed by whether reasoning is dropped
+	 *  (`null`: the original already reads as text). */
+	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<boolean, snapcompact.ArchiveView | null>>();
+	/** The compaction entry behind each archive summary message, once found. */
+	readonly #summaryEntries = new WeakMap<CompactionSummaryMessage, CompactionEntry>();
+	/** Reader copies that read an archive as text in place of its frames. */
+	readonly #textCopies = new WeakSet<AgentMessage>();
 	/** Reader copies of archive summary messages keyed by the original message, then by {@link ArchiveReader.key},
 	 *  so repeated swaps keep one identity. */
 	readonly #readerSummaries = new WeakMap<
@@ -2695,7 +2692,11 @@ export class SessionMaintenance {
 	 * floor the compaction decision respects so on-wire compression can never
 	 * suppress it.
 	 */
-	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = [], tokenizer = this.#tokenizer): number {
+	#estimateStoredContextTokens(
+		pendingMessages: AgentMessage[] = [],
+		tokenizer = this.#tokenizer,
+		messages: AgentMessage[] = this.#host.messages(),
+	): number {
 		// Local counting is the whole point of this arm: provider usage is
 		// exactly what it must not trust. Exclude encrypted reasoning
 		// (thinkingSignature / redactedThinking) too — its local byte size
@@ -2707,7 +2708,7 @@ export class SessionMaintenance {
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
-			tokenizer.countMessages(this.#host.messages(), opts) +
+			tokenizer.countMessages(messages, opts) +
 			tokenizer.countMessages(pendingMessages, opts)
 		);
 	}
@@ -4159,9 +4160,11 @@ export class SessionMaintenance {
 	/**
 	 * Count a rebuilt context the way {@link #estimateStoredContextTokens} will once it is committed:
 	 * a summary carrying frames is counted as itself so each frame gets the active model's frame
-	 * price. Native Responses history replaces the display summary and excludes opaque ciphertext.
+	 * price, and an archive as the active model reads it ({@link #messagesAsRead}). Native Responses
+	 * history replaces the display summary and excludes opaque ciphertext.
 	 */
-	#countProjectedMessages(messages: AgentMessage[]): number {
+	#countProjectedMessages(rebuilt: AgentMessage[]): number {
+		const messages = this.#messagesAsRead(rebuilt, this.#host.sessionManager.getBranchView());
 		const options = { excludeEncryptedReasoning: true } as const;
 		const archives: AgentMessage[] = [];
 		const rest: AgentMessage[] = [];
@@ -4356,7 +4359,8 @@ export class SessionMaintenance {
 		// Provider usage describes the active model's last request, so the failed
 		// turn comes off it at the active model's count. The local floor counts
 		// what `model` itself would be sent: another reader drops the active
-		// model's natively replayed reasoning, and a cold session drops its own.
+		// model's natively replayed reasoning, a cold session drops its own, and
+		// a reader without image input gets each archive as text.
 		const providerExcludedTokens = activeExcludedMessage ? this.#tokenizer.countMessage(activeExcludedMessage) : 0;
 		const tokenizerOptions = {
 			nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#host.providerSessionState),
@@ -4385,7 +4389,14 @@ export class SessionMaintenance {
 					providerExcludedTokens +
 					replayedReasoningShift,
 			),
-			Math.max(0, this.#estimateStoredContextTokens([], tokenizer) - storedExcludedTokens),
+			Math.max(
+				0,
+				this.#estimateStoredContextTokens(
+					[],
+					tokenizer,
+					this.#messagesAsRead(messages, this.#host.sessionManager.getBranchView(), model),
+				) - storedExcludedTokens,
+			),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
@@ -4792,7 +4803,7 @@ export class SessionMaintenance {
 				const original = this.#originalSummaries.get(message) ?? message;
 				const wanted =
 					(reader.excludeThinking && snapcompact.summaryIncludesThinking(original.summary)) ||
-					(reader.withoutFrames && (original.images?.length ?? 0) > 0)
+					(reader.withoutFrames && original.method === "snapcompact")
 						? await this.#readerSummary(original, model, reader)
 						: original;
 				if (wanted !== message) replacements.set(message, wanted);
@@ -4801,24 +4812,67 @@ export class SessionMaintenance {
 		return replacements;
 	}
 
-	/** `message` rebuilt from the archive view `reader` reads, one copy per original, reader and view. */
+	/**
+	 * `messages`, rebuilt from `entries`, with each snapcompact summary in the form
+	 * `model` (the active model by default) reads when it takes no image input,
+	 * the way {@link renderArchiveForModel} will send it, so a local count
+	 * measures that request; for a reader with image input, a text copy goes back
+	 * to its original frames. Synchronous: the no-reasoning frames of an image
+	 * reader are left to {@link messagesForModel}.
+	 */
+	#messagesAsRead(
+		messages: AgentMessage[],
+		entries: readonly SessionEntry[],
+		model: Model | undefined = this.#model,
+	): AgentMessage[] {
+		if (!model) return messages;
+		const reader = archiveReader(model);
+		let read: AgentMessage[] | undefined;
+		messages.forEach((message, index) => {
+			if (message.role !== "compactionSummary") return;
+			const original = this.#originalSummaries.get(message) ?? message;
+			let wanted: AgentMessage = message;
+			if (reader.withoutFrames && original.method === "snapcompact") {
+				const entry = this.#archiveEntry(original, entries);
+				const view = entry && this.#viewWithoutFrames(entry, reader);
+				wanted = view ? this.#readerMessage(original, view, reader) : original;
+			} else if (!reader.withoutFrames && this.#textCopies.has(message)) {
+				wanted = original;
+			}
+			if (wanted === message) return;
+			read ??= messages.slice();
+			read[index] = wanted;
+		});
+		return read ?? messages;
+	}
+
+	/** The compaction entry among `entries` whose snapcompact archive `message` was built from. */
+	#archiveEntry(message: CompactionSummaryMessage, entries: readonly SessionEntry[]): CompactionEntry | undefined {
+		const cached = this.#summaryEntries.get(message);
+		if (cached) return cached;
+		const entry = entries.findLast(
+			(entry): entry is CompactionEntry =>
+				entry.type === "compaction" &&
+				entry.summary === message.summary &&
+				new Date(entry.timestamp).getTime() === message.timestamp &&
+				snapcompact.getPreservedArchive(entry.preserveData) !== undefined,
+		);
+		if (entry) this.#summaryEntries.set(message, entry);
+		return entry;
+	}
+
+	/** `message` rebuilt from the archive view `reader` reads, or `message` itself when that is the original. */
 	async #readerSummary(
 		message: CompactionSummaryMessage,
 		model: Model,
 		reader: ArchiveReader,
 	): Promise<CompactionSummaryMessage> {
-		const entry = this.#host.sessionManager
-			.getBranchView()
-			.findLast(
-				(entry): entry is CompactionEntry =>
-					entry.type === "compaction" &&
-					entry.summary === message.summary &&
-					new Date(entry.timestamp).getTime() === message.timestamp &&
-					snapcompact.getPreservedArchive(entry.preserveData) !== undefined,
-			);
-		let view: snapcompact.ArchiveView;
+		const entry = this.#archiveEntry(message, this.#host.sessionManager.getBranchView());
+		let view: snapcompact.ArchiveView | undefined;
 		if (entry) {
-			view = await this.#readerView(entry, model, reader);
+			view = reader.withoutFrames
+				? this.#viewWithoutFrames(entry, reader)
+				: await this.#viewWithoutThinking(entry, model);
 		} else if (reader.excludeThinking && snapcompact.summaryIncludesThinking(message.summary)) {
 			// No archive behind it (e.g. archive text a summarizer folded into a plain
 			// summary): scrub the summary text itself and keep no blocks.
@@ -4826,10 +4880,16 @@ export class SessionMaintenance {
 				summary: snapcompact.textWithoutThinking(message.summary),
 				archive: { frames: [], totalChars: 0, truncatedChars: 0 },
 			};
-		} else {
-			// No archive text to read in place of its images.
-			return message;
 		}
+		return view ? this.#readerMessage(message, view, reader) : message;
+	}
+
+	/** `message` rebuilt from `view`, one copy per original, reader and view. */
+	#readerMessage(
+		message: CompactionSummaryMessage,
+		view: snapcompact.ArchiveView,
+		reader: ArchiveReader,
+	): CompactionSummaryMessage {
 		let cache = this.#readerSummaries.get(message);
 		if (!cache) {
 			cache = new Map();
@@ -4847,25 +4907,31 @@ export class SessionMaintenance {
 		};
 		cache.set(reader.key, { view, message: readerMessage });
 		this.#originalSummaries.set(readerMessage, message);
+		if (reader.withoutFrames) this.#textCopies.add(readerMessage);
 		return readerMessage;
 	}
 
-	/** The view of `entry`'s archive `reader` reads: reasoning dropped, then frames read as text, as it needs. */
-	async #readerView(entry: CompactionEntry, model: Model, reader: ArchiveReader): Promise<snapcompact.ArchiveView> {
-		if (!reader.withoutFrames) return await this.#viewWithoutThinking(entry, model);
+	/**
+	 * `entry`'s archive as a reader without image input reads it
+	 * ({@link snapcompact.viewWithoutFrames}), derived from its kept source once
+	 * per entry and reasoning policy; `undefined` when that is the original.
+	 */
+	#viewWithoutFrames(entry: CompactionEntry, reader: ArchiveReader): snapcompact.ArchiveView | undefined {
 		let views = this.#withoutFramesViews.get(entry);
 		if (!views) {
 			views = new Map();
 			this.#withoutFramesViews.set(entry, views);
 		}
-		const cached = views.get(reader.excludeThinking);
-		if (cached) return cached;
-		const base = reader.excludeThinking
-			? await this.#viewWithoutThinking(entry, model)
-			: { summary: entry.summary, archive: snapcompact.getPreservedArchive(entry.preserveData)! };
-		const view = snapcompact.viewWithoutFrames(base.summary, base.archive, compactionFileDetails(entry));
-		views.set(reader.excludeThinking, view);
-		return view;
+		let view = views.get(reader.excludeThinking);
+		if (view === undefined) {
+			const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
+			const unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, {
+				includeThinking: !reader.excludeThinking,
+			});
+			view = unfolded.archive === archive ? null : unfolded;
+			views.set(reader.excludeThinking, view);
+		}
+		return view ?? undefined;
 	}
 
 	#viewWithoutThinking(entry: CompactionEntry, model: Model): Promise<snapcompact.ArchiveView> {
@@ -4886,9 +4952,17 @@ export class SessionMaintenance {
 	 */
 	async #renderViewWithoutThinking(entry: CompactionEntry, model: Model): Promise<snapcompact.ArchiveView> {
 		const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
+		const details = entry.details as Partial<snapcompact.CompactionDetails> | undefined;
 		// The stored variant, the original when it carries no reasoning, else the
 		// text-only form without frames.
-		const readableView = () => snapcompact.viewWithoutThinking(entry.summary, archive, compactionFileDetails(entry));
+		const readableView = () =>
+			snapcompact.viewWithoutThinking(
+				entry.summary,
+				archive,
+				Array.isArray(details?.readFiles) && Array.isArray(details?.modifiedFiles)
+					? { readFiles: details.readFiles, modifiedFiles: details.modifiedFiles }
+					: undefined,
+			);
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (archive.withoutThinking || !snapcompact.summaryIncludesThinking(entry.summary) || !archiveText) {
 			return readableView();

@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -158,14 +159,18 @@ describe("snapcompact archive read by another model", () => {
 		return archive;
 	}
 
-	function startSession(sessionManager: SessionManager, model: Model): { session: AgentSession; mock: MockModel } {
+	function startSession(
+		sessionManager: SessionManager,
+		model: Model,
+		options: { settings?: Settings; maxFrameDataBytes?: number } = {},
+	): { session: AgentSession; mock: MockModel } {
 		const mock = createMockModel({ handler: { content: ["ok"] } });
 		const agent = new Agent({
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
 				tools: [],
-				messages: sessionManager.buildSessionContext().messages,
+				messages: sessionManager.buildSessionContext({ maxFrameDataBytes: options.maxFrameDataBytes }).messages,
 			},
 			convertToLlm,
 			streamFn: mock.stream,
@@ -173,7 +178,7 @@ describe("snapcompact archive read by another model", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: options.settings ?? Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 		});
 		sessions.push(session);
@@ -364,10 +369,13 @@ describe("snapcompact archive read by another model", () => {
 		const original = await seedArchive(sessionManager);
 		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
 		const { session } = startSession(sessionManager, gpt);
+		const render = vi.spyOn(snapcompact, "compact");
 
 		const { text, images } = requestContent(
 			await session.convertMessagesToLlm(session.messages, undefined, { ...claude, input: ["text"] }),
 		);
+		// Its text view comes from the kept source: no no-reasoning frames rendered for a reader that cannot see them.
+		expect(render).not.toHaveBeenCalled();
 		expect(images).toEqual([]);
 		expect(text).toContain(marker);
 		expect(text).toContain(PLAIN_LEGEND);
@@ -429,5 +437,76 @@ describe("snapcompact archive read by another model", () => {
 		expect(request).toBeDefined();
 		expect(request).toContain(marker);
 		expect(request).not.toContain(IMAGE_OMITTED);
+	});
+
+	it("sends the archive's text when the context it resumed from left every frame out", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		// A frame budget of zero drops every frame from the rebuilt summary, as a provider budget or
+		// unavailable frame blobs can: the summary then carries no image blocks at all.
+		const { session, mock } = startSession(sessionManager, deepseek, { maxFrameDataBytes: 0 });
+		expect(session.messages.some(message => message.role === "compactionSummary" && message.images)).toBe(false);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+		expect(text).not.toContain(FRAME_LEGEND);
+	});
+
+	it("accepts a compaction that shrinks the archive's text for a model without image input", async () => {
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager);
+		const filler = "the quick brown fox jumps over the lazy dog. ".repeat(40);
+		for (let i = 0; i < 6; i++) {
+			sessionManager.appendMessage({ role: "user", content: `later ${i}: ${filler}`, timestamp: Date.now() });
+			sessionManager.appendMessage(assistant(deepseek, [{ type: "text", text: `later reply ${i}: ${filler}` }]));
+		}
+		const model: Model = { ...deepseek, contextWindow: 400_000 };
+		const { session } = startSession(sessionManager, gpt, {
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 5,
+				"compaction.thresholdTokens": -1,
+				"compaction.keepRecentTokens": 1_000,
+				"compaction.autoContinue": false,
+				"compaction.asyncEnabled": false,
+			}),
+		});
+		await session.setModel(model);
+		// The persisted branch rebuilt with frames, and the context this model reads.
+		const framed = session.agent.tokenizer.countMessages(sessionManager.buildSessionContext().messages);
+		const asText = session.agent.tokenizer.countMessages(session.messages);
+		// A summary larger than the archive's framed form but well under its text.
+		const perFiller = session.agent.tokenizer.countMessages([
+			{ role: "user", content: filler.repeat(10), timestamp: 0 },
+		]);
+		const summaryTokens = Math.floor(framed + (asText - framed) / 2);
+		expect(asText - framed).toBeGreaterThan(perFiller);
+		const summary = filler.repeat(Math.ceil((summaryTokens / perFiller) * 10));
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary,
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const { promise, resolve } = Promise.withResolvers<{ committed: boolean; errorMessage?: string }>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") {
+				resolve({ committed: event.result !== undefined, errorMessage: event.errorMessage });
+			}
+		});
+
+		const trigger = { ...assistant(model, [{ type: "text", text: "Done." }]) };
+		trigger.usage = { ...trigger.usage, input: asText, totalTokens: asText };
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+
+		const end = await promise;
+		expect(end.errorMessage).toBeUndefined();
+		expect(end.committed).toBe(true);
 	});
 });

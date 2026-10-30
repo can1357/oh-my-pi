@@ -1576,8 +1576,6 @@ describe("archive helpers", () => {
 
 	describe("viewWithoutFrames", () => {
 		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 20 };
-		const FRAME_SUMMARY =
-			"- Some middle sections: images, not text.\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY";
 
 		function sentText(view: snapcompact.ArchiveView): string {
 			const blocks = snapcompact.historyBlocks(view.archive);
@@ -1585,28 +1583,65 @@ describe("archive helpers", () => {
 			return `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
 		}
 
-		it("reads the archive's whole kept source as text in place of its frames", () => {
-			const text = `¶user: ask${snapcompact.NEWLINE_GLYPH}¶think: plan${snapcompact.NEWLINE_GLYPH}¶ai: imaged middle${snapcompact.NEWLINE_GLYPH}¶ai: answer`;
-			const view = snapcompact.viewWithoutFrames(
-				FRAME_SUMMARY,
-				{
-					frames: [frame],
-					totalChars: 40,
-					truncatedChars: 7,
-					text,
-					textHead: "¶user: ask",
-					textTail: "¶ai: answer",
-				},
-				{ readFiles: ["src/a.ts"], modifiedFiles: [] },
+		async function framedArchive(): Promise<snapcompact.CompactionResult> {
+			const fileOps = snapcompact.createFileOps();
+			fileOps.read.add("src/read-only.ts");
+			fileOps.read.add("src/both.ts");
+			fileOps.edited.add("src/both.ts");
+			fileOps.edited.add("src/edited.ts");
+			const result = await snapcompact.compact(
+				makePreparation({
+					messagesToSummarize: [
+						createUserMessage(`HEAD sentinel. ${"Important fact number one. ".repeat(60)}`),
+						createAssistantMessage([
+							{ type: "thinking", thinking: "PRIVATE plan." },
+							{ type: "text", text: `MIDDLE sentinel. ${"Important fact number two. ".repeat(60)}` },
+						]),
+						createUserMessage(`${"Important fact number three. ".repeat(60)}TAIL sentinel.`),
+					],
+					fileOps,
+				}),
+				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
 			);
-			expect(view.archive).toEqual({ frames: [], totalChars: text.length, truncatedChars: 7, text, textHead: text });
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.frames.length).toBeGreaterThan(0);
+			expect(archive.textHead).not.toContain("MIDDLE sentinel");
+			expect(archive.textTail).not.toContain("MIDDLE sentinel");
+			return result;
+		}
+
+		it("reads the archive's whole kept source as text in place of its frames, with its file list", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive);
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.text).toBe(archive.text);
 			const sent = sentText(view);
-			expect(sent).toContain("¶ai: imaged middle\n¶ai: answer");
+			for (const sentinel of ["HEAD sentinel", "MIDDLE sentinel", "TAIL sentinel", "PRIVATE plan"]) {
+				expect(sent).toContain(sentinel);
+			}
+			expect(result.summary).toContain("images, not text");
 			expect(sent).not.toContain("images, not text");
-			// The reader may read reasoning, so the legend keeps it.
+			// This reader may read reasoning, so the legend keeps it.
 			expect(sent).toContain("`¶think:`");
-			expect(sent).toContain("About 7 characters of older middle history dropped");
-			expect(sent).toContain("a.ts (Read)");
+			// The summary's own file list, read-and-written files included.
+			for (const file of ["read-only.ts (Read)", "both.ts (RW)", "edited.ts (Write)"]) {
+				expect(result.summary).toContain(file);
+				expect(sent).toContain(file);
+			}
+		});
+
+		it("leaves reasoning out of the text for a reader that excludes it, without rendering frames", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive, { includeThinking: false });
+			expect(view.archive.frames).toEqual([]);
+			const sent = sentText(view);
+			expect(sent).toContain("MIDDLE sentinel");
+			expect(sent).not.toContain("PRIVATE plan");
+			expect(sent).not.toContain("¶think:");
+			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
+			expect(sent).toContain("both.ts (RW)");
 		});
 
 		it("keeps the edges and counts the imaged middle as dropped when the archive kept no whole source", () => {
@@ -1615,24 +1650,35 @@ describe("archive helpers", () => {
 				totalChars: 60,
 				truncatedChars: 0,
 				textHead: "¶user: ask",
-				textTail: "¶ai: answer",
+				textTail: "secret continuation\n¶ai: answer",
 			};
 			const view = snapcompact.viewWithoutFrames("no scopes\nHISTORY", legacy);
 			expect(view.archive).toEqual({
 				frames: [],
-				totalChars: 20,
+				totalChars: 10 + legacy.textTail.length,
 				truncatedChars: 40,
 				textHead: "¶user: ask",
-				textTail: "¶ai: answer",
+				textTail: legacy.textTail,
 			});
-			const sent = sentText(view);
-			expect(sent).toContain("middle history omitted above");
-			expect(sent).not.toContain("`¶think:`");
+			expect(sentText(view)).toContain("middle history omitted above");
+
+			// A reader without reasoning skips the tail's lines before its first scope label,
+			// whose scope sat in the dropped middle.
+			const thinking =
+				"`¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+			const scrubbed = snapcompact.viewWithoutFrames(thinking, legacy, { includeThinking: false });
+			expect(scrubbed.archive.textTail).toBe("¶ai: answer");
+			expect(scrubbed.archive.truncatedChars).toBe(40 + "secret continuation\n".length);
+			expect(sentText(scrubbed)).not.toContain("secret");
 		});
 
-		it("returns an archive without frames as is", () => {
+		it("returns an archive with neither frames nor reasoning to drop as is", () => {
 			const archive = { frames: [], totalChars: 3, truncatedChars: 0, textHead: "abc" };
 			expect(snapcompact.viewWithoutFrames("s", archive)).toEqual({ summary: "s", archive });
+			expect(snapcompact.viewWithoutFrames("s", archive, { includeThinking: false })).toEqual({
+				summary: "s",
+				archive,
+			});
 		});
 	});
 
