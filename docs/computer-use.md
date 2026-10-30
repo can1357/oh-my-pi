@@ -100,6 +100,8 @@ await win.type("Format Document");
 await win.press("enter");
 ```
 
+On macOS a screenshot of an on-screen window shows it at its on-screen size; a window spanning displays or partly off screen is captured as its part on the display that holds most of it, and pixel input maps through that part.
+
 Window methods include:
 
 - `screenshot({ silent? })`

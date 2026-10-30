@@ -34,6 +34,7 @@ darwin_helper(
 darwin_helper(
     name = "capture_darwin_helper",
     src = "src/desktop/macos/capture/helper.m",
+    hdrs = ["src/desktop/macos/capture/geometry.h"],
     frameworks = ["AppKit", "ScreenCaptureKit", "CoreGraphics"],
     minimum_macos = "14.0",
 )
