@@ -877,8 +877,11 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		// The owner goes with the configuration here too. `initialize()` replaces the queue with a
+		// direct registration, and that is the path a real SDK extension takes: without this the
+		// queue-time wrapper is simply skipped and every provider callback runs unowned.
 		this.runtime.registerProvider = (name, config, sourceId) => {
-			this.modelRegistry.registerProvider(name, config, sourceId);
+			this.modelRegistry.registerProvider(name, config, sourceId, this.runtime);
 		};
 		this.runtime.unregisterProvider = name => {
 			this.modelRegistry.unregisterProvider(name);
@@ -1860,18 +1863,19 @@ export class ExtensionRunner {
 		}
 	}
 
-	/** Claims this runner's extension callbacks for a session that is starting. A host may build
-	 *  one runner and hand it to several sessions in turn, so the claim — not the runner's own
-	 *  lifetime — is what keeps its callbacks live. */
-	claimExtensionCallbacks(): void {
-		if (typeof this.runtime?.beginSession === "function") this.runtime.beginSession();
-	}
-
-	/** Releases this session's claim; once the last session has gone, every callback its
-	 *  extensions handed over is inert. See `ExtensionCallbackOwner`: waiting for work this runner
-	 *  can see does not stop a facility it never told from entering a disposed session. */
-	retireExtensionCallbacks(): void {
-		if (typeof this.runtime?.retire === "function") this.runtime.retire();
+	/** Claims this runner's extension callbacks for a session that is starting, and returns the
+	 *  only way to give that claim back. A host may build one runner and hand it to several
+	 *  sessions in turn, so the claim — not the runner's own lifetime — is what keeps its
+	 *  callbacks live.
+	 *
+	 *  There is deliberately no separate "retire" method: a release that is not a handle from a
+	 *  claim can be called by a caller that never claimed, and that retires a live sibling
+	 *  session's surface. Waiting for work this runner can see is not enough on its own — a
+	 *  facility it never told can still enter a disposed session — which is why the claim exists
+	 *  at all. See `ExtensionCallbackOwner`. */
+	claimExtensionCallbacks(): (() => void) | undefined {
+		if (typeof this.runtime?.beginSession !== "function") return undefined;
+		return this.runtime.beginSession();
 	}
 
 	/** The owner a facility uses to own an invocation of a callback this session accepted. Exposed

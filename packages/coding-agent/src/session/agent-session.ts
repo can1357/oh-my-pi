@@ -1133,6 +1133,10 @@ export class AgentSession implements SettingsScope {
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	/** Gives back this session's claim on the extension-callback surface. Idempotent, and absent
+	 *  when no claim was taken — so disposal can neither release twice nor release a hold this
+	 *  session never took from a sibling that is still alive. */
+	#releaseExtensionCallbacks: (() => void) | undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
@@ -2254,14 +2258,8 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
-		// This session claims the runner's extension callbacks. A host may reuse one runner and
-		// runtime for several sessions in turn (see `agent-session-concurrent.test.ts`), so the
-		// claim a session takes here, and releases in `dispose`, is what keeps those callbacks
-		// live — not the runner's own lifetime. Optional call: a duck-typed partial runner is a
-		// supported host shape.
-		if (typeof config.extensionRunner?.claimExtensionCallbacks === "function") {
-			config.extensionRunner.claimExtensionCallbacks();
-		}
+		// The claim itself is taken at the END of this constructor: a claim held by a session that
+		// never finished being constructed can never be released.
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -3040,6 +3038,15 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+		// Last, and only on a session that is fully built. A host may reuse one runner and runtime
+		// for several sessions in turn (`agent-session-concurrent.test.ts` does), so this claim —
+		// not the runner's own lifetime — is what keeps its extension callbacks live, and
+		// `dispose` releases it through the handle the claim returns. Taken here because a claim
+		// taken earlier would outlive a constructor that then threw, with nothing left to release
+		// it; nothing above this line can invoke an extension callback. Optional call: a
+		// duck-typed partial runner is a supported host shape, and a runner that cannot be
+		// claimed is never released either.
+		this.#releaseExtensionCallbacks = config.extensionRunner?.claimExtensionCallbacks?.();
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -6377,7 +6384,16 @@ export class AgentSession implements SettingsScope {
 	 */
 	#disposeCall?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
-		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
+		if (this.#disposeCall) return this.#disposeCall;
+		// The promise is published BEFORE the teardown starts. `#doDispose` runs synchronously up
+		// to its first await, and `beginDispose()` calls every registered disposer inside that
+		// window: a disposer that disposes this session would otherwise find no stored promise and
+		// reenter, running the whole teardown twice — releasing this session's extension-callback
+		// claim twice and so retiring a live sibling session's surface. The latch itself stays
+		// synchronous; only the bookkeeping moves ahead of it.
+		const settled = Promise.withResolvers<void>();
+		this.#disposeCall = settled.promise;
+		this.#doDispose(options).then(settled.resolve, settled.reject);
 		return this.#disposeCall;
 	}
 
@@ -6630,15 +6646,24 @@ export class AgentSession implements SettingsScope {
 		// is repopulated with exactly the state we are trying to drop.
 		this.agent.setProviderResponseInterceptor(undefined);
 		this.agent.setRawSseEventInterceptor(undefined);
-		// Retire this session's extension surface before anything is released. Waiting for work we
-		// can see is not enough: a facility still holding an accepted callback — a bus subscription
-		// on a bus the host shares, a provider config inside ModelRegistry, a timer — can enter a
-		// disposed session long after, and no amount of reporting repairs a call that should not
-		// have happened. After this, every callback this session accepted is inert.
-		// Feature-tested: `extensionRunner` is host-supplied and embedders (and this repo's tests)
-		// pass partial stand-ins that implement only what they use.
-		const runnerToRetire = this.#extensionRunner;
-		if (typeof runnerToRetire?.retireExtensionCallbacks === "function") runnerToRetire.retireExtensionCallbacks();
+		// Give back this session's claim on the extension surface before anything is released.
+		// Waiting for work we can see is not enough: a facility still holding an accepted callback
+		// — a bus subscription on a bus the host shares, a provider config inside ModelRegistry, a
+		// timer — can enter a disposed session long after, and no amount of reporting repairs a
+		// call that should not have happened. Once the last session releases, every callback this
+		// session accepted is inert.
+		//
+		// The handle is the one the claim returned, so there is nothing to release when no claim
+		// was taken, and releasing twice releases once. Its failure is reported and swallowed:
+		// the rest of this teardown — the session writer, the account pools, the memory
+		// consolidation — must not be skipped because an extension surface threw on the way out.
+		try {
+			this.#releaseExtensionCallbacks?.();
+		} catch (error) {
+			logger.warn("Releasing the extension-callback claim failed during dispose", { error: String(error) });
+		} finally {
+			this.#releaseExtensionCallbacks = undefined;
+		}
 		// A deferred load the HOST started before disposal is extension code already running;
 		// refusing the next load (loadDeferredExtensions) says nothing about this one. Wait where
 		// it is awaited, inside the drain window, so its factory finishes before the release.

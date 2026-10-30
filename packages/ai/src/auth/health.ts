@@ -5,6 +5,7 @@ import type {
 	UsageCredential,
 	UsageFetchContext,
 	UsageFetchParams,
+	UsageProvider,
 	UsageReport,
 } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
@@ -32,6 +33,19 @@ import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
+
+/** Asks a usage provider whether it handles this request, treating a refusal as "no".
+ *
+ *  The predicate belongs to whoever registered the provider, usually an extension, and one that
+ *  throws — a provider whose session has been disposed refuses that way — must cost this probe
+ *  one credential's answer, not the whole health check. */
+function probeSupports(provider: UsageProvider, request: UsageRequestDescriptor): boolean {
+	try {
+		return provider.supports?.(request) ?? true;
+	} catch {
+		return false;
+	}
+}
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -376,7 +390,7 @@ export class CredentialHealth implements HealthApi {
 			const providerImpl = this.#deps.usage.providerFor(row.provider as Provider);
 			if (!providerImpl) {
 				base.reason = `no usage probe configured for provider ${row.provider}`;
-			} else if (providerImpl.supports && !providerImpl.supports(initialRequest)) {
+			} else if (providerImpl.supports && !probeSupports(providerImpl, initialRequest)) {
 				base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
 			} else if (providerImpl.validatesCredentials === false) {
 				base.reason = `usage probe for ${row.provider} does not validate credentials`;

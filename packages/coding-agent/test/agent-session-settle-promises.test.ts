@@ -15,7 +15,7 @@ import {
 	ExtensionRunner,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { RpcPromptResults } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -24,7 +24,7 @@ import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-ma
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession settles what it promised", () => {
@@ -1326,6 +1326,136 @@ describe("AgentSession settles what it promised", () => {
 		expect(seen).toBe(2);
 	}, 20_000);
 
+	it("keeps a sibling's callbacks live through a reentrant disposal", async () => {
+		// `dispose()` publishes its promise before the teardown runs, so a disposer that disposes
+		// the session again gets that promise instead of a second teardown. A second teardown
+		// would release this session's claim twice and retire a live sibling's surface.
+		const modelRegistry = new ModelRegistry(authStorage);
+		let seen = 0;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_start", () => {
+					seen++;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"r15-reentrant-dispose",
+		);
+		const runner = new ExtensionRunner(
+			[extension],
+			runtime,
+			tempDir.path(),
+			SessionManager.inMemory(tempDir.path()),
+			modelRegistry,
+		);
+		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses: [{ content: ["ack"] }] });
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const makeSession = (): AgentSession =>
+			new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+					convertToLlm,
+					streamFn: mock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings,
+				modelRegistry,
+				toolRegistry: new Map(),
+				extensionRunner: runner,
+			});
+
+		const closing = makeSession();
+		session = makeSession();
+		let reentered: Promise<void> | undefined;
+		closing.addDisposer(() => {
+			reentered = closing.dispose();
+		});
+		const outer = closing.dispose();
+		await outer;
+		await reentered;
+		// The disposer reentered before the teardown's first await; it must have received the
+		// call already in flight rather than starting a second one.
+		expect(reentered).toBe(outer);
+
+		// The sibling never disposed, so the surface is still held and its handlers still run.
+		expect(runtime.isRetired).toBe(false);
+		await runner.emit({ type: "agent_start" });
+		expect(seen).toBe(1);
+	}, 20_000);
+
+	it("pairs the extension-callback claim with the only release there is", () => {
+		// The release is a handle from the claim, not a second method: nothing can release a hold
+		// it never took, and releasing one twice releases once.
+		const runtime = new ExtensionRuntime();
+		const first = runtime.beginSession();
+		const second = runtime.beginSession();
+		expect(runtime.isRetired).toBe(false);
+
+		first();
+		first();
+		first();
+		// Three calls, one hold given back: the sibling's is untouched.
+		expect(runtime.isRetired).toBe(false);
+
+		second();
+		expect(runtime.isRetired).toBe(true);
+
+		// A claim after retirement revives the surface, and the spent handles cannot retire it
+		// again: each releases the lease it claimed.
+		const third = runtime.beginSession();
+		expect(runtime.isRetired).toBe(false);
+		first();
+		second();
+		expect(runtime.isRetired).toBe(false);
+		third();
+		expect(runtime.isRetired).toBe(true);
+	});
+
+	it("finishes teardown when a host's release handle throws", async () => {
+		// The release is reported and swallowed: the session writer, the account pools and the
+		// memory consolidation must not be skipped because an extension surface threw on the way
+		// out. A partial runner is a supported host shape, so this one implements just the claim.
+		let released = 0;
+		const runner = {
+			claimExtensionCallbacks: () => () => {
+				released++;
+				throw new Error("release failed");
+			},
+		} as unknown as ExtensionRunner;
+		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses: [{ content: ["ack"] }] });
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const failing = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map(),
+			extensionRunner: runner,
+		});
+		let closed = false;
+		const closeSpy = spyOn(failing.sessionManager, "close").mockImplementation(async () => {
+			closed = true;
+		});
+		try {
+			await withTimeout(failing.dispose(), 10_000, "dispose hung");
+			expect(released).toBe(1);
+			expect(closed).toBe(true);
+		} finally {
+			closeSpy.mockRestore();
+		}
+	}, 20_000);
+
 	it("keeps ownership between the handlers of a specialised emitter", async () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
@@ -1644,6 +1774,55 @@ describe("AgentSession settles what it promised", () => {
 		}
 	}, 20_000);
 
+	it("owns a bus subscription made from a captured pi, off every scope and under the wrong one", async () => {
+		// `pi.events` is a view bound to the session that handed it out, so a subscription made
+		// from a captured reference belongs to that session however it is reached: from no scope
+		// at all, and from inside another session's scope.
+		const bus = new EventBus();
+		const first = new ExtensionRuntime();
+		const second = new ExtensionRuntime();
+		const releaseFirst = first.beginSession();
+		second.beginSession();
+		let firstApi!: ExtensionAPI;
+		await loadExtensionFromFactory(
+			pi => {
+				firstApi = pi;
+			},
+			tempDir.path(),
+			bus,
+			first,
+			"r15-captured-owner",
+		);
+
+		// Registered while the SECOND session is the one accepting on the stack. The reference
+		// came from the first, and that is whose callback it is.
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		extensionCallbackScope.run(second, () => {
+			firstApi.events.on("r15-captured", async () => {
+				calls++;
+				await release.promise;
+			});
+		});
+		bus.emit("r15-captured", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(calls).toBe(1);
+		expect(first.hasPendingCallbacks()).toBe(true);
+		expect(second.hasPendingCallbacks()).toBe(false);
+		release.resolve();
+		await first.waitForPendingCallbacks();
+
+		// Captured and used after the owning session is gone, with nothing on the stack: inert.
+		releaseFirst();
+		firstApi.events.on("r15-captured-late", () => {
+			calls++;
+		});
+		bus.emit("r15-captured", {});
+		bus.emit("r15-captured-late", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(calls).toBe(1);
+	}, 20_000);
+
 	it("owns a promise from another realm, which fails the Promise brand check", async () => {
 		await startPooledRunWithStrandedAside();
 		const realm = createContext({});
@@ -1734,6 +1913,7 @@ describe("AgentSession settles what it promised", () => {
 		const firstRuntime = new ExtensionRuntime();
 		const secondRuntime = new ExtensionRuntime();
 		const release = Promise.withResolvers<void>();
+		const releaseFirstClaim = firstRuntime.beginSession();
 		await loadExtensionFromFactory(
 			pi => {
 				pi.events.on("r12-shared", () => undefined);
@@ -1755,7 +1935,7 @@ describe("AgentSession settles what it promised", () => {
 		try {
 			// The first session is gone; its retirement must not silence the second's handler, and
 			// the second's work must not be attributed to the first.
-			firstRuntime.retire();
+			releaseFirstClaim();
 			bus.emit("r12-shared", {});
 			for (let i = 0; i < 5; i++) await setImmediate();
 

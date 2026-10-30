@@ -509,7 +509,17 @@ export class UsageService implements UsageApi {
 
 		const cacheKey = this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, options?.baseUrl));
 		const now = Date.now();
-		const parsedReport = parseHeaders(headers, now, { responseStatus: options?.responseStatus });
+		// The parser belongs to whoever registered the provider — an extension, in the usual case
+		// — and this runs on the response path of every request. It must not be able to fail one:
+		// a parser whose session has been disposed refuses by throwing, and a third-party parser
+		// can throw for its own reasons. Either way there are simply no headers to ingest.
+		let parsedReport: UsageReport | null;
+		try {
+			parsedReport = parseHeaders(headers, now, { responseStatus: options?.responseStatus });
+		} catch (error) {
+			logger.debug("Rate-limit header parser failed; skipping ingest", { provider, error: String(error) });
+			return false;
+		}
 		if (!parsedReport) return false;
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can

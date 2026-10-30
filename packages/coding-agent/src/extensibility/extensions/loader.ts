@@ -31,7 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
-import { EventBus, extensionCallbackScope } from "../../utils/event-bus";
+import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -181,8 +181,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * So ownership is taken where the set IS closed: every extension callback is a value the
 	 * extension passes into `pi` or a `ctx` method, and {@link ownCallback} wraps it there. The
 	 * wrapper owns its own execution, so no invoking facility has to opt in and a new one cannot
-	 * reopen the hole — and it REFUSES to run once {@link retire} has been called, because a
-	 * callback that should not have been entered cannot be fixed by reporting that it was.
+	 * reopen the hole — and it REFUSES to run once the last session hold has been released,
+	 * because a callback that should not have been entered cannot be fixed by reporting that it
+	 * was.
 	 */
 	readonly #pendingCallbacks = new Set<Promise<unknown>>();
 	#callbacksChanged: PromiseWithResolvers<void> | undefined;
@@ -199,30 +200,43 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 */
 	#lease: ExtensionCallbackLease | undefined;
 
-	/** Claims this runtime's callbacks for a session that is starting. A lease retired by an
-	 *  earlier session is replaced; a live one gains a holder. */
-	beginSession(): void {
-		if (!this.#lease || this.#lease.isRetired) this.#lease = new ExtensionCallbackLease();
-		else this.#lease.join();
-	}
-
-	/** Retires the calling session's hold on this surface. Once the last holder has released it,
-	 *  every callback accepted through `pi`/`ctx` becomes inert, so a facility still holding one
-	 *  (a bus subscription, a provider config, a timer) can no longer enter a session whose
-	 *  resources are being released. Work already running is unaffected and still has to be
-	 *  waited for. A host that never called {@link beginSession} retires on the first call, which
-	 *  is what a single-session host has always seen. */
-	retire(): void {
-		this.#lease ??= new ExtensionCallbackLease();
-		this.#lease.release();
+	/** Claims this runtime's callbacks for a session that is starting, and returns the only way to
+	 *  give that claim back. A lease retired by an earlier session is replaced; a live one gains a
+	 *  holder.
+	 *
+	 *  The release is a handle rather than a second method for two reasons the review found by
+	 *  building them: a handle cannot be called without a matching claim, so no caller can steal a
+	 *  live sibling's hold, and it is idempotent, so a session disposed twice — or reentrantly —
+	 *  releases once. It releases the lease it claimed, so a handle outliving its generation
+	 *  cannot retire the session that came after.
+	 *
+	 *  Once the last holder releases, every callback accepted through `pi`/`ctx` becomes inert, so
+	 *  a facility still holding one (a bus subscription, a provider config, a timer) can no longer
+	 *  enter a session whose resources are being released. Work already running is unaffected and
+	 *  still has to be waited for. */
+	beginSession(): () => void {
+		let lease = this.#lease;
+		if (!lease || lease.isRetired) {
+			lease = new ExtensionCallbackLease();
+			this.#lease = lease;
+		} else {
+			lease.join();
+		}
+		const claimed = lease;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			claimed.release();
+		};
 	}
 
 	get isRetired(): boolean {
 		return this.#lease?.isRetired === true;
 	}
 
-	/** Wraps a callback this session accepts. The wrapper refuses after {@link retire}, and owns
-	 *  the lifetime of what it returns. */
+	/** Wraps a callback this session accepts. The wrapper refuses once the last session hold has
+	 *  been released, and owns the lifetime of what it returns. */
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
 		const owner = this;
 		// A regular function, not an arrow: a facility may invoke a callback with a receiver
@@ -394,10 +408,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly cwd: string,
 		events: EventBus,
 	) {
-		// Handed on unchanged: an extension comparing `pi.events` across bindings must see its own
-		// session's bus. Its subscriptions are still owned — `EventBus.on` takes ownership of the
-		// handler it is given, attributed to whichever session is accepting on that stack.
-		this.events = events;
+		// A view of the host's bus bound to THIS session's owner, not the bus itself. The scope
+		// alone attributes a subscription to whoever is accepting on the stack, which is silent
+		// for a `pi` reference captured and used later and wrong for one used while another
+		// session is on the stack; the reference knows which session gave it out. The transport
+		// is shared, so emits and handlers still cross sessions exactly as before — see
+		// `OwnedEventBus`. Stable identity: one view per binding, so `pi.events === pi.events`,
+		// and two bindings of one extension still see two different objects for two sessions.
+		this.events = new OwnedEventBus(events, runtime);
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
 		// rather than listing methods: a new method is bound without touching this.
@@ -414,12 +432,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 	}
 
-	beginSession(): void {
-		this.runtime.beginSession();
-	}
-
-	retire(): void {
-		this.runtime.retire();
+	beginSession(): () => void {
+		return this.runtime.beginSession();
 	}
 
 	get isRetired(): boolean {
@@ -971,16 +985,24 @@ function ownProviderConfigCallbacks<T extends object>(config: T, owner: Extensio
 		let owned: Record<string, unknown> | undefined;
 		for (const [key, entry] of Object.entries(value)) {
 			if (typeof entry !== "function") continue;
-			owned ??= { ...(value as Record<string, unknown>) };
+			// The copy keeps the prototype: a provider written as a class instance carries its
+			// methods there, and a plain spread would hand the invoker an object without them.
+			owned ??= Object.assign(Object.create(Object.getPrototypeOf(value) as object | null), value) as Record<
+				string,
+				unknown
+			>;
 			owned[key] = owner.ownInvocation(entry as (...args: unknown[]) => unknown);
 		}
 		return owned ?? value;
 	};
 	const source = config as Record<string, unknown>;
 	let result: Record<string, unknown> | undefined;
-	// `usage` is deliberately not copied here: the registry matches the object it was handed when
-	// an extension unregisters, and a copy breaks that. Its callbacks are owned at the registry.
-	for (const key of ["oauth"]) {
+	// `oauth` and `usage` alike. The earlier exemption for `usage` rested on unregister matching
+	// the object it was handed; it does not — `ModelRegistry.#clearRuntimeProviderState` calls
+	// `removeProvider(providerName)` and `UsageService.removeProvider` deletes by NAME. The
+	// owner-aware registry route already hands the auth storage a copy, so exempting the queue
+	// drain only made one of the two paths unowned.
+	for (const key of ["oauth", "usage"]) {
 		const block = source[key];
 		if (block === null || typeof block !== "object") continue;
 		const ownedBlock = own(block);

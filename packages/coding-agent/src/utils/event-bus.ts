@@ -57,6 +57,31 @@ export class EventBus {
 }
 
 /**
+ * The bus one session hands its extensions, bound to that session's callback owner.
+ *
+ * {@link extensionCallbackScope} attributes a subscription to whoever is accepting ON THE STACK,
+ * which is right while an extension factory or an owned callback is running and silent otherwise:
+ * a `pi` reference captured and used later — from a `setTimeout`, from another session's handler —
+ * subscribes with no owner at all, or with the wrong one. A reference knows which session gave it
+ * out even when the stack does not, so the binding travels with the reference.
+ *
+ * This is a view, not a second bus: `emit` and `on` reach the shared transport, so a handler
+ * registered through this facade is called by anyone emitting on the underlying bus, and both
+ * stay detachable (an extension may call `const { on } = pi.events`). Only who owns a new
+ * subscription changes.
+ */
+export class OwnedEventBus extends EventBus {
+	constructor(bus: EventBus, owner: AcceptedCallbackOwner) {
+		super();
+		// Assigned over the base's bound fields: the base's own listener map is never used, every
+		// call goes to the shared bus.
+		this.emit = bus.emit;
+		this.on = (channel, handler) => extensionCallbackScope.run(owner, () => bus.on(channel, handler));
+		this.clear = bus.clear;
+	}
+}
+
+/**
  * Publishes a subagent frame on the session bus and the observability bus.
  * SDK embedders may pass the same EventBus for both slots; the identity check
  * skips the aliased re-emit so listeners never see duplicate frames.

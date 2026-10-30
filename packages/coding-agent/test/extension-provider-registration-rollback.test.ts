@@ -223,6 +223,7 @@ describe("extension provider registration rollback", () => {
 				return report;
 			},
 		};
+		const originalFetchUsage = extensionUsage.fetchUsage;
 
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
@@ -243,7 +244,15 @@ describe("extension provider registration rollback", () => {
 			}
 
 			await expect(authStorage.usage.reports()).resolves.toEqual([report]);
-			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
+			// What this guards is the routing and the rollback, not the reference: a configuration
+			// an extension registered through `pi` arrives with its callbacks owned by that
+			// session, so the stored provider is a copy by design. Removal is by provider NAME
+			// (`UsageService.removeProvider`), so the copy unregisters exactly as the original
+			// would, and the extension's own object is never rewritten.
+			const registered = authStorage.usage.providerFor(provider);
+			expect(registered?.id).toBe(provider);
+			expect(registered).not.toBe(extensionUsage);
+			expect(extensionUsage.fetchUsage).toBe(originalFetchUsage);
 
 			modelRegistry.unregisterProvider(provider);
 			expect(authStorage.usage.providerFor(provider)).toBeUndefined();

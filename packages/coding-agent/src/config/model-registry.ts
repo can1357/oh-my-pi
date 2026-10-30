@@ -3566,6 +3566,10 @@ export class ModelRegistry {
 		 *  rewritten, so nothing downstream sees a value other than the one it was handed. */
 		callbackOwner?: ExtensionCallbackOwner,
 	): void {
+		// Owned once, here, and used everywhere below. This block has two consumers inside this
+		// method — the OAuth provider registry and the credential-aware model modifier — and
+		// owning it at only one of them left the other calling the extension's raw function.
+		const oauth = config.oauth ? ownProviderCallbacks(config.oauth, callbackOwner) : undefined;
 		if (config.streamSimple && !config.api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
@@ -3590,9 +3594,9 @@ export class ModelRegistry {
 			);
 		}
 
-		if (config.oauth) {
+		if (oauth) {
 			registerOAuthProvider({
-				...ownProviderCallbacks(config.oauth, callbackOwner),
+				...oauth,
 				id: providerName,
 				sourceId,
 			});
@@ -3671,11 +3675,11 @@ export class ModelRegistry {
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
 			// execution/error reporting by materializing only for this case.
-			if (config.oauth?.modifyModels && !this.#hasFullSnapshot) {
+			if (oauth?.modifyModels && !this.#hasFullSnapshot) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
-			if (config.oauth?.modifyModels) {
-				this.#runtimeModelModifiers.set(providerName, config.oauth.modifyModels);
+			if (oauth?.modifyModels) {
+				this.#runtimeModelModifiers.set(providerName, oauth.modifyModels);
 			} else {
 				this.#runtimeModelModifiers.delete(providerName);
 			}
@@ -3683,7 +3687,7 @@ export class ModelRegistry {
 				// Lazy compositions read runtime overlays directly. A whole-catalog
 				// modifier can affect providers beyond its owner, so discard every
 				// provider slice; an ordinary overlay only invalidates its provider.
-				if (config.oauth?.modifyModels) {
+				if (oauth?.modifyModels) {
 					this.#providerLookupSnapshots.clear();
 					this.#internedStaticModels.clear();
 				} else {
@@ -3919,7 +3923,12 @@ function ownProviderCallbacks<T extends object>(config: T, owner: ExtensionCallb
 	let owned: Record<string, unknown> | undefined;
 	for (const [key, value] of Object.entries(config)) {
 		if (typeof value !== "function") continue;
-		owned ??= { ...(config as Record<string, unknown>) };
+		// Prototype preserved: a provider written as a class instance keeps its methods there,
+		// and a plain spread would hand the invoker an object without them.
+		owned ??= Object.assign(Object.create(Object.getPrototypeOf(config) as object | null), config) as Record<
+			string,
+			unknown
+		>;
 		owned[key] = owner.ownInvocation(value as (...args: unknown[]) => unknown);
 	}
 	return (owned as T | undefined) ?? config;
