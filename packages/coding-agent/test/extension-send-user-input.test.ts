@@ -180,6 +180,7 @@ describe("pi.sendUserInput", () => {
 				},
 				setToolUIContext: () => {},
 				syncComposerShape: () => {},
+				syncExtensionLinks: () => {},
 			} as unknown as InteractiveModeContext;
 			await new ExtensionUiController(ctx).initHooksAndCustomTools();
 		} else {
