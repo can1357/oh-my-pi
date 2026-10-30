@@ -170,9 +170,7 @@ import type { CustomCommandContext } from "../extensibility/custom-commands/type
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
 	type BuiltSkillPromptMessage,
-	buildSkillPromptMessage,
 	loadSkillPrompt,
-	parseSkillInvocation,
 	renderSkillPromptMessage,
 	type Skill,
 	type SkillPromptInput,
@@ -479,6 +477,7 @@ import {
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
+import { dispatchSkillCommand, resolveSkillInvocation } from "./skill-command";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
@@ -10357,9 +10356,8 @@ export class AgentSession implements SettingsScope {
 		}
 
 		const expand = options?.expandPromptTemplates === true;
-		const invocation = expand && this.skillsSettings?.enableSkillCommands ? parseSkillInvocation(text) : undefined;
-		const skill = invocation && this.skills.find(candidate => candidate.name === invocation.name);
-		if (invocation && skill) {
+		const invocation = expand ? resolveSkillInvocation(this, text) : undefined;
+		if (invocation) {
 			// Admit before reading SKILL.md so shutdown and settle checks see this send,
 			// as they see an option-off send admitted synchronously by prompt().
 			await this.#admitSubmission(async () => {
@@ -10367,7 +10365,7 @@ export class AgentSession implements SettingsScope {
 				// image preprocessing does, instead of starting a turn the user just stopped.
 				const promptGeneration = this.#promptGeneration;
 				const sessionGeneration = this.#sessionGeneration;
-				const built = await buildSkillPromptMessage(skill, invocation, "user");
+				const loaded = await loadSkillPrompt(invocation.skill, this);
 				if (
 					this.#promptGeneration !== promptGeneration ||
 					this.#sessionGeneration !== sessionGeneration ||
@@ -10375,27 +10373,23 @@ export class AgentSession implements SettingsScope {
 				) {
 					return;
 				}
-				const skillContent = images ? [{ type: "text" as const, text: built.message }, ...images] : built.message;
+				// Render (which authorizes model mentions in the args) only once the send is still current.
+				const built = this.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
 				if (options?.attribution === "agent") {
 					// The skill custom message is user-invoked by definition; an agent-attributed send
 					// stays a plain user-role message, like every other sendUserMessage path.
+					const skillContent = images
+						? [{ type: "text" as const, text: built.message }, ...images]
+						: built.message;
 					await this.sendUserMessage(skillContent, { deliverAs: options.deliverAs, attribution: "agent" });
 					return;
 				}
-				await this.promptCustomMessage(
-					{
-						customType: SKILL_PROMPT_MESSAGE_TYPE,
-						content: skillContent,
-						display: true,
-						details: built.details,
-						attribution: "user",
-					},
-					{
-						streamingBehavior: options?.deliverAs ?? "steer",
-						queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
-						queueChipText: text,
-					},
-				);
+				await dispatchSkillCommand(this, invocation, {
+					prebuilt: built,
+					images,
+					streamingBehavior: options?.deliverAs ?? "steer",
+					queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
+				});
 			});
 			return;
 		}

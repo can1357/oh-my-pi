@@ -32,14 +32,7 @@ import {
 	getExtensionUISelectOptionLabel,
 	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
-import {
-	type BuiltSkillPromptMessage,
-	loadSkillPrompt,
-	parseSkillInvocation,
-	type Skill,
-	type SkillPromptInput,
-	type SkillRediscoverySource,
-} from "../../extensibility/skills";
+import { loadSkillPrompt, type SkillRediscoverySource } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
@@ -56,7 +49,8 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
 import { probeSessionLeases } from "../../session/session-storage";
-import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { dispatchSkillCommand, resolveSkillInvocation } from "../../session/skill-command";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
@@ -259,53 +253,6 @@ export type RpcSkillCommandSession = Pick<
 	SkillRediscoverySource;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
-export interface RpcSkillInvocation extends SkillPromptInput {
-	skill: Skill;
-	queueChipText: string;
-}
-
-/**
- * Fast in-memory pre-check for a skill invocation: settings gate, text shape,
- * and skill lookup. Returns null when the message is not a runnable skill
- * command. Performs no I/O — safe to run on the RPC serial queue.
- */
-export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
-	if (!session.skillsSettings?.enableSkillCommands) return null;
-	const parsed = parseSkillInvocation(text);
-	if (!parsed) return null;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
-}
-
-/**
- * Slow half of a skill invocation: builds the skill prompt message (file I/O)
- * and dispatches it through the full prompt pipeline (usage preflight,
- * compaction checks, provider calls). Resolves once the turn is scheduled.
- * Must not run on the RPC serial queue's response path — register it with
- * watchAndReportPromptResult and answer the command once it is admitted.
- */
-export async function runRpcSkillCommand(
-	session: RpcSkillCommandSession,
-	invocation: RpcSkillInvocation,
-	streamingBehavior: "steer" | "followUp" = "steer",
-	prebuilt?: BuiltSkillPromptMessage,
-	onPromptAdmitted?: () => void,
-	images?: ImageContent[],
-): Promise<boolean> {
-	const built = prebuilt ?? (await session.buildUserSkillPrompt(invocation.skill, invocation));
-	return session.promptCustomMessage(
-		{
-			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
-			display: true,
-			details: built.details,
-			attribution: "user",
-		},
-		{ streamingBehavior, queueChipText: invocation.queueChipText, onPromptAdmitted },
-	);
-}
-
 /**
  * Skill branch of the `prompt` command: resolves the invocation cheaply, then
  * registers the slow dispatch with watchAndReportPromptResult and awaits
@@ -329,7 +276,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	images?: ImageContent[];
 	isCurrent?: () => boolean;
 }): Promise<RpcSkillCommandResult | "cancelled" | null> {
-	const invocation = resolveRpcSkillInvocation(input.session, input.message);
+	const invocation = resolveSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
 	// Read the skill before acknowledging the command so a missing SKILL.md
 	// still fails immediately (a stale one is read from its rediscovered
@@ -343,14 +290,12 @@ export async function dispatchRpcSkillPrompt(input: {
 	await watchAndReportPromptResult({
 		ticket: input.ticket,
 		startPrompt: onPromptAdmitted =>
-			runRpcSkillCommand(
-				input.session,
-				invocation,
-				input.streamingBehavior ?? "steer",
-				built,
+			dispatchSkillCommand(input.session, invocation, {
+				streamingBehavior: input.streamingBehavior,
+				prebuilt: built,
 				onPromptAdmitted,
-				input.images,
-			),
+				images: input.images,
+			}),
 		results: input.results,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -364,9 +309,9 @@ export async function tryRunRpcSkillCommand(
 	streamingBehavior: "steer" | "followUp" = "steer",
 	images?: ImageContent[],
 ): Promise<RpcSkillCommandResult | false> {
-	const invocation = resolveRpcSkillInvocation(session, text);
+	const invocation = resolveSkillInvocation(session, text);
 	if (!invocation) return false;
-	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, undefined, images);
+	await dispatchSkillCommand(session, invocation, { streamingBehavior, images });
 	return { agentInvoked: true };
 }
 
