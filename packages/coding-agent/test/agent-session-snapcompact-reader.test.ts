@@ -522,6 +522,42 @@ describe("snapcompact archive read by another model", () => {
 		expect(largeText).not.toContain("middle history omitted above");
 	});
 
+	it("fits the archive text to the window when its ends tokenize more densely than its middle", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
+		// Three-byte characters at both ends, ASCII in the middle: the whole text's rate understates
+		// what the kept ends cost.
+		const dense = "漢字".repeat(20_000);
+		const text = `¶user: ${dense}\n¶ai: ${"plain words ".repeat(40_000)}\n¶user: ${dense}`;
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: text.length - 2_000 };
+		const archive = {
+			frames: [frame],
+			totalChars: text.length,
+			truncatedChars: 0,
+			text,
+			textHead: text.slice(0, 1_000),
+			textTail: text.slice(-1_000),
+		};
+		sessionManager.appendCompaction("HISTORY", "archived", keptId, 100_000, {
+			preserveData: { [snapcompact.PRESERVE_KEY]: archive },
+			method: "snapcompact",
+		});
+		sessionManager.appendMessage(assistant(gpt, [{ type: "text", text: "Kept reply." }]));
+		// A 15K threshold gives the archive 0.6 × 15K = 9K tokens.
+		const { session, mock } = startSession(
+			sessionManager,
+			{ ...deepseek, contextWindow: 20_000 },
+			{ settings: Settings.isolated({ "compaction.enabled": false, "compaction.thresholdTokens": 15_000 }) },
+		);
+
+		await session.prompt("Continue.");
+		const { text: sent, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(sent).toContain("middle history omitted above");
+		// The budget plus the summary's own instructions and the user turns around it.
+		expect(session.agent.tokenizer.countTokens(sent)).toBeLessThan(9_000 + 1_000);
+	});
+
 	it("accepts a compaction that shrinks the archive's text for a model without image input", async () => {
 		const sessionManager = SessionManager.inMemory();
 		await seedArchive(sessionManager);

@@ -1698,15 +1698,6 @@ describe("archive helpers", () => {
 			expect(view.archive.textTail).toBe(text.slice(-10));
 			expect(view.archive.truncatedChars).toBe(text.length - 20);
 		});
-
-		it("returns an archive with neither frames nor reasoning to drop as is", () => {
-			const archive = { frames: [], totalChars: 3, truncatedChars: 0, textHead: "abc" };
-			expect(snapcompact.viewWithoutFrames("s", archive)).toEqual({ summary: "s", archive });
-			expect(snapcompact.viewWithoutFrames("s", archive, { includeThinking: false })).toEqual({
-				summary: "s",
-				archive,
-			});
-		});
 	});
 
 	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {

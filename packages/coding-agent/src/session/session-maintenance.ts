@@ -4959,13 +4959,18 @@ export class SessionMaintenance {
 			const options = { includeThinking: !reader.excludeThinking };
 			let unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, options);
 			// The original too: a frameless archive was sized for the window that compacted.
-			const text = `${unfolded.archive.textHead ?? ""}${unfolded.archive.textTail ?? ""}`;
-			if (targetTokens !== undefined && text.length > 0) {
+			if (targetTokens !== undefined) {
 				const tokenizer = this.#tokenizer.countsAlike(model) ? this.#tokenizer : new Tokenizer(model);
-				const textTokens = tokenizer.countTokens(text);
-				if (textTokens > targetTokens) {
-					const maxChars = Math.floor((text.length * targetTokens) / textTokens);
-					unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, { ...options, maxChars });
+				const keptText = (view: snapcompact.ArchiveView) =>
+					`${view.archive.textHead ?? ""}${view.archive.textTail ?? ""}`;
+				let chars = keptText(unfolded).length;
+				let tokens = tokenizer.countTokens(keptText(unfolded));
+				// Cut at the measured rate, then measure the kept ends again: they may tokenize more
+				// densely than the dropped middle. Each pass cuts at least 2%.
+				while (tokens > targetTokens && chars > 0) {
+					chars = Math.min(Math.floor((chars * targetTokens) / tokens), Math.floor(chars * 0.98));
+					unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, { ...options, maxChars: chars });
+					tokens = tokenizer.countTokens(keptText(unfolded));
 				}
 			}
 			view = unfolded.archive === archive ? null : unfolded;
