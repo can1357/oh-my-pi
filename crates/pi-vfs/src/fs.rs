@@ -612,7 +612,7 @@ impl Fs {
 	pub async fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.route(path)? {
-			Route::Native => std::fs::write(path, contents),
+			Route::Native => native::write(path, contents),
 			Route::Provider(provider) => self.guard(provider.write(path, contents)).await,
 			Route::Mounted(file) => {
 				mount_open_async(file, &create_options())
@@ -1235,7 +1235,7 @@ impl BlockingFs {
 	pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.fs.route(path)? {
-			Route::Native => std::fs::write(path, contents),
+			Route::Native => native::write(path, contents),
 			Route::Provider(provider) => self.run(provider.write(path, contents)),
 			Route::Mounted(file) => {
 				io::Write::write_all(&mut mount_open(file, &create_options())?, contents)

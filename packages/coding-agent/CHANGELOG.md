@@ -15,6 +15,7 @@
 - Fixed `read.renderMarkdown` having no effect on plain-file reads: inline read previews now render Markdown files as formatted Markdown instead of numbered source ([#15007](https://github.com/can1357/oh-my-pi/issues/15007)).
 - Fixed Claude refusing every turn (`reasoning_extraction`) in a session snapcompacted under Codex, Grok or another reasoning model, after a switch or resume; Claude turns, `/btw`, `/handoff` and compaction now read a reasoning-free copy of the archive ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `grep`, `find`, `read`, and in-process shell builtins over `~/.omp` silently releasing omp's own SQLite locks on `agent.db` and its `-shm`, which let other omp processes unlink the live WAL and later corrupted the credentials store; they now skip or refuse SQLite files the process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586)).
+- Reading SQLite databases and writing to ones already open in omp now preserves the process's WAL locks ([#15586](https://github.com/can1357/oh-my-pi/issues/15586)).
 
 ### Removed
 

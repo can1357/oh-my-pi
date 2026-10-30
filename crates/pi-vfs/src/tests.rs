@@ -549,6 +549,7 @@ fn host_opens_refuse_sqlite_files_this_process_holds() {
 		io::ErrorKind::ResourceBusy
 	);
 	assert_eq!(fs.copy(&db, dir.0.join("copy.db")).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+	assert_eq!(fs.copy(&idle, &db).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
 	assert_eq!(fs.read(&text).unwrap(), b"needle");
 	assert!(!held_by_sqlite(&idle));
 	assert!(fs.read(&idle).is_ok());
@@ -557,6 +558,50 @@ fn host_opens_refuse_sqlite_files_this_process_holds() {
 	assert!(!held_by_sqlite(&db));
 	assert!(fs.read(&db).is_ok());
 	assert!(fs.read(&shm).is_ok());
+}
+
+/// Both write facades must refuse held database and WAL-index files before
+/// truncating them or opening a descriptor whose close would drop POSIX locks.
+#[cfg(unix)]
+#[tokio::test]
+async fn native_writes_preserve_held_sqlite_files_and_locks() {
+	let dir = TempDir::new("held-sqlite-write");
+	let db = dir.0.join("agent.db");
+	let shm = dir.0.join("agent.db-shm");
+	let db_contents = b"SQLite format 3\0original database";
+	let mut shm_contents = 3_007_000_u32.to_ne_bytes().to_vec();
+	shm_contents.resize(136, 42);
+	std::fs::write(&db, db_contents).unwrap();
+	std::fs::write(&shm, &shm_contents).unwrap();
+
+	let held = [&db, &shm].map(|path| std::fs::File::open(path).unwrap());
+	let locks = held.each_ref().map(lock_db);
+	let async_fs = Fs::native();
+	let blocking_fs = BlockingFs::native();
+	for path in [&db, &shm] {
+		assert_eq!(
+			async_fs
+				.write(path, b"replacement")
+				.await
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::ResourceBusy
+		);
+		assert_eq!(
+			blocking_fs.write(path, b"replacement").unwrap_err().kind(),
+			io::ErrorKind::ResourceBusy
+		);
+	}
+	for lock in locks {
+		assert_eq!(lock(), 1, "a refused write released a holder's lock");
+	}
+	use std::os::unix::fs::FileExt;
+	let mut db_after = vec![0; db_contents.len()];
+	let mut shm_after = vec![0; shm_contents.len()];
+	held[0].read_at(&mut db_after, 0).unwrap();
+	held[1].read_at(&mut shm_after, 0).unwrap();
+	assert_eq!(db_after, db_contents);
+	assert_eq!(shm_after, shm_contents);
 }
 
 /// Takes a POSIX read lock on `file` the way SQLite does and returns a probe

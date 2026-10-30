@@ -1,5 +1,4 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { isHeldBySqlite } from "@oh-my-pi/pi-natives";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -19,19 +18,6 @@ function isSqliteCantOpen(error: unknown): boolean {
 	return typeof error.code === "string" && error.code.startsWith("SQLITE_CANTOPEN");
 }
 
-async function requiresWalSidecarInitialization(filePath: string): Promise<boolean> {
-	// A database this process holds open already has its sidecars, and reading its header outside
-	// SQLite would release the open connection's POSIX locks.
-	if (isHeldBySqlite(filePath)) return false;
-	const formatVersions = await Bun.file(filePath).slice(18, 20).bytes();
-	if (formatVersions[0] !== 2 && formatVersions[1] !== 2) return false;
-	const [walExists, shmExists] = await Promise.all([
-		Bun.file(`${filePath}-wal`).exists(),
-		Bun.file(`${filePath}-shm`).exists(),
-	]);
-	return !walExists || !shmExists;
-}
-
 function configureSqliteReadConnection(db: Database): Database {
 	try {
 		db.run("PRAGMA query_only = ON");
@@ -45,16 +31,14 @@ function configureSqliteReadConnection(db: Database): Database {
 }
 
 /**
- * Opens the query-only connection used by read tools, retrying read-write mode solely to initialize missing WAL sidecars.
+ * Opens the query-only connection used by read tools, retrying read-write mode on SQLITE_CANTOPEN
+ * to initialize missing WAL sidecars.
  *
  * Helpers here run statements through `db.query()`: `close()` finalizes that cache, while an
  * unfinalized `db.prepare()` statement leaves the connection a zombie that keeps the file open
  * (Windows then refuses to delete it).
  */
 export async function openSqliteReadConnection(filePath: string): Promise<Database> {
-	if (await requiresWalSidecarInitialization(filePath)) {
-		return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
-	}
 	try {
 		return configureSqliteReadConnection(new Database(filePath, { readonly: true, strict: true }));
 	} catch (error) {
@@ -559,15 +543,23 @@ export function parseSqlitePathCandidates(filePath: string): SqlitePathCandidate
 }
 
 /**
- * Whether `absolutePath` is a SQLite database. A database this process already holds open answers
- * without a byte read: closing that read's descriptor would release the connection's POSIX locks.
+ * Whether `absolutePath` is a SQLite database, checked through SQLite's own file handling so
+ * detection cannot release another connection's process-wide POSIX locks.
  */
 export async function isSqliteFile(absolutePath: string): Promise<boolean> {
-	if (isHeldBySqlite(absolutePath)) return true;
 	try {
-		return looksLikeSqlite(await Bun.file(absolutePath).slice(0, SQLITE_MAGIC.byteLength).bytes());
-	} catch {
-		return false;
+		if ((await Bun.file(absolutePath).stat()).size < 100) return false;
+		const db = await openSqliteReadConnection(absolutePath);
+		try {
+			return true;
+		} finally {
+			db.close();
+		}
+	} catch (error) {
+		// A busy or damaged SQLite file still belongs on the SQLite route; falling through to a
+		// byte reader could close its inode while another connection holds process-wide locks.
+		if (!(error instanceof Error) || error.name !== "SQLiteError" || !("code" in error)) return false;
+		return typeof error.code === "string" && error.code !== "SQLITE_NOTADB" && !isSqliteCantOpen(error);
 	}
 }
 

@@ -10,7 +10,7 @@ mod windows;
 use std::{
 	fs,
 	future::{Future, ready},
-	io::{self, Read},
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
@@ -48,6 +48,12 @@ pub(crate) fn read(path: &Path) -> io::Result<Vec<u8>> {
 	let mut contents = Vec::new();
 	held_sqlite::open(path, &options)?.read_to_end(&mut contents)?;
 	Ok(contents)
+}
+
+pub(crate) fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
+	let mut options = OpenOptions::new();
+	options.write(true).create(true).truncate(true);
+	held_sqlite::open(path, &options)?.write_all(contents)
 }
 
 pub(crate) fn copy(from: &Path, to: &Path) -> io::Result<u64> {

@@ -8,6 +8,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
+	isSqliteFile,
 	listTables,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
@@ -238,6 +239,8 @@ describe("SQLite tool support", () => {
 
 	it("reads a clean WAL database after its writer removes the sidecar files", async () => {
 		const walPath = await stampCleanWalDb("clean-wal.sqlite");
+		expect(await Bun.file(`${walPath}-wal`).exists()).toBe(false);
+		expect(await Bun.file(`${walPath}-shm`).exists()).toBe(false);
 
 		const result = await readTool.execute("sqlite-clean-wal", { path: walPath });
 
@@ -259,7 +262,7 @@ describe("SQLite tool support", () => {
 		expect(getText(result)).toContain("| 1");
 	});
 
-	it("lists tables for a .db database when the magic bytes match SQLite", async () => {
+	it("lists tables for a .db database validated through SQLite", async () => {
 		const result = await readTool.execute("sqlite-db-list", { path: sqliteDbPath });
 		expect(getText(result)).toContain("users (6 rows)");
 	});
@@ -267,6 +270,32 @@ describe("SQLite tool support", () => {
 	it("falls through to plain file reading for non-SQLite .db files", async () => {
 		const result = await readTool.execute("sqlite-invalid-db", { path: invalidDbPath });
 		expect(getText(result)).toContain("not sqlite");
+	});
+
+	it("falls through to plain file reading for empty and invalid-header .db files", async () => {
+		const emptyPath = path.join(tmpDir, "empty.db");
+		const invalidHeaderPath = path.join(tmpDir, "invalid-header.db");
+		await fs.writeFile(emptyPath, "");
+		const invalidHeader = Buffer.alloc(4096);
+		invalidHeader.write("SQLite format 3\0");
+		await fs.writeFile(invalidHeaderPath, invalidHeader);
+
+		expect(await isSqliteFile(emptyPath)).toBe(false);
+		expect(await isSqliteFile(invalidHeaderPath)).toBe(false);
+		expect(getText(await readTool.execute("sqlite-empty-db", { path: emptyPath }))).not.toContain("SQLite tables");
+	});
+
+	it("keeps a busy SQLite file on the SQLite route instead of falling through to raw reads", async () => {
+		const dbPath = path.join(tmpDir, "busy.db");
+		const db = new Database(dbPath);
+		try {
+			db.run("CREATE TABLE entries (value TEXT)");
+			db.run("BEGIN EXCLUSIVE");
+			expect(await isSqliteFile(dbPath)).toBe(true);
+		} finally {
+			db.run("ROLLBACK");
+			db.close();
+		}
 	});
 
 	// Closing any descriptor on a live database drops this process's POSIX locks, after which peers
@@ -293,6 +322,8 @@ describe("SQLite tool support", () => {
 				expect(isHeldBySqlite(dbPath)).toBe(true);
 				const before = await heldLocks();
 				expect(before).toBeGreaterThan(0);
+				expect(await isSqliteFile(dbPath)).toBe(true);
+				expect(await heldLocks()).toBe(before);
 
 				expect(getText(await readTool.execute("sqlite-held", { path: dbPath }))).toContain("entries (1 rows)");
 				await expect(readTool.execute("sqlite-held-shm", { path: `${dbPath}-shm` })).rejects.toThrow(/holds open/);
