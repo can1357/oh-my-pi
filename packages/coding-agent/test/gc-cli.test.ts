@@ -501,6 +501,39 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.errors.join("\n")).toContain("owned by a running process");
 		expect(await Bun.file(orphan).exists()).toBe(true);
 	});
+	for (const [route, flags] of [
+		["the flag", { blobs: true }],
+		["a configured sweep", {}],
+	] as const) {
+		test(`warns that reclamation needs a quiescent machine (${route})`, async () => {
+			await writeBlob(root, hashFor(`warn-${route.length}`), "orphan");
+			if (route === "a configured sweep") {
+				await fs.mkdir(path.join(root, "config"), { recursive: true });
+				await Bun.write(path.join(root, "settings.json"), JSON.stringify({ gc: { blobs: true } }));
+			}
+
+			const written: string[] = [];
+			const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+				written.push(String(chunk));
+				return true;
+			});
+			let result: GcResult;
+			try {
+				result = await runGcCommand({ flags: { agentDir: root, ...flags, apply: true } });
+			} finally {
+				stdout.mockRestore();
+			}
+			const text = written.join("");
+
+			// A configured sweep is the one nobody typed, so the warning has
+			// to reach the person at the command rather than only in the
+			// setting's own documentation.
+			expect(result.blobs).toBeDefined();
+			expect(text).toContain("quiescent machine");
+			expect(text).toContain("stop every session writer first");
+			expect(text).toContain("omp gc --wal --apply");
+		});
+	}
 	test("reads a transcript a breadcrumb registers while it is listing", async () => {
 		const referencedHash = hashFor("late-crumb-referenced");
 		const referenced = await writeBlob(root, referencedHash, "referenced");

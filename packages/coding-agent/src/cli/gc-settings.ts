@@ -13,7 +13,16 @@ import { register } from "../config/registry";
 // writing, which is useless rather than wrong; guards that do not, delete
 // live data. Neither is a thing to run by default. `--blobs`, or
 // `gc.blobs`, turns it on for a machine whose sessions are quiescent.
-export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: false });
+export const cfgGcBlobs = register({
+	id: "gc.blobs",
+	type: "boolean",
+	default: false,
+	description:
+		"Reclaim unreferenced blobs during `omp gc --apply`. Quiescent machines only: concurrent session " +
+		"writes can permanently delete a blob a readable session still references. Setting this true in any " +
+		"configuration layer makes an unqualified `omp gc --apply` delete; `omp gc --wal --apply` checkpoints " +
+		"the databases and nothing else, whatever is configured.",
+});
 
 // Opt-in, like `gc.stale` and for a stronger reason: archiving is the one
 // phase that moves a session out of the sessions tree, and nothing in this

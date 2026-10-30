@@ -12,7 +12,12 @@ export default class Gc extends Command {
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)" }),
 		json: Flags.boolean({ description: "Output JSON" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
-		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
+		blobs: Flags.boolean({
+			description:
+				"Sweep unreferenced blobs. Quiescent machines only: concurrent session writes can permanently " +
+				"delete a blob a readable session still references. Stop every session writer first, including " +
+				"any that holds no ownership lease.",
+		}),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		stale: Flags.boolean({

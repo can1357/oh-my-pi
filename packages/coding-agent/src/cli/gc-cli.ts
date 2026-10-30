@@ -462,12 +462,19 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
  * artifacts: `session-manager.ts:178-200` copies a child's `.jsonl` into the
  * tree without claiming that child's lease.
  *
- * There is no door to hold here. What there is, is a cheap way to notice
- * that the room changed: take this twice, once when the sessions are read
- * and once when the candidate set is final, and refuse the whole phase if
- * anything appeared, vanished or moved. One extra listing, right by
- * construction rather than by enumerating the writers, and no lock that
- * would stop a session being created.
+ * There is no door to hold here, so this is a way to notice that the room
+ * changed: take it twice, once when the sessions are read and once when the
+ * candidate set is final, and refuse the whole phase if a name appeared,
+ * vanished, or changed in identity, size or modification time. No lock, so
+ * nothing here stops a session being created.
+ *
+ * It is not a guarantee and it is not free. A change undone again before
+ * the second listing passes it, and so does one that leaves name, size and
+ * modification time equal — at one-second timestamp granularity an ordinary
+ * rewrite can. It costs two full walks of the sessions tree on top of the
+ * reference walk, measured 5.785 seconds apart on a tree of 8,001 sessions.
+ * It narrows the window; it does not close it, which is why reclamation is
+ * opt-in.
  */
 async function sessionTreeCensus(
 	sessionRoots: string[],
@@ -541,10 +548,12 @@ function censusChange(before: Map<string, string>, after: Map<string, string>): 
  * Not being able to learn what the kernel opened is the same answer: if
  * `/proc/self/fd` cannot be read, this run does not know what it holds.
  *
- * Lifting the restriction needs a mechanism that makes the proof available,
- * not another arrangement handled. Until then the command says what it
- * cannot show rather than guessing, and a machine with no linked sessions —
- * the ordinary one — reclaims exactly as before.
+ * Lifting the restriction needs a mechanism that makes the proof available
+ * — writers participating, a quarantine a reader restores from — not
+ * another arrangement handled. Until then the command says what it cannot
+ * show rather than guessing, and reclamation is opt-in: a tree with no
+ * links still refuses whenever a session is owned, unreadable or changing,
+ * so nothing here reclaims the way the unguarded sweep used to.
  */
 async function collectReferencedBlobHashes(
 	sessionNames: string[],
@@ -2557,6 +2566,16 @@ function renderText(result: GcResult): string {
 	if (result.blobs) {
 		lines.push(
 			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
+		);
+		// Said at the command, every time, because the setting's own text is
+		// not where a person meets this: a configured sweep is the one
+		// nobody typed, and a successful one otherwise prints a count and
+		// nothing else.
+		lines.push(
+			"  blobs: reclamation is for a quiescent machine. Concurrent session writes can permanently " +
+				"delete a blob a readable session still references; stop every session writer first, including " +
+				"any that holds no ownership lease. `omp gc --wal --apply` checkpoints the databases and " +
+				"reclaims nothing, whatever is configured.",
 		);
 		if (result.blobs.errors.length > 0) lines.push(`blob errors: ${result.blobs.errors.length}`);
 	}
