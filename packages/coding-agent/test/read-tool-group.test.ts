@@ -171,8 +171,8 @@ describe("ReadToolGroupComponent", () => {
 		component.attachUsage(["read-one"], usage, 1000, 500, firstAt);
 		component.attachUsage(["read-two"], usage, 1000, 500, secondAt);
 
-		expect(component.setUsageSummary(secondAt + 1, "Nobody owns this")).toBe(false);
-		expect(component.setUsageSummary(secondAt, "  Read the second module  ")).toBe(true);
+		expect(component.setUsageSummary(secondAt + 1, { text: "Nobody owns this" })).toBe(false);
+		expect(component.setUsageSummary(secondAt, { text: "  Read the second module  ", tone: "warning" })).toBe(true);
 
 		const lines = Bun.stripANSI(component.render(120).join("\n")).split("\n");
 		const captionIndex = lines.findIndex(line => line.includes("› Read the second module"));
@@ -182,7 +182,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(lines.filter(line => line.includes("›"))).toHaveLength(1);
 
 		const native = JSON.stringify(component.describe?.());
-		expect(native).toContain('"t":"Read the second module","s":"muted em"');
+		expect(native).toContain('{"t":"› ","s":"warning"},{"t":"Read the second module","s":"muted em"}');
 		expect(native).not.toContain("Nobody owns this");
 	});
 

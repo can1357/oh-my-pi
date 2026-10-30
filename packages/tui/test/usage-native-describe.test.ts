@@ -380,13 +380,16 @@ describe("createUsageRowBlock describe", () => {
 		if (!metrics) throw new Error("usage row did not describe");
 		const ansiMetrics = block.render(100).filter(line => line.trim() !== "");
 
-		block.setSummary("  Fixed the add operator in calc.py  ");
+		block.setSummary({ text: "  Fixed the add operator in calc.py  " });
 		const captioned = block.describe?.(cx);
 		if (!captioned) throw new Error("usage row did not describe");
 		expect(captioned.k).toBe("col");
 		const [caption, row] = captioned.c ?? [];
 		expect(isNode(caption) && caption.p).toMatchObject({
-			spans: expect.arrayContaining([{ t: "Fixed the add operator in calc.py", s: "muted em" }]),
+			spans: [
+				{ t: "› ", s: "accent" },
+				{ t: "Fixed the add operator in calc.py", s: "muted em" },
+			],
 		});
 		expect(row).toEqual(metrics);
 
@@ -394,5 +397,15 @@ describe("createUsageRowBlock describe", () => {
 		expect(ansi).toHaveLength(ansiMetrics.length + 1);
 		expect(Bun.stripANSI(ansi[0] ?? "").trim()).toBe("› Fixed the add operator in calc.py");
 		expect(ansi.slice(1)).toEqual(ansiMetrics);
+
+		// A failed step's caption carries the error tone on its marker.
+		block.setSummary({ text: "Fixed the add operator in calc.py", tone: "error" });
+		const toned = block.describe?.(cx);
+		expect(isNode(toned?.c?.[0]) && toned?.c?.[0].p).toMatchObject({
+			spans: [
+				{ t: "› ", s: "error" },
+				{ t: "Fixed the add operator in calc.py", s: "muted em" },
+			],
+		});
 	});
 });

@@ -12,17 +12,38 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;
 
-/** Leads a step summary in the accent color so the italic caption reads apart from transcript prose. */
+/** Leads a step summary, colored by how the step went, so the italic caption reads apart from transcript prose. */
 const STEP_SUMMARY_MARKER = "›";
 
-/** A step summary for the ANSI transcript: accent marker, then the caption in muted italics. */
-export function formatStepSummary(summary: string): string {
-	return `${theme.fg("accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", summary))}`;
+/** How a captioned step went: `warning` when some of its tool calls failed, `error` when all did. */
+export type StepSummaryTone = "warning" | "error";
+
+/** A step's caption and, when any of its tool calls failed, the tone that colors its marker. */
+export interface StepSummary {
+	readonly text: string;
+	readonly tone?: StepSummaryTone;
+}
+
+/** A step summary for the ANSI transcript: toned marker (accent for a clean step), then the caption in muted italics. */
+export function formatStepSummary(summary: StepSummary): string {
+	return `${theme.fg(summary.tone ?? "accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", summary.text))}`;
 }
 
 /** A step summary as native spans, matching {@link formatStepSummary}. */
-export function stepSummarySpans(summary: string): TspSpan[] {
-	return [span(`${STEP_SUMMARY_MARKER} `, "accent"), span(summary, "muted em")];
+export function stepSummarySpans(summary: StepSummary): TspSpan[] {
+	return [span(`${STEP_SUMMARY_MARKER} `, summary.tone ?? "accent"), span(summary.text, "muted em")];
+}
+
+/** A trimmed copy of `summary`; `undefined` when its caption is blank. */
+export function normalizeStepSummaryText(summary: StepSummary): StepSummary | undefined {
+	const text = summary.text.trim();
+	if (!text) return undefined;
+	return summary.tone ? { text, tone: summary.tone } : { text };
+}
+
+/** Whether two step summaries render identically. */
+export function sameStepSummary(a: StepSummary | undefined, b: StepSummary | undefined): boolean {
+	return a?.text === b?.text && a?.tone === b?.tone;
 }
 
 /** Local ISO date with a wall-clock time; only the hour cycle follows the terminal. */
@@ -181,7 +202,7 @@ export class UsageRowBlock extends Container {
 	readonly #timestamp: number | undefined;
 	readonly #turnElapsedMs: number | undefined;
 	readonly #metrics: MetricRow;
-	#summary: string | undefined;
+	#summary: StepSummary | undefined;
 	#nativeNode: NativeNode | undefined;
 	/** The terminal's clock {@link #nativeNode} was described with. */
 	#nativeHour12: boolean | undefined;
@@ -205,7 +226,7 @@ export class UsageRowBlock extends Container {
 	}
 
 	/** The step summary shown with this row, once one has landed. */
-	get summary(): string | undefined {
+	get summary(): StepSummary | undefined {
 		return this.#summary;
 	}
 
@@ -213,14 +234,14 @@ export class UsageRowBlock extends Container {
 	 * Lead the row with a plain-English summary of the step above it. Natively it repaints in place,
 	 * even deep in scrollback; the ANSI strip gains a line above the metrics while still on screen.
 	 */
-	setSummary(summary: string): void {
-		const trimmed = summary.trim();
-		if (!trimmed || trimmed === this.#summary) return;
-		this.#summary = trimmed;
+	setSummary(summary: StepSummary): void {
+		const next = normalizeStepSummaryText(summary);
+		if (!next || sameStepSummary(next, this.#summary)) return;
+		this.#summary = next;
 		this.#nativeNode = undefined;
 		this.clear();
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(formatStepSummary(trimmed), 1, 0));
+		this.addChild(new Text(formatStepSummary(next), 1, 0));
 		this.addChild(this.#metrics);
 		this.invalidate();
 	}

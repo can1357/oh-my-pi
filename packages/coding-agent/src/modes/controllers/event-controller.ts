@@ -60,11 +60,13 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import type { StepSummary } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { writeDeviceDispatch } from "../../tools/resolve";
 import {
 	STEP_SUMMARY_CUSTOM_TYPE,
 	type StepSummaryEntryData,
 	StepSummarizer,
+	stepSummaryTone,
 } from "../../step-summary/step-summarizer";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
@@ -367,7 +369,7 @@ export class EventController {
 	#stepSummarizer: StepSummarizer | undefined = undefined;
 	#stepSummaryOwner: AgentSession | undefined = undefined;
 	/** Callbacks that caption a step's usage row (standalone or nested in a read group), by assistant-message timestamp; drained at `turn_end`. */
-	#uncaptionedUsageRows = new Map<number, (summary: string) => void>();
+	#uncaptionedUsageRows = new Map<number, (summary: StepSummary) => void>();
 	/** Latest user message text and the session it was sent in: the request step captions are written against. */
 	#stepRequest: { owner: AgentSession; text: string } | undefined = undefined;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
@@ -1621,11 +1623,13 @@ export class EventController {
 		const sessionManager = owner.sessionManager;
 		const sessionFile = sessionManager.getSessionFile();
 		const request = this.#stepRequest?.owner === owner ? this.#stepRequest.text : undefined;
-		void summarizer.summarize({ message, toolResults: event.toolResults, request }).then(summary => {
-			if (!summary) return;
+		void summarizer.summarize({ message, toolResults: event.toolResults, request }).then(text => {
+			if (!text) return;
 			if (this.ctx.viewSession !== owner || owner.sessionManager.getSessionFile() !== sessionFile) return;
-			caption(summary);
-			const data: StepSummaryEntryData = { messageTimestamp: message.timestamp, summary };
+			const tone = stepSummaryTone(event.toolResults);
+			caption(tone ? { text, tone } : { text });
+			const data: StepSummaryEntryData = { messageTimestamp: message.timestamp, summary: text };
+			if (tone) data.tone = tone;
 			sessionManager.appendCustomEntry(STEP_SUMMARY_CUSTOM_TYPE, data);
 		});
 	}

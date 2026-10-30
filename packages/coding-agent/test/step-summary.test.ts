@@ -6,6 +6,7 @@ import {
 	normalizeStepSummary,
 	STEP_SUMMARY_CUSTOM_TYPE,
 	stepSummariesFromEntries,
+	stepSummaryTone,
 } from "@oh-my-pi/pi-coding-agent/step-summary/step-summarizer";
 
 function assistant(content: AssistantMessage["content"]): AssistantMessage {
@@ -40,7 +41,15 @@ function result(toolCallId: string, text: string, isError = false): ToolResultMe
 }
 
 function toolResult(toolCallId: string, toolName: string, details: unknown, isError = false): ToolResultMessage {
-	return { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text: "" }], details, isError, timestamp: 2 };
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName,
+		content: [{ type: "text", text: "" }],
+		details,
+		isError,
+		timestamp: 2,
+	};
 }
 
 describe("localStepSummary", () => {
@@ -140,12 +149,22 @@ describe("normalizeStepSummary", () => {
 });
 
 describe("stepSummariesFromEntries", () => {
-	it("restores captions by message timestamp and ignores malformed or foreign entries", () => {
+	it("restores captions and their tones by message timestamp, ignoring malformed or foreign entries", () => {
 		const summaries = stepSummariesFromEntries([
 			{
 				type: "custom",
 				customType: STEP_SUMMARY_CUSTOM_TYPE,
 				data: { messageTimestamp: 10, summary: "Ran the tests" },
+			},
+			{
+				type: "custom",
+				customType: STEP_SUMMARY_CUSTOM_TYPE,
+				data: { messageTimestamp: 15, summary: "Build failed", tone: "error" },
+			},
+			{
+				type: "custom",
+				customType: STEP_SUMMARY_CUSTOM_TYPE,
+				data: { messageTimestamp: 16, summary: "Unknown tone", tone: "purple" },
 			},
 			{
 				type: "custom",
@@ -157,6 +176,18 @@ describe("stepSummariesFromEntries", () => {
 			{ type: "custom", customType: "other", data: { messageTimestamp: 13, summary: "not ours" } },
 			{ type: "message", data: { messageTimestamp: 14, summary: "not custom" } },
 		]);
-		expect([...summaries]).toEqual([[10, "Ran the tests"]]);
+		expect([...summaries]).toEqual([
+			[10, { text: "Ran the tests" }],
+			[15, { text: "Build failed", tone: "error" }],
+			[16, { text: "Unknown tone" }],
+		]);
+	});
+});
+
+describe("stepSummaryTone", () => {
+	it("is error when every call failed, warning when some did, and absent otherwise", () => {
+		expect(stepSummaryTone([result("a", "ok"), result("b", "ok")])).toBe(undefined);
+		expect(stepSummaryTone([result("a", "ok"), result("b", "boom", true)])).toBe("warning");
+		expect(stepSummaryTone([result("a", "boom", true), result("b", "boom", true)])).toBe("error");
 	});
 });

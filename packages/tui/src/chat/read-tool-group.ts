@@ -20,7 +20,14 @@ import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
-import { formatStepSummary, formatUsageRow, stepSummarySpans } from "../overlays/usage-row";
+import {
+	formatStepSummary,
+	formatUsageRow,
+	normalizeStepSummaryText,
+	sameStepSummary,
+	type StepSummary,
+	stepSummarySpans,
+} from "../overlays/usage-row";
 import { formatCount, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
@@ -148,7 +155,7 @@ type ReadUsageRow = {
 	timestamp?: number;
 	turnElapsedMs?: number;
 	/** Plain-English caption of the request, shown above its metrics (`display.stepSummaries`). */
-	summary?: string;
+	summary?: StepSummary;
 };
 
 /** Number of preview rows to show per read while collapsed. */
@@ -561,13 +568,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * Caption the usage row of the request whose assistant message has
 	 * `timestamp`. Returns false when no row here belongs to that request.
 	 */
-	setUsageSummary(timestamp: number, summary: string): boolean {
-		const trimmed = summary.trim();
-		if (!trimmed) return false;
+	setUsageSummary(timestamp: number, summary: StepSummary): boolean {
+		const next = normalizeStepSummaryText(summary);
+		if (!next) return false;
 		for (const usageRow of this.#usageRows.values()) {
 			if (usageRow.timestamp !== timestamp) continue;
-			if (usageRow.summary !== trimmed) {
-				usageRow.summary = trimmed;
+			if (!sameStepSummary(usageRow.summary, next)) {
+				usageRow.summary = next;
 				this.#updateDisplay();
 			}
 			return true;

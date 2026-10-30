@@ -17,6 +17,7 @@ import { type AssistantMessage, completeSimple, type TextContent, type ToolResul
 import { parseTextSignature } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import type { StepSummary, StepSummaryTone } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
@@ -33,6 +34,8 @@ export interface StepSummaryEntryData {
 	/** `timestamp` of the assistant message the caption describes. */
 	messageTimestamp: number;
 	summary: string;
+	/** Marker tone; absent when every tool call in the step succeeded. */
+	tone?: StepSummaryTone;
 }
 
 /** Hard cap; a caption is ~20 tokens, the headroom covers backends that ignore `disableReasoning`. */
@@ -172,7 +175,9 @@ export function localStepSummary(input: StepSummaryInput): string | undefined {
 		const target = typeof args.path === "string" ? args.path.trim() : "";
 		if (call.name === "read") {
 			if (!target || target.includes("://")) return undefined;
-			const name = splitPathAndSel(target).path.split(/[\\/]/).findLast(part => part !== "");
+			const name = splitPathAndSel(target)
+				.path.split(/[\\/]/)
+				.findLast(part => part !== "");
 			if (!name) return undefined;
 			if (!read.includes(name)) read.push(name);
 		} else if (call.name === "grep") {
@@ -297,18 +302,28 @@ export class StepSummarizer {
 	}
 }
 
+/** Marker tone for a step: `error` when every tool call failed, `warning` when some did, else none. */
+export function stepSummaryTone(toolResults: readonly ToolResultMessage[]): StepSummaryTone | undefined {
+	const failed = toolResults.filter(result => result.isError).length;
+	if (failed === 0) return undefined;
+	return failed === toolResults.length ? "error" : "warning";
+}
+
 /** Persisted captions by assistant-message timestamp, for transcript replay. */
 export function stepSummariesFromEntries(
 	entries: readonly { type: string; customType?: string; data?: unknown }[],
-): Map<number, string> {
-	const summaries = new Map<number, string>();
+): Map<number, StepSummary> {
+	const summaries = new Map<number, StepSummary>();
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== STEP_SUMMARY_CUSTOM_TYPE) continue;
 		const data = entry.data;
 		if (!isRecord(data)) continue;
-		const { messageTimestamp, summary } = data;
+		const { messageTimestamp, summary, tone } = data;
 		if (typeof messageTimestamp === "number" && typeof summary === "string" && summary) {
-			summaries.set(messageTimestamp, summary);
+			summaries.set(
+				messageTimestamp,
+				tone === "warning" || tone === "error" ? { text: summary, tone } : { text: summary },
+			);
 		}
 	}
 	return summaries;
