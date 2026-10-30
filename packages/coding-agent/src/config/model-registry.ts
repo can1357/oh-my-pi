@@ -363,6 +363,8 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
+	/** `ConfigFile.normalizationEpoch` last copied into {@link #configWarnings}. */
+	#publishedModelsFileEpoch = -1;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1020,6 +1022,17 @@ export class ModelRegistry {
 		const warnings = this.#configWarnings;
 		this.#configWarnings = [];
 		return warnings;
+	}
+
+	#publishModelsFileWarnings(): void {
+		const epoch = this.#modelsConfigFile.normalizationEpoch();
+		if (epoch === this.#publishedModelsFileEpoch) return;
+		this.#publishedModelsFileEpoch = epoch;
+		const prefix = `${this.#modelsConfigFile.path()}: `;
+		this.#configWarnings = this.#configWarnings.filter(warning => !warning.startsWith(prefix));
+		for (const warning of this.#modelsConfigFile.drainWarnings()) {
+			this.#configWarnings.push(`${prefix}${warning}`);
+		}
 	}
 
 	#loadModels() {
@@ -1744,6 +1757,10 @@ export class ModelRegistry {
 			};
 		}
 		const { value, error, status } = this.#modelsConfigFile.tryLoad();
+		// `omp models refresh` builds the registry and then force-reparses the
+		// same file before anything drains #configWarnings. Publish the findings
+		// of the latest parse only, or the same modality warning is printed twice.
+		this.#publishModelsFileWarnings();
 
 		if (status === "error") {
 			return {

@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { OmpErrors } from "@oh-my-pi/omptype";
+import { ModelsConfigFile } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import {
 	type ProviderValidationConfig,
 	validateProviderConfiguration,
 } from "@oh-my-pi/pi-coding-agent/config/models-config";
 import { type ModelsConfig, ModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const models = [{ id: "grok-4", api: "openai-completions" as const }];
 const baseUrl = "https://api.example.invalid/v1";
@@ -216,5 +223,106 @@ describe("model kind must match its api", () => {
 				"runtime-register",
 			),
 		).not.toThrow();
+	});
+});
+
+describe("models.yml input modality the catalog cannot express (#16342)", () => {
+	function catalogInputModalities(): string[] {
+		const declared = AXES["input-modalities"].values ?? [];
+		return declared.filter((value): value is string => typeof value === "string");
+	}
+
+	/** A models.yml with one provider whose models declare the given `input` lists. */
+	function writeModelsFile(models: readonly { id: string; input: string }[]): string {
+		const dir = TempDir.createSync("@models-config-input-");
+		const file = path.join(dir.path(), "models.yml");
+		fs.writeFileSync(file, modelsYaml(models));
+		return file;
+	}
+
+	function modelsYaml(models: readonly { id: string; input: string }[]): string {
+		return [
+			"providers:",
+			"  openrouter:",
+			"    baseUrl: https://api.example.invalid/v1",
+			"    apiKey: sk-test",
+			"    api: openai-completions",
+			"    models:",
+			...models.flatMap(model => [`      - id: "${model.id}"`, `        input: [${model.input}]`]),
+			"",
+		].join("\n");
+	}
+
+	test("an unsupported input modality is dropped and the file still loads", () => {
+		// A models.yml naming a modality the catalog does not know must not take
+		// the whole config down: the file loads with the modality dropped, and
+		// the warning names that modality plus the catalog's own vocabulary.
+		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const config = ModelsConfigFile.relocate(file);
+		const result = config.tryLoad();
+		expect(result.status).toBe("ok");
+		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(catalogInputModalities());
+		const [warning] = config.drainWarnings();
+		expect(warning).toContain('provider "openrouter"');
+		expect(warning).toContain('model "some/video-capable-model"');
+		expect(warning).toContain('modality "video"');
+		for (const modality of catalogInputModalities()) {
+			expect(warning).toContain(modality);
+		}
+	});
+
+	test("a failed load does not keep the dropped-modality warning", () => {
+		// `input: [video, 7]` reports `video` and then fails the schema. The
+		// next successful load of the same file must not repeat that warning.
+		const file = writeModelsFile([{ id: "m", input: "video, 7" }]);
+		const config = ModelsConfigFile.relocate(file);
+		expect(config.tryLoad().status).toBe("error");
+		expect(config.drainWarnings()).toEqual([]);
+		fs.writeFileSync(file, modelsYaml([{ id: "m", input: "text" }]));
+		config.invalidate();
+		const result = config.tryLoad();
+		expect(result.status).toBe("ok");
+		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(["text"]);
+		expect(config.drainWarnings()).toEqual([]);
+	});
+
+	test("a model whose only modality is unsupported keeps the catalog default", () => {
+		// Dropping every modality must not leave the model with an empty input
+		// list: the key goes away so the catalog's own default applies.
+		const file = writeModelsFile([{ id: "only-video", input: "video" }]);
+		const config = ModelsConfigFile.relocate(file);
+		const result = config.tryLoad();
+		expect(result.status).toBe("ok");
+		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toBeUndefined();
+	});
+
+	test("a malformed input entry stays a schema error", () => {
+		// Only an unknown modality is forgiven; a list the schema cannot read at
+		// all is still a configuration mistake worth reporting.
+		const file = writeModelsFile([{ id: "bad-entry", input: "text, 7" }]);
+		const result = ModelsConfigFile.relocate(file).tryLoad();
+		expect(result.status).toBe("error");
+		if (result.status !== "error") throw new Error("expected the file to fail validation");
+		expect(result.error.message).toContain("7");
+	});
+
+	test("the registry loads the model and reports the dropped modality once", async () => {
+		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const registry = new ModelRegistry(authStorage, file);
+			// `omp models refresh` force-reparses before draining. The warning
+			// from the constructor load must not be joined by a second copy.
+			await registry.refresh("offline", { refreshCommandCredentials: true });
+			expect(registry.getError()).toBeUndefined();
+			const model = registry.getAll().find(entry => entry.id === "some/video-capable-model");
+			const input: readonly string[] = model?.input ?? [];
+			expect(input).toEqual(catalogInputModalities());
+			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes('modality "video"'));
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain('model "some/video-capable-model"');
+		} finally {
+			authStorage.close();
+		}
 	});
 });
