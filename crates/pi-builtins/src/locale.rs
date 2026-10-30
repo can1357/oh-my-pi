@@ -733,9 +733,9 @@ fn locale_utility_output(
 	locale_utility_output_at(std::path::Path::new(program), categories, locale, env, cwd, ask)
 }
 
-/// [`locale_utility_output`] against one named program: everything the
-/// chosen stream carried, from a child that ran to a normal end, or why
-/// there is none.
+/// [`locale_utility_output`] against one named program: what the chosen
+/// stream held when the child ended — which is not everything the child
+/// wrote, see [`memory_file`] — or why there is none.
 #[cfg(target_os = "linux")]
 fn locale_utility_output_at(
 	program: &std::path::Path,
@@ -820,12 +820,26 @@ fn locale_utility_output_at(
 		// status is a utility this code does not know rather than a failed
 		// load, and its output is not an answer.
 		Completion::Exited(0) => {},
+		// The three statuses below are the ones the child uses for its own
+		// failures, and a utility is free to exit with any of them, so each
+		// message says which reading it is.
 		Completion::Exited(CHILD_NO_DIRECTORY) => {
-			return Err(report(format!("{named} could not enter the shell's working directory")));
+			return Err(report(format!(
+				"{named} exited with status {CHILD_NO_DIRECTORY}, which here means it could not enter the \
+				 shell's working directory, unless the utility uses that status itself"
+			)));
 		},
-		Completion::Exited(CHILD_NO_PROGRAM) => return Err(report(format!("{named} would not run"))),
+		Completion::Exited(CHILD_NO_PROGRAM) => {
+			return Err(report(format!(
+				"{named} exited with status {CHILD_NO_PROGRAM}, which here means it would not run, unless \
+				 the utility uses that status itself"
+			)));
+		},
 		Completion::Exited(CHILD_NO_SETUP) => {
-			return Err(report(format!("{named} could not be set up to answer")));
+			return Err(report(format!(
+				"{named} exited with status {CHILD_NO_SETUP}, which here means it could not be set up to \
+				 answer, unless the utility uses that status itself"
+			)));
 		},
 		Completion::Exited(status) => return Err(report(format!("{named} exited with status {status}"))),
 		Completion::Ended(how) => return Err(report(format!("{named} {how}"))),
@@ -1050,12 +1064,18 @@ struct CloneArgs {
 /// five of them.
 #[cfg(target_os = "linux")]
 static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+	// Each probe has to answer with the error that only a kernel knowing
+	// the call can give. "Anything but `ENOSYS`" and "anything but
+	// `EINVAL`" are not that: a `clone3` or a `waitid` denied by a seccomp
+	// filter answers `EPERM`, `EACCES` or `ENOSYS`, and reading those as
+	// capability left five real children and five zombies behind.
+	//
 	// SAFETY: a null argument block with a zero size is refused before the
 	// kernel reads anything, so this makes no process either way.
 	let cloned = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<CloneArgs>(), 0usize) };
-	let clone3 = cloned < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS);
+	let clone3 = cloned < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
 	// SAFETY: a descriptor number no process can have open answers `EBADF`
-	// where the kernel knows `P_PIDFD` and `EINVAL` where it does not;
+	// where the kernel knows `P_PIDFD`, and `EINVAL` where it does not;
 	// neither waits for anything. A negative number is refused as an
 	// identifier before the kernel looks at the kind at all, so it has to be
 	// a large positive one. `P_PIDFD` is 3.
@@ -1070,7 +1090,7 @@ static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 			std::ptr::null_mut::<libc::c_void>(),
 		)
 	};
-	let by_handle = watched < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL);
+	let by_handle = watched < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
 	// Both, and asked together: `clone3` arrived in Linux 5.3 and waiting
 	// by handle in 5.4, so a kernel between them would make a child this
 	// code could then neither watch nor reap.
@@ -1124,14 +1144,19 @@ fn start_locale_utility(
 		exit_signal: u64::try_from(libc::SIGCHLD).unwrap_or_default(),
 		..CloneArgs::default()
 	};
-	// SAFETY: both sets are filled in by the calls that take them, and the
-	// mask this thread had is put back on both sides of the clone.
+	// SAFETY: both sets are filled in by the calls that take them. A block
+	// that did not happen must not be "restored": `held` would be the empty
+	// set, and putting that on would unblock everything the caller had
+	// blocked and deliver whatever was pending.
 	let held = unsafe {
 		let mut every = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
 		let mut held = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-		libc::sigfillset(every.as_mut_ptr());
-		libc::sigemptyset(held.as_mut_ptr());
-		libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), held.as_mut_ptr());
+		if libc::sigfillset(every.as_mut_ptr()) != 0 {
+			return Err(std::io::Error::last_os_error());
+		}
+		if libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), held.as_mut_ptr()) != 0 {
+			return Err(std::io::Error::last_os_error());
+		}
 		held.assume_init()
 	};
 	// SAFETY: the argument block is initialised and outlives the call; the
@@ -1143,12 +1168,38 @@ fn start_locale_utility(
 		// SAFETY: this is the whole of the child, and every call here is
 		// async-signal-safe.
 		unsafe {
-			// No handler this process installed may run here, and the mask
-			// this thread had is what the utility should start with.
+			// No handler this process installed may run here. An *ignored*
+			// disposition is left alone, which is `posix_spawn`'s contract
+			// and not a window of any kind: with `SIGPIPE` ignored in the
+			// caller, a utility that raises it and then answers succeeds
+			// under `posix_spawn` and died on signal 13 when this reset it.
 			for signal in 1..=libc::SIGRTMAX() {
-				libc::signal(signal, libc::SIG_DFL);
+				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
+					continue;
+				}
+				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+				// A number the library keeps for itself — glibc's 32 and 33 —
+				// cannot be read or set, and carries nothing of this
+				// process's to reset.
+				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) != 0 {
+					continue;
+				}
+				let current = current.assume_init();
+				if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
+					continue;
+				}
+				let mut default = std::mem::MaybeUninit::<libc::sigaction>::zeroed().assume_init();
+				default.sa_sigaction = libc::SIG_DFL;
+				if libc::sigemptyset(&raw mut default.sa_mask) != 0
+					|| libc::sigaction(signal, &raw const default, std::ptr::null_mut()) != 0
+				{
+					libc::_exit(CHILD_NO_SETUP);
+				}
 			}
-			libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut());
+			// The mask this thread had is what the utility should start with.
+			if libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) != 0 {
+				libc::_exit(CHILD_NO_SETUP);
+			}
 			if libc::setpgid(0, 0) != 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
@@ -1164,12 +1215,17 @@ fn start_locale_utility(
 			if libc::setrlimit(libc::RLIMIT_FSIZE, &raw const cap) != 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
+			// The answer stream is redirected *before* `/dev/null` is
+			// opened. With the selected stream closed on entry the open
+			// takes that very number, and duplicating the answer onto it
+			// afterwards left the later duplications reading the answer
+			// file as their source: the diagnostics stream then carried the
+			// codeset and a loadable locale read as unloadable.
+			if libc::dup2(answer, taken) < 0 {
+				libc::_exit(CHILD_NO_SETUP);
+			}
 			let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-			if null < 0
-				|| libc::dup2(answer, taken) < 0
-				|| libc::dup2(null, 0) < 0
-				|| libc::dup2(null, discarded) < 0
-			{
+			if null < 0 || libc::dup2(null, 0) < 0 || libc::dup2(null, discarded) < 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
 			if null > 2 {
@@ -1188,8 +1244,13 @@ fn start_locale_utility(
 		true => Err(std::io::Error::last_os_error()),
 		false => Ok(()),
 	};
-	// SAFETY: putting back the mask this thread had before the clone.
-	unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) };
+	// SAFETY: putting back the mask this thread had before the clone. A
+	// restoration that fails would leave the caller with nearly every
+	// signal blocked, so it is reported rather than passed over.
+	let restored = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) };
+	if restored != 0 {
+		return Err(std::io::Error::from_raw_os_error(restored));
+	}
 	cloned?;
 	if handle < 0 {
 		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));

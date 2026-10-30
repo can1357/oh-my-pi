@@ -842,33 +842,105 @@ fn a_descendant_of_the_utility_does_not_outlive_the_query() {
 	panic!("the descendant {descendant} outlived the query");
 }
 
-/// With this process's own standard output and error closed, a fresh pipe
-/// takes descriptors 1 and 2, and the spawn's file actions must not open
-/// `/dev/null` over the one the answer is written to.
+/// A standard descriptor the caller has closed must not become the answer.
+///
+/// Whichever of them is closed, the open the child does for `/dev/null`
+/// takes that number, so the answer stream has to be redirected first:
+/// doing it the other way round put the answer file in `/dev/null`'s place
+/// and left the later duplications reading *it* as their source. Measured
+/// with stderr closed and real `/usr/bin/locale`: the diagnostics stream
+/// carried `ISO-8859-1` instead of nothing and a loadable locale read as
+/// unloadable.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_answer_pipe_survives_closed_standard_descriptors() {
+fn a_closed_standard_descriptor_never_becomes_the_answer() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	// A name only the utility can answer for, so the diagnostics stream is
+	// exercised as well as the codeset one.
+	let literal = "omp;literal";
+	let mut copy = Command::new("cp");
+	copy.arg("-a").arg(locales.join(SHELL_ONLY_LOCALE)).arg(locales.join(literal));
+	assert!(copy.output().unwrap().status.success());
+	let shell_path = locales.to_str().unwrap().to_owned();
+	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+	// SAFETY: nextest gives this test its own process, and nothing else in
+	// it reads `LOCPATH` concurrently.
+	unsafe { std::env::set_var("LOCPATH", &locales) };
+	for closed in 1..8u32 {
+		let wanted: Vec<i32> = (0..3).filter(|standard| closed & (1 << standard) != 0).collect();
+		// SAFETY: every descriptor is put back below, before anything else
+		// in this process writes to one.
+		let kept: Vec<(i32, i32)> =
+			wanted.iter().map(|standard| (*standard, unsafe { libc::dup(*standard) })).collect();
+		// SAFETY: as above.
+		for (standard, _) in &kept {
+			unsafe { libc::close(*standard) };
+		}
+		let codeset = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
+		let loadable = crate::locale::locale_loadable(literal, libc::LC_CTYPE_MASK);
+		// SAFETY: as above; every saved descriptor is this test's own.
+		for (standard, saved) in &kept {
+			unsafe {
+				libc::dup2(*saved, *standard);
+				libc::close(*saved);
+			}
+		}
+		assert!(
+			matches!(&codeset, crate::locale::Codeset::Loaded(found) if found == "ISO-8859-1"),
+			"closed {wanted:?}: {codeset:?}"
+		);
+		assert!(loadable, "closed {wanted:?}: the literal name is loadable");
+	}
+	// SAFETY: as above.
+	unsafe { std::env::remove_var("LOCPATH") };
+}
+
+/// A query leaves the caller's signal mask as it found it, and leaves an
+/// ignored disposition ignored.
+///
+/// Blocking every signal across the clone is this code's business and not
+/// the caller's: a mask call whose failure went unchecked used to "restore"
+/// an empty set and hand back a thread with nothing blocked. And resetting
+/// *ignored* dispositions is not `posix_spawn`'s contract — with `SIGPIPE`
+/// ignored in the caller, a utility that raises it and then answers
+/// succeeds under `posix_spawn` and died on signal 13 when this reset it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_query_leaves_the_callers_signal_settings_alone() {
+	use std::os::unix::fs::PermissionsExt as _;
+
 	let dir = tempfile::tempdir().unwrap();
 	let Some(locales) = shell_only_locale(dir.path()) else { return };
 	let shell_path = locales.to_str().unwrap().to_owned();
 	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
-	// SAFETY: the two descriptors are put back below, before anything else in
-	// this process writes to them; nextest gives this test its own process.
-	let (kept_out, kept_err) = unsafe { (libc::dup(1), libc::dup(2)) };
-	// SAFETY: as above.
-	unsafe {
-		libc::close(1);
-		libc::close(2);
-	}
+	let blocked = |signal| {
+		let mask = nix::sys::signal::SigSet::thread_get_mask();
+		mask.map(|held| held.contains(signal)).unwrap_or_default()
+	};
+	let mut usr1 = nix::sys::signal::SigSet::empty();
+	usr1.add(nix::sys::signal::SIGUSR1);
+	usr1.thread_block().unwrap();
+	// SAFETY: nextest gives this test its own process; the disposition is
+	// put back below.
+	let kept = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+	let before = blocked(nix::sys::signal::SIGUSR1);
 	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
-	// SAFETY: as above; both saved descriptors are this test's own.
-	unsafe {
-		libc::dup2(kept_out, 1);
-		libc::dup2(kept_err, 2);
-		libc::close(kept_out);
-		libc::close(kept_err);
-	}
-	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
+	let after = blocked(nix::sys::signal::SIGUSR1);
+	// A utility that raises the signal the caller ignores, then answers.
+	let program = dir.path().join("locale");
+	fs::write(&program, "#!/bin/sh\nkill -PIPE $$\nprintf 'UTF-8\\n'\n").unwrap();
+	fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+	let ignored = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &|_| None);
+	// SAFETY: as above.
+	unsafe { libc::signal(libc::SIGPIPE, kept) };
+	usr1.thread_unblock().unwrap();
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(found) if found == "ISO-8859-1"), "{answer:?}");
+	assert!(before && after, "the caller's mask is its own: before {before}, after {after}");
+	assert!(
+		matches!(&ignored, crate::locale::Codeset::Loaded(found) if found == "UTF-8"),
+		"an ignored disposition stays ignored: {ignored:?}"
+	);
 }
 
 /// A name is the name of locale data, whatever punctuation it carries.
