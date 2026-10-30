@@ -891,11 +891,14 @@ interface Osc11Cycle {
  * answer cannot arrive — so this count is what keeps a terminal that stops
  * answering from leaving a backlog that swallows answers for ever.
  *
- * Two: the deepest backlog anyone has reproduced is two retired cycles
- * answering late together, and a dead spell has to be paid off one answer at a
- * time before the appearance updates again. Past the cap an old answer can be
- * published under a later request; below it, a deeper dead spell would cost
- * every update behind it instead.
+ * Two, and the trade is the reason rather than the depth of any backlog seen:
+ * three, four and eight retired cycles answering together all reproduce. A
+ * larger cap holds more old answers back and publishes fewer stale ones, but a
+ * terminal that stops answering then owes that many swallowed answers before
+ * anything is published again — a hundred unanswered cycles would cost a
+ * hundred dead refreshes. A stranded appearance lasts the rest of the session;
+ * a stale colour is wrong for one cycle. So the price of two is that past it an
+ * old answer can be published under a later request.
  */
 const OSC11_MAX_CLAIMS = 2;
 
