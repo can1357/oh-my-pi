@@ -25,6 +25,7 @@ import type {
 	AssistantMessage,
 	CacheRetention,
 	Context,
+	FetchImpl,
 	Model,
 	StopReason,
 	StreamFunction,
@@ -48,10 +49,10 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
-import { withoutDispatchHold } from "../utils/transport-fetch";
+import { fetchAuthorizedAtWire, withoutDispatchHold } from "../utils/transport-fetch";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
-import { signRequest } from "./aws-sigv4";
+import { type AwsCredentials, signRequest } from "./aws-sigv4";
 import { isThinkingPrefixBindingError, logDroppedThinking, streamBedrockAnthropicCompaction } from "./anthropic";
 import type { AnthropicMessagesClientLike, AnthropicRequestOptions } from "./anthropic-client";
 import { supportsBedrockConverseCompaction } from "./anthropic-compaction";
@@ -192,6 +193,27 @@ function resolveBedrockRequestUrl(
 }
 
 /**
+ * Credentials to SigV4-sign a Bedrock request with. A credential lookup is the
+ * request's prerequisite, not inference traffic: it goes out unheld under its
+ * own timeouts, while the request it signs still holds at the wire.
+ */
+function resolveBedrockSigningCredentials(
+	options: BedrockOptions,
+	region: string,
+	signal: AbortSignal | undefined,
+): Promise<AwsCredentials> {
+	if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
+		return Promise.resolve({ accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" });
+	}
+	return resolveAwsCredentials({
+		profile: options.profile,
+		region,
+		signal,
+		fetch: options.fetch ? withoutDispatchHold(options.fetch) : undefined,
+	});
+}
+
+/**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
  * cannot hang the caller. `heldWork` is the stream the caller returns, so the
@@ -259,36 +281,40 @@ async function sendBedrockRequest(
 	}
 	const body = new TextEncoder().encode(JSON.stringify(input));
 	const bearerToken = resolveBearerToken(options);
+	const wireFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
+	let sendFetch: FetchImpl;
 	let requestHeaders: Record<string, string>;
 	if (bearerToken) {
 		requestHeaders = { ...headers, Authorization: `Bearer ${bearerToken}` };
+		sendFetch = wireFetch;
 	} else {
-		let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
-		if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
-			credentials = { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" };
-		} else {
-			// A credential lookup is this request's prerequisite, not inference
-			// traffic: it goes out unheld under its own timeouts, and the signed
-			// request below still holds at the wire.
-			credentials = await resolveAwsCredentials({
-				profile: options.profile,
+		// Resolved once before the retry loop, so a profile with no usable
+		// credentials fails as itself instead of as five retried attempts.
+		await resolveBedrockSigningCredentials(options, region, signal);
+		// A SigV4 signature carries the time it was made, and AWS rejects one more
+		// than five minutes old. A dispatch hold that a human releases outlasts
+		// that, so the request is signed where it leaves: after the transport's
+		// holds open, on every attempt. Credentials are looked up again there,
+		// since temporary ones can expire during the same wait.
+		const authorize = async (wireInit: RequestInit): Promise<RequestInit> => {
+			const signed = await signRequest({
+				method: "POST",
+				host,
+				path: urlPath,
+				query,
+				body,
 				region,
-				signal,
-				fetch: options.fetch ? withoutDispatchHold(options.fetch) : undefined,
+				service: "bedrock",
+				credentials: await resolveBedrockSigningCredentials(options, region, signal),
+				headers,
 			});
-		}
-		const signed = await signRequest({
-			method: "POST",
-			host,
-			path: urlPath,
-			query,
-			body,
-			region,
-			service: "bedrock",
-			credentials,
-			headers,
-		});
-		requestHeaders = { ...headers, ...signed };
+			// `requestHeaders` below is a plain record and the transport keeps a
+			// plain record one, so the request it hands back is still one.
+			const sentHeaders = wireInit.headers as Record<string, string> | undefined;
+			return { ...wireInit, headers: { ...sentHeaders, ...signed } };
+		};
+		requestHeaders = headers;
+		sendFetch = (wireInput, wireInit) => fetchAuthorizedAtWire(wireFetch, wireInput, wireInit ?? {}, authorize);
 	}
 	// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 	// watchdogs govern slow-prefill streams (issue #2422). Direct callers that
@@ -313,7 +339,7 @@ async function sendBedrockRequest(
 			headers: requestHeaders,
 			body,
 			signal: watchdog.signal,
-			fetch: options.fetch,
+			fetch: sendFetch,
 			timeout: false,
 		});
 		if (!response.ok && endpoint === "invoke-with-response-stream")

@@ -16,6 +16,7 @@ import {
 	ChatToolDefinitionSchema,
 	CompletionConfigurationSchema,
 	ConversationalPlannerMode,
+	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
 	GetUserJwtRequestSchema,
@@ -59,7 +60,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
-import { withoutDispatchHold } from "../utils/transport-fetch";
+import { fetchAuthorizedAtWire, type WireAuthorization, withoutDispatchHold } from "../utils/transport-fetch";
 import {
 	CONNECT_COMPRESSED_FLAG,
 	CONNECT_END_STREAM_FLAG,
@@ -252,24 +253,25 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			// the same budget `register-builtins` gives the stream watchdog.
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const heldFetch: FetchImpl = async (input, init) => {
-				const watchdog = armPreResponseTimeout(init?.signal ?? undefined, firstEventTimeoutMs, stream);
+			const watchFirstEvent = async (
+				signal: AbortSignal | null | undefined,
+				send: (watched: AbortSignal | undefined) => Promise<Response>,
+			): Promise<Response> => {
+				const watchdog = armPreResponseTimeout(signal ?? undefined, firstEventTimeoutMs, stream);
 				try {
-					return await fetchImpl(input, { ...init, signal: watchdog.signal });
+					return await send(watchdog.signal);
 				} finally {
 					watchdog.clear();
 				}
 			};
+			const heldFetch: FetchImpl = (input, init) =>
+				watchFirstEvent(init?.signal, signal => fetchImpl(input, { ...init, signal }));
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			// The session-token exchange is this request's prerequisite, not
 			// inference traffic: it goes out unheld, still under the stream
 			// watchdog's clock.
-			const auth = await fetchDevinAuthMetadata(
-				options?.apiKey,
-				baseUrl,
-				withoutDispatchHold(fetchImpl),
-				options?.signal,
-			);
+			const authFetch = withoutDispatchHold(fetchImpl);
+			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, authFetch, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
 				apiKey: options?.apiKey,
@@ -289,45 +291,66 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
 				),
 			};
-			// Router models (`adaptive`) are not valid chat model uids: the server
-			// resolves them through AssignModel and expects the returned uid plus
-			// assignment JWT on the chat request that shares the cascade id.
-			let assignment: ModelAssignment | undefined;
-			if (model.compat.modelRouter) {
-				assignment = await assignDevinModel(model, turn, chatBaseUrl, heldFetch, options?.signal);
-				output.upstreamModel = assignment.modelUid;
-			}
-			let request = buildDevinChatRequest(model, context, options, turn, assignment);
-			const replacementRequest = await options?.onPayload?.(request, model);
-			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
-			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			// A small request goes out plain and without `connect-content-encoding`,
-			// so no server sees an encoding it never has to decode.
-			const compress = reqBytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
-			const chatBody = compress ? await gzipAsync(reqBytes) : reqBytes;
-			const compressedBytes = compress ? chatBody.byteLength : undefined;
-			logger.debug("devin: sending chat request", {
-				model: model.id,
-				tools: context.tools?.length ?? 0,
-				requestBytes: reqBytes.byteLength,
-				compressedBytes,
-			});
-			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
+			const chat: { sent?: DevinChatBody } = {};
+			// The chat request carries the user JWT and, for a router model, the
+			// assignment JWT in its protobuf body. Both expire, and a dispatch hold
+			// a human releases can outlast them, so the body is built where the
+			// request leaves: after the transport's holds open, and again whenever
+			// a gate that closed sends the request back to wait, so `onPayload`
+			// sees every body built. The URL the first exchange named stays: it is
+			// already the request's address.
+			const authorize: WireAuthorization = async wireInit => {
+				// Router models (`adaptive`) are not valid chat model uids: the server
+				// resolves them through AssignModel and expects the returned uid plus
+				// assignment JWT on the chat request that shares the cascade id.
+				let assignment: ModelAssignment | undefined;
+				if (model.compat.modelRouter) {
+					assignment = await assignDevinModel(model, turn, chatBaseUrl, heldFetch, options?.signal);
+					output.upstreamModel = assignment.modelUid;
+				}
+				// After the assignment, whose own request may have waited on a hold.
+				if (!devinJwtOutlivesSend(turn.userJwt)) {
+					turn.userJwt = (
+						await fetchDevinAuthMetadata(options?.apiKey, baseUrl, authFetch, options?.signal)
+					).userJwt;
+				}
+				const sent = await buildDevinChatBody(model, context, options, turn, assignment);
+				chat.sent = sent;
+				// The record below is a plain one and the transport keeps a plain
+				// record one, so the request it hands back is still one.
+				const sentHeaders = wireInit.headers as Record<string, string> | undefined;
+				return {
+					...wireInit,
+					headers: {
+						...sentHeaders,
+						...(sent.compressedBytes !== undefined ? { "connect-content-encoding": "gzip" } : undefined),
+						...options?.headers,
+					},
+					body: sent.frame,
+				};
+			};
 
-			const response = await heldFetch(chatBaseUrl + CHAT_MESSAGE_PATH, {
-				method: "POST",
-				headers: {
-					"content-type": "application/connect+proto",
-					"connect-protocol-version": "1",
-					...(compress ? { "connect-content-encoding": "gzip" } : {}),
-					"accept-encoding": "identity",
-					"user-agent": "connect-go/1.18.1 (go1.26.3)",
-					"connect-accept-encoding": "gzip",
-					...options?.headers,
-				},
-				body: frame,
-				signal: options?.signal,
-			});
+			const response = await watchFirstEvent(options?.signal, signal =>
+				fetchAuthorizedAtWire(
+					fetchImpl,
+					chatBaseUrl + CHAT_MESSAGE_PATH,
+					{
+						method: "POST",
+						headers: {
+							"content-type": "application/connect+proto",
+							"connect-protocol-version": "1",
+							"accept-encoding": "identity",
+							"user-agent": "connect-go/1.18.1 (go1.26.3)",
+							"connect-accept-encoding": "gzip",
+							...options?.headers,
+						},
+						signal,
+					},
+					authorize,
+				),
+			);
+			// `authorize` built it before the request could leave.
+			const { request, bytes: reqBytes, compressedBytes } = chat.sent!;
 
 			if (!response.ok) {
 				const payload = new Uint8Array(await response.arrayBuffer());
@@ -586,11 +609,76 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 /** Per-turn wire state shared by `AssignModel` and `GetChatMessage`. */
 interface DevinTurn {
 	apiKey: string | undefined;
+	/** Replaced where the chat request leaves when it would not outlive the send. */
 	userJwt: string;
 	/** Cascade thread id; assignment and chat must agree on it or the JWT is rejected. */
 	cascadeId: string;
 	/** History already run through {@link transformMessages}, shared by both calls. */
 	messages: Message[];
+}
+
+/** A `GetChatMessage` request as it goes on the wire. */
+interface DevinChatBody {
+	request: GetChatMessageRequest;
+	/** The serialized request, before compression. */
+	bytes: Uint8Array;
+	/** Size on the wire when the request went out compressed; `undefined` when it went out plain. */
+	compressedBytes: number | undefined;
+	/** The Connect frame that carries it. */
+	frame: Uint8Array;
+}
+
+async function buildDevinChatBody(
+	model: Model<"devin-agent">,
+	context: Context,
+	options: DevinOptions | undefined,
+	turn: DevinTurn,
+	assignment: ModelAssignment | undefined,
+): Promise<DevinChatBody> {
+	let request = buildDevinChatRequest(model, context, options, turn, assignment);
+	const replacementRequest = await options?.onPayload?.(request, model);
+	if (replacementRequest !== undefined) request = replacementRequest as typeof request;
+	const bytes = toBinary(GetChatMessageRequestSchema, request);
+	// A small request goes out plain and without `connect-content-encoding`,
+	// so no server sees an encoding it never has to decode.
+	const compress = bytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
+	const chatBody = compress ? await gzipAsync(bytes) : bytes;
+	const compressedBytes = compress ? chatBody.byteLength : undefined;
+	logger.debug("devin: sending chat request", {
+		model: model.id,
+		tools: context.tools?.length ?? 0,
+		requestBytes: bytes.byteLength,
+		compressedBytes,
+	});
+	return {
+		request,
+		bytes,
+		compressedBytes,
+		frame: frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0),
+	};
+}
+
+/**
+ * How long past the moment a request leaves a Devin JWT must stay valid to go
+ * out as it is: transit to the server, and clock drift between us and it.
+ */
+const DEVIN_JWT_EXPIRY_SKEW_MS = 60_000;
+
+/**
+ * Whether a Devin JWT states an expiry far enough off to send it now. A token
+ * whose payload carries no readable `exp` claim states no lifetime, so nothing
+ * shows it outlived whatever wait came before the send.
+ */
+function devinJwtOutlivesSend(token: string): boolean {
+	const payload = token.split(".")[1];
+	if (!payload) return false;
+	try {
+		const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+		if (!isRecord(claims) || typeof claims.exp !== "number") return false;
+		return claims.exp * 1000 - DEVIN_JWT_EXPIRY_SKEW_MS > Date.now();
+	} catch {
+		return false;
+	}
 }
 
 async function fetchDevinAuthMetadata(

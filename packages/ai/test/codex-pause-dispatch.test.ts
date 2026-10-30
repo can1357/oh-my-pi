@@ -6,6 +6,12 @@
  * sends nothing and is not. Every socket the transport opens passes a hold
  * immediately before it, including one opened after waiting on another
  * caller's handshake, and a cancellation during that wait opens nothing.
+ *
+ * A hold that carries a probe (`DispatchHold.isClosed`) is read in the same
+ * synchronous step as each of those sends, so a gate that closes in the
+ * microtasks after the hold answered still stops it. The DeviceCheck
+ * attestation a handshake or an SSE request carries is minted after the wait,
+ * so a pause cannot leave a stale one on the wire.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -22,6 +28,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { PROBE_MAX_DEPTH, ProbedGate, resumeUntilSettled } from "./helpers/probed-gate";
 
 const { getAgentDir, setAgentDir, TempDir } = piUtils;
 const originalAgentDir = getAgentDir();
@@ -79,8 +86,11 @@ class FakeSocket {
 	onmessage: ((event: MessageEvent) => void) | null = null;
 	onerror: ((event: Event) => void) | null = null;
 	onclose: ((event: CloseEvent) => void) | null = null;
+	/** The handshake headers the transport opened this socket with. */
+	headers: Record<string, string>;
 
-	constructor() {
+	constructor(_url?: string, options?: { headers?: Record<string, string> }) {
+		this.headers = options?.headers ?? {};
 		FakeSocket.instances.push(this);
 		const script = FakeSocket.script.connect;
 		if (script) script(this, FakeSocket.instances.length);
@@ -361,15 +371,16 @@ describe("Codex websocket connects under a dispatch hold", () => {
 				socket.emit(...completedFrames("resp_1", "Hi"));
 			},
 		});
-		// The request resolves its attestation header immediately before it
-		// joins the pending handshake; nothing after that awaits a timer.
-		let attestations = 0;
-		const requestAttesting = Promise.withResolvers<void>();
-		setCodexAttestationProvider(async () => {
-			attestations += 1;
-			if (attestations === 2) requestAttesting.resolve();
-			return undefined;
-		});
+		// A request that joins a handshake another caller started marks it with
+		// `codexWs:awaitSharedHandshake` and waits on it in the same step. Its
+		// attestation is minted only for a socket it opens itself, so it marks
+		// nothing earlier.
+		const joined = Promise.withResolvers<void>();
+		const time = piUtils.logger.time as (op: string, ...rest: unknown[]) => unknown;
+		vi.spyOn(piUtils.logger, "time").mockImplementation(((op: string, ...rest: unknown[]) => {
+			if (op === "codexWs:awaitSharedHandshake") joined.resolve();
+			return time(op, ...rest);
+		}) as unknown as typeof piUtils.logger.time);
 		const model = createModel();
 		const prewarm = prewarmOpenAICodexResponses(model, {
 			apiKey: createToken(),
@@ -378,8 +389,7 @@ describe("Codex websocket connects under a dispatch hold", () => {
 		}).catch(() => {});
 		while (FakeSocket.instances.length === 0) await nextTurn();
 		const result = request([user]);
-		await requestAttesting.promise;
-		await nextTurn();
+		await joined.promise;
 		return { result, prewarm };
 	}
 
@@ -537,3 +547,220 @@ describe("Codex websocket connects under a dispatch hold", () => {
 		]);
 	});
 });
+
+function resetSessions(): void {
+	for (const state of sessions.values()) state.close?.();
+	sessions = new Map();
+}
+
+describe("Codex sends nothing while a probed gate reads closed", () => {
+	// The hold was awaited and `response.create` sent a few microtasks later,
+	// so a pause landing in between was never seen and the frame went out
+	// under it.
+	it("holds response.create when the gate closes after the hold answered", async () => {
+		const sentWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			resetSessions();
+			const probe = new ProbedGate();
+			let sent = false;
+			installSocket({
+				frame: (frame, socket) => {
+					if (frame.type !== "response.create") return;
+					sent = true;
+					if (probe.closed) sentWhileClosed.push(depth);
+					socket.emit(...completedFrames("resp_1", "Hi"));
+				},
+			});
+			// The socket is open only for the hold right before `response.create`.
+			const hold = probe.holdClosingAfter(depth, () =>
+				FakeSocket.instances.some(socket => socket.readyState === FakeSocket.OPEN),
+			);
+			const result = streamSimple(
+				createModel(),
+				{ systemPrompt: SYSTEM, messages: [user] },
+				{ ...requestOptions(), beforeDispatch: hold },
+			).result();
+			const message = await resumeUntilSettled(
+				result,
+				probe,
+				() => !sent,
+				() => heldAt.push(depth),
+			);
+			expect(message.stopReason).toBe("stop");
+		}
+
+		expect(sentWhileClosed).toEqual([]);
+		// Not vacuous: some depth closed the gate before the send and was held.
+		expect(heldAt.length).toBeGreaterThan(0);
+	});
+
+	// The connect hold was awaited and the socket constructed afterwards, so a
+	// pause landing in between opened a connection under it.
+	it("opens no socket when the gate closes after the connect hold answered", async () => {
+		const openedWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			resetSessions();
+			const probe = new ProbedGate();
+			installSocket({
+				connect: socket => {
+					if (probe.closed) openedWhileClosed.push(depth);
+					socket.open();
+				},
+			});
+			// A prewarm asks the hold once, right before the socket it opens.
+			const prewarm = prewarmOpenAICodexResponses(createModel(), {
+				apiKey: createToken(),
+				sessionId: "codex-pause-dispatch",
+				providerSessionState: sessions,
+				beforeDispatch: probe.holdClosingAfter(depth, () => true),
+			});
+			await resumeUntilSettled(
+				prewarm,
+				probe,
+				() => FakeSocket.instances.length === 0,
+				() => heldAt.push(depth),
+			);
+			expect(FakeSocket.instances).toHaveLength(1);
+		}
+
+		expect(openedWhileClosed).toEqual([]);
+		expect(heldAt.length).toBeGreaterThan(0);
+	});
+
+	// The steering pump awaited the hold and submitted the steer afterwards, so
+	// a pause landing in between put new user input on the wire under it.
+	it("holds response.steer when the gate closes after the hold answered", async () => {
+		const sentWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			resetSessions();
+			const probe = new ProbedGate();
+			const created = Promise.withResolvers<void>();
+			let sent = false;
+			installSocket({
+				frame: (frame, socket) => {
+					if (frame.type === "response.create") {
+						socket.emit(
+							{ type: "response.created", response: { id: "resp_1" } },
+							...messageFrames("msg_1", "Plan"),
+						);
+						created.resolve();
+						return;
+					}
+					sent = true;
+					if (probe.closed) sentWhileClosed.push(depth);
+					socket.emit(...steeredFrames());
+				},
+			});
+			const steering = typedSteering("use tabs", () => {});
+			// Claimed, the input is ready: the next hold is the steer's last one.
+			const hold = probe.holdClosingAfter(depth, () => steering.claimed());
+			const result = streamSimple(
+				createModel(),
+				{ systemPrompt: SYSTEM, messages: [user] },
+				{ ...requestOptions(steering.source), beforeDispatch: hold },
+			).result();
+			await created.promise;
+			await nextTurn();
+			steering.queue();
+			const message = await resumeUntilSettled(
+				result,
+				probe,
+				() => !sent,
+				() => heldAt.push(depth),
+			);
+			expect(message.stopReason).toBe("stop");
+			expect(steering.settled()).toBe("accepted");
+		}
+
+		expect(sentWhileClosed).toEqual([]);
+		expect(heldAt.length).toBeGreaterThan(0);
+	});
+});
+
+describe("Codex attestation is minted after the dispatch hold", () => {
+	/**
+	 * Logs each attestation as it is minted, numbered. The first one closes the
+	 * gate: the pause lands right after it, so a request that minted before its
+	 * hold carries that one through the whole pause.
+	 */
+	function attestEachMint(probe: ProbedGate, events: string[]): void {
+		let mints = 0;
+		setCodexAttestationProvider(async () => {
+			mints += 1;
+			events.push(`mint:attestation-${mints}`);
+			if (mints === 1) probe.close();
+			return `attestation-${mints}`;
+		});
+	}
+
+	/** Runs `pending` to the end, logging each resume of the gate the first mint closed. */
+	function resumeLogging<T>(pending: Promise<T>, probe: ProbedGate, events: string[]): Promise<T> {
+		return resumeUntilSettled(
+			pending,
+			probe,
+			() => true,
+			() => events.push("resume"),
+		);
+	}
+
+	// The attestation was minted with the handshake headers, before the
+	// connect hold, and the socket opened after resume carried that one:
+	// mint:attestation-1, resume, socket opened with attestation-1.
+	it("opens the socket with an attestation minted after the hold", async () => {
+		const probe = new ProbedGate();
+		const events: string[] = [];
+		attestEachMint(probe, events);
+		installSocket({
+			frame: (frame, socket) => {
+				if (frame.type === "response.create") socket.emit(...completedFrames("resp_1", "Hi"));
+			},
+		});
+		const result = streamSimple(
+			createModel(),
+			{ systemPrompt: SYSTEM, messages: [user] },
+			{ ...requestOptions(), beforeDispatch: probe.hold },
+		).result();
+		const message = await resumeLogging(result, probe, events);
+
+		expect(message.stopReason).toBe("stop");
+		expect(FakeSocket.instances).toHaveLength(1);
+		const sentWith = FakeSocket.instances[0]!.headers["x-oai-attestation"];
+		expect(events).toContain("resume");
+		expect(events.indexOf(`mint:${sentWith}`)).toBeGreaterThan(events.lastIndexOf("resume"));
+	});
+
+	// The SSE request built its headers, attestation included, before the
+	// transport's hold, and the request sent after resume carried that one.
+	it("sends the SSE request with an attestation minted after the hold", async () => {
+		const probe = new ProbedGate();
+		const events: string[] = [];
+		attestEachMint(probe, events);
+		const sentWith: (string | null)[] = [];
+		const fetch: FetchImpl = async (_input, init) => {
+			sentWith.push(new Headers(init?.headers).get("x-oai-attestation"));
+			return new Response(sseBody(completedFrames("resp_1", "Hi")), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const model = buildModel({ ...createModel(), preferWebsockets: false });
+		const result = streamSimple(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			{ ...requestOptions(), fetch, beforeDispatch: probe.hold },
+		).result();
+		const message = await resumeLogging(result, probe, events);
+
+		expect(message.stopReason).toBe("stop");
+		expect(sentWith).toHaveLength(1);
+		expect(events).toContain("resume");
+		expect(events.indexOf(`mint:${sentWith[0]}`)).toBeGreaterThan(events.lastIndexOf("resume"));
+	});
+});
+
+function sseBody(frames: Frame[]): string {
+	return frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("");
+}

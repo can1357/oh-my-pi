@@ -29,7 +29,7 @@ import * as AIError from "../error";
 import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { ImageContent, Model, Usage } from "../types";
-import { holdBeforeDispatch } from "../utils/dispatch-hold";
+import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
 import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
@@ -519,23 +519,31 @@ export class NativeJudge implements Judge {
 		};
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
-			// Each attempt, retries included, holds before its timeout is armed:
-			// the timeout bounds the endpoint, not a caller's hold (`/pause`).
-			await holdBeforeDispatch(hold, signal);
-			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
+			let sent = false;
 			try {
-				response = await this.#fetch(
-					target.url,
-					withInferenceUserAgent(target.url, {
-						method: "POST",
-						headers,
-						body,
-						signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-					}),
-				);
+				// Each attempt, retries included, holds before its timeout is armed:
+				// the timeout bounds the endpoint, not a caller's hold (`/pause`).
+				// The fetch starts in the same synchronous step as the last read of
+				// the hold's probe, so a gate that closed after the hold answered
+				// still holds the attempt.
+				response = await dispatchWhenOpen(hold, signal, () => {
+					sent = true;
+					const timeout = AbortSignal.timeout(this.#timeoutMs);
+					return this.#fetch(
+						target.url,
+						withInferenceUserAgent(target.url, {
+							method: "POST",
+							headers,
+							body,
+							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+						}),
+					);
+				});
 			} catch (error) {
-				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
+				// A hold that failed or was cancelled fails the judgment as itself:
+				// nothing was sent, so there is nothing to retry.
+				if (!sent || signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
 				await Bun.sleep(backoffMs(attempt, undefined));
 				continue;
 			}

@@ -22,7 +22,7 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
-import { holdBeforeDispatch } from "../utils/dispatch-hold";
+import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { armPreResponseTimeout } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
@@ -68,6 +68,21 @@ const GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS = 90_000;
  * matches the OAuth `TOKEN_REQUEST_TIMEOUT_MS` used by sibling GitLab flows.
  */
 const GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS = 30_000;
+/**
+ * How long before the expiry GitLab states for a workflow token the token is
+ * replaced before it opens another socket. The socket authenticates at its
+ * handshake, which has to land while the token is still good, with room for
+ * clock skew between this host and GitLab.
+ */
+const GITLAB_DUO_WORKFLOW_TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+/**
+ * How long a workflow token is trusted when the `direct_access` response states
+ * no expiry. GitLab mints a two-hour token today and says so
+ * (`gitlab_rails.token_expires_at`); a server that does not say is given the
+ * same conservative lifetime the GitLab Duo provider assumes for its own
+ * `direct_access` token.
+ */
+const GITLAB_DUO_WORKFLOW_TOKEN_UNSTATED_TTL_MS = 25 * 60 * 1000;
 /**
  * How many times a single stream may restart on a FRESH workflow after the server
  * reports its per-workflow step (graph-recursion) limit. Long OMP tool-call loops
@@ -234,8 +249,13 @@ export interface GitLabDirectAccessResponse {
 	jwt?: string;
 	workflow_token?: string;
 	duo_workflow_access_token?: string;
-	duo_workflow_service?: { token?: string; base_url?: string; headers?: Record<string, string> };
-	gitlab_rails?: { token?: string };
+	duo_workflow_service?: {
+		token?: string;
+		token_expires_at?: string | number;
+		base_url?: string;
+		headers?: Record<string, string>;
+	};
+	gitlab_rails?: { token?: string; token_expires_at?: string | number };
 	[key: string]: unknown;
 }
 
@@ -244,6 +264,12 @@ interface GitLabDuoWorkflowDirectAccessConnection {
 	baseUrl?: string;
 	headers: Record<string, string>;
 	serviceEndpoint: boolean;
+	/**
+	 * When the token has aged out and must be minted afresh before it opens
+	 * another socket, in epoch milliseconds. Undefined for a caller's own
+	 * `workflowToken`, which this provider cannot mint.
+	 */
+	refreshAt?: number;
 }
 
 interface GitLabCreateWorkflowResponse {
@@ -1315,11 +1341,12 @@ async function runGitLabDuoWorkflow(
 			setGitLabDuoWorkflowCachedNamespace(apiKey, baseUrl, options.cwd, namespaceSelection);
 		}
 	}
+	const rootNamespaceId = setup.rootNamespaceId;
 	const restNamespaceId = setup.restNamespaceId;
 	const createNamespaceId = setup.createNamespaceId;
 	const restProjectId = setup.restProjectId;
 	const webSocketProjectId = setup.webSocketProjectId;
-	const workflowConnection = setup.workflowConnection;
+	let workflowConnection = setup.workflowConnection;
 	const selectedModelIdentifier = setup.selectedModelIdentifier;
 	let workflowId = setup.workflowId;
 	let startPayload = setup.startPayload;
@@ -1370,39 +1397,65 @@ async function runGitLabDuoWorkflow(
 			// This loop opens a socket of its own on every restart — a reconnect,
 			// an approval round, a step-limit restart. Each is traffic the caller's
 			// gate has to see; the REST calls above reach the wire through the
-			// transport fetch, which holds for the same reason.
-			await holdBeforeDispatch(options.beforeDispatch, options.signal);
-			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
-				token: workflowConnection.token,
-				projectId: webSocketProjectId,
-				// Pass the resolved namespace/root even when no numeric project id is
-				// available (project path unresolved, or auto-discovery found none): the
-				// REST direct_access/create calls may be namespace- or path-scoped, but the
-				// socket must still route inside the selected namespace. Dropping them with
-				// the project left the socket scope-less and could route/fail outside it.
-				namespaceId: restNamespaceId,
-				rootNamespaceId: restNamespaceId,
-				selectedModelIdentifier,
-				workflowDefinition,
-				serviceEndpoint: workflowConnection.serviceEndpoint,
-				extraHeaders: workflowConnection.headers,
-				originBaseUrl: baseUrl,
-				webSocketFactory: options.webSocketFactory,
-			});
-			if (providerSessionState) {
-				// Capture the CURRENT workflow id (it is reassigned across timeout/step-limit/
-				// retry restarts) so a later session-dispose stops the right workflow.
-				const stopWorkflowId = workflowId;
-				providerSessionState.active = {
-					workflowId,
-					startPayload,
-					ws,
-					stop: () => {
-						void stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, stopWorkflowId);
-					},
-				};
-			}
-			lastSocketResult = await runGitLabDuoWorkflowSocket(ws, startPayload, state, options);
+			// transport fetch, which holds for the same reason. The socket opens in
+			// the same synchronous step as the hold's last check, so a pause that
+			// lands after the hold answered opens nothing, and the run takes its
+			// handlers in that step too, before the socket can report anything.
+			lastSocketResult = await dispatchWhenOpen(
+				options.beforeDispatch,
+				options.signal,
+				() => {
+					const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
+						token: workflowConnection.token,
+						projectId: webSocketProjectId,
+						// Pass the resolved namespace/root even when no numeric project id is
+						// available (project path unresolved, or auto-discovery found none): the
+						// REST direct_access/create calls may be namespace- or path-scoped, but the
+						// socket must still route inside the selected namespace. Dropping them with
+						// the project left the socket scope-less and could route/fail outside it.
+						namespaceId: restNamespaceId,
+						rootNamespaceId: restNamespaceId,
+						selectedModelIdentifier,
+						workflowDefinition,
+						serviceEndpoint: workflowConnection.serviceEndpoint,
+						extraHeaders: workflowConnection.headers,
+						originBaseUrl: baseUrl,
+						webSocketFactory: options.webSocketFactory,
+					});
+					if (providerSessionState) {
+						// Capture the CURRENT workflow id (it is reassigned across timeout/step-limit/
+						// retry restarts) so a later session-dispose stops the right workflow.
+						const stopWorkflowId = workflowId;
+						providerSessionState.active = {
+							workflowId,
+							startPayload,
+							ws,
+							stop: () => {
+								void stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, stopWorkflowId);
+							},
+						};
+					}
+					return runGitLabDuoWorkflowSocket(ws, startPayload, state, options);
+				},
+				// The socket authenticates at its handshake with a token GitLab
+				// minted during setup, and a pause can outlast it. One that has
+				// aged out is minted afresh here, after the hold answered and before
+				// its last check, so a pause landing while it is minted sends the
+				// barrier round again. Minting is the request's own credential
+				// prerequisite and goes out unheld (see `withoutDispatchHold`).
+				async () => {
+					if (workflowConnection.refreshAt === undefined || Date.now() < workflowConnection.refreshAt) return;
+					workflowConnection = await requestGitLabDuoWorkflowDirectAccess(
+						withoutDispatchHold(fetchImpl),
+						baseUrl,
+						apiKey,
+						rootNamespaceId,
+						restProjectId,
+						workflowDefinition,
+						options.signal,
+					);
+				},
+			);
 			if (lastSocketResult === "approval") {
 				startPayload = buildGitLabDuoWorkflowApprovalStartRequest(startPayload);
 				state.lastApprovalStatus = undefined;
@@ -1712,6 +1765,8 @@ async function requestGitLabDuoWorkflowDirectAccess(
 	// which surfaces through the outer `streamGitLabDuoWorkflow` catch as a real
 	// stream `error` event — matching the existing HTTP-error path rather than the
 	// swallowed best-effort helpers (settings ensure / project discovery / models).
+	// An unstated lifetime counts from before the request, never from after it.
+	const requestedAt = Date.now();
 	const response = await fetchImpl(gitLabApiUrl(baseUrl, "/api/v4/ai/duo_workflows/direct_access"), {
 		method: "POST",
 		headers: {
@@ -1752,6 +1807,7 @@ async function requestGitLabDuoWorkflowDirectAccess(
 	}
 	traceGitLabDuoWorkflow("direct_access.token", { hasToken: true });
 	const serviceEndpoint = !payload.gitlab_rails?.token && Boolean(payload.duo_workflow_service?.base_url);
+	const expiresAt = gitLabDuoWorkflowTokenExpiry(payload);
 	return {
 		token,
 		...(serviceEndpoint && payload.duo_workflow_service?.base_url
@@ -1759,7 +1815,29 @@ async function requestGitLabDuoWorkflowDirectAccess(
 			: {}),
 		headers: serviceEndpoint ? (payload.duo_workflow_service?.headers ?? {}) : {},
 		serviceEndpoint,
+		refreshAt:
+			expiresAt === undefined
+				? requestedAt + GITLAB_DUO_WORKFLOW_TOKEN_UNSTATED_TTL_MS
+				: expiresAt - GITLAB_DUO_WORKFLOW_TOKEN_REFRESH_MARGIN_MS,
 	};
+}
+
+/**
+ * The earliest expiry a `direct_access` response states for its tokens, in
+ * epoch milliseconds. GitLab's own language server refreshes on the earlier of
+ * the Rails token's and the Duo Workflow Service token's, so this does too.
+ * GitLab serializes a time as ISO 8601; a bare number is read as epoch
+ * seconds, as a JWT `exp` is, unless it is too large to be one.
+ */
+function gitLabDuoWorkflowTokenExpiry(payload: GitLabDirectAccessResponse): number | undefined {
+	let earliest: number | undefined;
+	for (const stated of [payload.gitlab_rails?.token_expires_at, payload.duo_workflow_service?.token_expires_at]) {
+		if (stated === undefined || stated === "") continue;
+		const numeric = Number(stated);
+		const at = Number.isNaN(numeric) ? Date.parse(String(stated)) : numeric < 1e12 ? numeric * 1000 : numeric;
+		if (Number.isFinite(at)) earliest = Math.min(earliest ?? at, at);
+	}
+	return earliest;
 }
 
 async function createGitLabDuoWorkflow(
@@ -2095,11 +2173,13 @@ export function runGitLabDuoWorkflowSocket(
 	// Each frame this run puts on the socket for the request — the
 	// `startRequest` that starts (and bills) a workflow, or the
 	// `actionResponse` that lets a preserved one run its next model turn —
-	// waits on the caller's dispatch hold first. Closing the socket is the one
-	// write left unheld: it stops paid work instead of starting it. A send
-	// that throws fails this request rather than escaping as a rejection no
-	// one observes, and a hold that ends after the run settled leaves the
-	// socket to whoever owns it by then.
+	// waits on the caller's dispatch hold first, and goes out in the same
+	// synchronous step as the hold's last check, so a pause that lands after
+	// the hold answered still stops it. Closing the socket is the one write
+	// left unheld: it stops paid work instead of starting it. A send that
+	// throws fails this request rather than escaping as a rejection no one
+	// observes, and a hold that ends after the run settled leaves the socket
+	// to whoever owns it by then.
 	const dispatch = (frames: readonly unknown[]): void => {
 		const send = (): void => {
 			try {
@@ -2118,20 +2198,17 @@ export function runGitLabDuoWorkflowSocket(
 		}
 		dispatchHeld = true;
 		stopIdleTimer();
-		void holdBeforeDispatch(hold, options.signal).then(
-			() => {
-				dispatchHeld = false;
-				if (settled) return;
-				startIdleTimer();
-				if (!settled) send();
-			},
-			(error: unknown) => {
-				dispatchHeld = false;
-				if (settled) return;
-				close();
-				settle("closed", error);
-			},
-		);
+		void dispatchWhenOpen(hold, options.signal, () => {
+			dispatchHeld = false;
+			if (settled) return;
+			startIdleTimer();
+			if (!settled) send();
+		}).catch((error: unknown) => {
+			dispatchHeld = false;
+			if (settled) return;
+			close();
+			settle("closed", error);
+		});
 	};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;

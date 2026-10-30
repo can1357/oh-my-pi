@@ -26,7 +26,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { DispatchHold, LiveSteering, UserMessage } from "../../types";
-import { holdBeforeDispatch } from "../../utils/dispatch-hold";
+import { dispatchWhenOpen } from "../../utils/dispatch-hold";
 import type { InputItem } from "./request-transformer";
 
 /** The request a pump steers on behalf of, as its submissions see it. */
@@ -44,7 +44,8 @@ export type CodexSteerAck = { accepted: true; id: string } | { accepted: false; 
 export interface CodexSteerSocket {
 	/**
 	 * Sends `response.steer` at once; resolves on the matching acknowledgement,
-	 * rejects when the socket closes first. The pump holds before calling it.
+	 * rejects when the socket closes first. The pump calls it in the same
+	 * synchronous step as the dispatch hold's last check.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck>;
 }
@@ -128,7 +129,7 @@ export class CodexSteerPump {
 				// Held before the claim, the input stays queued with the caller for
 				// as long as a pause lasts; a response that ends meanwhile leaves it
 				// there for the caller's next request.
-				if (!(await this.#passHold(responseId, signal))) return;
+				if (!(await this.#whenOpen(responseId, signal, () => {}))) return;
 				const claimedAt = performance.now();
 				const claim = await this.#source.claim(signal);
 				if (!claim) {
@@ -144,21 +145,19 @@ export class CodexSteerPump {
 				}
 				const preparedAt = performance.now();
 				// The claim awaited the caller's own preparation, which a pause can
-				// outlast; this hold is the last await before the frame goes out.
-				if (!(await this.#passHold(responseId, signal))) {
+				// outlast. The frame goes out in the same synchronous step as the
+				// hold's last check, so a pause landing after the hold answered
+				// still stops it.
+				let sentAt = 0;
+				const submitted = await this.#whenOpen(responseId, signal, () => {
+					sentAt = performance.now();
+					return this.#submit(responseId, input);
+				});
+				if (!submitted) {
 					claim.reject();
 					return;
 				}
-				const sentAt = performance.now();
-				let ack: CodexSteerAck | undefined;
-				try {
-					ack = await withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
-				} catch (error) {
-					logger.debug("Codex steering acknowledgement missing", {
-						responseId,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
+				const ack = submitted.value;
 				if (!ack) {
 					this.#uncertain = true;
 					claim.reject();
@@ -187,14 +186,20 @@ export class CodexSteerPump {
 	}
 
 	/**
-	 * Await the request's dispatch hold. False when the pump stops instead:
-	 * the response ended or the request was cancelled while held, or the hold
-	 * failed, which fails the submission like any other dispatch error.
+	 * Await the request's dispatch hold, then call `send` in the same
+	 * synchronous step as the hold's last check ({@link dispatchWhenOpen}), and
+	 * return what it returned. Undefined when the pump stops instead: the
+	 * response ended or the request was cancelled while held, or the hold
+	 * failed, which fails the submission like any other dispatch error. `send`
+	 * must not throw, or its failure would read as the hold's.
 	 */
-	async #passHold(responseId: string, signal: AbortSignal): Promise<boolean> {
+	async #whenOpen<T>(
+		responseId: string,
+		signal: AbortSignal,
+		send: () => T,
+	): Promise<{ value: Awaited<T> } | undefined> {
 		try {
-			await holdBeforeDispatch(this.#dispatch.hold, signal);
-			return true;
+			return { value: await dispatchWhenOpen(this.#dispatch.hold, signal, send) };
 		} catch (error) {
 			if (!signal.aborted) {
 				logger.debug("Codex steering hold failed", {
@@ -202,7 +207,24 @@ export class CodexSteerPump {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			}
-			return false;
+			return undefined;
+		}
+	}
+
+	/**
+	 * Send `response.steer` now and wait for its acknowledgement; undefined when
+	 * none arrives, so the server may or may not hold the input. The frame goes
+	 * out before the first await, and the acknowledgement clock starts with it.
+	 */
+	async #submit(responseId: string, input: InputItem[]): Promise<CodexSteerAck | undefined> {
+		try {
+			return await withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
+		} catch (error) {
+			logger.debug("Codex steering acknowledgement missing", {
+				responseId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
 		}
 	}
 }

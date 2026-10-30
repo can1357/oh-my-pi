@@ -43,6 +43,7 @@ import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { PROBE_MAX_DEPTH, ProbedGate, resumeUntilSettled } from "./helpers/probed-gate";
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -1233,6 +1234,68 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(result.stopReason).not.toBe("error");
 	});
 
+	// The hold was awaited and the socket opened a few microtasks later, so a
+	// pause landing in between opened a workflow socket under it.
+	it("opens no workflow socket when the gate closes after the hold answered", async () => {
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const openedWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			const probe = new ProbedGate();
+			let sockets = 0;
+			const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+				sockets++;
+				if (probe.closed) openedWhileClosed.push(depth);
+				const socket: GitLabDuoWorkflowWebSocketLike = {
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+					send() {
+						queueMicrotask(() =>
+							socket.onmessage?.(
+								new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }),
+							),
+						);
+					},
+					close() {},
+				};
+				queueMicrotask(() => socket.onopen?.(new Event("open")));
+				return socket;
+			};
+			const result = streamGitLabDuoWorkflow(model, context, {
+				apiKey: "[REDACTED]",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: fetchImpl,
+				webSocketFactory,
+				// The REST setup goes through `fetchImpl` unheld, so the first hold
+				// the provider asks is the one right before its socket.
+				beforeDispatch: probe.holdClosingAfter(depth, () => true),
+			}).result();
+			const message = await resumeUntilSettled(
+				result,
+				probe,
+				() => sockets === 0,
+				() => heldAt.push(depth),
+			);
+			expect(sockets).toBe(1);
+			expect(message.stopReason).not.toBe("error");
+		}
+
+		expect(openedWhileClosed).toEqual([]);
+		// Not vacuous: some depth closed the gate before the socket and was held.
+		expect(heldAt.length).toBeGreaterThan(0);
+	});
+
 	// The hold before the factory covers the connection only. The handshake
 	// after it outlasts a pause engaged while it runs, and `startRequest` —
 	// not the socket — is what starts and bills the workflow.
@@ -1678,6 +1741,49 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 				deliver(socket, { status: "INPUT_REQUIRED" });
 				expect(await successor).toBe("terminal");
 			}
+		});
+
+		// The hold was awaited and the frame sent a few microtasks later, so a
+		// pause landing in between put a frame that starts or continues paid
+		// work on the socket under it.
+		it("sends no frame when the gate closes after the hold answered", async () => {
+			const sentWhileClosed: string[] = [];
+			const heldAt: string[] = [];
+			for (const frame of ["startRequest", "actionResponse"] as const) {
+				for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+					const probe = new ProbedGate();
+					let sends = 0;
+					const double = socketDouble(() => {
+						sends++;
+						if (probe.closed) sentWhileClosed.push(`${frame}@${depth}`);
+						queueMicrotask(() => deliver(double.socket, { status: "INPUT_REQUIRED" }));
+					});
+					const run = runGitLabDuoWorkflowSocket(
+						double.socket,
+						startRequest(),
+						socketState(),
+						{
+							apiKey: "redacted",
+							idleTimeoutMs: 1_000,
+							beforeDispatch: probe.holdClosingAfter(depth, () => true),
+						},
+						frame === "actionResponse" ? actionResponse : undefined,
+					);
+					if (frame === "startRequest") double.socket.onopen?.(new Event("open"));
+					const result = await resumeUntilSettled(
+						run,
+						probe,
+						() => sends === 0,
+						() => heldAt.push(`${frame}@${depth}`),
+					);
+					expect(result).toBe("terminal");
+					expect(sends).toBe(1);
+				}
+			}
+
+			expect(sentWhileClosed).toEqual([]);
+			expect(heldAt.some(at => at.startsWith("startRequest@"))).toBe(true);
+			expect(heldAt.some(at => at.startsWith("actionResponse@"))).toBe(true);
 		});
 
 		// The idle watchdog times the server's silence, and a frame parked on

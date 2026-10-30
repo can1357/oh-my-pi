@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKeyResolution,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -69,12 +75,17 @@ import type {
 	ToolChoice,
 } from "./types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
-import { holdBeforeDispatch } from "./utils/dispatch-hold";
+import { dispatchWhenOpen } from "./utils/dispatch-hold";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
-import { withoutDispatchHold, withTransportFetch } from "./utils/transport-fetch";
+import {
+	fetchAuthorizedAtWire,
+	type WireAuthorization,
+	withoutDispatchHold,
+	withTransportFetch,
+} from "./utils/transport-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -643,12 +654,66 @@ export const __providerInFlightForTesting = {
 	},
 };
 
+/**
+ * How long a key an {@link ApiKeyResolver} resolved is sent as it is. omp's
+ * OAuth refresher hands out an access token only while it has at least
+ * `OAUTH_REFRESH_SKEW_MS` (60 s, `auth/refresh.ts`) of life left, a margin it
+ * sizes for the trip to the provider and clock skew. Half of it is spent
+ * between resolving and dispatching; the other half stays for what the margin
+ * was sized for. Past it the chokepoint asks the resolver again, which returns
+ * the same cached token when it is still good and refreshes it when not.
+ */
+export const RESOLVED_CREDENTIAL_REUSE_MS = 30_000;
+
+/**
+ * The key a request was resolved with, kept by the auth-retry driver that
+ * resolved it so the chokepoint can resolve it again when the wait before
+ * dispatch has outlived {@link RESOLVED_CREDENTIAL_REUSE_MS}. A static key
+ * has none: nothing about it goes stale.
+ */
+interface ResolvedCredential {
+	apiKey: string;
+	credentialId: number | undefined;
+	oauthIdentity: OAuthRequestIdentity | undefined;
+	/** `Date.now()` when {@link apiKey} was resolved. */
+	resolvedAt: number;
+	/** Resolve the key again and record it here; a resolver with nothing to give keeps the current one. */
+	refresh(signal: AbortSignal | undefined): Promise<void>;
+}
+
+const RESOLVED_CREDENTIAL = Symbol("omp.resolvedCredential");
+
+type CarriesCredential = { [RESOLVED_CREDENTIAL]?: ResolvedCredential };
+
+function resolvedCredentialOf(options: object | undefined): ResolvedCredential | undefined {
+	return (options as CarriesCredential | undefined)?.[RESOLVED_CREDENTIAL];
+}
+
+/** `options` carrying `credential`'s current key; the same object while the key is unchanged. */
+function withCurrentCredential<TOptions extends object>(options: TOptions, credential: ResolvedCredential): TOptions {
+	const current = options as { apiKey?: unknown; credentialId?: number };
+	if (current.apiKey === credential.apiKey && current.credentialId === credential.credentialId) return options;
+	// Every options type that reaches the chokepoint carries these three fields.
+	const refreshed = {
+		...options,
+		apiKey: credential.apiKey,
+		credentialId: credential.credentialId,
+		oauthIdentity: credential.oauthIdentity,
+	} as TOptions;
+	return refreshed;
+}
+
+/** The static key a dispatch carries, or `fallback` when it carries none. */
+function dispatchApiKey(options: { apiKey?: unknown } | undefined, fallback: string): string {
+	return typeof options?.apiKey === "string" && options.apiKey ? options.apiKey : fallback;
+}
+
 function withProviderInFlightLimit<
 	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
 >(
 	model: Model<Api>,
 	options: TOptions | undefined,
-	dispatch: (limited: boolean) => AssistantMessageEventStream,
+	dispatch: (limited: boolean, options: TOptions | undefined) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
@@ -660,7 +725,8 @@ function withProviderInFlightLimit<
 	// resolved credential, a command-backed header, an in-flight slot — can
 	// have been awaited after it.
 	const hold = options?.beforeDispatch;
-	if (limit === undefined && !hold) return healLeakedThinking(model, dispatch(false));
+	const credential = resolvedCredentialOf(options);
+	if (limit === undefined && !hold && !credential) return healLeakedThinking(model, dispatch(false, options));
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -698,11 +764,40 @@ function withProviderInFlightLimit<
 			// this attempt through the catch below, as any dispatch error would.
 			// An abort ends the wait the same way, so cancelling a request held
 			// behind an indefinite hold also releases the permit acquired above.
-			await holdBeforeDispatch(hold, options?.signal);
-			if (options?.signal?.aborted) {
-				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
-			}
-			const inner = healLeakedThinking(model, dispatch(limit !== undefined));
+			// The dispatch runs in the same synchronous step as the last read of
+			// the hold's probe: a gate that closed in the microtasks after the
+			// hold answered is still seen, and the request waits again.
+			const inner = await dispatchWhenOpen(
+				hold,
+				options?.signal,
+				() => {
+					if (options?.signal?.aborted) {
+						throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
+					}
+					return healLeakedThinking(
+						model,
+						dispatch(
+							limit !== undefined,
+							credential && options ? withCurrentCredential(options, credential) : options,
+						),
+					);
+				},
+				// A resolved key that the slot wait or the hold may have outlived is
+				// resolved again here, after the holds answer, on every round a
+				// closed gate sends the request back to wait. This is as late as a
+				// key can be chosen for every provider alike: each one writes it into
+				// its own headers, or its body, after this dispatch. A pause that
+				// engages in the milliseconds between here and the transport's own
+				// barrier and then outlives the key sends it stale; the provider
+				// answers 401 before any event is emitted, and the auth-retry driver
+				// that resolved the key replays the request with a refreshed one.
+				credential &&
+					(async () => {
+						if (Date.now() - credential.resolvedAt > RESOLVED_CREDENTIAL_REUSE_MS) {
+							await credential.refresh(options?.signal);
+						}
+					}),
+			);
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -739,23 +834,34 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 	// rides on `init.signal`, so a held token fetch would also have run that
 	// guard's clock through the hold.
 	const tokenFetch = withoutDispatchHold(baseFetch);
-	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+	// The token expires, and a dispatch hold a human releases can outlast it,
+	// so it is taken where the request leaves: after the transport's holds
+	// open, and again whenever a gate that closed sends the request back to
+	// wait. A cached token that is still valid costs nothing there.
+	const authorize: WireAuthorization = async wireInit => {
 		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
-		const headers = new Headers(init?.headers);
+		const headers = new Headers(wireInit.headers);
 		headers.set("Authorization", `Bearer ${token}`);
+		return { ...wireInit, headers };
+	};
+	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
 		if (isVertexRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
-			return baseFetch(url, {
-				...init,
-				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
-				headers,
-				body: transformed,
-			});
+			return fetchAuthorizedAtWire(
+				baseFetch,
+				url,
+				{
+					...init,
+					method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
+					body: transformed,
+				},
+				authorize,
+			);
 		}
-		return baseFetch(rewritten, { ...init, headers });
+		return fetchAuthorizedAtWire(baseFetch, rewritten, init ?? {}, authorize);
 	};
 	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 }
@@ -854,8 +960,8 @@ export function stream<TApi extends Api>(
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
 	if (!model.requiresGlyphTokenization) {
-		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
+		return withThinkingLoopGuard(model, options, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) => streamDispatch(model, context, opts, limited)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -863,8 +969,10 @@ export function stream<TApi extends Api>(
 	const wireOptions: OptionsForApi<TApi> | undefined =
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, codec.context, opts, limited)),
+		withThinkingLoopGuard(model, wireOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) =>
+				streamDispatch(model, codec.context, opts, limited),
+			),
 		),
 	);
 }
@@ -1252,11 +1360,7 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (
-			apiKey?: string,
-			credentialId?: number,
-			oauthIdentity?: OAuthRequestIdentity,
-		): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (credential?: ResolvedCredential): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1265,9 +1369,17 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const attemptOptions = {
+					...requestOptions,
+					apiKey: credential?.apiKey,
+					credentialId: credential?.credentialId,
+					oauthIdentity: credential?.oauthIdentity,
+					[RESOLVED_CREDENTIAL]: credential,
+				};
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
+					// Read per event: the chokepoint may have resolved the key again.
+					const credentialId = credential?.credentialId;
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
 						else if (event.type === "done") event.message.credentialId = credentialId;
@@ -1301,7 +1413,7 @@ function streamSimpleRequest<TApi extends Api>(
 				flushBuffered();
 				if (!outer.done) {
 					const result = await inner.result();
-					if (credentialId !== undefined) result.credentialId = credentialId;
+					if (credential?.credentialId !== undefined) result.credentialId = credential.credentialId;
 					outer.end(result);
 				}
 			} catch (error) {
@@ -1360,7 +1472,38 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			// The key an attempt sends, which the chokepoint resolves again when the
+			// wait before dispatch outlived it. The retry below must then know the
+			// key the request actually carried.
+			const credentialFor = (
+				apiKey: string,
+				id: number | undefined,
+				identity: OAuthRequestIdentity | undefined,
+			): ResolvedCredential => ({
+				apiKey,
+				credentialId: id,
+				oauthIdentity: identity,
+				resolvedAt: Date.now(),
+				async refresh(refreshSignal) {
+					let resolved: ApiKeyResolution;
+					try {
+						resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal: refreshSignal });
+					} catch {
+						// The key it carries may still be good; if it is not, the 401 it
+						// draws reaches the auth retry below like any other.
+						return;
+					}
+					const key = resolvedApiKeyBearer(resolved);
+					if (key === undefined) return;
+					this.apiKey = key;
+					this.credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+					this.oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+					this.resolvedAt = Date.now();
+					retryState.attemptedKeys.add(key);
+					retryState.lastKey = key;
+				},
+			});
+			let failure = await runAttempt(credentialFor(lastKey, credentialId, oauthIdentity));
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1380,7 +1523,7 @@ function streamSimpleRequest<TApi extends Api>(
 				);
 				if (nextKey === undefined) break;
 				// Any hold the caller supplied runs inside this attempt, at the dispatch chokepoint.
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(credentialFor(nextKey, nextCredentialId, nextOAuthIdentity));
 				if (!next) return;
 				failure = next;
 			}
@@ -1402,8 +1545,8 @@ function streamSimpleRequest<TApi extends Api>(
 	// extension-registered APIs can't accidentally override a configured
 	// pi-native transport.
 	if (model.transport === "pi-native") {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => {
+		return withThinkingLoopGuard(model, requestOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (_limited, opts) => {
 				const nativeOptions =
 					model.api === "bedrock-converse-stream"
 						? {
@@ -1431,8 +1574,8 @@ function streamSimpleRequest<TApi extends Api>(
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
+		return withThinkingLoopGuard(model, requestOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) =>
 				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
 			),
 		);
@@ -1456,7 +1599,9 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// The resolver form is handled by the wrapper above; only a static string
-	// key reaches this point.
+	// key reaches this point. The paths below send the key the chokepoint hands
+	// them rather than this one: when the wrapper resolved it, the chokepoint
+	// may have resolved it again after a wait the first one did not survive.
 	const apiKey =
 		(typeof requestOptions?.apiKey === "string" ? requestOptions.apiKey : undefined) || getEnvApiKey(model.provider);
 	if (!apiKey) {
@@ -1465,11 +1610,11 @@ function streamSimpleRequest<TApi extends Api>(
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (model.provider === "gitlab-duo") {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
+		return withThinkingLoopGuard(model, requestOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) =>
 				streamGitLabDuo(model, context, {
 					...opts,
-					apiKey,
+					apiKey: dispatchApiKey(opts, apiKey),
 					waitForTerminalDrain: limited,
 				}),
 			),
@@ -1482,11 +1627,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// thinking itself. A caller's hold lives in that wrapper, so the
 		// exception would have been the one dispatch on the wire it never saw;
 		// the wrapper heals the same way, so nothing else changes here.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+		return withThinkingLoopGuard(model, requestOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (_limited, opts) =>
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
-					apiKey,
+					apiKey: dispatchApiKey(opts, apiKey),
 				}),
 			),
 		);
@@ -1500,11 +1645,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// thinking, so clamp disabled requests to the lowest supported effort
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
-		return withThinkingLoopGuard(model, kimiOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
+		return withThinkingLoopGuard(model, kimiOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) =>
 				streamKimi(model as Model<"openai-completions">, context, {
 					...opts,
-					apiKey,
+					apiKey: dispatchApiKey(opts, apiKey),
 					format: opts?.kimiApiFormat,
 					waitForTerminalDrain: limited,
 				}),
@@ -1515,11 +1660,11 @@ function streamSimpleRequest<TApi extends Api>(
 	// Synthetic - route to dedicated handler that wraps OpenAI or Anthropic API
 	if (model.provider === "synthetic") {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
+		return withThinkingLoopGuard(model, requestOptions, guarded =>
+			withProviderInFlightLimit(model, guarded, (limited, opts) =>
 				streamSynthetic(model as Model<"openai-completions">, context, {
 					...opts,
-					apiKey,
+					apiKey: dispatchApiKey(opts, apiKey),
 					format: opts?.syntheticApiFormat ?? "openai",
 					waitForTerminalDrain: limited,
 				}),
@@ -1844,6 +1989,9 @@ function mapOptionsForApi<TApi extends Api>(
 		// so the caller's hold has to travel in it; without it every ordinary
 		// Anthropic/OpenAI/Google request dispatched with `undefined`.
 		beforeDispatch: options?.beforeDispatch,
+		// And the key it was resolved with, which the chokepoint resolves again
+		// when the hold outlived it.
+		[RESOLVED_CREDENTIAL]: resolvedCredentialOf(options),
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
