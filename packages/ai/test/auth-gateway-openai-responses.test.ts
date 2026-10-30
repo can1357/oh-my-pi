@@ -177,6 +177,47 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("treats null temperature as an omitted sampling control", () => {
+		const parsed = parseRequest({ model: "m", input: "hi", temperature: null });
+		expect(parsed.options).not.toHaveProperty("temperature");
+	});
+
+	it("treats null max_output_tokens as an omitted output limit", () => {
+		const parsed = parseRequest({ model: "m", input: "hi", max_output_tokens: null });
+		expect(parsed.options).not.toHaveProperty("maxOutputTokens");
+	});
+
+	it("treats null reasoning as omitted reasoning controls", () => {
+		const parsed = parseRequest({ model: "m", input: "hi", reasoning: null });
+		expect(parsed.options).not.toHaveProperty("reasoning");
+		expect(parsed.options).not.toHaveProperty("hideThinkingSummary");
+	});
+
+	it("treats null reasoning.summary as unset without dropping the requested effort", () => {
+		const parsed = parseRequest({ model: "m", input: "hi", reasoning: { effort: "low", summary: null } });
+		expect(parsed.options.reasoning).toBe(Effort.Low);
+		expect(parsed.options).not.toHaveProperty("hideThinkingSummary");
+	});
+
+	it("preserves zero temperature and a concrete output limit", () => {
+		const parsed = parseRequest({ model: "m", input: "hi", temperature: 0, max_output_tokens: 128 });
+		expect(parsed.options).toMatchObject({ temperature: 0, maxOutputTokens: 128 });
+	});
+
+	it("still rejects null in required and non-nullable optional fields", () => {
+		expect(() => parseRequest({ model: null, input: "hi" })).toThrow(/model/);
+		expect(() => parseRequest({ model: "m", input: "hi", prompt_cache_key: null })).toThrow(/prompt_cache_key/);
+	});
+
+	it("still rejects malformed non-null request controls", () => {
+		expect(() => parseRequest({ model: "m", input: "hi", temperature: "0.5" })).toThrow(/temperature/);
+		expect(() => parseRequest({ model: "m", input: "hi", max_output_tokens: "128" })).toThrow(/max_output_tokens/);
+		expect(() => parseRequest({ model: "m", input: "hi", reasoning: "low" })).toThrow(/reasoning/);
+		expect(() => parseRequest({ model: "m", input: "hi", reasoning: { summary: "verbose" } })).toThrow(
+			/reasoning\.summary/,
+		);
+	});
+
 	it("coerces a message item with content:null to an empty content array (Codex #10956)", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.3-codex-spark",
