@@ -478,16 +478,23 @@ async function pinDirectory(
 }
 
 /**
- * Hold a child of a directory this copy already holds, and refuse one that is
- * not on the parent's own filesystem or has anything mounted in it.
+ * Hold a child of a directory this copy already holds, and refuse anything
+ * that is not a directory of the parent's own.
  *
  * A directory is reached through its parent's descriptor, so no pathname above
- * it can redirect the walk; what the descriptor cannot answer is whether the
- * thing it reached is a doorway somewhere else. A mount installed on the name
- * between its creation and its use gives a directory on another device, and a
- * bind of a directory on the *same* device shows itself in the mount table —
- * which is read against where the directory is, never against the descriptor
- * path, because `/proc/self/fd` answers no question about mounts.
+ * it can redirect the walk; what the descriptor cannot answer by itself is
+ * whether the thing it reached is a doorway somewhere else. Three things
+ * answer that, and the last is the one that decides:
+ *
+ * - the device, which a mount from another filesystem changes;
+ * - the mount table, read against where the directory is and never against the
+ *   descriptor path, because `/proc/self/fd` answers no question about mounts;
+ * - and the directory's own link to its parent. A descriptor opened while a
+ *   bind mount stood on the name keeps the bound directory after the mount is
+ *   detached — same device, and by then an empty mount table — but it is some
+ *   other directory's child, and `..` says so. Asked last, it also closes the
+ *   order the other way round: a mount that is still there to be detached is
+ *   a mount the table has already reported.
  */
 async function pinVerifiedChild(
 	parent: PinnedDirectory,
@@ -511,7 +518,29 @@ async function pinVerifiedChild(
 		await child.close();
 		return undefined;
 	}
+	if (!(await isChildOf(child, parent))) {
+		logger.warn(`A session artifact directory is not a child of the directory that holds its name; ${what}`, {
+			dir: where,
+		});
+		await child.close();
+		return undefined;
+	}
 	return child;
+}
+
+/**
+ * Whether the directory a descriptor holds is a child of the directory another
+ * descriptor holds — asked of the filesystem, through `..`, rather than of a
+ * pathname.
+ */
+async function isChildOf(child: PinnedDirectory, parent: PinnedDirectory): Promise<boolean> {
+	const above = await pinDirectory(`${child.at}/..`);
+	if (!above) return false;
+	try {
+		return sameNode(above.identity, parent.identity);
+	} finally {
+		await above.close();
+	}
 }
 
 /** Where a session leaves the artifact claims its transcript has already spent. */
@@ -793,40 +822,20 @@ async function stagingIsStillOurs(staging: ArtifactStaging, what: string): Promi
  * never crossing a device.
  */
 async function removeArtifactStaging(staging: ArtifactStaging, created?: Map<string, ObjectIdentity>): Promise<void> {
-	const root = await pinDirectory(staging.path, stagingIdentity(staging));
-	if (!root) {
-		logger.warn("Session artifact staging is no longer the directory that was created; left alone", {
+	// The root goes the way every object inside it goes: moved, whole, into a
+	// directory created here, emptied from inside, and taken down there. A
+	// `rmdir` of its own name would take whatever that name reaches at that
+	// instant, and the staging name is derived from the session file, so
+	// anybody can know it and leave an empty directory under it to be removed.
+	const parent = await pinDirectory(path.dirname(staging.path));
+	if (!parent) {
+		logger.warn("Could not hold the directory a session artifact staging tree is in; left alone", {
 			staging: staging.path,
 		});
 		return;
 	}
 	try {
-		const mounts = await mountsUnder(staging.path);
-		if (mounts === undefined || mounts.length > 0) {
-			logger.warn("Session artifact staging is mounted or unverifiable; left alone", {
-				staging: staging.path,
-				mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
-			});
-			return;
-		}
-		await emptyPinnedDirectory(root, "", created);
-	} finally {
-		await root.close();
-	}
-	// The root itself, through a descriptor on the directory that holds its
-	// name: a `rmdir` of the pathname would resolve every component again, and
-	// the last component is checked here against the identity the staging
-	// directory was created with. `rmdir` removes nothing that is not empty,
-	// so the name it resolves is either this copy's emptied tree or nothing
-	// this copy can take down.
-	const parent = await pinDirectory(path.dirname(staging.path));
-	if (!parent) return;
-	try {
-		const base = path.basename(staging.path);
-		const stillOurs = await pinDirectory(`${parent.at}/${base}`, stagingIdentity(staging), staging.path);
-		if (!stillOurs) return;
-		await stillOurs.close();
-		await fs.promises.rmdir(`${parent.at}/${base}`).catch(() => {});
+		await removeDirectoryIfStillOurs(parent, path.basename(staging.path), stagingIdentity(staging), "", created);
 	} finally {
 		await parent.close();
 	}
@@ -866,45 +875,10 @@ async function emptyPinnedDirectory(
 			continue;
 		}
 		if (entry.isDirectory()) {
-			// `O_NOFOLLOW` refuses a symlink that took this name; the identity
-			// refuses a directory that was swapped or shadowed for one.
-			const child = await pinDirectory(at, record, path.join(dir.path, entry.name));
-			if (!child) {
-				logger.warn("A session artifact staging entry is not the directory that was created; left alone", {
-					path: staged,
-				});
-				continue;
-			}
-			try {
-				if (child.identity.device !== dir.identity.device) {
-					logger.warn("A session artifact staging entry is on another filesystem; left alone", {
-						path: staged,
-					});
-					continue;
-				}
-				// Re-read per directory: a mount placed under this one after
-				// the tree was checked would otherwise have its contents
-				// deleted as if they were the copy's.
-				const mounts = await mountsUnder(child.path);
-				if (mounts === undefined || mounts.length > 0) {
-					logger.warn("A session artifact staging entry is mounted or unverifiable; left alone", {
-						path: staged,
-						mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
-					});
-					continue;
-				}
-				await emptyPinnedDirectory(child, staged, created);
-			} finally {
-				await child.close();
-			}
-			await fs.promises.rmdir(at).catch(() => {});
+			await removeDirectoryIfStillOurs(dir, entry.name, record, staged, created);
 			continue;
 		}
-		if (record) {
-			await removeIfStillOurs(dir, entry.name, record, staged);
-			continue;
-		}
-		await fs.promises.unlink(at).catch(() => {});
+		await removeIfStillOurs(dir, entry.name, record, staged);
 	}
 }
 
@@ -921,18 +895,21 @@ async function emptyPinnedDirectory(
 async function removeIfStillOurs(
 	dir: PinnedDirectory,
 	name: string,
-	record: ObjectIdentity,
+	record: ObjectIdentity | undefined,
 	staged: string,
 ): Promise<void> {
 	const at = `${dir.at}/${name}`;
 	// First, that the name still reaches the object this copy created: a file
 	// unlinked and recreated there can wear the same inode, and only the
-	// change time and link count separate it from this copy's own.
+	// change time and link count separate it from this copy's own. A sweeper
+	// clearing up after a process that is gone has no record to check against
+	// and takes what it finds — inside a tree it has already proved is an
+	// abandoned staging tree of its own filesystem.
 	const before = await fs.promises
 		.lstat(at, { bigint: true })
 		.then(identityOf)
 		.catch(() => undefined);
-	if (!before || !thisCopysToRemove(before, record)) {
+	if (!before || (record && !thisCopysToRemove(before, record))) {
 		if (before) {
 			logger.warn("A session artifact staging entry is not the object that was created; left alone", {
 				path: staged,
@@ -947,30 +924,25 @@ async function removeIfStillOurs(
 	// therefore cannot have been recycled by a replacement. Anything that is
 	// not this copy's is left in that directory rather than put back over
 	// whatever now holds the original name.
-	const asideDir = await makeExclusiveDirectory(dir);
-	if (!asideDir) return;
+	const aside = await makeExclusiveDirectory(dir);
+	if (!aside) return;
+	const asideDir = aside.dir;
 	try {
-		try {
-			await fs.promises.rename(at, `${asideDir.at}/entry`);
-		} catch (error) {
-			if (!isEnoent(error)) logger.warn("Could not set a session artifact aside to remove it", { path: staged });
-			return;
-		}
+		if (!(await moveIntoAside(at, asideDir, false, staged))) return;
 		const moved = await fs.promises
-			.lstat(`${asideDir.at}/entry`, { bigint: true })
+			.lstat(`${asideDir.at}/${ASIDE_ENTRY}`, { bigint: true })
 			.then(identityOf)
 			.catch(() => undefined);
 		if (moved && sameNode(moved, before)) {
-			if (moved.directory) await emptyPinnedDirectory(asideDir, staged, undefined);
-			else await fs.promises.unlink(`${asideDir.at}/entry`).catch(() => {});
+			await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
 			return;
 		}
 		logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
 		try {
 			// Exclusive again: if something has taken the original name since,
 			// it keeps it, and what was moved stays where nothing serves it.
-			await fs.promises.link(`${asideDir.at}/entry`, at);
-			await fs.promises.unlink(`${asideDir.at}/entry`).catch(() => {});
+			await fs.promises.link(`${asideDir.at}/${ASIDE_ENTRY}`, at);
+			await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
 		} catch {
 			logger.warn("Could not put back an object that was not this copy's", {
 				path: staged,
@@ -978,22 +950,237 @@ async function removeIfStillOurs(
 			});
 		}
 	} finally {
-		await asideDir.close();
-		await fs.promises.rmdir(`${dir.at}/${path.basename(asideDir.path)}`).catch(() => {});
+		await removeExclusiveDirectory(dir, aside);
 	}
 }
 
-/** A directory created here, under a name nothing else can already hold. */
-async function makeExclusiveDirectory(dir: PinnedDirectory): Promise<PinnedDirectory | undefined> {
+/** The one name an aside directory ever holds. */
+const ASIDE_ENTRY = "entry";
+
+/**
+ * Move `from` to the one name inside an aside directory, having first taken
+ * that name exclusively.
+ *
+ * `rename` replaces whatever the target names, which is safe only while the
+ * target is known to be this copy's. The aside directory was created here, but
+ * it is reached again by its name to be opened, so the thing opened can be
+ * another directory with contents of its own: creating the name first — `mkdir`
+ * for a directory, `open(wx)` for anything else, both of which fail rather than
+ * overwrite — is what proves the move lands on nobody's file.
+ */
+async function moveIntoAside(
+	from: string,
+	aside: PinnedDirectory,
+	directory: boolean,
+	staged: string,
+): Promise<boolean> {
+	const target = `${aside.at}/${ASIDE_ENTRY}`;
+	try {
+		if (directory) await fs.promises.mkdir(target);
+		else await (await fs.promises.open(target, "wx")).close();
+	} catch {
+		logger.warn("A session artifact removal directory is not the one that was created; nothing was moved into it", {
+			path: staged,
+			aside: aside.path,
+		});
+		return false;
+	}
+	try {
+		await fs.promises.rename(from, target);
+		return true;
+	} catch (error) {
+		if (!isEnoent(error)) logger.warn("Could not set a session artifact aside to remove it", { path: staged });
+		await (directory ? fs.promises.rmdir(target) : fs.promises.unlink(target)).catch(() => {});
+		return false;
+	}
+}
+
+/**
+ * Remove a directory from a held directory, but only while it is still the
+ * directory this copy created there.
+ *
+ * A `rmdir` of a name is not a removal of the directory that name reached a
+ * moment ago: an empty directory put there in between is what goes, and an
+ * empty directory is the one thing any process of the same user can make. So a
+ * staged directory is moved, whole, into a directory created here, emptied
+ * from inside through a descriptor held on it, and taken down there, where the
+ * name it has is one nothing else has ever seen.
+ */
+async function removeDirectoryIfStillOurs(
+	parent: PinnedDirectory,
+	name: string,
+	record: ObjectIdentity | undefined,
+	staged: string,
+	created: Map<string, ObjectIdentity> | undefined,
+): Promise<void> {
+	const at = `${parent.at}/${name}`;
+	const before = await fs.promises
+		.lstat(at, { bigint: true })
+		.then(identityOf)
+		.catch(() => undefined);
+	if (!before?.directory || (record && !sameNode(before, record))) {
+		if (before) {
+			logger.warn("A session artifact staging entry is not the directory that was created; left alone", {
+				path: staged,
+			});
+		}
+		return;
+	}
+	// Emptied where it stands, so that anything in it which is not this
+	// copy's — a file somebody else put there, which this copy leaves alone —
+	// stays under the name it has rather than being carried off with the
+	// directory around it.
+	const inPlace = await pinVerifiedChild(parent, name, "it was left where it is");
+	if (!inPlace) return;
+	let empty = false;
+	try {
+		if (!sameNode(inPlace.identity, before)) return;
+		await emptyPinnedDirectory(inPlace, staged, created);
+		empty = (await fs.promises.readdir(inPlace.at).catch(() => ["unreadable"])).length === 0;
+	} finally {
+		await inPlace.close();
+	}
+	if (!empty) {
+		logger.debug("A session artifact staging directory still holds something this copy may not remove", {
+			path: staged,
+		});
+		return;
+	}
+	// Only then taken down, and not by its name: a `rmdir` of the name takes
+	// whatever the name reaches at that instant, and an empty directory put
+	// there in between is both indistinguishable and trivial to make. The
+	// empty directory is moved into one created here, checked there, and
+	// removed under a name nothing else has ever seen.
+	await removeEmptyDirectory(parent, name, before, staged);
+}
+
+/**
+ * Remove an empty directory this copy created, from inside a directory created
+ * here rather than by the name it has where it stands.
+ */
+async function removeEmptyDirectory(
+	parent: PinnedDirectory,
+	name: string,
+	expected: ObjectIdentity,
+	staged: string,
+): Promise<void> {
+	const aside = await makeExclusiveDirectory(parent);
+	if (!aside) return;
+	const asideDir = aside.dir;
+	try {
+		if (!(await moveIntoAside(`${parent.at}/${name}`, asideDir, true, staged))) return;
+		// Opened where nothing else names it, and still required to be the
+		// directory that was moved: a bind mount that stood on the old name is
+		// a different inode, detached or not.
+		const inside = await pinVerifiedChild(asideDir, ASIDE_ENTRY, "it was left where it was moved to");
+		const ours = Boolean(inside && sameNode(inside.identity, expected));
+		await inside?.close();
+		if (!ours) {
+			logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
+			await putDirectoryBack(parent, name, asideDir, staged);
+			return;
+		}
+		await fs.promises.rmdir(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
+	} finally {
+		await removeExclusiveDirectory(parent, aside);
+	}
+}
+
+/**
+ * Put a directory back under the name it was moved from, and only if that name
+ * is still free.
+ *
+ * `mkdir` is what asks: it fails rather than overwrites, so a name something
+ * else has taken since keeps what it has, and what was moved stays in the
+ * aside directory, where nothing serves it and the next sweep finds it.
+ */
+async function putDirectoryBack(
+	parent: PinnedDirectory,
+	name: string,
+	aside: PinnedDirectory,
+	staged: string,
+): Promise<void> {
+	try {
+		await fs.promises.mkdir(`${parent.at}/${name}`);
+		await fs.promises.rename(`${aside.at}/${ASIDE_ENTRY}`, `${parent.at}/${name}`);
+	} catch {
+		logger.warn("Could not put back a directory that was not this copy's", { path: staged, kept: aside.path });
+	}
+}
+
+/**
+ * Take down an aside directory, and only while its name still reaches the
+ * directory that was created.
+ *
+ * This is the one `rmdir` by name left, and what makes it safe is the name:
+ * minted here, never reused, and never written down anywhere another process
+ * can read it before it exists. An empty directory put in its place would have
+ * to be put there under a name nobody could know. The staging root cannot
+ * claim that — its name comes from the session file it belongs to — which is
+ * why the root is taken down from inside one of these instead.
+ */
+async function removeExclusiveDirectory(parent: PinnedDirectory, aside: AsideDirectory): Promise<void> {
+	const name = path.basename(aside.dir.path);
+	await fs.promises.unlink(`${aside.dir.at}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
+	await aside.dir.close();
+	const now = await fs.promises
+		.lstat(`${parent.at}/${name}`, { bigint: true })
+		.then(identityOf)
+		.catch(() => undefined);
+	if (now && sameNode(now, aside.dir.identity)) await fs.promises.rmdir(`${parent.at}/${name}`).catch(() => {});
+	aside.lease.release();
+}
+
+/** A directory created here to judge one object in, and the lease that keeps a sweeper out of it. */
+interface AsideDirectory {
+	dir: PinnedDirectory;
+	lease: { release(): void };
+}
+
+/**
+ * A directory created here, under a name nothing else can already hold, that a
+ * sweeper will finish if this process does not.
+ *
+ * It is named and marked as a staging tree of its own, because that is what it
+ * is: a tree of this copy's objects, on disk, that nothing points at. A crash
+ * between the move and the removal would otherwise leave the thing moved into
+ * it where no sweep looks — the leak the old by-name `rmdir` did not have, and
+ * the price of not having it is a marker and a lease, which the sweeper
+ * already understands.
+ */
+async function makeExclusiveDirectory(dir: PinnedDirectory): Promise<AsideDirectory | undefined> {
 	for (let attempt = 0; attempt < 4; attempt++) {
-		const name = `.omp-removing-${mintSessionId()}`;
+		const name = `.omp-removing-${mintSessionId()}${ARTIFACT_STAGING_SUFFIX}`;
+		const lease = tryAcquireSessionLease(stagingLeaseName(name));
+		if (!lease) continue;
 		try {
-			await fs.promises.mkdir(`${dir.at}/${name}`);
+			await fs.promises.mkdir(`${dir.at}/${name}`, { mode: 0o700 });
 		} catch (error) {
+			lease.release();
 			if (isEexist(error)) continue;
 			return undefined;
 		}
-		return await pinDirectory(`${dir.at}/${name}`, undefined, path.join(dir.path, name));
+		const aside = await pinVerifiedChild(dir, name, "nothing was moved into it");
+		if (!aside) {
+			lease.release();
+			return undefined;
+		}
+		try {
+			await fs.promises.writeFile(
+				`${aside.at}/${ARTIFACT_STAGING_MARKER}`,
+				JSON.stringify({
+					device: String(aside.identity.device),
+					inode: String(aside.identity.inode),
+					lease: stagingLeaseName(name),
+				}),
+				{ mode: 0o600 },
+			);
+		} catch {
+			await aside.close();
+			lease.release();
+			return undefined;
+		}
+		return { dir: aside, lease };
 	}
 	return undefined;
 }
@@ -1090,9 +1277,28 @@ async function publishArtifactStaging(
 			// The marker travels with the tree and is taken out of the
 			// destination afterwards: removing it first would leave a crash
 			// between the two with a staging tree nothing can recognise.
-			await fs.promises
-				.unlink(`${parent.at}/${path.basename(destination)}/${ARTIFACT_STAGING_MARKER}`)
-				.catch(() => {});
+			//
+			// Through the tree itself, never through the destination name. The
+			// rename keeps the inode, so the directory that was staged is
+			// still identifiable; a symlink put at the destination name points
+			// the unlink at a marker of somebody else's, and that file is as
+			// likely to be their only copy of it.
+			const handed = await pinDirectory(
+				`${parent.at}/${path.basename(destination)}`,
+				stagingIdentity(staging),
+				destination,
+			);
+			if (handed) {
+				try {
+					await fs.promises.unlink(`${handed.at}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
+				} finally {
+					await handed.close();
+				}
+			} else {
+				logger.warn("A session's published artifacts directory is not the tree that was staged; marker left", {
+					destination,
+				});
+			}
 			return new Set(published);
 		} catch (error) {
 			if (!isEnotempty(error) && !isEexist(error) && !isEnotdir(error)) {
@@ -1232,12 +1438,10 @@ async function moveIntoHeldDirectory(
 			await fs.promises.unlink(source).catch(() => {});
 			return true;
 		}
-		let created = true;
 		try {
 			await fs.promises.mkdir(target);
 		} catch (error) {
 			if (!isEexist(error)) throw error;
-			created = false;
 		}
 		// Both sides are opened through the descriptor that holds them and
 		// checked for a mount: the destination's own subdirectory is not this
@@ -1252,11 +1456,25 @@ async function moveIntoHeldDirectory(
 			return false;
 		}
 		try {
-			let any = false;
 			for (const child of await fs.promises.readdir(sourceDir.at)) {
-				if (await moveIntoHeldDirectory(sourceDir, targetDir, child, destination)) any = true;
+				await moveIntoHeldDirectory(sourceDir, targetDir, child, destination);
 			}
-			return any || created;
+			// Delivered means *all* of it arrived. What the caller does with
+			// this is count the entry's files and bytes, and a directory that
+			// lost one child to a name the destination already had, or to a
+			// check that refused it, did not deliver what that number says. A
+			// report of a delivery that did not happen is worse than the loss
+			// it hides: it is what stops anyone looking for the files.
+			const left = await fs.promises.readdir(sourceDir.at).catch(() => ["unreadable"]);
+			if (left.length > 0) {
+				logger.warn("Part of a session's copied artifact directory could not be published", {
+					destination,
+					name,
+					left: left.slice(0, ARTIFACT_COPY_LARGEST),
+				});
+				return false;
+			}
+			return true;
 		} finally {
 			await sourceDir.close();
 			await targetDir.close();

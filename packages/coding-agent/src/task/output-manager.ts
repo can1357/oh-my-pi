@@ -150,9 +150,18 @@ export class AgentOutputManager {
 			// already have is the only safe answer; it still goes through the
 			// same scoping as any other, so a nested child keeps its parent's
 			// prefix.
-			const unique = `${id}-${mintSessionId().slice(-8)}`;
-			this.#taken.add(unique);
-			return this.#parentPrefix ? `${this.#parentPrefix}.${unique}` : unique;
+			//
+			// Unguessable is not unique: two mints can end in the same eight
+			// characters, and this manager has already handed out everything in
+			// `#taken`. Asking it is what keeps one subagent's output from
+			// being served as another's.
+			for (let attempt = 0; ; attempt++) {
+				const tail = mintSessionId().slice(-8);
+				const unique = attempt === 0 ? `${id}-${tail}` : `${id}-${tail}-${attempt + 1}`;
+				if (this.#taken.has(unique)) continue;
+				this.#taken.add(unique);
+				return this.#parentPrefix ? `${this.#parentPrefix}.${unique}` : unique;
+			}
 		}
 		let candidate = id;
 		for (let n = 2; this.#taken.has(candidate); n++) {

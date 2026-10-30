@@ -420,6 +420,73 @@ describe("copying a session's artifacts to another session", () => {
 		expect(fs.readFileSync(path.join(outside, "deep", "precious"), "utf8")).toBe("and this");
 	});
 
+	it("leaves an empty directory that took the staging name, and removes its own tree", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "the copy's");
+		let impostor = "";
+		let moved = "";
+
+		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				// An empty directory is what any process of this user can make,
+				// and a removal that resolves the staging name takes whatever
+				// the name reaches. This one is not the directory that was
+				// created, and is not this copy's to remove.
+				const staging = path.join(tempDir.path(), stagingLeftovers(tempDir.path())[0] as string);
+				moved = `${staging}.moved`;
+				fs.renameSync(staging, moved);
+				fs.mkdirSync(staging);
+				impostor = staging;
+				return false;
+			},
+		});
+
+		expect(outcome.discarded).toBe(true);
+		expect(fs.existsSync(impostor)).toBe(true);
+		expect(fs.readdirSync(impostor)).toEqual([]);
+		// What the copy made is still the copy's, under the name it was moved
+		// to, and the sweep that collects staging trees finds it by its marker.
+		expect(fs.existsSync(moved)).toBe(true);
+	});
+
+	it("does not take the marker out through a destination name that stopped being the tree", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		const outside = path.join(tempDir.path(), "outside");
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "COPIED");
+		// Somebody else's file, under the name the marker has.
+		fs.writeFileSync(path.join(outside, ".omp-staging"), "THEIR ONLY COPY");
+
+		const rename = fs.promises.rename;
+		let swapped = false;
+		const hook = spyOn(fs.promises, "rename").mockImplementation(async (...args: unknown[]) => {
+			const result = await rename(...(args as Parameters<typeof rename>));
+			// Between the handover and the marker's removal: the destination
+			// name now points somewhere else entirely.
+			if (!swapped && String(args[1]).endsWith(DESTINATION)) {
+				swapped = true;
+				fs.renameSync(destinationArtifacts, `${destinationArtifacts}.real`);
+				fs.symlinkSync(outside, destinationArtifacts);
+			}
+			return result;
+		});
+
+		try {
+			const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+			expect(swapped).toBe(true);
+			expect(outcome.discarded).toBe(false);
+			expect(fs.readFileSync(path.join(outside, ".omp-staging"), "utf8")).toBe("THEIR ONLY COPY");
+		} finally {
+			hook.mockRestore();
+		}
+	});
+
 	it("leaves a staged file that is no longer the one it wrote", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
