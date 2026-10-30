@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	disposeAllKernelSessions,
+	disposeKernelSessionsByOwner,
 	executePython,
 	executePythonWithKernel,
 	type PythonExecutorOptions,
@@ -272,6 +273,29 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		});
 		expect(kept.exitCode).toBe(0);
 		expect(kept.output.trim()).toBe(`${first} kept`);
+	}, 40_000);
+
+	it("ends a runner two agents shared once the one that armed it is disposed", async () => {
+		setSupersededKernelGraceMs(100);
+		using sharedDir = TempDir.createSync("@python-runner-co-owner-a-");
+		using oneDir = TempDir.createSync("@python-runner-co-owner-b-");
+		using twoDir = TempDir.createSync("@python-runner-co-owner-c-");
+		const shared = {
+			sessionId: "co-owned-kernel",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+			cwd: sharedDir.path(),
+		};
+		const first = await runnerPid({ ...shared, kernelOwnerId: "agent-session:co-one" });
+		expect(await runnerPid({ ...shared, kernelOwnerId: "agent-session:co-two" })).toBe(first);
+		await runnerPid({ ...shared, cwd: oneDir.path(), kernelOwnerId: "agent-session:co-one" });
+		await runnerPid({ ...shared, cwd: twoDir.path(), kernelOwnerId: "agent-session:co-two" });
+
+		// The disposal drops this agent's registration from the shared runner
+		// and cancels its grace. The agent still registered left for another
+		// directory earlier and never comes back to start a new one.
+		await disposeKernelSessionsByOwner("agent-session:co-two");
+		expect(await waitForExit(first, 10_000)).toBe(true);
 	}, 40_000);
 
 	it("streams stdout chunks as they are produced", async () => {

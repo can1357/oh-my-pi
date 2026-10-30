@@ -1328,6 +1328,53 @@ describe("structured subagent primitive", () => {
 		expect(run).not.toHaveBeenCalled();
 		expect(released).toBe(1);
 	});
+
+	it("runs the caller hold's release when the spawn is cancelled before the child starts", async () => {
+		// The real runner, not a replacement: an already-aborted spawn returns
+		// "Cancelled before start" without creating a child session, so nothing
+		// downstream will ever end and release what the parent holds for it.
+		mockDiscovery();
+		let released = 0;
+
+		const settled = await runStructuredSubagent(
+			request({ signal: AbortSignal.abort(), onRelease: () => void (released += 1) }),
+		);
+
+		expect(settled.result.error).toBe("Cancelled before start");
+		expect(released).toBe(1);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("runs the caller hold's release when the isolation workspace cannot be created", async () => {
+		// Real failure in the real runner: a directory that is not a repository
+		// has no isolation to build, so `ensureIsolation` throws before any
+		// workspace handle, child, or lifecycle exists.
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-startup-"));
+		let released = 0;
+		try {
+			const failed = await isolationRunner.runIsolatedSubprocess({
+				baseOptions: {
+					cwd: outside,
+					agent: AGENT,
+					task: "Inspect the target.",
+					index: 0,
+					id: "Worker",
+					onRelease: async () => void (released += 1),
+				},
+				context: { repoRoot: outside },
+				preferredBackend: undefined,
+				agentId: "Worker",
+				mergeMode: "patch",
+				artifactsDir: outside,
+				buildFailureResult: error => ({ ...result(), exitCode: 1, error: String(error) }),
+			});
+
+			expect(failed.exitCode).toBe(1);
+			expect(released).toBe(1);
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("agent frontmatter structured opt-in", () => {

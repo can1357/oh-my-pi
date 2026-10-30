@@ -588,13 +588,22 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
+		if (!handle) {
+			// Isolation failed before a workspace existed, so no child was ever
+			// dispatched and no child lifecycle will end: whatever the caller
+			// holds for this child is still owed, and this is the last place
+			// that can discharge it.
+			await releaseBase();
+		} else if (
 			!releasePromise &&
 			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
 		) {
-			if (deferredCleanup) {
+			if (retainWorkspace) {
+				// The workspace stays on disk, but the caller's hold is not part
+				// of it: nothing left will end to release it. `releaseBase` runs
+				// at most once.
+				await releaseBase();
+			} else if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,
 					resource: "isolation",

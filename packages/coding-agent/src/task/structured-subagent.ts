@@ -27,6 +27,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -853,10 +854,13 @@ function describeSalvagedWork(result: SingleResult): string {
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
  *
- * {@link StructuredSubagentRequest.onRelease} runs exactly once: the executor
- * takes it over the moment the child is dispatched — a kept-alive child holds
- * it until its lifecycle ends — and every path that never dispatches one runs
- * it here instead.
+ * {@link StructuredSubagentRequest.onRelease} runs exactly once. Rather than
+ * declaring the handover at dispatch — which is earlier than the child exists,
+ * so a spawn cancelled before its first turn or an isolation workspace that
+ * could not be created would strand it — this boundary asks on the way out
+ * whether the hold is still owed. It is, unless the agent lifecycle took the
+ * child over: that is the one thing that outlives this call and will release
+ * it when the kept-alive child's lifecycle ends.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const callerRelease = request.onRelease;
@@ -868,20 +872,20 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				await callerRelease();
 			}
 		: undefined;
-	let childOwnsRelease = false;
+	let childId: string | undefined;
 	try {
-		return await runStructuredSubagentDispatch(request, releaseOnce, () => {
-			childOwnsRelease = true;
+		return await runStructuredSubagentDispatch(request, releaseOnce, id => {
+			childId = id;
 		});
 	} finally {
-		if (!childOwnsRelease) await releaseOnce?.();
+		if (childId === undefined || !AgentLifecycleManager.global().has(childId)) await releaseOnce?.();
 	}
 }
 
 async function runStructuredSubagentDispatch(
 	request: StructuredSubagentRequest,
 	onRelease: (() => Promise<void>) | undefined,
-	markDispatched: () => void,
+	reportChildId: (id: string) => void,
 ): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
@@ -905,6 +909,9 @@ async function runStructuredSubagentDispatch(
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
+		// The id this run's hold is attached to, so the boundary above can ask
+		// whether the agent lifecycle took it over.
+		reportChildId(id);
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
 		const baseOptions = buildExecutorOptions(request, policy, lease, id, onRelease);
 		baseOptions.onCleanupDeferred = completion => {
@@ -935,10 +942,6 @@ async function runStructuredSubagentDispatch(
 					)
 				: undefined;
 		let result: SingleResult;
-		// The child owns the caller's release from here: `finalizeSubagentLifecycle`
-		// hands it to the lifecycle manager for a kept-alive agent and runs it
-		// itself otherwise, including when no child session was ever created.
-		markDispatched();
 		try {
 			if (!isolationContext) {
 				result = await runSubprocess(baseOptions);

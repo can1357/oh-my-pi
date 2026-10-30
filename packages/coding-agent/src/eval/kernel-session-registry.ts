@@ -10,7 +10,7 @@ import {
 	type SessionOwners,
 	waitForPromiseWithCancellation,
 } from "./executor-base";
-import { SupersededKernelReaper } from "./superseded-reclaim";
+import { SupersededKernelReaper, type SupersededReclaimOutcome } from "./superseded-reclaim";
 
 interface KernelSessionRegistryOptions {
 	sessionId?: string;
@@ -357,13 +357,23 @@ export function createKernelSessionRegistry<
 	}
 
 	/**
-	 * Shut down, after an idle grace, the kernels this owner left behind under
-	 * other session keys.
+	 * Arm or disarm the idle grace on every retained kernel, in one pass over
+	 * the registry.
 	 *
 	 * A retained kernel is keyed by (eval session id, cwd, interpreter), so an
 	 * owner that changes directory, switches interpreter, or whose eval session
 	 * id gains its on-disk session file acquires a *new* kernel and strands the
 	 * previous runner.
+	 *
+	 * Whether a kernel is stranded is a property of the registry as a whole —
+	 * where each of its owners is working now — not of the call that happens to
+	 * notice. So the question is asked about every session, from every point
+	 * that can change the answer: a cell acquiring or releasing a session, a
+	 * borrow ending, an owner departing. Asking it everywhere is what a scan
+	 * driven by the acquiring call cannot do: that one cannot see a session
+	 * still behind its startup barrier, and skips the very key whose cell has
+	 * just finished while its owner has moved on — the kernel left over from
+	 * two overlapping cold starts belongs to both of those blind spots.
 	 *
 	 * A session is armed once every agent registered against it has run its
 	 * latest cell under some other key ({@link everyOwnerMovedAway}); arming on
@@ -391,45 +401,44 @@ export function createKernelSessionRegistry<
 	 * The shutdown runs in the background: it costs the acquiring cell nothing,
 	 * and `disposeAll` awaits whatever is still in flight.
 	 */
-	function reclaimSupersededSessions(sessionKey: string, options: TOptions): void {
-		const ownerId = options.kernelOwnerId;
-		if (ownerId === undefined) return;
+	function reconcileSupersededSessions(): void {
 		for (const [key, session] of Array.from(sessions.entries())) {
-			if (key === sessionKey) continue;
 			// Armed on ownership alone. A session busy right now is still one its
 			// owners have walked away from, and the fire-time guards below are
 			// what decide; arming only when it is idle would leave a kernel whose
 			// owner never runs another cell unreclaimed for the life of the host.
-			if (!isSupersededFor(key, session, ownerId)) continue;
-			reaper.schedule(session, async () => {
-				// Re-checked at the far end of the grace: a cell, a borrow or
-				// another agent may have taken the kernel in the meantime.
-				if (!isSupersededFor(key, session, ownerId)) return "settled";
-				if (session.activeUses > 0 || session.kernel.hasPendingWork()) return "deferred";
-				descriptor.invalidateSession?.(session);
-				if (sessions.get(key) === session) sessions.delete(key);
-				const result = await settleShutdown(session, false);
-				if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
-				logger.warn(`${descriptor.languageLabel} kernel left behind by its session did not confirm exit`, {
-					sessionId: session.sessionId,
-					sessionKey: key,
-					cwd: session.cwd,
-					reason: result.status === "rejected" ? result.reason : "not confirmed",
-				});
-				// Put it back so a later dispose retries, matching disposeAll.
-				if (!sessions.has(key)) sessions.set(key, session);
-				return "settled";
-			});
+			if (isSuperseded(key, session)) reaper.schedule(session, () => reclaimSuperseded(key, session));
+			else reaper.cancel(session);
 		}
 	}
 
+	/** Shut the kernel under `key` down, unless a fire-time guard still holds it. */
+	async function reclaimSuperseded(key: string, session: TSession): Promise<SupersededReclaimOutcome> {
+		// Re-checked at the far end of the grace: a cell, a borrow or another
+		// agent may have taken the kernel in the meantime.
+		if (!isSuperseded(key, session)) return "settled";
+		if (session.activeUses > 0 || session.kernel.hasPendingWork()) return "deferred";
+		descriptor.invalidateSession?.(session);
+		if (sessions.get(key) === session) sessions.delete(key);
+		const result = await settleShutdown(session, false);
+		if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
+		logger.warn(`${descriptor.languageLabel} kernel left behind by its session did not confirm exit`, {
+			sessionId: session.sessionId,
+			sessionKey: key,
+			cwd: session.cwd,
+			reason: result.status === "rejected" ? result.reason : "not confirmed",
+		});
+		// Put it back so a later dispose retries, matching disposeAll.
+		if (!sessions.has(key)) sessions.set(key, session);
+		return "settled";
+	}
+
 	/**
-	 * Whether `session` under `key` is one this owner shares with nobody who is
-	 * still working there, and may therefore be armed or shut down.
+	 * Whether `session` under `key` is one nobody is still working at, and may
+	 * therefore be armed or shut down.
 	 */
-	function isSupersededFor(key: string, session: TSession, ownerId: string): boolean {
+	function isSuperseded(key: string, session: TSession): boolean {
 		if (sessions.get(key) !== session) return false;
-		if (!session.ownerIds.has(ownerId)) return false;
 		return everyOwnerMovedAway(key, session);
 	}
 
@@ -465,6 +474,9 @@ export function createKernelSessionRegistry<
 			if (released) return;
 			released = true;
 			session.activeUses -= 1;
+			// The hold is gone, so this session may now be reclaimable; the
+			// borrower's owner may never run another cell to notice.
+			reconcileSupersededSessions();
 		};
 	}
 
@@ -566,6 +578,11 @@ export function createKernelSessionRegistry<
 			});
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
+		// A kernel this owner shared with another agent kept only its
+		// registration dropped above. Nobody is left to notice that, so the
+		// arming question is asked again here: the agents it still belongs to
+		// may have moved away long ago.
+		reconcileSupersededSessions();
 	}
 
 	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
@@ -611,7 +628,7 @@ export function createKernelSessionRegistry<
 		// frame, which a kernel replacement stretches to seconds.
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
 		try {
-			reclaimSupersededSessions(sessionKey, options);
+			reconcileSupersededSessions();
 			throwIfCallerCancelled(options);
 			const kernel = await acquireLiveSessionKernel(session, cwd, options);
 			if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
@@ -634,6 +651,10 @@ export function createKernelSessionRegistry<
 			}
 		} finally {
 			session.activeUses -= 1;
+			// This cell is done holding the session, and the owner it ran for may
+			// have moved on while it ran — an older key whose cold start finished
+			// last is superseded the moment its only cell ends.
+			reconcileSupersededSessions();
 		}
 	}
 

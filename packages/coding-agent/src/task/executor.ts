@@ -4232,8 +4232,41 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 
 /**
  * Run a single agent in-process.
+ *
+ * {@link ExecutorOptions.onRelease} — what the caller holds on this child's
+ * behalf, such as the retained eval kernel its tools run on — is owed here
+ * until something that will certainly end takes it over, which is the agent
+ * lifecycle and nothing else. So this boundary asks one question on the way
+ * out, rather than each exit remembering to release: an abort before the child
+ * starts, a throw from the run, or a run that never created a session all
+ * leave the hold owed, and all discharge it here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	let releaseOwed = options.onRelease !== undefined;
+	try {
+		return await runDispatchedSubprocess(options, () => {
+			releaseOwed = false;
+		});
+	} finally {
+		if (releaseOwed) {
+			try {
+				await options.onRelease?.();
+			} catch (error) {
+				logger.warn("Subagent lifecycle resource cleanup failed", { id: options.id, error: String(error) });
+			}
+		}
+	}
+}
+
+/**
+ * The run itself. `onReleaseTakenOver` is called once
+ * {@link finalizeSubagentLifecycle} has either run the caller's release or
+ * handed it to the lifecycle manager of a kept-alive child.
+ */
+async function runDispatchedSubprocess(
+	options: ExecutorOptions,
+	onReleaseTakenOver: () => void,
+): Promise<SingleResult> {
 	const {
 		cwd,
 		agent,
@@ -5139,15 +5172,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						deferCleanup(completion);
 					},
 				});
-			} else {
-				// No child session was ever created, so none of what the caller
-				// held for it is still needed, and no lifecycle will end to
-				// release it later.
-				try {
-					await options.onRelease?.();
-				} catch (error) {
-					logger.warn("Subagent lifecycle resource cleanup failed", { id, error: String(error) });
-				}
+				// Either it ran the release or the lifecycle manager now holds it
+				// for a kept-alive child: it is no longer owed by this run.
+				onReleaseTakenOver();
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {

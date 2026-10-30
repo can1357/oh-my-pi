@@ -3,7 +3,14 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
-import { borrowVmContext, disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import {
+	borrowVmContext,
+	disposeAllVmContexts,
+	disposeVmContextsByOwner,
+	type JsEvalWorkerHandle,
+	setJsEvalWorkerFactoriesForTests,
+} from "../../src/eval/js/context-manager";
+import type { WorkerInbound, WorkerOutbound } from "../../src/eval/js/worker-protocol";
 import { executeJs } from "../../src/eval/js/executor";
 import { setSupersededKernelGraceMs } from "../../src/eval/superseded-reclaim";
 import { AgentOutputManager } from "../../src/task/output-manager";
@@ -46,6 +53,63 @@ async function contextId(cwd: string, sessionId: string, ownerId: string): Promi
 	);
 	if (result.exitCode !== 0) throw new Error(`cell failed: ${result.output}`);
 	return result.output.trim();
+}
+
+/**
+ * Run every context on a real eval worker thread, holding back the first
+ * worker's `ready` until `gate` resolves, and resolve `spawned` once that
+ * worker exists. A cold start that finishes after a later key's cell cannot be
+ * produced any other way: the delay is in worker startup, which the public
+ * surface does not expose. Returns the restore from
+ * {@link setJsEvalWorkerFactoriesForTests}.
+ */
+function holdFirstWorkerReady(gate: Promise<void>, spawned: PromiseWithResolvers<void>): () => void {
+	let holdNext = true;
+	const spawn = (): JsEvalWorkerHandle => {
+		const worker = new Worker(new URL("../../src/eval/js/worker-entry.ts", import.meta.url).href, {
+			type: "module",
+		});
+		const held = holdNext ? gate : undefined;
+		holdNext = false;
+		const handle: JsEvalWorkerHandle = {
+			mode: "worker",
+			send: message => worker.postMessage(message),
+			onMessage(handler) {
+				const wrap = (event: MessageEvent): void => {
+					const message = event.data as WorkerOutbound;
+					if (held && message.type === "ready") void held.then(() => handler(message));
+					else handler(message);
+				};
+				worker.addEventListener("message", wrap);
+				return () => worker.removeEventListener("message", wrap);
+			},
+			onError(handler) {
+				const onError = (event: ErrorEvent): void => handler(new Error(event.message || "worker error"));
+				const onClose = (): void => handler(new Error("JS eval worker exited"));
+				worker.addEventListener("error", onError);
+				worker.addEventListener("close", onClose);
+				return () => {
+					worker.removeEventListener("error", onError);
+					worker.removeEventListener("close", onClose);
+				};
+			},
+			async close() {
+				const exited = Promise.withResolvers<void>();
+				const onClose = (): void => exited.resolve();
+				worker.addEventListener("close", onClose);
+				worker.postMessage({ type: "close" } satisfies WorkerInbound);
+				await exited.promise;
+				worker.removeEventListener("close", onClose);
+				return true;
+			},
+			async terminate() {
+				worker.terminate();
+			},
+		};
+		spawned.resolve();
+		return handle;
+	};
+	return setJsEvalWorkerFactoriesForTests({ spawnProcess: spawn, spawnWorker: spawn });
 }
 
 describe("superseded JavaScript contexts", () => {
@@ -142,5 +206,71 @@ describe("superseded JavaScript contexts", () => {
 		release();
 		await Bun.sleep(TEST_GRACE_MS * 8);
 		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+	}, 60_000);
+
+	it("drops a context borrowed after its owner had already moved on", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using firstDir = TempDir.createSync("@js-late-borrow-a-");
+		using secondDir = TempDir.createSync("@js-late-borrow-b-");
+		const owner = "agent-session:js-late-borrow";
+		const firstKey = `js:cwd:${firstDir.path()}`;
+		const first = await contextId(firstDir.path(), firstKey, owner);
+		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
+
+		// The borrow arrives after the move, so it is what spares the context
+		// from the grace already running. Ending it is the last event this
+		// context sees: its owner is elsewhere and runs no further cell here.
+		const release = borrowVmContext(firstKey);
+		release();
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+	}, 60_000);
+
+	it("drops a shared context after the agent whose move armed it is disposed", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using sharedDir = TempDir.createSync("@js-co-owner-a-");
+		using oneDir = TempDir.createSync("@js-co-owner-b-");
+		using twoDir = TempDir.createSync("@js-co-owner-c-");
+		const sessionId = `js:cwd:${sharedDir.path()}`;
+		const first = await contextId(sharedDir.path(), sessionId, "agent-session:js-co-one");
+		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-co-two")).toBe(first);
+		await contextId(oneDir.path(), `js:cwd:${oneDir.path()}`, "agent-session:js-co-one");
+		await contextId(twoDir.path(), `js:cwd:${twoDir.path()}`, "agent-session:js-co-two");
+
+		// Disposing one of the two drops only its registration from the shared
+		// context, and cancels the grace on the way. The agent left registered
+		// moved away earlier and never comes back to arm another one.
+		await disposeVmContextsByOwner("agent-session:js-co-two");
+		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-co-one")).not.toBe(first);
+	}, 60_000);
+
+	it("drops a context whose cold start finished after a newer key's cell", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using firstDir = TempDir.createSync("@js-overlap-a-");
+		using secondDir = TempDir.createSync("@js-overlap-b-");
+		const owner = "agent-session:js-overlap";
+		const firstKey = `js:cwd:${firstDir.path()}`;
+		const gate = Promise.withResolvers<void>();
+		const spawned = Promise.withResolvers<void>();
+		const restore = holdFirstWorkerReady(gate.promise, spawned);
+		try {
+			const older = contextId(firstDir.path(), firstKey, owner);
+			// The older key is registered as starting, and its worker will not
+			// report ready until the newer key's cell is done.
+			await spawned.promise;
+			await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
+			gate.resolve();
+			const first = await older;
+
+			// Nothing the newer cell could scan knew the older context existed,
+			// and the owner has been at the newer key since before the older
+			// worker was ready.
+			await Bun.sleep(TEST_GRACE_MS * 8);
+			expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+		} finally {
+			gate.resolve();
+			restore();
+		}
 	}, 60_000);
 });

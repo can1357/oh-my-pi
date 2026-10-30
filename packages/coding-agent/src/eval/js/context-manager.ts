@@ -15,7 +15,7 @@ import { getEnabledEvalPreludes } from "../preludes";
 import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
-import { SupersededKernelReaper } from "../superseded-reclaim";
+import { SupersededKernelReaper, type SupersededReclaimOutcome } from "../superseded-reclaim";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
@@ -214,7 +214,7 @@ export async function executeInVmContext(options: {
 		options.ownerId,
 	);
 	try {
-		reclaimSupersededJsSessions(sessionKey, options.ownerId);
+		reconcileSupersededJsSessions();
 		const result = await runOnce(session, options);
 		if (session.state === "alive" && path.isAbsolute(options.filename)) {
 			updateEvalState(options.session, {
@@ -227,52 +227,60 @@ export async function executeInVmContext(options: {
 		return result;
 	} finally {
 		session.activeUses -= 1;
+		// This cell is done holding the context, and its owner may have moved on
+		// while it ran — an older key whose cold start finished last is
+		// superseded the moment its only cell ends.
+		reconcileSupersededJsSessions();
 	}
 }
 
 /**
- * Shut down, after an idle grace, the contexts this owner left behind under
- * other session keys.
+ * Arm or disarm the idle grace on every retained JavaScript context, in one
+ * pass over the registry.
  *
  * A retained JavaScript context is keyed by the eval session id, which ends in
  * `:cwd:<cwd>`, so an owner that changes directory — or whose eval session id
  * gains its on-disk session file — acquires a *new* worker and strands the
  * previous one. Nothing reclaimed it: its V8 heap stayed resident until the
  * host process exited, and unlike a Python runner it is a worker thread no
- * process list will ever show. The rules match the Python registry's: a
- * context is armed once every agent registered against it has run its latest
- * cell elsewhere, a caller holding it or work in flight keeps it alive when
- * the grace expires, and a reclaim those guards stop is armed again rather
- * than dropped.
+ * process list will ever show.
+ *
+ * Whether a context is stranded is a property of the registry as a whole —
+ * where each of its owners is working now — not of the call that happens to
+ * notice, so the question is asked about every context from every point that
+ * can change the answer: a cell acquiring or releasing one, a borrow ending,
+ * an owner departing. The rules match the Python registry's
+ * `reconcileSupersededSessions`: a context is armed once every agent
+ * registered against it has run its latest cell elsewhere, a caller holding it
+ * or work in flight keeps it alive when the grace expires, and a reclaim those
+ * guards stop is armed again rather than dropped.
  */
-function reclaimSupersededJsSessions(sessionKey: string, ownerId: string | undefined): void {
-	// Without an explicit owner the registry records only the first caller and
-	// cannot tell two of them apart, so it reclaims nothing rather than guess.
-	if (ownerId === undefined) return;
+function reconcileSupersededJsSessions(): void {
 	for (const [key, session] of Array.from(sessions.entries())) {
-		if (key === sessionKey) continue;
 		// Armed on ownership alone; the fire-time guards decide. See the Python
-		// registry's `reclaimSupersededSessions` for why a busy session is armed.
-		if (!isSupersededFor(key, session, ownerId)) continue;
-		reaper.schedule(session, async () => {
-			if (!isSupersededFor(key, session, ownerId) || session.state !== "alive") return "settled";
-			if (session.activeUses > 0) return "deferred";
-			if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) {
-				return "deferred";
-			}
-			await killSessionFor(session, new ToolError("JS context left behind by its session"), { force: false });
-			return "settled";
-		});
+		// registry's `reconcileSupersededSessions` for why a busy context is armed.
+		if (isSuperseded(key, session)) reaper.schedule(session, () => reclaimSuperseded(key, session));
+		else reaper.cancel(session);
 	}
 }
 
+/** Terminate the worker under `key`, unless a fire-time guard still holds it. */
+async function reclaimSuperseded(key: string, session: JsSession): Promise<SupersededReclaimOutcome> {
+	if (!isSuperseded(key, session) || session.state !== "alive") return "settled";
+	if (session.activeUses > 0) return "deferred";
+	if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) {
+		return "deferred";
+	}
+	await killSessionFor(session, new ToolError("JS context left behind by its session"), { force: false });
+	return "settled";
+}
+
 /**
- * Whether `session` under `key` is one this owner shares with nobody who is
- * still working there, and may therefore be armed or shut down.
+ * Whether `session` under `key` is one nobody is still working at, and may
+ * therefore be armed or shut down.
  */
-function isSupersededFor(key: string, session: JsSession, ownerId: string): boolean {
+function isSuperseded(key: string, session: JsSession): boolean {
 	if (sessions.get(key) !== session) return false;
-	if (!session.ownerIds.has(ownerId)) return false;
 	return everyOwnerMovedAway(key, session);
 }
 
@@ -307,6 +315,10 @@ export function borrowVmContext(sessionKey: string): () => void {
 		if (released) return;
 		released = true;
 		session.activeUses -= 1;
+		// The borrow was this context's only reason to be spared, and cancelling
+		// its timer was this borrow's doing: a context the owner had already left
+		// gets no later cell to arm it again.
+		reconcileSupersededJsSessions();
 	};
 }
 
@@ -552,6 +564,11 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	await Promise.all(
 		toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
 	);
+	// A context this owner shared with another agent kept only its registration
+	// dropped above. Nobody is left to notice that, so the arming question is
+	// asked again here: the agents it still belongs to may have moved away long
+	// ago.
+	reconcileSupersededJsSessions();
 }
 
 /**

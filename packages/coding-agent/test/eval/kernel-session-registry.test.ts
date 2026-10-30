@@ -760,6 +760,95 @@ describe("kernel session reclamation", () => {
 		}
 	});
 
+	it("reclaims a shared kernel after the co-owner whose move armed it is disposed", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			const shared = { sessionId: "co-owner-disposed:cwd:/tmp/a" };
+			await registry.executeOnSession("first owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:one" });
+			await registry.executeOnSession("second owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:two" });
+			await registry.executeOnSession("first owner moves", "/tmp/b", {
+				sessionId: "co-owner-disposed:cwd:/tmp/b",
+				kernelOwnerId: "agent-session:one",
+			});
+			await registry.executeOnSession("second owner moves", "/tmp/c", {
+				sessionId: "co-owner-disposed:cwd:/tmp/c",
+				kernelOwnerId: "agent-session:two",
+			});
+			// The disposal drops this owner's registration from the kernel the
+			// two shared, and cancels its grace on the way. The owner left
+			// behind moved away long ago and runs nothing here again, so the
+			// shared kernel has to be armed from the disposal itself.
+			await registry.disposeByOwner("agent-session:two");
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("reclaims a shared kernel when the owner still working on it is disposed", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			const shared = { sessionId: "last-owner-disposed:cwd:/tmp/a" };
+			await registry.executeOnSession("first owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:one" });
+			await registry.executeOnSession("second owner", "/tmp/a", { ...shared, kernelOwnerId: "agent-session:two" });
+			await registry.executeOnSession("first owner moves", "/tmp/b", {
+				sessionId: "last-owner-disposed:cwd:/tmp/b",
+				kernelOwnerId: "agent-session:one",
+			});
+			// The only owner still on the shared kernel ends. Nothing was armed
+			// while it was there, and the owner that remains registered is
+			// somewhere else.
+			await registry.disposeByOwner("agent-session:two");
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("reclaims an older key whose cold start finished after a newer key's cell", async () => {
+		const startedFirst = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const { kernels, registry } = createFakeRegistry(
+			async (_kernel, code) => ({ cancelled: false, value: code }),
+			async kernel => {
+				if (kernel.index !== 0) return;
+				startedFirst.resolve();
+				await releaseFirst.promise;
+			},
+		);
+		try {
+			const older = registry.executeOnSession("older cell", "/tmp/a", {
+				sessionId: "overlapping-start:cwd:/tmp/a",
+				kernelOwnerId: "agent-session:one",
+			});
+			// The newer key's cell runs while the older key is still starting,
+			// so nothing it can see is reclaimable: the older session is not
+			// registered yet.
+			await startedFirst.promise;
+			await registry.executeOnSession("newer cell", "/tmp/b", {
+				sessionId: "overlapping-start:cwd:/tmp/b",
+				kernelOwnerId: "agent-session:one",
+			});
+			releaseFirst.resolve();
+			expect(await older).toEqual({ cancelled: false, value: "older cell" });
+
+			// The owner has been at the newer key since before the older kernel
+			// existed, and runs no further cell: the older cell ending is the
+			// last moment anything can arm its grace.
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+			expect(kernels[1]?.alive).toBe(true);
+		} finally {
+			releaseFirst.resolve();
+			await registry.disposeAll();
+		}
+	});
+
 	it("does not reclaim after a dispose that arrives while a busy kernel is deferred", async () => {
 		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
 		await registry.executeOnSession("first dir", "/tmp/a", {
