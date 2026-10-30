@@ -1,9 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentOptions,
+	type AgentTool,
+	SentToolDefinitions,
+} from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	FetchImpl,
+	Message,
 	Model,
 	ProviderSessionState,
 	Tool,
@@ -400,6 +407,95 @@ describe("isolated auto-learn capture", () => {
 		expect(primary?.options?.promptCacheKey).toBe("primary-cache");
 		expect(capture?.options?.promptCacheKey).toBe("primary-cache");
 		expect(capture?.options?.sessionId).not.toBe("primary-session");
+	});
+
+	it("routes the capture by the key the primary loop sent when the session pins none", async () => {
+		const mock = createMockModel({
+			responses: [{ content: ["Nothing to keep."] }, { content: ["Nothing to keep."] }],
+		});
+		const learnTool = captureTool("learn", "Remember a fact");
+		// A new session: no explicit key, so the loop routes on its provider session id.
+		const sourceAgent = new Agent({
+			initialState: { model: mock, systemPrompt: ["Test"], tools: [learnTool] },
+			sessionId: "primary-session",
+		});
+		const createAgent = (options: AgentOptions) => new Agent({ ...options, convertToLlm, streamFn: mock.stream });
+
+		await createAutoLearnCaptureRunner({ sourceAgent, captureTools: () => [learnTool], createAgent })("Capture");
+		// The model-gated Task family key the primary loop resolves wins over the session id.
+		await createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [learnTool],
+			primaryPromptCacheKey: () => "task-family",
+			createAgent,
+		})("Capture");
+
+		expect(mock.calls.map(call => call.options?.promptCacheKey)).toEqual(["primary-session", "task-family"]);
+		expect(mock.calls.every(call => call.options?.sessionId !== "primary-session")).toBe(true);
+	});
+
+	it("re-declares the tools the primary withdrew from the definitions it sent", async () => {
+		const mock = createMockModel({
+			responses: [{ content: ["Primary answer."] }, { content: ["Nothing to keep."] }],
+		});
+		const readTool = captureTool("read", "Read files");
+		const learnTool = captureTool("learn", "Remember a fact");
+		const sourceAgent = new Agent({
+			initialState: { model: mock, systemPrompt: ["Test"], tools: [readTool, learnTool] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		await sourceAgent.prompt("Earlier task");
+		sourceAgent.setTools([learnTool]);
+		let seeded: SentToolDefinitions | undefined;
+		await createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [learnTool],
+			createAgent: options => {
+				seeded = options.sentToolDefinitions;
+				return new Agent({ ...options, convertToLlm, streamFn: mock.stream });
+			},
+		})("Capture");
+
+		const replayed = [
+			{ role: "assistant", requestControls: { tools: { declared: ["read", "learn"] } } },
+		] as Message[];
+		const learnWire = mock.calls[0]?.context.tools?.filter(t => t.name === "learn") ?? [];
+		expect(seeded?.inactiveFor(replayed, learnWire)?.map(t => t.name)).toEqual(["read"]);
+		expect(new SentToolDefinitions().inactiveFor(replayed, learnWire)).toBeUndefined();
+	});
+
+	it("drops a tool the Umans gateway would run itself instead of advertising a refused copy", async () => {
+		const mock = createMockModel({ responses: [{ content: ["Nothing to keep."] }] });
+		const umans = buildModel({
+			id: "claude-test",
+			name: "Umans test",
+			api: "anthropic-messages",
+			provider: "umans",
+			baseUrl: "https://api.code.umans.ai",
+			headers: { "X-Umans-Websearch-Provider": "native" },
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const webSearch = captureTool("web_search", "Search the web");
+		const readTool = captureTool("read", "Read files");
+		const learnTool = captureTool("learn", "Remember a fact");
+		let advertised: string[] | undefined;
+		await createAutoLearnCaptureRunner({
+			sourceAgent: new Agent({
+				initialState: { model: umans, systemPrompt: ["Test"], tools: [webSearch, readTool, learnTool] },
+			}),
+			captureTools: () => [learnTool],
+			createAgent: options => {
+				advertised = options.initialState?.tools?.map(t => t.name);
+				return new Agent({ ...options, convertToLlm, streamFn: mock.stream });
+			},
+		})("Capture");
+
+		expect(advertised).toEqual(["read", "learn"]);
 	});
 
 	it("refuses a call to a non-capture tool without running any of its code", async () => {

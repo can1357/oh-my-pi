@@ -652,6 +652,14 @@ function getUmansWebSearchHeader(
 	return provider ? { [UMANS_WEBSEARCH_PROVIDER_HEADER]: provider } : undefined;
 }
 
+/** Whether a request to `model` has the Umans gateway run `web_search` itself, never dispatching it to the client. */
+export function usesUmansGatewayWebSearch(
+	model: Model<"anthropic-messages">,
+	headers?: Record<string, string>,
+): boolean {
+	return getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)) !== undefined;
+}
+
 function shouldUseUmansGatewayWebSearch(name: string, enabled: boolean): boolean {
 	return enabled && name.toLowerCase() === UMANS_WEBSEARCH_TOOL_NAME;
 }

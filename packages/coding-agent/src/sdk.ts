@@ -27,6 +27,7 @@ import type {
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { usesUmansGatewayWebSearch } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -1723,9 +1724,24 @@ export interface AutoLearnCaptureRunnerOptions {
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
 	createAgent: (options: AgentOptions) => Agent;
+	/**
+	 * The cache key the primary loop sends for `model` (explicit, or the model-gated Task family key); undefined falls
+	 * back to the source agent's explicit key, then its provider session id, as providers route on
+	 * `promptCacheKey ?? sessionId`.
+	 */
+	primaryPromptCacheKey?: (model: Model) => string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
+}
+
+/** Tools a provider runs itself, never dispatching the call to the client: a refused copy could not stop them. */
+function providerExecutesTool(model: Model, tool: AgentTool): boolean {
+	return (
+		model.api === "anthropic-messages" &&
+		tool.name.toLowerCase() === "web_search" &&
+		usesUmansGatewayWebSearch(model as Model<"anthropic-messages">)
+	);
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1774,13 +1790,23 @@ export function createAutoLearnCaptureRunner(
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: captureToolList(options.sourceAgent.state.tools, captureTools),
+				// A provider-executed tool is dropped instead: that costs the prefix only where the gateway search is on.
+				tools: captureToolList(
+					options.sourceAgent.state.tools.filter(tool => !providerExecutesTool(captureModel, tool)),
+					captureTools,
+				),
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
-			// The primary's cache key, so a provider that routes by it (OpenAI `prompt_cache_key`) serves the capture from
-			// the primary prompt's cache. The provider session id above stays the capture's own (#10869).
-			promptCacheKey: options.sourceAgent.promptCacheKey,
+			// The key the primary loop sent, so a provider that routes by it (OpenAI `prompt_cache_key`) serves the
+			// capture from the primary prompt's cache. The provider session id above stays the capture's own (#10869).
+			promptCacheKey:
+				options.primaryPromptCacheKey?.(captureModel) ??
+				options.sourceAgent.promptCacheKey ??
+				options.sourceAgent.sessionId,
+			// The replayed history's `requestControls` declare tools the primary withdrew (Anthropic `tool_removal`);
+			// their sent definitions keep that declaration byte-identical.
+			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
@@ -5585,6 +5611,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
+			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))
