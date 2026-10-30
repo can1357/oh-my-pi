@@ -19,6 +19,7 @@ import {
 	type RestoredSession,
 	restoreArchivedSession,
 	removeStagingGround,
+	type StagingGround,
 	restoreRecordPath,
 	stagingLedgerDir,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
@@ -3936,3 +3937,100 @@ test("a killed run's recorded stage is quarantined by gc, and the restore then f
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
 	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
 });
+
+/** A session archived and reclaimed, with a killed run's recorded partial stage left in its archived tree. */
+async function archivedWithKilledStage(): Promise<{ ground: StagingGround; record: string; liveArtifacts: string }> {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
+	await ground.handle.writeFile("PARTIAL STAGE");
+	await ground.handle.close();
+	return { ground, record: path.basename(ground.record), liveArtifacts };
+}
+
+test("quarantine refuses a destination that resolves into a session tree, and moves nothing", async () => {
+	const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+	// The quarantine directory is a link back into the archived artifact
+	// tree, so a move into it would put the partial stage where a restore
+	// carries it home.
+	await fs.symlink(archiveFile.slice(0, -".jsonl.gz".length), path.join(root, "archive", "gc-quarantine"));
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(preview.quarantine?.errors.join("\n")).toContain("inside a session tree");
+	expect(applied.quarantine?.errors.join("\n")).toContain("inside a session tree");
+	expect(applied.quarantine?.moved).toBe(false);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect(restored.restore?.errors.length).toBeGreaterThan(0);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+});
+
+test("a quarantine killed after making its destination can be run again", async () => {
+	const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+	// What a kill right after the destination `mkdir` leaves: the empty
+	// destination, with the record and the directory where they were.
+	const destination = path.join(root, "archive", "gc-quarantine", path.basename(record, ".json"));
+	await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(preview.quarantine?.errors).toEqual([]);
+	expect(applied.quarantine?.errors).toEqual([]);
+	expect(applied.quarantine?.moved).toBe(true);
+	expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+	expect(restored.restore?.errors).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+});
+
+for (const obstacle of ["a destination holding something else", "a destination parent nobody can write"] as const) {
+	test(`the quarantine preview reports ${obstacle}, as applying would`, async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const quarantineRoot = path.join(root, "archive", "gc-quarantine");
+		const destination = path.join(quarantineRoot, path.basename(record, ".json"));
+		if (obstacle === "a destination holding something else") {
+			await Bun.write(path.join(destination, "unrelated"), "UNRELATED");
+		} else {
+			await fs.mkdir(quarantineRoot, { recursive: true });
+			await fs.chmod(quarantineRoot, 0o500);
+		}
+		try {
+			const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+			const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+			expect(applied.quarantine?.moved).toBe(false);
+			expect(applied.quarantine?.errors.length).toBeGreaterThan(0);
+			expect(preview.quarantine?.errors.length).toBeGreaterThan(0);
+			expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+		} finally {
+			await fs.chmod(quarantineRoot, 0o700).catch(() => undefined);
+		}
+	});
+}
+
+for (const shape of [
+	"a file identity without a directory identity",
+	"a directory identity without a file identity",
+] as const) {
+	test(`quarantine refuses a record with ${shape}, which no gc run writes`, async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const identity = { dev: -1, ino: -2 };
+		const forged =
+			shape === "a file identity without a directory identity"
+				? { dir: ground.dir, file: ground.file, identity }
+				: { dir: ground.dir, file: ground.file, dirIdentity: identity };
+		await Bun.write(ground.record, JSON.stringify(forged));
+
+		const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+		expect(applied.quarantine?.moved).toBe(false);
+		expect(applied.quarantine?.errors.join("\n")).toContain("could not be read");
+		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	});
+}

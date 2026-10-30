@@ -1292,12 +1292,12 @@ function parseIdentity(value: unknown): { dev: number; ino: number } | undefined
 	if (
 		typeof value !== "object" ||
 		value === null ||
-		!("dev" in value && typeof value.dev === "number") ||
-		!("ino" in value && typeof value.ino === "number")
+		!("dev" in value && Number.isSafeInteger(value.dev) && (value.dev as number) >= 0) ||
+		!("ino" in value && Number.isSafeInteger(value.ino) && (value.ino as number) >= 0)
 	) {
 		throw new Error("not a staging record");
 	}
-	return { dev: value.dev, ino: value.ino };
+	return { dev: value.dev as number, ino: value.ino as number };
 }
 
 function parseStagingRecord(text: string): StagingRecord {
@@ -1312,6 +1312,9 @@ function parseStagingRecord(text: string): StagingRecord {
 	}
 	const dirIdentity = parseIdentity("dirIdentity" in entry ? entry.dirIdentity : undefined);
 	const identity = parseIdentity("identity" in entry ? entry.identity : undefined);
+	// A run writes the names first and then both identities at once, so a
+	// record holding one identity without the other is not one a run wrote.
+	if ((dirIdentity === undefined) !== (identity === undefined)) throw new Error("not a staging record");
 	return { dir: entry.dir, file: entry.file, dirIdentity, identity };
 }
 
@@ -1532,17 +1535,50 @@ export interface StagingQuarantine {
 }
 
 /**
+ * `target`'s real path as it would resolve now: the real path of its nearest
+ * existing ancestor with the missing rest appended.
+ */
+async function resolvedPath(target: string): Promise<{ real: string; existing: string }> {
+	const rest: string[] = [];
+	let at = target;
+	for (;;) {
+		try {
+			return { real: path.join(await fs.realpath(at), ...rest.reverse()), existing: at };
+		} catch (error) {
+			const parent = path.dirname(at);
+			if (!isEnoent(error) || parent === at) throw error;
+			rest.push(path.basename(at));
+			at = parent;
+		}
+	}
+}
+
+/**
  * Move a staging record and the directory it names out of the session trees,
- * into `gc-quarantine` beside the tree the directory is in — outside both
- * `sessions` and `archive/sessions`, and on the same filesystem as the
- * directory, so the move is a `rename`. Without `apply`, say what would move.
+ * into `gc-quarantine/<record id>` beside the tree the directory's parent is
+ * in. Without `apply`, say what would move — and what would stop it.
  *
  * Nothing is deleted: a restore then finds neither the record nor the
  * directory and finishes, and whatever the directory held stays readable in
- * quarantine. A record is moved only when it is one a run of this feature
- * could have written — see {@link checkRecordedGround}. The caller holds the
- * gc lock, so no run is staging into the directory while it moves; the
- * advice that names this command asks for activity on the session to stop.
+ * quarantine. A record is acted on only when it is one a run of this feature
+ * could have written — see {@link parseStagingRecord} and
+ * {@link checkRecordedGround}.
+ *
+ * The destination's real path, as it resolves through any link above it, has
+ * to lie outside both session trees, or nothing moves: a quarantine that
+ * resolved into a tree would put a partial stage where a restore carries it
+ * home. Every failure this can predict — a destination holding something
+ * else, a directory that cannot be written, a move across filesystems — is
+ * checked before anything is made, the same way for a preview as for
+ * `--apply`. The destination is decided from the directory's parent, which a
+ * move leaves in place, so a quarantine stopped part-way is run again by
+ * the same command: a destination holding only what this record's own
+ * quarantine puts there is taken up where it stopped.
+ *
+ * The caller holds the gc lock, so no run is staging into the directory while
+ * it moves; the advice that names this command asks for activity on the
+ * session to stop. A process that rebinds a directory above the destination
+ * between the last check and the `rename` is outside what this guards.
  */
 export async function quarantineStagingRecord(
 	agentDir: string,
@@ -1554,9 +1590,28 @@ export async function quarantineStagingRecord(
 		? path.normalize(query)
 		: path.join(ledger, query.endsWith(".json") ? query : `${query}.json`);
 	const result: StagingQuarantine = { record, moved: false, errors: [] };
-	if (path.dirname(record) !== ledger || !record.endsWith(".json")) {
-		result.errors.push(`${record} is not a staging record in ${ledger}`);
+	const refuse = (why: string): StagingQuarantine => {
+		result.errors.push(why);
 		return result;
+	};
+	if (path.dirname(record) !== ledger || !record.endsWith(".json")) {
+		return refuse(`${record} is not a staging record in ${ledger}`);
+	}
+	const id = path.basename(record, ".json");
+	const roots = await stagingRoots(agentDir);
+	const quarantineFor = (tree: string | undefined): string =>
+		path.join(tree === undefined ? agentDir : path.dirname(tree), "gc-quarantine", id);
+
+	if (!(await fs.lstat(record).catch(() => undefined))) {
+		// Already moved by an earlier run of this command, or never there.
+		for (const destination of [...roots, undefined].map(quarantineFor)) {
+			if (await fs.lstat(path.join(destination, path.basename(record))).catch(() => undefined)) {
+				result.quarantine = destination;
+				result.moved = true;
+				return result;
+			}
+		}
+		return refuse(`${record} is not a staging record in ${ledger}`);
 	}
 	let entry: StagingRecord;
 	try {
@@ -1569,53 +1624,107 @@ export async function quarantineStagingRecord(
 			await handle.close().catch(() => undefined);
 		}
 	} catch (error) {
-		result.errors.push(`${record} could not be read: ${errorText(error)}`);
-		return result;
+		return refuse(`${record} could not be read: ${errorText(error)}`);
 	}
-	const roots = await stagingRoots(agentDir);
 	const ground = await checkRecordedGround(entry, roots);
-	if (ground.kind === "refused") {
-		result.errors.push(ground.note);
-		return result;
-	}
-	const real = ground.kind === "gone" ? undefined : await fs.realpath(entry.dir).catch(() => undefined);
-	const tree = real === undefined ? undefined : roots.find(root => isWithin(root, real));
-	const quarantine = path.join(
-		tree === undefined ? agentDir : path.dirname(tree),
-		"gc-quarantine",
-		path.basename(record, ".json"),
-	);
-	if (real !== undefined) result.directory = entry.dir;
-	result.quarantine = quarantine;
-	if (!apply) return result;
+	if (ground.kind === "refused") return refuse(ground.note);
+	const directoryPresent = ground.kind !== "gone";
+	const moved = path.basename(entry.dir);
+
+	const parent = await fs.realpath(path.dirname(entry.dir)).catch(() => undefined);
+	const destination = quarantineFor(parent === undefined ? undefined : roots.find(root => isWithin(root, parent)));
+	result.quarantine = destination;
+	if (directoryPresent) result.directory = entry.dir;
+
+	// Everything that would stop the move, checked before anything is made.
+	const planned = async (): Promise<string | undefined> => {
+		const { real, existing } = await resolvedPath(destination);
+		if (roots.some(root => isWithin(root, real) || isWithin(real, root))) {
+			return `${destination} resolves to ${real}, inside a session tree, so nothing was moved; give it a directory of its own outside ${roots.join(" and ")}`;
+		}
+		const standing = await fs.lstat(destination).catch(() => undefined);
+		if (standing) {
+			if (!standing.isDirectory())
+				return `${destination} is already there and is not a directory, so nothing was moved`;
+			const names = await fs.readdir(destination);
+			const foreign = names.filter(name => name !== moved && name !== path.basename(record));
+			if (foreign.length > 0) {
+				return `${destination} already holds ${foreign.join(", ")}, which no quarantine of this record put there, so nothing was moved`;
+			}
+			if (directoryPresent && names.includes(moved)) {
+				return `${destination} already holds ${moved} while ${entry.dir} is still there, so nothing was moved`;
+			}
+		}
+		const writable = [existing, ledger, ...(directoryPresent ? [path.dirname(entry.dir), entry.dir] : [])];
+		for (const directory of writable) {
+			try {
+				await fs.access(directory, fsConstants.W_OK | fsConstants.X_OK);
+			} catch (error) {
+				return `${directory} cannot be written, so nothing was moved: ${errorText(error)}`;
+			}
+		}
+		if (directoryPresent) {
+			const [from, into] = await Promise.all([fs.stat(path.dirname(entry.dir)), fs.stat(existing)]);
+			if (from.dev !== into.dev) {
+				return `${entry.dir} and ${destination} are on different filesystems, so the directory cannot be moved by rename and nothing was moved`;
+			}
+		}
+		return undefined;
+	};
 	try {
-		await fs.mkdir(path.dirname(quarantine), { recursive: true, mode: 0o700 });
-		await fs.mkdir(quarantine, { mode: 0o700 });
+		const stop = await planned();
+		if (stop) return refuse(stop);
 	} catch (error) {
-		result.errors.push(`${quarantine} could not be made, so nothing was moved: ${errorText(error)}`);
-		return result;
+		return refuse(`${destination} could not be checked, so nothing was moved: ${errorText(error)}`);
 	}
-	if (result.directory !== undefined) {
+	if (!apply) return result;
+
+	try {
+		await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+		await fs.mkdir(destination, { mode: 0o700 }).catch((error: unknown) => {
+			if (codeOf(error) !== "EEXIST") throw error;
+		});
+		// Looked at again now that it exists: what was made has to be a real
+		// directory, outside both trees.
+		const made = await fs.lstat(destination);
+		const real = await fs.realpath(destination);
+		if (!made.isDirectory() || roots.some(root => isWithin(root, real) || isWithin(real, root))) {
+			return refuse(`${destination} resolves to ${real}, inside a session tree, so nothing was moved`);
+		}
+	} catch (error) {
+		return refuse(`${destination} could not be made, so nothing was moved: ${errorText(error)}`);
+	}
+	if (directoryPresent) {
 		try {
-			await fs.rename(entry.dir, path.join(quarantine, path.basename(entry.dir)));
+			await fs.rename(entry.dir, path.join(destination, moved));
 		} catch (error) {
 			const across = codeOf(error) === "EXDEV" ? ", because they are on different filesystems" : "";
-			result.errors.push(
-				`${entry.dir} could not be moved into ${quarantine}${across}, so nothing was moved: ${errorText(error)}`,
+			return refuse(
+				`${entry.dir} could not be moved into ${destination}${across}, so nothing was moved: ${errorText(error)}; ` +
+					`run the same command again once that is fixed`,
 			);
-			// The directory this run just made, still empty.
-			await fs.rmdir(quarantine).catch(() => undefined);
-			return result;
 		}
 	}
+	const recordInto = path.join(destination, path.basename(record));
 	try {
-		await fs.rename(record, path.join(quarantine, path.basename(record)));
+		await fs.rename(record, recordInto);
 	} catch (error) {
-		result.errors.push(
-			`${record} could not be moved into ${quarantine}: ${errorText(error)}. Its directory was moved, so the record ` +
-				`now names nothing and the next \`omp gc --archive --apply\` drops it`,
-		);
-		return result;
+		if (codeOf(error) !== "EXDEV") {
+			return refuse(
+				`${record} could not be moved into ${destination}: ${errorText(error)}; run the same command again`,
+			);
+		}
+		// The ledger is this feature's own, and may sit on another filesystem
+		// than the archive: the record is copied across, then its ledger
+		// entry removed.
+		try {
+			await fs.copyFile(record, recordInto, fsConstants.COPYFILE_EXCL);
+			await fs.unlink(record);
+		} catch (copyError) {
+			return refuse(
+				`${record} could not be moved into ${destination}: ${errorText(copyError)}; run the same command again`,
+			);
+		}
 	}
 	result.moved = true;
 	return result;
