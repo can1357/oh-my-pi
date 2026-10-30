@@ -850,7 +850,7 @@ test("archiving refuses while the archive holds artifact bytes the live tree los
 
 	// `fs.cp(force)` truncates before it writes, so this must never start.
 	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
 	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: KEEP USER HISTORY\n");
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: ");
 });
@@ -992,7 +992,7 @@ test("archiving refuses a conflict below a symlinked archive directory", async (
 	const result = await archiveEverything();
 
 	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
 	expect(await Bun.file(path.join(offloaded, "tool.log")).text()).toBe("PREFIX-ARCHIVED-ONLY-SUFFIX\n");
 });
 
@@ -1021,7 +1021,7 @@ test("archiving checks the bytes it is about to write, not the live file it read
 	}
 
 	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
 	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("PREFIX-ARCHIVED-ONLY-SUFFIX\n");
 });
 
@@ -1469,4 +1469,137 @@ test("archiving into an existing private archive directory does not widen it", a
 	expect((await archiveEverything()).archive?.archived).toBe(1);
 
 	expect((await fs.stat(archivedArtifacts)).mode & 0o777).toBe(0o700);
+});
+test("archiving never writes over an archived artifact, even to repair a short one", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The live file now holds everything the archived one does and more. There
+	// is no way to replace a name only while it still holds what was examined,
+	// so the archive is left alone and the operator is told how to finish it.
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-AND-MORE");
+
+	const result = await archiveEverything();
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("PREFIX");
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("PREFIX-AND-MORE");
+});
+
+test("the archived transcript is never written over one that appeared at its name", async () => {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		if (String(destination) === archiveFile) await Bun.write(archiveFile, "NEW USER WORK\n");
+		return await realLink(source, destination);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(archiveFile).text()).toBe("NEW USER WORK\n");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("a rollback leaves alone a name this run created and something else replaced", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL A");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+
+	// `a.log` is published, then replaced by someone else's file, and the run
+	// then fails. The replacement is not this run's to undo.
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		if (String(source).endsWith("z.log")) {
+			const replacement = path.join(root, "someone-elses-file");
+			await Bun.write(replacement, "NEW USER WORK");
+			await fs.rename(replacement, path.join(archivedArtifacts, "a.log"));
+			throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		}
+		return await realCopyFile(source, destination, mode);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("NEW USER WORK");
+});
+
+test("a restore refuses while a running process owns the session", async () => {
+	await archiveEverything();
+	const lease = tryAcquireSessionLease(SESSION_ID);
+	expect(lease).not.toBeNull();
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("owns this session");
+	} finally {
+		lease?.release();
+	}
+
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a genuine version 1 transcript the writer migrates still restores", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	// Version 1: no entry names, no parents — the shape the migration exists
+	// to give an entry tree to.
+	const header = { type: "session", version: 1, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: root };
+	const body = `${JSON.stringify(header)}\n${JSON.stringify({
+		type: "message",
+		message: { role: "user", content: "KEEP" },
+	})}\n${JSON.stringify({ type: "message", message: { role: "assistant", content: [] } })}\n`;
+	await Bun.write(sessionFile, body);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	await manager.setSessionName("Renamed", "user");
+	await manager.close();
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("a staging name left linked to an archived file does not damage it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARCHIVED CONTENT");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "nested", "tool.log"), "ARCHIVED CONTENT");
+
+	// What a kill between `link` and the temp's removal leaves: a second name
+	// on the published archive file. The next run must take that name off the
+	// data before it stages anything through it, not write into it.
+	const archived = path.join(archivedArtifacts, "tool.log");
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		const staged = String(destination);
+		if (staged.endsWith(".tmp") && !(await Bun.file(staged).exists())) await fs.link(archived, staged);
+		return await realCopyFile(source, staged, mode);
+	});
+	try {
+		await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(await Bun.file(archived).text()).toBe("ARCHIVED CONTENT");
 });

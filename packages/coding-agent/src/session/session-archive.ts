@@ -25,7 +25,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
-import { SESSION_STAGING_RE, sessionStagingPath } from "./session-storage";
+import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -413,51 +413,42 @@ function jsonContains(held: unknown, holder: unknown): boolean {
 /**
  * The entry tree `migrateV1ToV2` builds for a transcript that never had one.
  *
- * It gives every non-session record a fresh `id`, points its `parentId` at
- * the record before it, and turns a compaction's `firstKeptEntryIndex` into
- * the `firstKeptEntryId` of the record at that index. Those names are the
- * migration's own, so they are not compared as names — but the relations
- * they stand for are the conversation's branch and compaction structure, and
- * those are compared: the archived name of a parent must map to the live
- * name of the live record's parent. Exempting the fields outright would let
- * a reparented or re-targeted history read as the same session, and the
- * context the session rebuilds from it would be a different conversation.
+ * A genuine version 1 transcript has no entry names at all, so there is
+ * nothing on the archived side to map from. What the migration does is
+ * positional: every non-session record gets a fresh `id`, its `parentId` is
+ * the record immediately before it — null for the first — and a compaction's
+ * `firstKeptEntryIndex` becomes the `firstKeptEntryId` of the entry at that
+ * index, counting the session header as entry zero.
+ *
+ * So the relations are rebuilt here the same way and compared against what
+ * the live file says. The names themselves are not compared, because the
+ * migration chose them; the structure they describe is, because that is the
+ * conversation's branch and compaction shape. Exempting the fields outright
+ * would let a reparented or re-targeted history read as the same session,
+ * and the context rebuilt from it would be a different conversation.
  */
 class MigratedEntryTree {
-	readonly #liveIdByArchivedId = new Map<string, string>();
-	readonly #liveIdByIndex: (string | undefined)[] = [];
+	/** Live entry names by entry index, the session header being entry zero. */
+	readonly #liveIdByEntry: (string | undefined)[] = [];
 
-	/** Record one archived record's position and the live name it was given. */
-	note(index: number, archived: Record<string, unknown>, live: Record<string, unknown>): void {
-		const liveId = typeof live.id === "string" ? live.id : undefined;
-		this.#liveIdByIndex[index] = liveId;
-		if (typeof archived.id === "string" && liveId !== undefined) {
-			this.#liveIdByArchivedId.set(archived.id, liveId);
-		}
+	/** Record the live name of the entry at `entry`, the header being entry zero. */
+	note(entry: number, live: Record<string, unknown>): void {
+		this.#liveIdByEntry[entry] = typeof live.id === "string" ? live.id : undefined;
 	}
 
-	/** Whether the live record stands in the same place in the tree as the archived one. */
-	holdsRelations(archived: Record<string, unknown>, live: Record<string, unknown>): boolean {
-		if ("parentId" in archived || "parentId" in live) {
-			const archivedParent = archived.parentId;
-			const liveParent = live.parentId;
-			if (archivedParent === null || archivedParent === undefined) {
-				if (liveParent !== null && liveParent !== undefined) return false;
-			} else if (typeof archivedParent !== "string") {
-				return false;
-			} else if (this.#liveIdByArchivedId.get(archivedParent) !== liveParent) {
-				return false;
-			}
+	/** Whether the live record stands where the migration would have put it. */
+	holdsRelations(archived: Record<string, unknown>, live: Record<string, unknown>, entry: number): boolean {
+		if (typeof live.id !== "string") return false;
+		// The record before this one, or nothing when this is the first.
+		const expectedParent = entry > 1 ? this.#liveIdByEntry[entry - 1] : null;
+		const liveParent = live.parentId === undefined ? null : live.parentId;
+		if (liveParent !== expectedParent) return false;
+		const index = archived.firstKeptEntryIndex;
+		if (index === undefined && archived.firstKeptEntryId === undefined) {
+			return live.firstKeptEntryId === undefined;
 		}
-		const target = archived.firstKeptEntryIndex ?? archived.firstKeptEntryId;
-		if (target === undefined && live.firstKeptEntryId === undefined) return true;
-		const expected =
-			typeof target === "number"
-				? this.#liveIdByIndex[target]
-				: typeof target === "string"
-					? this.#liveIdByArchivedId.get(target)
-					: undefined;
-		return expected === live.firstKeptEntryId;
+		if (typeof index !== "number") return false;
+		return live.firstKeptEntryId === this.#liveIdByEntry[index];
 	}
 }
 
@@ -470,12 +461,18 @@ const MIGRATED_RECORD_FIELDS: Record<string, true> = {
 };
 
 /** Whether `holder` carries `held`, allowing for the migrations `version` has since been through. */
-function recordIsCarried(held: unknown, holder: unknown, version: number, tree: MigratedEntryTree): boolean {
+function recordIsCarried(
+	held: unknown,
+	holder: unknown,
+	version: number,
+	tree: MigratedEntryTree,
+	entry: number,
+): boolean {
 	if (typeof held !== "object" || held === null || Array.isArray(held)) return jsonContains(held, holder);
 	if (typeof holder !== "object" || holder === null || Array.isArray(holder)) return false;
 	const a = held as Record<string, unknown>;
 	const b = holder as Record<string, unknown>;
-	if (version < 2 && !tree.holdsRelations(a, b)) return false;
+	if (version < 2 && !tree.holdsRelations(a, b, entry)) return false;
 	for (const [key, value] of Object.entries(a)) {
 		if (version < 2 && MIGRATED_RECORD_FIELDS[key]) continue;
 		// `migrateV2ToV3` renames the `hookMessage` role to `custom`.
@@ -555,19 +552,20 @@ async function recordsAreCarried(archived: AsyncGenerator<string>, live: AsyncGe
 	if (!held || !holder || !headersAreOneSession(held, holder)) return false;
 	const version = typeof held.version === "number" ? held.version : 1;
 	const tree = new MigratedEntryTree();
-	for (let index = 0; ; index += 1) {
+	// Entry zero is the session header; the records follow it.
+	for (let entry = 1; ; entry += 1) {
 		const next = await nextRecord(archived);
 		if (!next) return true;
 		const onto = await nextRecord(live);
 		if (!onto) return false;
 		const a = next.value;
 		const b = onto.value;
-		if (typeof a === "object" && a !== null && typeof b === "object" && b !== null) {
-			tree.note(index, a as Record<string, unknown>, b as Record<string, unknown>);
+		if (typeof b === "object" && b !== null && !Array.isArray(b)) {
+			tree.note(entry, b as Record<string, unknown>);
 		}
-		if (next.raw === onto.raw) continue;
+		if (version >= 2 && next.raw === onto.raw) continue;
 		if (a === undefined || b === undefined) return false;
-		if (!recordIsCarried(a, b, version, tree)) return false;
+		if (!recordIsCarried(a, b, version, tree, entry)) return false;
 	}
 }
 
@@ -604,11 +602,16 @@ async function survivesRemovalOf(destination: string, destinationStat: Stats, so
  * standing on observations taken before it started; checking a file by size
  * and inode leaves it standing on the wrong question, because content that
  * changed to the same length passes both. So each file is compared in full
- * through a descriptor of its own and unlinked immediately after, which is
- * the narrowest order POSIX allows. A live writer that ignores the gc lock
- * can still change a file in the gap between one entry's check and its
- * unlink; nothing short of holding the whole tree open closes that, and the
- * lock is what cooperating writers use.
+ * through a descriptor of its own and unlinked immediately after.
+ *
+ * That narrows the exposure; it does not close it. A descriptor pins an
+ * inode's lifetime, not its content and not what its pathname means, so a
+ * writer that changes the live file at any point during the comparison — not
+ * merely between the check and the unlink — can leave the archive deleted
+ * against bytes that are already gone. Nothing available here closes that.
+ * The contract is the one the rest of the session storage uses: the gc lock
+ * and the session's ownership lease, both of which the restore takes. A
+ * writer that honours neither is outside it.
  */
 async function removeArchiveTreeOnceCarried(source: string, destination: string, archiveRoot: string): Promise<void> {
 	const stat = await fs.lstat(source).catch(error => {
@@ -800,10 +803,11 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * Whether the file at `candidatePath` holds every byte the already-open
  * `archived` handle has, and is not that same file.
  *
- * The archive phase asks this immediately before it publishes a replacement
- * for an artifact the archive already holds, with the existing archived copy
- * pinned by the descriptor it read: a path swapped underneath cannot turn the
- * answer into permission to overwrite something that was never examined.
+ * The archive phase asks this about the copy it has staged, with the
+ * existing archived file pinned by the descriptor it read, so the comparison
+ * is of the file rather than of whatever its name points at by then. It is
+ * only ever an answer about what was read: the caller writes over nothing on
+ * the strength of it, and publishes only where there is nothing to replace.
  */
 export async function archivedHandleIsHeldBy(
 	archived: fs.FileHandle,
@@ -835,6 +839,12 @@ export async function isSamePath(source: string, destination: string): Promise<b
 	return a !== undefined && b !== undefined && a.dev === b.dev && a.ino === b.ino;
 }
 
+/** The session id an archived transcript's name carries. */
+function archivedSessionId(archiveFile: string): string {
+	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
+	return stem.slice(stem.lastIndexOf("_") + 1) || stem;
+}
+
 /**
  * Put an archived transcript back where it belongs, with its artifact tree,
  * and drop the archive copy so the session exists in exactly one place.
@@ -842,6 +852,12 @@ export async function isSamePath(source: string, destination: string): Promise<b
  * The caller must hold the gc lock: between the transcript landing and the
  * artifact tree following it, the session exists in both trees, and an
  * archive phase running in that window would move the halves past each other.
+ *
+ * The session's ownership lease is taken too, and a restore refuses while
+ * another process holds it. Naming the lease as the contract and then moving
+ * a session under the very process that holds it is the one writer this must
+ * never race, and it is exactly the writer the archive phase already refuses
+ * to touch.
  */
 export async function restoreArchivedSessionLocked(archiveFile: string, agentDir?: string): Promise<RestoredSession> {
 	const sessionPath = liveSessionPathForArchive(archiveFile, agentDir);
@@ -851,42 +867,53 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				`Inflate it yourself with \`gunzip -c "${archiveFile}" > <file>.jsonl\`; omp does not move files outside its own storage.`,
 		);
 	}
-	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
-	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
-	let bytes: number;
-	if (await statIfPresent(sessionPath)) {
-		// The transcript is already live. Either another process restored it
-		// while this one waited for the lock, or an earlier attempt moved the
-		// transcript and failed on its artifact tree. Finishing that attempt is
-		// the only way the tree comes home, so a retry resumes rather than
-		// refusing — for this session, carried on or not, never another.
-		if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
-			throw new Error(`Refusing to restore over a different session file: ${sessionPath}`);
-		}
-		bytes = (await fs.stat(sessionPath)).size;
-	} else {
-		bytes = await inflateArchivedTranscript(archiveFile, sessionPath);
+	const lease = tryAcquireSessionLease(archivedSessionId(archiveFile));
+	if (!lease) {
+		throw new Error(
+			`Cannot restore "${archiveFile}": a running process owns this session. ` +
+				`Close it and run \`omp gc --restore\` again.`,
+		);
 	}
+	try {
+		const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
+		const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
+		let bytes: number;
+		if (await statIfPresent(sessionPath)) {
+			// The transcript is already live. Either another process restored it
+			// while this one waited for the lock, or an earlier attempt moved the
+			// transcript and failed on its artifact tree. Finishing that attempt is
+			// the only way the tree comes home, so a retry resumes rather than
+			// refusing — for this session, carried on or not, never another.
+			if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
+				throw new Error(`Refusing to restore over a different session file: ${sessionPath}`);
+			}
+			bytes = (await fs.stat(sessionPath)).size;
+		} else {
+			bytes = await inflateArchivedTranscript(archiveFile, sessionPath);
+		}
 
-	const notRestored: string[] = [];
-	const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
-	let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
-	if (hasArtifacts) {
-		try {
-			await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
-			artifactsRestored = true;
-		} catch (error) {
-			notRestored.push(
-				`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+		const notRestored: string[] = [];
+		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
+		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
+		if (hasArtifacts) {
+			try {
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
+				artifactsRestored = true;
+			} catch (error) {
+				notRestored.push(
+					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
 		}
+		// Keep the archive when its artifacts did not come with it, so the next
+		// attempt still has both halves to work from.
+		if (artifactsRestored || !hasArtifacts) await fs.rm(archiveFile, { force: true });
+		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
+	} finally {
+		lease.release();
 	}
-	// Keep the archive when its artifacts did not come with it, so the next
-	// attempt still has both halves to work from.
-	if (artifactsRestored || !hasArtifacts) await fs.rm(archiveFile, { force: true });
-	return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 }
 
 /**

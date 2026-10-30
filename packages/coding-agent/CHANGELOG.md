@@ -59,6 +59,10 @@
 - A transcript is never restored or archived over one that appeared at its path in the meantime ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - A version 1 transcript whose entry tree was reparented, or whose compaction target moved, is refused instead of accepted as the same session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - A session renamed after a half-finished restore can be restored again, instead of refusing for ever with "a different session file" ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` never writes over anything the archive already holds: a destination holding exactly what would be written is left alone, anything else is reported with both copies intact, and the archived transcript is published with `link` like the artifacts already were ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A failed archive run identifies what it created by the entry rather than the name, so a file something else put at one of those names is left alone ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore` takes the session's ownership lease and refuses while a running process holds it, the same way archiving already did ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A genuine version 1 transcript — no entry ids, no parents — restores after the writer migrates it, and a migrated transcript whose entry tree or compaction target moved is still refused ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

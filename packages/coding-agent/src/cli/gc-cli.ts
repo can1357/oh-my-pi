@@ -1038,16 +1038,22 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 		? await fs.realpath(source).catch(() => source)
 		: source;
 	let sourceGone = false;
-	let renamed = false;
+	let published = false;
 	try {
 		const expected = await digestStream(Bun.file(source).stream());
+		// A killed run can leave this name linked to the archive it published;
+		// writing onto it would damage that archive before anything read it.
+		await fs.rm(tempPath, { force: true });
 		await pipeline(
 			Bun.file(source).stream(),
 			createGzip({ level: 9 }),
 			(await fs.open(tempPath, "w")).createWriteStream(),
 		);
-		await fs.rename(tempPath, destination);
-		renamed = true;
+		// `link`, not `rename`: the caller has already established that nothing
+		// of this session's is at the destination, so anything there now is
+		// someone else's, and `EEXIST` says so rather than writing over it.
+		await fs.link(tempPath, destination);
+		published = true;
 		const stored = await digestArchivedSessionFile(destination);
 		if (stored.hash !== expected.hash) {
 			throw new Error(
@@ -1058,22 +1064,43 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 		sourceGone = true;
 		return { orphanedTarget: sourceReal === source ? undefined : sourceReal };
 	} catch (error) {
-		await fs.rm(tempPath, { force: true });
-		if (renamed && !sourceGone) await fs.rm(destination, { force: true });
+		if (published && !sourceGone) await fs.rm(destination, { force: true });
 		throw error;
+	} finally {
+		await fs.rm(tempPath, { force: true });
 	}
+}
+
+/** One entry this copy created, as the entry it created — not merely the name it used. */
+interface ArchiveCreation {
+	path: string;
+	dev: number;
+	ino: number;
 }
 
 /** What one copy into the archive created, so a failure can undo exactly that. */
 interface ArchiveCopyState {
 	brokenLinks: number;
-	/** Absolute paths this copy created, deepest last. */
-	created: string[];
+	/** Entries this copy created, shallowest first. */
+	created: ArchiveCreation[];
+}
+
+/** Remember an entry this copy made, by the entry and not by its name. */
+async function noteCreation(target: string, state: ArchiveCopyState): Promise<void> {
+	const made = await statIfPresent(target);
+	if (made) state.created.push({ path: target, dev: made.dev, ino: made.ino });
 }
 
 /**
- * Publish one live file into the archive, refusing to destroy archived bytes
- * the live copy does not have.
+ * Publish one live file into the archive.
+ *
+ * Nothing already in the archive is written over. There is no way to replace
+ * a directory entry only if it still names the file that was examined —
+ * `rename` takes whatever is at the path when it runs — so the archive never
+ * replaces: a destination that already holds exactly what would be written
+ * is left alone, and a destination holding anything else is reported with
+ * both copies intact. A half-finished artifact tree is finished by restoring
+ * the session and archiving it again, not by writing over the half.
  *
  * The live content is staged beside its destination first, so the comparison
  * runs against the bytes that are actually about to land rather than against
@@ -1084,18 +1111,9 @@ interface ArchiveCopyState {
  * Only the destination's absence may skip that comparison. A destination
  * that cannot be opened — no permission, an I/O error — is not an empty
  * slot, and reading it as one is how a file nobody could read gets written
- * over.
- *
- * The live file being the archived file under another name — a hard link, a
- * symlink onto it — is refused outright rather than archived over itself.
- *
- * Publication is a temp plus a link or a rename, never a write into the
- * archived file: writing in place makes an interrupted repair a truncated
- * archive, and truncates every other name of that inode along with it. An
- * absent destination is published with `link`, which fails rather than
- * replace a file that appeared in the meantime; a destination being repaired
- * is replaced whole, so an interruption leaves either the old copy or the
- * new one.
+ * over. The live file being the archived file under another name — a hard
+ * link, a symlink onto it — is refused outright rather than archived over
+ * itself.
  */
 async function publishArtifactIntoArchive(
 	source: string,
@@ -1105,6 +1123,11 @@ async function publishArtifactIntoArchive(
 ): Promise<void> {
 	const tempPath = sessionStagingPath(destination);
 	try {
+		// A killed run can leave this name linked to the file it published, and
+		// `copyFile` onto it would truncate that archived file before anything
+		// looked at it. Dropping the name first leaves the archive's own name
+		// on the data.
+		await fs.rm(tempPath, { force: true });
 		await fs.copyFile(source, tempPath);
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
@@ -1112,7 +1135,7 @@ async function publishArtifactIntoArchive(
 		});
 		if (!archived) {
 			await fs.link(tempPath, destination);
-			state.created.push(destination);
+			await noteCreation(destination, state);
 			return;
 		}
 		try {
@@ -1123,17 +1146,22 @@ async function publishArtifactIntoArchive(
 						`archiving it would write the archive over its own file`,
 				);
 			}
-			if (verified.isFile() && !(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
-				throw new Error(
-					`the archive already holds ${destination}, and ${source} does not hold its bytes; ` +
-						`archiving would overwrite the archived copy with a shorter or different one. ` +
-						`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
-				);
+			if (
+				verified.isFile() &&
+				verified.size === (await fs.stat(tempPath)).size &&
+				(await archivedHandleIsHeldBy(archived, verified, tempPath))
+			) {
+				// The archive already holds exactly this. Nothing to write.
+				return;
 			}
 		} finally {
 			await archived.close();
 		}
-		await fs.rename(tempPath, destination);
+		throw new Error(
+			`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
+				`the archive is left as it is. Bring the session home first (\`omp gc --restore\`) and archive it again, ` +
+				`or move one of the two copies aside`,
+		);
 	} finally {
 		await fs.rm(tempPath, { force: true });
 	}
@@ -1168,12 +1196,15 @@ async function copyArtifactEntryIntoArchive(
 		const standing = await statIfPresent(destination);
 		await fs.mkdir(destination, { recursive: true });
 		if (!standing) {
+			// Recorded before the mode is set: a `chmod` that fails must still
+			// leave this directory to the rollback, or a retry finds it standing
+			// at whatever the umask gave it and keeps that mode for good.
+			await noteCreation(destination, state);
 			// A directory deliberately kept private stays private in the archive:
 			// `mkdir` applies the umask, which would widen a `0700` tree to
 			// `0755`. A directory the archive already holds keeps its own mode —
 			// merging into a private one must not widen it to the live tree's.
 			await fs.chmod(destination, stat.mode & 0o7777);
-			state.created.push(destination);
 		}
 		// Sorted, so a run that fails part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
@@ -1187,21 +1218,24 @@ async function copyArtifactEntryIntoArchive(
 
 /**
  * Undo one failed copy into the archive, and nothing more.
- *
- * What goes is what this copy made, recorded as it made it — not every path
- * absent from a snapshot taken before it started. Those are different sets
- * the moment anything else writes into the tree: a file somebody created at
- * a destination the copy then refused to replace is absent from the
- * snapshot, and removing it would undo with one hand what `link` refused to
- * do with the other. Deepest last, so a directory is empty when its turn
+
+ * What goes is what this copy made, and only while the name still holds what
+ * it made. A pathname is not ownership in either direction: a file somebody
+ * created at a destination the copy refused to replace must not be removed
+ * because its name is unfamiliar, and a file somebody put at a name this
+ * copy did once create must not be removed because the name is familiar.
+ * The entry is identified by `dev`/`ino`, so an entry that was replaced
+ * since is left alone. Deepest first, so a directory is empty when its turn
  * comes.
  */
-async function removeTreeAdditions(created: readonly string[]): Promise<void> {
-	for (const target of [...created].reverse()) {
+async function removeTreeAdditions(created: readonly ArchiveCreation[]): Promise<void> {
+	for (const made of [...created].reverse()) {
+		const standing = await fs.lstat(made.path).catch(() => undefined);
+		if (!standing || standing.dev !== made.dev || standing.ino !== made.ino) continue;
 		// A directory goes only when it is empty: something else may have put a
 		// file in it since, and that file is not this run's to remove.
-		await fs.unlink(target).catch(async () => {
-			await fs.rmdir(target).catch(() => undefined);
+		await fs.unlink(made.path).catch(async () => {
+			await fs.rmdir(made.path).catch(() => undefined);
 		});
 	}
 }
