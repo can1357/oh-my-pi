@@ -178,8 +178,30 @@ export async function transactionAsync<T>(db: Database, fn: () => Promise<T>): P
 	}
 }
 
+const closeCallbacks = new WeakMap<Database, Set<() => void>>();
+
+export function onDatabaseClose(db: Database, callback: () => void): void {
+	let callbacks = closeCallbacks.get(db);
+	if (callbacks === undefined) {
+		callbacks = new Set();
+		closeCallbacks.set(db, callbacks);
+	}
+	callbacks.add(callback);
+}
+
 export function closeQuietly(db: Database | undefined | null): void {
 	if (db === undefined || db === null) return;
+	const callbacks = closeCallbacks.get(db);
+	if (callbacks !== undefined) {
+		closeCallbacks.delete(db);
+		for (const callback of callbacks) {
+			try {
+				callback();
+			} catch {
+				// Best-effort cleanup.
+			}
+		}
+	}
 	try {
 		db.close();
 	} catch {

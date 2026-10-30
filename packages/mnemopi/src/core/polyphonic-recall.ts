@@ -1,7 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { type Env, polyphonicRecallEnabled } from "../config";
-import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { closeQuietly, type DatabasePath, onDatabaseClose, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
@@ -198,20 +199,104 @@ function normalizeVector(vector: readonly number[] | Float32Array): Float32Array
 	return out;
 }
 
-function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
+interface CachedEmbedding {
+	readonly rawJson: string;
+	readonly values: Float64Array;
+	readonly norm: number;
+	readonly byteSize: number;
+}
+
+const MAX_EMBEDDING_CACHE_ENTRIES = 10_000;
+const MAX_EMBEDDING_CACHE_BYTES = 16 * 1024 * 1024;
+const embeddingCachesByDb = new WeakMap<Database, LRUCache<string, CachedEmbedding>>();
+
+function getEmbeddingCache(db: Database): LRUCache<string, CachedEmbedding> {
+	let cache = embeddingCachesByDb.get(db);
+	if (cache === undefined) {
+		const created = new LRUCache<string, CachedEmbedding>({
+			max: MAX_EMBEDDING_CACHE_ENTRIES,
+			maxSize: MAX_EMBEDDING_CACHE_BYTES,
+			sizeCalculation: entry => entry.byteSize,
+		});
+		embeddingCachesByDb.set(db, created);
+		onDatabaseClose(db, () => {
+			created.clear();
+			embeddingCachesByDb.delete(db);
+		});
+		cache = created;
+	}
+	return cache;
+}
+
+interface DeferredAdmission {
+	readonly memoryId: string;
+	readonly entry: CachedEmbedding;
+}
+
+interface VectorScanState {
+	hitEntries: number;
+	hitBytes: number;
+	readonly deferred: DeferredAdmission[];
+	deferredBytes: number;
+}
+
+function cosineAgainstRow(
+	cache: LRUCache<string, CachedEmbedding>,
+	unit: Float32Array,
+	row: EmbeddingRow,
+	scanState: VectorScanState,
+): number | null {
+	const cached = cache.get(row.memory_id);
+	if (cached !== undefined) {
+		if (cached.rawJson === row.embedding_json) {
+			const { values, norm } = cached;
+			if (values.length !== unit.length || norm === 0) return null;
+			scanState.hitEntries++;
+			scanState.hitBytes += cached.byteSize;
+			let dot = 0;
+			for (let i = 0; i < values.length; i++) {
+				dot += (unit[i] as number) * (values[i] as number);
+			}
+			return dot / norm;
+		}
+		cache.delete(row.memory_id);
+	}
+
+	let raw: unknown;
+	try {
+		raw = JSON.parse(row.embedding_json) as unknown;
+	} catch {
+		return null;
+	}
 	if (!Array.isArray(raw) || raw.length !== unit.length) return null;
+
+	const byteSize = row.memory_id.length * 2 + row.embedding_json.length * 2 + raw.length * 8 + 64;
+	const shouldDefer =
+		scanState.hitEntries + scanState.deferred.length < MAX_EMBEDDING_CACHE_ENTRIES &&
+		scanState.hitBytes + scanState.deferredBytes + byteSize <= MAX_EMBEDDING_CACHE_BYTES;
+
+	const values = shouldDefer ? new Float64Array(raw.length) : null;
 	let normSq = 0;
 	let dot = 0;
 	for (let i = 0; i < raw.length; i++) {
 		const value = raw[i];
 		if (typeof value !== "number" || !Number.isFinite(value)) return null;
+		if (values !== null) values[i] = value;
 		normSq += value * value;
-		const unitValue = unit[i];
-		if (unitValue === undefined) return null;
-		dot += unitValue * value;
+		dot += (unit[i] as number) * value;
 	}
 	if (normSq === 0) return null;
-	return dot / Math.sqrt(normSq);
+	const norm = Math.sqrt(normSq);
+
+	if (values !== null) {
+		scanState.deferred.push({
+			memoryId: row.memory_id,
+			entry: { rawJson: row.embedding_json, values, norm, byteSize },
+		});
+		scanState.deferredBytes += byteSize;
+	}
+
+	return dot / norm;
 }
 
 function queryTokens(query: string): string[] {
@@ -368,15 +453,16 @@ export class PolyphonicRecallEngine {
 			return [];
 		}
 
+		const cache = getEmbeddingCache(this.db);
+		const scanState: VectorScanState = {
+			hitEntries: 0,
+			hitBytes: 0,
+			deferred: [],
+			deferredBytes: 0,
+		};
 		const byId = new Map<string, VoiceRecallResult>();
 		for (const row of rows) {
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(row.embedding_json) as unknown;
-			} catch {
-				continue;
-			}
-			const cosine = cosineAgainstUnit(queryUnit, parsed);
+			const cosine = cosineAgainstRow(cache, queryUnit, row, scanState);
 			if (cosine === null || cosine < VECTOR_VOICE_MIN_COSINE) continue;
 			const similarity = (cosine + 1) / 2;
 			const existing = byId.get(row.memory_id);
@@ -394,6 +480,21 @@ export class PolyphonicRecallEngine {
 				});
 			}
 		}
+
+		let admittedEntries = scanState.hitEntries;
+		let admittedBytes = scanState.hitBytes;
+		for (const { memoryId, entry } of scanState.deferred) {
+			if (
+				admittedEntries + 1 > MAX_EMBEDDING_CACHE_ENTRIES ||
+				admittedBytes + entry.byteSize > MAX_EMBEDDING_CACHE_BYTES
+			) {
+				continue;
+			}
+			admittedEntries++;
+			admittedBytes += entry.byteSize;
+			cache.set(memoryId, entry);
+		}
+
 		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId)).slice(0, 20);
 	}
 	/**
@@ -616,6 +717,11 @@ export class PolyphonicRecallEngine {
 		};
 	}
 	close(): void {
+		const cache = embeddingCachesByDb.get(this.db);
+		if (cache !== undefined) {
+			cache.clear();
+			embeddingCachesByDb.delete(this.db);
+		}
 		if (this.ownsConnection) closeQuietly(this.db);
 	}
 
