@@ -278,10 +278,13 @@ describe("EventController run status while prompts wait on the user", () => {
 		for (let tick = 0; tick < 20; tick++) await Promise.resolve();
 	});
 
-	it("keeps a tool's own question when its dialog opens the session wait", async () => {
-		// The tool UI brackets its approval through `trackUserWaits`, whose label
-		// is generic. The prompt recorded for that tool call names the question
-		// and its kind, so that is what the title and the OSC record report.
+	it("names a tool's own question for a dialog whose frame names nothing", async () => {
+		// A dialog that gave no words of its own is published under the generic
+		// label its wrapper's method explains. The prompt recorded for the call
+		// being asked about names the operation and its kind, so that is what the
+		// title and the OSC record report while the dialog stands — and once it
+		// settles nothing is being asked, even though the approved call runs on
+		// until its own end.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt" });
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
@@ -293,7 +296,7 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
 
 		await controller.handleEvent({ type: "user_wait_end" });
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
@@ -331,6 +334,50 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		await controller.handleEvent({ type: "user_wait_end" });
 		await controller.handleEvent(toolEnd("bash-2", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("names the approval still waiting as soon as its frame is published", async () => {
+		// The first approval is answered while its call runs on: the session
+		// publishes the second dialog at once, but the first call's
+		// `tool_execution_end` can be far later (a long command, a tool awaiting
+		// another). Reporting the record of the answered call until then leaves
+		// the status line naming an operation nobody is being asked about.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = {
+			name: "bash",
+			label: "Bash",
+			formatApprovalDetails: (args: { command: string }) => [`Command: ${args.command}`],
+		} as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const secondDialog = "Allow tool: bash\nCommand: echo second";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo first" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: "Allow tool: bash\nCommand: echo first" });
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "echo second" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: secondDialog, kind: "permission" });
+
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: secondDialog });
+	});
+
+	it("returns to working when the last dialog settles while an approved call runs on", async () => {
+		// Nothing waits on a person once the bracket closes. The approved call is
+		// executing, not asking, so its approval record must not hold the run at
+		// `blocked` for the rest of the command.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "sleep 60" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: "Allow tool: bash", kind: "permission" });
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 });

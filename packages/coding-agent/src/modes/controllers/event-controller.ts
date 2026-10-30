@@ -6,6 +6,7 @@ import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-uti
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
+import { UNNAMED_DIALOG_PROMPTS } from "../../extensibility/extensions/user-wait";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import {
@@ -432,20 +433,20 @@ export class EventController {
 			irc_message: e => this.#handleIrcMessage(e),
 			user_wait_start: async event => {
 				this.#sessionUserWait = { state: "blocked", kind: event.kind ?? "question", msg: event.prompt };
-				// A tool's own dialog opens this bracket too, through the extension
-				// UI tracker; the frame it publishes carries that dialog's own
-				// words and kind. The prompt recorded for the tool call is the
-				// same wait seen from the run's side, so either names the
-				// operation; it stays the one reported, and the session wait is
-				// what is left when no tool prompt is waiting — a dialog with no
-				// run behind it, or one replayed onto a rebuilt view.
-				setRunStatus(this.#blockingPrompts.values().next().value ?? this.#sessionUserWait);
+				setRunStatus(this.#reportedStatus());
 				this.ctx.ui.requestRender();
 			},
 			user_wait_end: async () => {
 				if (!this.#sessionUserWait) return;
 				this.#sessionUserWait = undefined;
-				const status = this.#statusWithNoSessionWait();
+				// No dialog waits on a person any more, so no tool call does
+				// either: every prompt a call raises opens this bracket. What is
+				// left in the map is the approval record of a call that was
+				// answered and is now executing — its execution is not its
+				// approval, and keeping it would hold the run at `blocked` for
+				// the rest of a long command.
+				this.#blockingPrompts.clear();
+				const status = this.#reportedStatus();
 				setRunStatus(status);
 				// A run that handed control to background work keeps the OSC `working`
 				// record but an idle title (the async-only policy in #handleAgentEnd).
@@ -1039,15 +1040,30 @@ export class EventController {
 	}
 
 	/**
-	 * What the run reports when no session dialog is open: a tool call still
-	 * waiting on the user outranks the run, and with nothing waiting the report
-	 * follows the run — a dialog that opened outside any run leaves the session
-	 * idle rather than claiming work nobody started.
+	 * What the run reports right now. An open session dialog is the only live
+	 * record of which dialog a person is being asked to answer, so it ranks
+	 * first: the approval record a tool call carries outlives the answer — it
+	 * is dropped at the call's `tool_execution_end`, not when the person
+	 * answered — and preferring it names an operation already approved.
+	 *
+	 * `local` is the record the caller holds for a call waiting on the user,
+	 * and defaults to the oldest one still waiting: a call that just raised its
+	 * own prompt passes that prompt, since it is the one now in front. It
+	 * reports when no dialog is open — a host that brackets no dialog has only
+	 * these records — and it also names a frame that names nothing itself
+	 * ({@link UNNAMED_DIALOG_PROMPTS}: an SDK caller that passed no prompt, a
+	 * dialog with no title). With neither, the report follows the run: a dialog
+	 * that opened outside any run leaves the session idle rather than claiming
+	 * work nobody started.
 	 */
-	#statusWithNoSessionWait(): RunStatus {
-		return (
-			this.#blockingPrompts.values().next().value ?? (this.#runActive ? { state: "working" } : { state: "idle" })
-		);
+	#reportedStatus(local: RunStatus | undefined = this.#blockingPrompts.values().next().value): RunStatus {
+		const wait = this.#sessionUserWait;
+		if (wait) {
+			return wait.state === "blocked" && wait.msg !== undefined && UNNAMED_DIALOG_PROMPTS.has(wait.msg)
+				? (local ?? wait)
+				: wait;
+		}
+		return local ?? (this.#runActive ? { state: "working" } : { state: "idle" });
 	}
 
 	/**
@@ -2023,10 +2039,10 @@ export class EventController {
 		const blocked = this.#blockingPrompt(renderToolName, event.args);
 		if (blocked) {
 			this.#blockingPrompts.set(event.toolCallId, blocked);
-			// A session dialog outranks the run's own prompt, the same way the
-			// tool-execution-end path below resolves it: the person still owes an
-			// answer to the dialog, and the title and OSC record must name it.
-			setRunStatus(this.#sessionUserWait ?? blocked);
+			// An open dialog outranks this call's own prompt, which has not been
+			// raised yet: the person owes that dialog the answer, and the title
+			// and OSC record must name it.
+			setRunStatus(this.#reportedStatus(blocked));
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -2270,8 +2286,8 @@ export class EventController {
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
-			// A session dialog outranks the run here too.
-			setRunStatus(this.#sessionUserWait ?? this.#blockingPrompts.values().next().value ?? { state: "working" });
+			// An open dialog outranks the remaining records here too.
+			setRunStatus(this.#reportedStatus());
 		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
