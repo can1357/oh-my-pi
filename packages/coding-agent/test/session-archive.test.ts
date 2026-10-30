@@ -1950,3 +1950,65 @@ test("archiving over a different archived session names both halves to move", as
 	expect(errors).toContain(archivedArtifacts);
 	expect(errors).toContain("Moving the transcript alone is not enough");
 });
+
+test("work written over a restored artifact after its proof puts the archive back", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE ORIGINAL");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+	await archiveEverything();
+
+	// Past every sample a restore can take: the live file is replaced after
+	// its own proof, while the archive is being set aside. Nothing can be
+	// asked about the owners that would catch this — only the pass over the
+	// retained originals, which is why they are retained.
+	let replaced = false;
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+		await realRename(source, destination);
+		if (replaced || !String(source).startsWith(`${archivedArtifacts}${path.sep}`)) return;
+		replaced = true;
+		await Bun.write(path.join(liveArtifacts, "a.log"), "NEW CHILD OWNER WORK");
+	});
+	let restored: RestoredSession | undefined;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		rename.mockRestore();
+	}
+
+	expect(restored?.artifactsRestored).toBe(false);
+	// Put back exactly as it was, both halves of the archive and all of it.
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("UNIQUE ORIGINAL");
+	expect(await Bun.file(path.join(archivedArtifacts, "z.log")).text()).toBe("SECOND");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a transcript that diverges after its artifacts came home puts the archive back", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ARTIFACT");
+	await archiveEverything();
+	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+
+	// The live transcript is replaced once the artifact tree has been proved
+	// and its retained copy dropped, which is the last moment the archived
+	// transcript could go.
+	let diverged = false;
+	const realRm = fs.rm;
+	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+		const done = String(target).startsWith(path.dirname(archiveFile)) && String(target).endsWith(".tmp");
+		if (done && !diverged) {
+			diverged = true;
+			await Bun.write(sessionFile, sessionBody(other, "ANOTHER SESSION", root));
+		}
+		return await realRm(target, options);
+	});
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("no longer holds");
+	} finally {
+		rm.mockRestore();
+	}
+
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
