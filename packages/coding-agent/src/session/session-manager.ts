@@ -873,8 +873,14 @@ async function emptyPinnedDirectory(
 		// and knows nothing at all about an object it never placed. Reading
 		// the one claim as the other is how a sweep comes to delete a file
 		// somebody else put there — the tree is left whole instead, and said
-		// so, which costs the disk the copy was going to free and loses
-		// nothing.
+		// so.
+		//
+		// What that costs is retention rather than a delay: nothing collects
+		// such a tree later, and it outlives the session it was being copied
+		// for. A record durable enough for the next process to use is possible
+		// — written as the copy goes, read conservatively, anything missing or
+		// not matching meaning keep — and would turn this into recovery. It is
+		// not here, and this is the conservative half of it.
 		if (!created) {
 			logger.warn("An abandoned session artifact staging tree is not this process's to empty; left whole", {
 				dir: dir.path,

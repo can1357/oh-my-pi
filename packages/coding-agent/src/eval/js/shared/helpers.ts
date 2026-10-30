@@ -2,7 +2,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { ARTIFACT_STAGING_SUFFIX } from "../../../session/artifact-staging";
 import type { JsStatusEvent } from "./types";
 
 export interface HelperOptions {
@@ -142,13 +141,12 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
  * falls back to the read tool, which resolves through the manager.
  */
 async function resolveArtifactPath(root: string, id: string): Promise<string | undefined> {
-	// A fork's inherited artifacts arrive by copy, and a copy into a directory
-	// that already has artifacts of its own arrives one entry at a time. The
-	// host's readers wait for it; this one runs in a worker with no sight of
-	// that, so it asks the directory instead: a staging tree beside the
-	// artifacts dir means a copy is in flight, and half an inheritance is not
-	// an answer. The miss falls back to the read tool, which does wait.
-	if (await artifactCopyInFlight(root)) return undefined;
+	// Whether the directory is the session's yet is not a question this side
+	// can answer — a staging tree beside it is a hint that is wrong in both
+	// directions, absent while a copy that has announced itself has yet to
+	// create one, and present forever after a copy that was killed. The host
+	// holds the cell until its copies have settled (`awaitEvalArtifactsSettled`)
+	// precisely so that this listing is the session's own.
 	let files: string[];
 	try {
 		files = await fs.readdir(root);
@@ -158,19 +156,6 @@ async function resolveArtifactPath(root: string, id: string): Promise<string | u
 	}
 	const name = files.find(file => file.startsWith(`${id}.`));
 	return name === undefined ? undefined : path.join(root, name);
-}
-
-/** Whether a copy is building a tree to publish into `root` (see `ARTIFACT_STAGING_SUFFIX`). */
-async function artifactCopyInFlight(root: string): Promise<boolean> {
-	const base = `${path.basename(root)}.`;
-	let siblings: string[];
-	try {
-		siblings = await fs.readdir(path.dirname(root));
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		return false;
-	}
-	return siblings.some(name => name.startsWith(base) && name.endsWith(ARTIFACT_STAGING_SUFFIX));
 }
 
 /** Resolve an internal-URL relative path under its root, mirroring the host

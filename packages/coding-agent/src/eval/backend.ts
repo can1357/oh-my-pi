@@ -1,5 +1,6 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
+import { whenArtifactCopiesSettle } from "../session/session-manager";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -74,6 +75,30 @@ export interface ExecutorBackend {
 	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability>;
 	/** Execute one cell. Caller invokes once per cell and aggregates results. */
 	execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult>;
+}
+
+/**
+ * Hold a cell until any artifact copy into this session's artifacts directory
+ * has finished.
+ *
+ * The helpers that serve `artifact://<n>` inside a cell run where the readiness
+ * table cannot be reached — a worker for JavaScript, a subprocess kernel for
+ * Python — and both resolve the id by listing the directory. A directory is a
+ * snapshot, not a protocol: during a merge it holds some of the inherited
+ * artifacts and not the rest, and before the staging tree exists it holds none
+ * of them while a copy is already under way. So the question is asked on this
+ * side, where the answer is kept, and asked before the cell starts rather than
+ * by each reader inside it.
+ *
+ * It costs the cell the time the copy has left, and only while one is running:
+ * a copy announces itself for as long as it is going on and for no longer. The
+ * caller's signal cancels the wait, because a pending answer is still not
+ * something to make a cancelled cell sit through.
+ */
+export async function awaitEvalArtifactsSettled(session: ToolSession, signal?: AbortSignal): Promise<void> {
+	const dir = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+	if (!dir) return;
+	await whenArtifactCopiesSettle(dir, signal);
 }
 
 /**
