@@ -104,6 +104,8 @@ objc2-core-foundation = "=0.3.2"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+# Match terminfo's build-time phf_shared features.
+phf_shared = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
@@ -123,6 +125,24 @@ xkeysym = "=0.2.1"
 napi-build.workspace = true
 shlex.workspace = true
 syntect.workspace = true
+# Match runtime features for dependencies shared with build scripts and proc macros.
+bitflags = { version = "2", features = ["std"] }
+crc32fast = "1"
+data-encoding = "2"
+either = "1"
+fastrand = { version = "2", features = ["js"] }
+flate2 = { version = "1", features = ["zlib-rs"] }
+foldhash = "0.2"
+hashbrown = "0.17"
+indexmap = { version = "2", features = ["serde"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+peg-runtime = { version = "0.8", features = ["std"] }
+rand_core = { version = "0.6", features = ["std"] }
+serde = { workspace = true, features = ["rc", "alloc"] }
+serde_core = { version = "1", features = ["rc", "alloc"] }
+serde_json = { workspace = true, features = ["raw_value", "alloc"] }
+simd-adler32 = "0.3"
+zlib-rs = "0.6"
 
 # Transitive-only pin: see find-msvc-tools in the root workspace manifest.
 # `cfg(false)` is cargo's documented home for a version pin that no target

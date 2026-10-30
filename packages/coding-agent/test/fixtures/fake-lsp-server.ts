@@ -29,6 +29,7 @@ const didChange: Record<string, number[]> = {};
 const didClose: string[] = [];
 const notifications: string[] = [];
 const documents = new Map<string, { version: number; text: string }>();
+const workspaceFolders = new Set<string>();
 let nextServerRequestId = 1;
 const pendingServerRequests = new Map<
 	string | number,
@@ -102,6 +103,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				didChange: didChangeSnapshot,
 				didClose: [...didClose],
 				notifications: [...notifications],
+				workspaceFolders: [...workspaceFolders],
 			});
 			break;
 		}
@@ -112,6 +114,11 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		}
 		case "test/echo":
 			respond(id, message.params);
+			break;
+		case "test/junkHeader":
+			// A header block without Content-Length makes the client resync and warn.
+			process.stdout.write("Junk: header\r\n\r\n");
+			respond(id, null);
 			break;
 		case "test/serverRequest": {
 			const params = message.params as { method: string; params: unknown };
@@ -155,6 +162,12 @@ function handleNotification(message: JsonRpcMessage): void {
 			const { uri } = params.textDocument;
 			didClose.push(uri);
 			documents.delete(uri);
+			break;
+		}
+		case "workspace/didChangeWorkspaceFolders": {
+			const { event } = message.params as { event: { added: { uri: string }[]; removed: { uri: string }[] } };
+			for (const folder of event.removed) workspaceFolders.delete(folder.uri);
+			for (const folder of event.added) workspaceFolders.add(folder.uri);
 			break;
 		}
 		case "exit":

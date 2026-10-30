@@ -24,7 +24,6 @@ autobenches = false
 description = """
 Fast line oriented regex searching as a library.
 """
-homepage = "https://github.com/BurntSushi/ripgrep/tree/master/crates/searcher"
 documentation = "https://docs.rs/grep-searcher"
 readme = "README.md"
 keywords = [
@@ -36,6 +35,8 @@ keywords = [
 ]
 license = "Unlicense OR MIT"
 repository = "https://github.com/BurntSushi/ripgrep/tree/master/crates/searcher"
+
+[lints]
 
 [features]
 avx-accel = []

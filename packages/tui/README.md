@@ -521,6 +521,12 @@ SIXEL images encode off the JavaScript thread: the first render reserves the ima
 
 Supported formats: PNG, JPEG, GIF, WebP. Dimensions are parsed from the image headers automatically.
 
+### Figures
+
+`FigureMarkdown`, `SvgFigure`, and `TableChartFigure` size their images to a share of the terminal viewport. A surface shorter than the screen (an overlay, a pane) passes `maxRows: () => rows`, read on every render: the rows each figure may fill, a table chart's separator included. Zero hides a figure and keeps it from holding up transcript completion. Callers reserve room for prose and chrome themselves.
+
+Lowering the ceiling refits the drawn image at once and redraws it at the new size; a SIXEL reserves its rows while each re-encode runs off the JavaScript thread, as for a width change. Changing the ceiling of rows already committed to native scrollback forces a resync, so leave committed figures alone.
+
 ## Autocomplete
 
 ### CombinedAutocompleteProvider

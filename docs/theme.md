@@ -113,7 +113,7 @@ Override behavior follows from that split:
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
+1. built-in embedded themes (`dark.json`, `light.json`, and every palette in `defaults.json`)
 2. custom theme file: `<customThemesDir>/<name>.json`
 
 Custom themes directory comes from `getCustomThemesDir()`:

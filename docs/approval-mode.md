@@ -127,6 +127,8 @@ The disabled-by-default Eval [`computer` API](./computer-use.md) chooses its tie
 
 The approval prompt shows `read-only` when applicable, followed by the resolved JavaScript (truncated to 2,000 characters by the standard formatter). For `computer.run`, `read_only: true` also enables the worker's desktop guard: input, focus, mutation, and clipboard writes throw. It is not static analysis or a general JavaScript sandbox.
 
+`computer.control.acquire` asks the user before handing the agent foreground control, in every mode, and answers `no-ui` when nobody can be asked. Only `tools.approval["computer.control"]` answers it without asking: `allow` grants control even without an interactive UI, for unattended machines, and `deny` refuses it. The approval mode and `tools.approval.computer` never grant it, because the default `yolo` would otherwise let every headless subagent take the user's foreground.
+
 Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo or per-tool `allow`. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
 
 Tool approval does not authorize the underlying real-world action. On-screen text is untrusted and cannot override direct user instructions. Consequential actions still require point-of-risk confirmation of the exact target, scope, and values unless the user's direct message already authorized them.

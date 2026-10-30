@@ -12,6 +12,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -42,11 +43,18 @@ const REQUEST_ENVELOPE_BYTES = 64_000;
  * arm at all. So an assistant image never occupies an input-image slot, and
  * counting it inflates the drop budget until the clamp starts evicting user
  * and tool-result images the provider was perfectly happy to accept.
+ *
+ * A computer result on a route that sends its metadata screenshot counts as
+ * that one image, whatever its content holds ({@link sentScreenshotBytes}).
  */
-function countImages(context: Context): number {
+function countImages(context: Context, metadataWire: boolean): number {
 	let count = 0;
 	for (const message of context.messages) {
 		if (message.role === "assistant") continue;
+		if (sentScreenshotBytes(message, metadataWire) !== undefined) {
+			count++;
+			continue;
+		}
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type === "image") count++;
@@ -61,11 +69,56 @@ function inlineImageBytes(image: ImageContent, model: Model): number {
 	return image.data.length; // Base64 is ASCII, so character count equals JSON byte count.
 }
 
+/**
+ * Whether `model`'s request sends a computer result's `providerMetadata.screenshot` in place of its content image.
+ * The Responses wire does (`appendResponsesToolResultMessages`: a `computer_call_output`, or an assistant note quoting
+ * it on a model without native computer use), except Codex without native computer use, which unrolls the result to its
+ * content. Every other wire sends only the content. Factory Droid sends each model over its registry wire.
+ */
+function sendsComputerScreenshotMetadata(model: Model): boolean {
+	const api = model.api === "factory-droid-agent" ? resolveFactoryDroidPolicy(model)?.wire : model.api;
+	switch (api) {
+		case "openai-responses":
+		case "azure-openai-responses":
+			return true;
+		case "openai-codex-responses":
+			return model.supportsComputerUse === true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Inline bytes of a computer result's `providerMetadata.screenshot` on a route that sends it in place of the result's
+ * content ({@link sendsComputerScreenshotMetadata}), or `undefined` where the route sends the content. On such a route
+ * the result's content images never travel, and a `file_id` screenshot costs nothing.
+ */
+function sentScreenshotBytes(message: Message, metadataWire: boolean): number | undefined {
+	if (!metadataWire || message.role !== "toolResult" || message.providerMetadata?.type !== "computer")
+		return undefined;
+	const imageUrl = message.providerMetadata.screenshot.image_url;
+	return imageUrl?.slice(0, 5).toLowerCase() === "data:" ? imageUrl.length : 0;
+}
+
+/** Inline image bytes a user, developer or tool-result message puts on the wire. */
+function sentImageBytes(message: Message, model: Model, metadataWire: boolean): number {
+	const screenshot = sentScreenshotBytes(message, metadataWire);
+	if (screenshot !== undefined) return screenshot;
+	if (!Array.isArray(message.content)) return 0;
+	let bytes = 0;
+	for (const part of message.content) {
+		if (part.type === "image") bytes += inlineImageBytes(part, model);
+	}
+	return bytes;
+}
+
 interface ImageBudgetState {
 	remainingDrops: number;
 	inlineBytes: number;
 	byteBudget: number;
 	model: Model;
+	/** {@link sendsComputerScreenshotMetadata} for `model`. */
+	metadataWire: boolean;
 	/** Messages whose images the byte clamp must not evict. */
 	kept?: ReadonlySet<Message>;
 }
@@ -109,10 +162,25 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
+/**
+ * Where the route sends a computer result's metadata screenshot, the result is that one image, never its content:
+ * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text, as
+ * for an unreadable screenshot in {@link dropUnreadableContextImages}. Elsewhere the content is what is sent and
+ * clamped, and the unsent metadata stays.
+ */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
-	const content = clampContent(message.content, state);
-	return content ? { ...message, content } : message;
+	const screenshot = sentScreenshotBytes(message, state.metadataWire);
+	if (screenshot === undefined) {
+		const content = clampContent(message.content, state);
+		return content ? { ...message, content } : message;
+	}
+	const bytes = state.byteBudget === Number.POSITIVE_INFINITY ? 0 : screenshot;
+	if (state.remainingDrops <= 0 && !(state.inlineBytes > state.byteBudget && bytes > 0)) return message;
+	if (state.remainingDrops > 0) state.remainingDrops--;
+	state.inlineBytes -= bytes;
+	const text = message.content.filter(part => part.type === "text");
+	return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
@@ -142,10 +210,17 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const totalImages = countImages(context);
+	const metadataWire = sendsComputerScreenshotMetadata(model);
+	const totalImages = countImages(context, metadataWire);
 	const remainingDrops = totalImages - providerImageBudget(model);
 	if (remainingDrops <= 0) return context;
-	return clampImages(context, { remainingDrops, inlineBytes: 0, byteBudget: Number.POSITIVE_INFINITY, model });
+	return clampImages(context, {
+		remainingDrops,
+		inlineBytes: 0,
+		byteBudget: Number.POSITIVE_INFINITY,
+		model,
+		metadataWire,
+	});
 }
 
 /**
@@ -154,7 +229,12 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
  * while the kept images still fit `imageRoom`, the limit less the request's other serialized bytes. The clamp evicts
  * everything else oldest-first, as on other hosts.
  */
-function newestImageMessages(context: Context, model: Model, imageRoom: number | undefined): Set<Message> {
+function newestImageMessages(
+	context: Context,
+	model: Model,
+	metadataWire: boolean,
+	imageRoom: number | undefined,
+): Set<Message> {
 	const kept = new Set<Message>();
 	if (imageRoom === undefined || imageRoom <= 0) return kept;
 	let user: Message | undefined;
@@ -165,10 +245,7 @@ function newestImageMessages(context: Context, model: Model, imageRoom: number |
 		if (!Array.isArray(message.content)) continue;
 		const isUser = !user && message.role === "user" && message.historyRewriteAt === undefined;
 		if (!isUser && (toolResult || message.role !== "toolResult")) continue;
-		let messageBytes = 0;
-		for (const part of message.content) {
-			if (part.type === "image") messageBytes += inlineImageBytes(part, model);
-		}
+		const messageBytes = sentImageBytes(message, model, metadataWire);
 		if (isUser) user = message;
 		else if (messageBytes > 0) toolResult = message;
 		else continue;
@@ -188,15 +265,17 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	const budgetedHost = reachesBudgetedHost(model);
 	const byteBudget = resolveInlineImageByteBudget(model, budgetedHost);
 	if (byteBudget === undefined) return context;
+	const metadataWire = sendsComputerScreenshotMetadata(model);
 	let inlineBytes = 0;
 	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
 	let unsentBytes = 0;
 	for (const message of context.messages) {
-		if (!Array.isArray(message.content)) continue;
+		if (message.role !== "assistant") {
+			inlineBytes += sentImageBytes(message, model, metadataWire);
+			continue;
+		}
 		for (const part of message.content) {
-			if (part.type !== "image") continue;
-			if (message.role === "assistant") unsentBytes += part.data.length;
-			else inlineBytes += inlineImageBytes(part, model);
+			if (part.type === "image") unsentBytes += part.data.length;
 		}
 	}
 	if (inlineBytes <= byteBudget) return context;
@@ -204,8 +283,14 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
 	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
 	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
+	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes); where that is the
+	// metadata copy, none of its content is sent.
 	const wire = context.messages.map(message => {
-		if (message.role === "toolResult") return { ...message, details: undefined };
+		if (message.role === "toolResult") {
+			return sentScreenshotBytes(message, metadataWire) === undefined
+				? { ...message, details: undefined, providerMetadata: undefined }
+				: { ...message, details: undefined, content: [] };
+		}
 		const payload = message.providerPayload;
 		if (!payload) return message;
 		const owner =
@@ -214,8 +299,8 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	});
 	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
 	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
-	const kept = newestImageMessages(context, model, imageRoom);
-	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });
+	const kept = newestImageMessages(context, model, metadataWire, imageRoom);
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, metadataWire, kept });
 }
 
 /**

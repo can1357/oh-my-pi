@@ -269,7 +269,7 @@ GDB example for an OpenOCD remote target:
 
 - Filesystem
    - Resolves program/file/cwd paths against the session cwd.
-   - Report creation writes `.tar.gz` bundles and reads the current session JSONL, its recursive artifact subtree (including nested subagent transcripts/artifacts), and same-day logs. Unrelated sibling sessions are not included.
+   - Report creation writes `.tar.gz` bundles and reads the current session JSONL, its recursive artifact subtree (including nested subagent transcripts/artifacts), and same-day logs. Unrelated sibling sessions are not included; their log records are left out of `session-logs.txt` but still appear in the per-file tails of `logs.txt`.
    - Memory reports include only numeric process/heap counters, not heap snapshots or runtime-derived type names. Session data, artifacts, logs, settings, raw SSE diagnostics, and environment values may still contain private data; review the archive before sharing. Environment redaction matches variable names, not arbitrary secrets in values.
    - Older memory reports containing `heap.heapsnapshot` must be treated as credential-bearing files. Do not share them; if one was already shared, revoke or rotate exposed provider and MCP credentials, including OAuth refresh tokens, and remove shared copies.
    - Work-profile export writes `/tmp/work-profile-<timestamp>.svg`.
@@ -322,6 +322,7 @@ GDB example for an OpenOCD remote target:
    - `MAX_LOG_LINES = 5000` for interactive log reading
    - `MAX_LOG_BYTES = 2 * 1024 * 1024` tail-read ceiling
    - report bundles include up to `1000` tail lines from each same-day PID-qualified/rotated log file, ordered by mtime with filename separators
+   - `session-logs.txt` holds the last `MAX_LOG_LINES` same-day records whose `sessionId` is the bundled session's or one of its bundled subagent transcripts', read from whole files, not tails
    - artifact inclusion recursively follows only the current session's artifact subtree; there is no separate ten-subagent cap
 - Interactive profiling windows in `packages/coding-agent/src/debug/index.ts`: both performance and work reports request `getWorkProfile(30)`.
 - Artifact cache pruning default: `30` days in `clearArtifactCache()` and the selector confirmation text.

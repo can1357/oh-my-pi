@@ -186,7 +186,9 @@ export function createKernelSessionRegistry<
 		}
 		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
-		const startup = (async () => {
+		// Kernels are shared by every owner of the key, so the readers and timers a
+		// kernel starts carry no caller's log context.
+		const startup = logger.withoutContext(async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
 			const session = descriptor.createSession({
 				sessionKey,
@@ -200,7 +202,7 @@ export function createKernelSessionRegistry<
 				sessions.set(sessionKey, session);
 			}
 			return session;
-		})();
+		});
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
@@ -216,8 +218,9 @@ export function createKernelSessionRegistry<
 	}
 
 	async function replaceSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
-		if (descriptor.replaceSessionKernel) {
-			return await descriptor.replaceSessionKernel(session, cwd, options, context);
+		const replace = descriptor.replaceSessionKernel;
+		if (replace) {
+			return await logger.withoutContext(() => replace(session, cwd, options, context));
 		}
 		if (descriptor.logBeforeReplacement) {
 			logger.warn(`${descriptor.languageLabel} subprocess died or is unresponsive; spawning fresh process`, {
@@ -233,7 +236,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		requireRemainingKernelTimeoutMs(options.deadlineMs, descriptor.cancelledErrorClass);
-		const next = await descriptor.startKernel(cwd, options);
+		const next = await logger.withoutContext(() => descriptor.startKernel(cwd, options));
 		if (sessions.get(session.sessionKey) !== session) {
 			await next.shutdown().catch(() => undefined);
 			throw new descriptor.cancelledErrorClass(false);
@@ -347,7 +350,7 @@ export function createKernelSessionRegistry<
 			if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: id,
 				cwd: session.cwd,
 				reason,
@@ -400,7 +403,7 @@ export function createKernelSessionRegistry<
 			}
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: session.sessionKey,
 				cwd: session.cwd,
 				reason,

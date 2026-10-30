@@ -138,16 +138,15 @@ This runs the napi CLI (host-only, local cargo profile) against `crates/pi-nativ
 
 ### Opt-in remote cache (`.bazelrc.user`)
 
-`.bazelrc` ends with `try-import %workspace%/.bazelrc.user` (gitignored). The bazel-remote node port admits the vmon CI egress addresses and the tailnet; from the tailnet, wire it read-only:
+`.bazelrc` ends with `try-import %workspace%/.bazelrc.user` (gitignored). CI's remote cache is served by the vmon node to its own sandboxes only, so locally use a disk cache or a remote cache of your own:
 
 ```
 # .bazelrc.user
-build --config=cache-ro
-build --remote_cache=grpcs://can.internal:30992
-build --tls_certificate=infra/bazel-remote/ca.crt
+build --disk_cache=~/.cache/bazel-disk
+# or: build --config=cache-ro --remote_cache=<your cache URL>
 ```
 
-`cache-ro`/`cache-rw` in `.bazelrc` carry only policy (upload on/off, `--remote_local_fallback`, retries/timeout so a cache outage never fails the build); endpoint + credentials are always composed by the consumer. A plain `--disk_cache=<dir>` line also works fine here.
+`cache-ro`/`cache-rw` in `.bazelrc` carry only policy (upload on/off, `--remote_local_fallback`, retries/timeout so a cache outage never fails the build); the endpoint is always supplied by the consumer.
 
 ## CI
 
@@ -186,7 +185,7 @@ Bazel native jobs need no toolchain setup: bazelisk, Bazel and a warm repository
 
 ### `bazel-cache` action (`.github/actions/bazel-cache`)
 
-Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc` output) that consumers pass via `bazelisk --bazelrc=...` or `OMP_BAZEL_RC`. Every Bazel job runs on a vmon runner (`VMON_CI=1`), which selects `--config=ci` plus the template-baked repository/xwin caches (`/opt/bazel-repo-cache`); given the `BAZEL_REMOTE_URL`/`BAZEL_REMOTE_USER`/`BAZEL_REMOTE_PASSWORD` repository secrets as inputs it adds `--config=cache-rw`, the TLS remote-cache endpoint, the masked Basic-auth header, and `--remote_download_toplevel`. Off vmon the fragment carries only `--config=ci` and the build runs uncached.
+Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc` output) that consumers pass via `bazelisk --bazelrc=...` or `OMP_BAZEL_RC`. Every Bazel job runs on a vmon runner (`VMON_CI=1`), which selects `--config=ci` plus the template-baked repository/xwin caches (`/opt/bazel-repo-cache`); when the node serves a Bazel cache (`VMON_CACHE_URL` set) it adds `--remote_cache=$VMON_CACHE_URL/bazel` with `--config=cache-rw` on branch/tag events or `--config=cache-ro` on pull requests. Off vmon the fragment carries only `--config=ci` and the build runs uncached.
 
 ### Native artifact actions
 
@@ -235,11 +234,11 @@ bazelisk build --nobuild //:natives-win32-x64-baseline
 
 ### Cache behavior
 
-- **vmon:** read-write gRPC to bazel-remote on can.internal (`BAZEL_REMOTE_URL`, a source-filtered node port; TLS via the committed `infra/bazel-remote/ca.crt`, htpasswd user `ci`). `--remote_local_fallback` plus retries make an outage degrade to local execution rather than fail the build.
-- **GitHub-hosted:** no bazel-remote access and no Bazel builds; PR runs restore main's linux-x64 pair from actions/cache.
+- **vmon:** the node's per-repository Bazel HTTP cache (`$VMON_CACHE_URL/bazel`; branch and tag jobs write, pull requests read). `--remote_local_fallback` plus retries make an outage degrade to local execution rather than fail the build.
+- **GitHub-hosted:** no remote cache and no Bazel builds; PR runs restore main's linux-x64 pair from actions/cache.
 - **darwin repos:** `@llvm_darwin_tools` (~2 GiB LLVM 23.1.3), `@swift_linux` (~1.1 GiB Swift 6.4.0) and `@macos_sdk` (~70 MiB Command Line Tools package) are sha256-pinned, repository-cache backed and opt into the repo contents cache. The SDK input set is ~50k files, staged into every darwin compile/link sandbox.
 - **msvc repos:** the ~2 GiB LLVM download is sha256-pinned and repository-cache backed; the ~1 GiB xwin CRT/SDK splat is fetched from the Microsoft CDN inside the repo rule and is **not** repo-cache backed — a cold output base re-downloads it unless `OMP_XWIN_CACHE_DIR` and the repo contents cache hold it (CI: both baked into the `omp-ci` template). Microsoft advances the VS channel payload over time, so remote-cache hit rates for win32 actions degrade gracefully after an MS bump (same property the previous cross toolchain had). Win32 link actions also don't share cache entries across host OSes (linux vs mac clang binaries).
-- Server-side operations (deploy, TLS/auth, exposure, poisoning boundary): `infra/docs/04-caching.md`.
+- Cache layout, policies and poisoning boundary: `infra/docs/03-caching.md`.
 
 ## Target/variant model and naming conventions
 
