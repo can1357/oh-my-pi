@@ -1065,7 +1065,8 @@ describe("beforeDispatch", () => {
 
 	// A hold joins a wrapper-carrying build in place, so that build cannot
 	// stand in for its own unheld transport even while it has no hold yet: the
-	// cleanup traffic handed it would be held by a hold added afterwards.
+	// cleanup traffic handed it would be held by a hold added afterwards, and
+	// would run through the inference request's wrapper.
 	test("keeps cleanup traffic unheld when a hold later joins a wrapper-carrying transport", async () => {
 		const calls: string[] = [];
 		const base = (async () => {
@@ -1089,7 +1090,7 @@ describe("beforeDispatch", () => {
 		expect(transportFetch(model(), cleanup, hold)).not.toBe(cleanup);
 
 		await cleanup("https://example.invalid/v1/workflows/1", { method: "PATCH" });
-		expect(calls).toEqual(["wrap", "request"]);
+		expect(calls).toEqual(["request"]);
 		calls.length = 0;
 		await observed("https://example.invalid/v1/messages", { method: "POST" });
 		expect(calls).toEqual(["wrap", "hold", "request"]);

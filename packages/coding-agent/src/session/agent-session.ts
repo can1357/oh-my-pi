@@ -2243,11 +2243,13 @@ export class AgentSession implements SettingsScope {
 		const sideStreamFn = config.sideStreamFn ?? streamSimple;
 		// Compaction summaries, handoff documents, branch summaries and side
 		// turns all reach a provider through this one function, outside any
-		// agent loop, so `/pause` holds each of their requests here. The wait
-		// ends on the request's own signal or on this session's disposal — a
-		// human releases `/pause`, and a disposed session must not pay for its
-		// held requests on resume — and then the request's own hold runs, so a
-		// caller's check of what changed under the pause sees the state after it.
+		// agent loop, so `/pause` holds each of their requests here. The
+		// request's own signal or this session's disposal ends the whole wait,
+		// the request's own hold included, and fails the request with that
+		// reason: a human releases `/pause`, and a disposed session must not pay
+		// for its held requests on resume. The request's own hold runs after the
+		// wait, and again after any pause engaged while it ran, so a caller's
+		// check of what changed under the pause sees the state after it.
 		this.#sideStreamFn = (model, context, options) => {
 			const disposed = this.#disposeAbortController.signal;
 			const lifetime = options?.signal ? AbortSignal.any([options.signal, disposed]) : disposed;

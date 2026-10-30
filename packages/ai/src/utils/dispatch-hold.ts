@@ -7,11 +7,12 @@ import { raceWithSignal } from "./abort";
  * transport operation, and let a cancellation interrupt it.
  *
  * Every site that puts bytes on the wire for an inference request funnels
- * through this: the provider-dispatch chokepoint, the one transport fetch, and
- * each transport whose request is not an HTTP fetch (the Codex websocket, the
- * Cursor HTTP/2 stream, the GitLab Duo workflow socket). Call it *after* that
- * site's own asynchronous preparation — a handshake, a payload build, a
- * request-debug dump — so no await of ours can still follow the hold.
+ * through this or {@link dispatchWhenOpen}: the provider-dispatch chokepoint,
+ * the one transport fetch, and each transport whose request is not an HTTP
+ * fetch (the Codex websocket, the Cursor HTTP/2 stream, the GitLab Duo
+ * workflow socket). Call it *after* that site's own asynchronous preparation —
+ * a handshake, a payload build, a request-debug dump — so no await of ours can
+ * still follow the hold.
  *
  * An indefinite hold is legitimate (`/pause` holds until a human resumes); an
  * indefinite hold after the request was cancelled is not. `signal` therefore
@@ -20,71 +21,119 @@ import { raceWithSignal } from "./abort";
  * (a provider in-flight permit, a socket). The hold itself keeps running — it
  * is the caller's shared gate, not this request's — and stays observed, so a
  * later rejection is never unhandled.
+ *
+ * It returns once the hold has answered and its probe, if it has one
+ * ({@link DispatchHold.isClosed}), reads open, asking the hold again while the
+ * probe reads closed. That still leaves the microtasks between this return and
+ * the caller's send, in which a gate can close. A site whose send is one
+ * synchronous call is exact only through {@link dispatchWhenOpen}, which reads
+ * the probe in the same step as the send.
  */
 export async function holdBeforeDispatch(hold: DispatchHold | undefined, signal?: AbortSignal | null): Promise<void> {
-	if (!hold) return;
-	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Request aborted before dispatch");
-	const pending = hold();
-	if (pending) await raceWithSignal(pending, signal ?? undefined);
-	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Request aborted before dispatch");
+	if (hold) await dispatchWhenOpen(hold, signal, () => {});
 }
 
 /**
- * How many passes {@link holdAllBeforeDispatch} makes before it gives up. Only
- * a park keeps the barrier going round: a gate parks while it is closed, so a
- * few passes cover every pause a human engages while another hold waits. A
- * hold that parks every time it is asked (a pacing delay, a hold that always
- * awaits I/O) never lets a pass finish, so it is not a gate another hold can
- * be checked against.
+ * Await every hold on one request, then call `send` in the same synchronous
+ * step as the last check that none of them is closed, and return what it
+ * returns.
+ *
+ * That last check is what makes the holds a barrier, and it can only be made
+ * for a hold that carries a probe ({@link DispatchHold.isClosed}). Awaiting a
+ * hold proves it was open when it answered, not that it still is: a gate can
+ * close in any microtask between that answer and the send. So once every hold
+ * has answered, every probe is read and `send` runs with nothing awaited in
+ * between; a probe that reads closed sends the barrier round again, awaiting
+ * every hold afresh. Going round has no limit, because only a closed gate
+ * causes it, and a gate that keeps closing is a gate that is closed: waiting
+ * on it is the point. A request therefore never reaches `send` while any probe
+ * reads closed.
+ *
+ * A hold without a probe is a plain function, and nothing can re-read it
+ * without awaiting it again. For such a hold this guarantees the wait and
+ * nothing more: it may close again after it answered and the request still
+ * goes out. The re-asking described at {@link MAX_DISPATCH_HOLD_PASSES}
+ * narrows that window for one answered before a later hold waited; it does
+ * not close it.
+ *
+ * `send` must put the request on the wire before it awaits anything, or a gate
+ * could close in that await too. A hold given to a live transport while this
+ * waits is awaited before any probe is read.
+ *
+ * `prepare` is work whose result must not be older than the last wait: a
+ * signature, a short-lived token. It runs on every round, after the holds have
+ * answered and before the probes are read, so a gate that closes while it runs
+ * sends the barrier round again and the work is redone after that wait too.
+ */
+export async function dispatchWhenOpen<T>(
+	hold: DispatchHold | readonly DispatchHold[] | undefined,
+	signal: AbortSignal | null | undefined,
+	send: () => T | PromiseLike<T>,
+	prepare?: () => Promise<void>,
+): Promise<T> {
+	const holds = hold === undefined ? NO_HOLDS : typeof hold === "function" ? [hold] : hold;
+	for (;;) {
+		const asked = await awaitHolds(holds, signal);
+		if (prepare) {
+			await prepare();
+			throwIfAborted(signal);
+		}
+		// Synchronous from here to `send`. A hold that joined the live list
+		// after the pass that asked the others has never been awaited, so it
+		// sends the barrier round as a closed probe does.
+		if (asked === holds.length && !holds.some(held => held.isClosed?.() === true)) return send();
+	}
+}
+
+/**
+ * How many passes the best-effort re-check of holds without a probe makes
+ * before it gives up. A hold without a probe that answered before a later hold
+ * parked may have closed again in the meantime, and nothing can re-read it, so
+ * the pass starts again from the first hold. A later hold that answered late
+ * gave the earlier ones time to change too, if less of it, and costs one
+ * confirming pass in which only a park starts again, so a hold that always
+ * awaits something on its way to answering costs two passes, not an endless
+ * loop. A hold with a probe never needs any of this: its probe is read at the
+ * send. A hold that parks every time it is asked (a pacing delay) behind one
+ * without a probe never lets a pass finish, and after this many passes the
+ * attempt fails rather than loop forever or send past a hold nobody re-read.
  */
 export const MAX_DISPATCH_HOLD_PASSES = 8;
 
 /**
- * How a hold after the first answered: `now` when what it returned had
- * already settled, `late` when its promise was still pending but settled in
- * the microtasks that followed, `parked` when the event loop turned first.
+ * How a hold answered: `now` when what it returned had already settled, `late`
+ * when its promise was still pending but settled in the microtasks that
+ * followed, `parked` when the event loop turned first.
  */
 type HoldAnswer = "now" | "late" | "parked";
 
+const NO_HOLDS: readonly DispatchHold[] = [];
+
 /**
- * Await several dispatch holds as one barrier: the request may go out only
- * when none of them is closed at the same moment.
- *
- * Awaiting them one after another is not that. A hold already awaited may
- * close again while a later one waits — a `/pause` engaged then would still
- * send — so every answer before a hold that made the barrier wait is stale.
- * The holds are awaited in order, and when one after the first parks, the
- * pass starts again from the first. One that answers late has given the
- * earlier holds time to change too, if less of it; that pass is confirmed by
- * one more, in which only a park starts again, so a hold that always awaits
- * something on its way to answering costs two passes, not an endless loop. A
- * pass in which every hold after the first answers at once proves they were
- * all open together, as does a confirming pass with no park.
- *
- * The first hold has nothing before it to go stale, so however long it parks
- * the pass goes on, and a single hold is exactly {@link holdBeforeDispatch}:
- * one call, no re-check. A barrier still going round after
- * {@link MAX_DISPATCH_HOLD_PASSES} passes fails the attempt rather than loop
- * forever or send under a hold nobody verified.
+ * Await every hold in order, and return how many the finishing pass asked.
+ * While every hold before the current one carries a probe, nothing asked so
+ * far can go stale unseen, and the current one is simply awaited; after a
+ * hold without a probe, each later answer is classified and may restart the
+ * pass ({@link MAX_DISPATCH_HOLD_PASSES}).
  */
-export async function holdAllBeforeDispatch(
-	holds: readonly DispatchHold[],
-	signal?: AbortSignal | null,
-): Promise<void> {
+async function awaitHolds(holds: readonly DispatchHold[], signal: AbortSignal | null | undefined): Promise<number> {
 	let confirming = false;
 	for (let pass = 1; ; pass++) {
-		await holdBeforeDispatch(holds[0], signal);
 		let worst: HoldAnswer = "now";
+		let unprobed = false;
+		let asked = 0;
 		// Indexed, not iterated over a copy: a hold added to a live transport
 		// while this request waits gates it too.
-		for (let i = 1; i < holds.length && worst !== "parked"; i++) {
-			const answer = await askHold(holds[i]!, signal);
+		for (; asked < holds.length && worst !== "parked"; asked++) {
+			const hold = holds[asked]!;
+			const answer = await askHold(hold, signal, unprobed);
 			if (answer !== "now") worst = answer;
+			if (!hold.isClosed) unprobed = true;
 		}
-		if (worst === "now" || (worst === "late" && confirming)) return;
+		if (worst === "now" || (worst === "late" && confirming)) return asked;
 		if (pass >= MAX_DISPATCH_HOLD_PASSES) {
 			throw new AIError.ProviderResponseError(
-				`Dispatch holds did not open together in ${MAX_DISPATCH_HOLD_PASSES} passes: a hold after the first parks every time it is asked, so it cannot gate a request alongside another hold`,
+				`Dispatch holds did not open together in ${MAX_DISPATCH_HOLD_PASSES} passes: a hold parks every time it is asked behind one without a probe, so that one cannot be re-checked`,
 				{ kind: "runtime" },
 			);
 		}
@@ -92,23 +141,32 @@ export async function holdAllBeforeDispatch(
 	}
 }
 
-/** Await one hold after the first, and report how it answered. */
-async function askHold(hold: DispatchHold, signal: AbortSignal | null | undefined): Promise<HoldAnswer> {
-	let late = false;
+/** Await one hold; when `observe` is set, report how it answered. */
+async function askHold(
+	hold: DispatchHold,
+	signal: AbortSignal | null | undefined,
+	observe: boolean,
+): Promise<HoldAnswer> {
+	throwIfAborted(signal);
 	let parked = false;
-	const marker = setImmediate(() => {
-		parked = true;
-	});
+	const marker = observe
+		? setImmediate(() => {
+				parked = true;
+			})
+		: undefined;
 	// The marker only observes the hold; it must not keep a process alive.
-	marker.unref();
+	marker?.unref();
 	try {
-		await holdBeforeDispatch(() => {
-			const pending = hold();
-			late = pending !== undefined && Bun.peek.status(pending) === "pending";
-			return pending;
-		}, signal);
+		const pending = hold();
+		const late = observe && pending !== undefined && Bun.peek.status(pending) === "pending";
+		if (pending) await raceWithSignal(pending, signal ?? undefined);
+		throwIfAborted(signal);
+		return parked ? "parked" : late ? "late" : "now";
 	} finally {
 		clearImmediate(marker);
 	}
-	return parked ? "parked" : late ? "late" : "now";
+}
+
+function throwIfAborted(signal: AbortSignal | null | undefined): void {
+	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Request aborted before dispatch");
 }

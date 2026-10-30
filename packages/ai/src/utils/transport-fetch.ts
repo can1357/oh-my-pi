@@ -2,7 +2,7 @@ import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, DispatchHold, FetchImpl, Model, TransportWrapper } from "../types";
-import { holdAllBeforeDispatch } from "./dispatch-hold";
+import { dispatchWhenOpen } from "./dispatch-hold";
 import { preResponseGuard } from "./idle-iterator";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
@@ -28,7 +28,10 @@ interface TransportFetchStamp {
 	 * rebuilt instead.
 	 */
 	live: boolean;
-	/** The same transport with no hold, built once on demand for cleanup traffic. */
+	/**
+	 * The same transport with neither the hold nor the caller's wrappers, built
+	 * once on demand for cleanup and credential traffic.
+	 */
 	unheld?: FetchImpl;
 }
 
@@ -51,8 +54,10 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: TransportFetchStamp };
  * after it is the whole point, and the debug session awaits the body and the
  * filesystem. The request's own `signal` ends the wait, so cancelling a
  * request parked on a hold no longer leaves it parked forever. Several holds
- * are one barrier ({@link holdAllBeforeDispatch}): the request goes out only
- * when none of them is closed at the same moment.
+ * are awaited in order and then probed together in the same synchronous step
+ * that calls `fetchImpl` ({@link dispatchWhenOpen}): a request never goes out
+ * while a hold that carries a probe reads closed. A hold without one is only
+ * awaited.
  *
  * `wrap` is the caller's `wrapTransport`: a wrapper around the built fetch,
  * for a caller that must *see* each attempt and its response — the only way
@@ -116,20 +121,67 @@ export function transportFetch(
  * provider's inference host, and the inference request they prepare still
  * holds at the wire right after them. Holding them as well only parks them
  * under their own absolute timeouts, which a pause outlasts. Everything else
- * the wrapper does (User-Agent, `NODE_EXTRA_CA_CERTS`, proxy, `PI_REQ_DEBUG`)
+ * the transport does (User-Agent, `NODE_EXTRA_CA_CERTS`, proxy, `PI_REQ_DEBUG`)
  * still applies. A fetch this layer did not build, or one with no hold that no
  * hold can join later, is returned unchanged.
+ *
+ * The caller's `wrapTransport` does not apply either. Its state is the
+ * inference request's — an attempt budget, the caller's report-back — and this
+ * traffic is not one of that request's attempts. Sharing the live wrapper would
+ * let a workflow stop or a token refresh spend the request's budget, or be
+ * declined by it; running the factory again would hand this traffic a copy
+ * whose state is nobody's. No caller wrapper has a job on cleanup traffic.
  */
 export function withoutDispatchHold(fetchImpl: FetchImpl): FetchImpl {
 	const stamp = (fetchImpl as TransportFetch)[TRANSPORT_FETCH];
 	// A live build never stands in for its own unheld transport, even while it
-	// has no hold: a hold that joins it later would gate the unheld traffic too.
+	// has no hold: a hold that joins it later would gate the unheld traffic
+	// too, and it runs the caller's wrappers.
 	if (!stamp || (stamp.holds.length === 0 && !stamp.live)) return fetchImpl;
-	// Keeps the caller's wrappers: only the hold is wrong for this traffic.
 	// Not live, so a hold given for it later builds another transport instead
 	// of gating this one.
-	stamp.unheld ??= buildTransportFetch(stamp.model, stamp.base, [], stamp.wraps, false);
+	stamp.unheld ??= buildTransportFetch(stamp.model, stamp.base, [], [], false);
 	return stamp.unheld;
+}
+
+/**
+ * Adds what authorizes a request and expires — a SigV4 signature, a
+ * short-lived token — to the request as the transport will send it.
+ */
+export type WireAuthorization = (init: RequestInit) => Promise<RequestInit>;
+
+const WIRE_AUTHORIZATION = Symbol("omp.wireAuthorization");
+
+type AuthorizedRequestInit = RequestInit & { [WIRE_AUTHORIZATION]?: WireAuthorization };
+
+/**
+ * Send a request through `fetchImpl`, authorized for the moment it leaves
+ * rather than the moment it was built.
+ *
+ * A dispatch hold that a human releases can outlast any authorization that
+ * expires: AWS rejects a SigV4 signature more than five minutes old, and an
+ * access token minted before a pause may be dead after it. Through a transport
+ * fetch, `authorize` therefore runs inside the dispatch barrier, after the
+ * holds have answered and before their probes are read, and again on every
+ * round a closed gate sends the request back to wait ({@link dispatchWhenOpen}).
+ * Through any other fetch there is no hold this layer can reach, so
+ * `authorize` runs just before the call; a fetch that wraps a transport must
+ * itself send through this helper to keep the ordering.
+ *
+ * The step rides on the request's init, so a caller's `wrapTransport` must
+ * pass on the init it was given, as it must for the body and the signal.
+ */
+export async function fetchAuthorizedAtWire(
+	fetchImpl: FetchImpl,
+	input: string | URL | Request,
+	init: RequestInit,
+	authorize: WireAuthorization,
+): Promise<Response> {
+	if ((fetchImpl as TransportFetch)[TRANSPORT_FETCH]) {
+		const deferred: AuthorizedRequestInit = { ...init, [WIRE_AUTHORIZATION]: authorize };
+		return fetchImpl(input, deferred);
+	}
+	return fetchImpl(input, await authorize(init));
 }
 
 function buildTransportFetch(
@@ -144,6 +196,7 @@ function buildTransportFetch(
 	const inner: FetchImpl = async (input, init) => {
 		const method = init?.method ?? (input instanceof Request ? input.method : "GET");
 		const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+		const authorize = (init as AuthorizedRequestInit | undefined)?.[WIRE_AUTHORIZATION];
 		// A pre-response budget bounds the provider's latency, so its clock must
 		// not run while we prepare the request or hold it: a hold a human
 		// releases would otherwise fail the resumed request with `TimeoutError`
@@ -156,12 +209,29 @@ function buildTransportFetch(
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
 		const debug = isRequestDebugEnabled() ? await createFetchRequestDebugSession(input, init) : undefined;
-		await holdAllBeforeDispatch(holds, signal);
-		// Recorded for the request that is now going out, not for one a hold
-		// still gates or an abort cancelled.
-		if (method === "POST") recordDispatchOrigin(model, input);
-		deadline?.resume();
-		const response = await base(input, init);
+		const prepared = init;
+		let wireInit = init;
+		// The holds' probes are read in the same synchronous step as the call
+		// below, so nothing in this callback may await before `base` runs:
+		// recording the origin and restarting the pre-response clock are both
+		// synchronous.
+		const response = await dispatchWhenOpen(
+			holds,
+			signal,
+			() => {
+				// Recorded for the request that is now going out, not for one a
+				// hold still gates or an abort cancelled.
+				if (method === "POST") recordDispatchOrigin(model, input);
+				deadline?.resume();
+				return base(input, wireInit);
+			},
+			// Authorized after the last wait, so what goes out was authorized
+			// for the moment it goes out (see `fetchAuthorizedAtWire`).
+			authorize &&
+				(async () => {
+					wireInit = await authorize(prepared ?? {});
+				}),
+		);
 		return debug ? debug.wrapResponse(response) : response;
 	};
 	// Outermost: an attempt the caller's wrapper declines never reaches the
