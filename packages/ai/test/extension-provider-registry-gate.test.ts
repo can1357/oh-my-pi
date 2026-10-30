@@ -10,7 +10,7 @@ import {
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 interface TestGate extends ProviderCallGate {
 	retired: boolean;
@@ -44,7 +44,8 @@ function makeGate(): TestGate {
 }
 
 const SOURCE = "registry-gate-scratch";
-const stream = {} as AssistantMessageEventStream;
+/** A genuine stream: a session's registration refuses, at production, one that reports no completion. */
+const stream = () => new AssistantMessageEventStream();
 
 afterEach(() => {
 	clearCustomApis();
@@ -54,8 +55,8 @@ afterEach(() => {
 
 describe("custom API registry", () => {
 	test("host registration returns the same record and the registered functions unchanged", () => {
-		const simple = () => stream;
-		const full = () => stream;
+		const simple = stream;
+		const full = () => stream();
 		registerCustomApi("scratch-host", simple, SOURCE, full);
 		const first = getCustomApi("scratch-host");
 		expect(first).toBe(getCustomApi("scratch-host"));
@@ -63,7 +64,7 @@ describe("custom API registry", () => {
 		expect(first?.stream).toBe(full);
 		expect(first?.sourceId).toBe(SOURCE);
 		// Host re-registration still replaces.
-		const other = () => stream;
+		const other = () => stream();
 		registerCustomApi("scratch-host", other, "other-source");
 		expect(getCustomApi("scratch-host")?.streamSimple).toBe(other);
 		unregisterCustomApis(SOURCE);
@@ -76,7 +77,7 @@ describe("custom API registry", () => {
 		let receiver: unknown;
 		registerCustomApi("scratch-receiver", function (this: unknown) {
 			receiver = this;
-			return stream;
+			return stream();
 		});
 		const record = getCustomApi("scratch-receiver");
 		record?.streamSimple({} as never, {} as never);
@@ -90,12 +91,12 @@ describe("custom API registry", () => {
 		const childReceivers: unknown[] = [];
 		const parentFn = () => {
 			calls.push(`parent:${parent.inside}`);
-			return stream;
+			return stream();
 		};
 		const childFn = function (this: unknown) {
 			childReceivers.push(this);
 			calls.push(`child:${child.inside}`);
-			return stream;
+			return stream();
 		};
 		registerCustomApi("scratch-shared", parentFn, SOURCE, undefined, parent);
 		registerCustomApi("scratch-shared", childFn, SOURCE, undefined, child);
@@ -130,9 +131,9 @@ describe("custom API registry", () => {
 	test("same-gate re-registration replaces in place; gate-scoped unregister leaves other sessions", () => {
 		const parent = makeGate();
 		const child = makeGate();
-		const a = () => stream;
-		const b = () => stream;
-		const c = () => stream;
+		const a = () => stream();
+		const b = () => stream();
+		const c = () => stream();
 		registerCustomApi("scratch-scope", a, SOURCE, undefined, parent);
 		registerCustomApi("scratch-scope", b, SOURCE, undefined, child);
 		registerCustomApi("scratch-scope", c, SOURCE, undefined, parent);

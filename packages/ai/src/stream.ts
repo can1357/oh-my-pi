@@ -14,7 +14,7 @@ import {
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
-import { admittedStream, getCustomApi } from "./api-registry";
+import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
@@ -864,9 +864,7 @@ function streamDispatch<TApi extends Api>(
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return admittedStream(
-			customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited }),
-		);
+		return customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited });
 	}
 
 	if (model.provider === "gitlab-duo") {
@@ -1418,9 +1416,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!customApiProvider) {
 					throw new AIError.ConfigurationError(`Unhandled API: ${model.api}`);
 				}
-				return admittedStream(
-					customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
-				);
+				return customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited });
 			}),
 		);
 	}

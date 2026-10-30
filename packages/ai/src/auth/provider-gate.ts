@@ -15,8 +15,11 @@
  * the usage service, the credential-health check, the header ingest, the OAuth registry's login,
  * refresh and key consumers, the model-modifier projection and the custom-API stream. Each one
  * selects a live registration and runs the call as that session's work; the author's object is
- * never touched.
+ * never touched. A signal one of those calls hands its author goes through {@link AdmittedSignal}:
+ * otherwise the author's abort listener would run outside that work.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /**
  * What an admitted call produces, declared by the call site that admits it.
  *
@@ -73,4 +76,68 @@ export function callThroughGate<R>(
 	kind: AdmittedWorkKind = "value",
 ): R {
 	return gate ? gate.run(call, kind) : call();
+}
+
+/**
+ * The signal an admitted call hands its author in place of the caller's.
+ *
+ * It is a different object because an author's abort listener runs inside the host's
+ * `controller.abort()`, in the caller's async context: Bun's `EventTarget` does not carry the
+ * context from `addEventListener`. Handed the caller's own, the listener would run outside the
+ * session that owns it — and once the call is over, even after that session has gone. This one
+ * aborts inside the admission, with the caller's reason, so the listeners on it run as the
+ * session's work, and it stops following the caller's at the call's terminal.
+ *
+ * It says what the caller's says wherever the author can look. Already aborted, it is aborted
+ * before the author is called. Otherwise one listener added just before the call forwards the
+ * abort, so it fires where the author's own listener on the caller's signal would have, in the
+ * same turn. That listener comes off when the abort fires (`once`) and when the call site
+ * {@link release}s at the terminal of everything the call produced, fulfilled or failed, so a
+ * long-lived caller signal gathers none across calls.
+ *
+ * A host registration has no gate and no admission to carry: its author is handed the caller's
+ * own signal.
+ */
+export class AdmittedSignal {
+	readonly #gate: ProviderCallGate | undefined;
+	readonly #caller: AbortSignal | undefined;
+	#admitted: AbortSignal | undefined;
+	#forward: (() => void) | undefined;
+
+	/** `gate` is the registration's, absent for the host's own; `caller` is the signal the host
+	 *  was given for this call. */
+	constructor(gate: ProviderCallGate | undefined, caller: AbortSignal | undefined) {
+		this.#gate = gate;
+		this.#caller = caller;
+	}
+
+	/**
+	 * The signal to hand the author. Call it inside the admitted call: the async context it runs
+	 * in is the admission the abort is carried into. Asking again returns the same signal.
+	 */
+	admit(): AbortSignal | undefined {
+		const caller = this.#caller;
+		if (!this.#gate || !caller) return caller;
+		if (this.#admitted) return this.#admitted;
+		const controller = new AbortController();
+		this.#admitted = controller.signal;
+		if (caller.aborted) {
+			controller.abort(caller.reason);
+		} else {
+			const admission = AsyncLocalStorage.snapshot();
+			const forward = () => admission(() => controller.abort(caller.reason));
+			this.#forward = forward;
+			caller.addEventListener("abort", forward, { once: true });
+		}
+		return this.#admitted;
+	}
+
+	/** Lets go of the caller's signal: the call site's, at the terminal of everything the admitted
+	 *  call produced. Bound, and harmless to call again or when nothing was admitted. */
+	readonly release = (): void => {
+		const forward = this.#forward;
+		if (!forward) return;
+		this.#forward = undefined;
+		this.#caller?.removeEventListener("abort", forward);
+	};
 }

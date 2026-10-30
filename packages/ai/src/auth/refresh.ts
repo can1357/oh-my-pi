@@ -1,4 +1,5 @@
 import { scheduler } from "node:timers/promises";
+import { types } from "node:util";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProviderEntry, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
@@ -6,7 +7,7 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
-import { callThroughGate } from "./provider-gate";
+import { AdmittedSignal, callThroughGate } from "./provider-gate";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -1033,18 +1034,33 @@ export class OAuthRefresher {
 		} else {
 			const customProvider = getOAuthProviderEntry(provider);
 			if (customProvider) {
-				const custom = customProvider.provider;
+				const { provider: custom, gate } = customProvider;
+				const admitted = new AdmittedSignal(gate, signal);
 				// The capability read is the author's code as much as the call (it may be a getter),
-				// so both run as the owning session's work.
-				refreshPromise = callThroughGate(customProvider.gate, () => {
-					if (!custom.refreshToken) {
-						throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
-							kind: "configuration",
-							provider,
-						});
-					}
-					return custom.refreshToken(credential, signal);
-				});
+				// so both run as the owning session's work, and the function read is the one called.
+				try {
+					refreshPromise = callThroughGate(gate, () => {
+						const refreshToken = custom.refreshToken;
+						if (!refreshToken) {
+							throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
+								kind: "configuration",
+								provider,
+							});
+						}
+						return Reflect.apply(refreshToken, custom, [credential, admitted.admit()]);
+					});
+				} catch (error) {
+					admitted.release();
+					throw error;
+				}
+				// The exchange can outlast the wait below — a timeout ends the wait, not the exchange —
+				// so the signal it was handed follows the caller's until the exchange itself settles.
+				// `Promise.prototype.then` subscribes without reading the result's own `then`.
+				if (types.isPromise(refreshPromise)) {
+					Promise.prototype.then.call(refreshPromise, admitted.release, admitted.release);
+				} else {
+					admitted.release();
+				}
 			} else {
 				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
 			}

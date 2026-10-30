@@ -154,6 +154,194 @@ export interface UsageReport {
 }
 
 /**
+ * How {@link copyUsageReport} copies one value of a report.
+ *
+ * - `data`: an open value — a record whose keys are its content (`metadata`, `usedFractions`),
+ *   a list, or a primitive. Copied as JSON copies it: each own enumerable string key and each
+ *   array element, read once.
+ * - `fields`: a known shape — the report, a limit, its window. Copied by reading each field the
+ *   shape has, the way a field read reads it, so an inherited or non-enumerable field and a
+ *   prototype getter arrive as they would for the host. Nothing else on the object is read.
+ * - `items`: a list whose items all have one schema.
+ */
+type ReportSchema =
+	| { readonly kind: "data" }
+	| { readonly kind: "fields"; readonly fields: readonly (readonly [field: string, schema: ReportSchema])[] }
+	| { readonly kind: "items"; readonly items: ReportSchema };
+
+const DATA: ReportSchema = { kind: "data" };
+
+/** A known shape: one entry for every field of `T`, so a field added to `T` does not compile until
+ *  it says how it is copied. */
+function fieldsOf<T>(fields: { readonly [K in keyof T]-?: ReportSchema }): ReportSchema {
+	return { kind: "fields", fields: Object.entries<ReportSchema>(fields) };
+}
+
+const USAGE_LIMIT = fieldsOf<UsageLimit>({
+	id: DATA,
+	label: DATA,
+	scope: fieldsOf<UsageScope>({
+		provider: DATA,
+		accountId: DATA,
+		projectId: DATA,
+		orgId: DATA,
+		modelId: DATA,
+		tier: DATA,
+		windowId: DATA,
+		shared: DATA,
+		sharedGroup: DATA,
+	}),
+	window: fieldsOf<UsageWindow>({ id: DATA, label: DATA, durationMs: DATA, resetsAt: DATA, resetLabel: DATA }),
+	amount: fieldsOf<UsageAmount>({
+		used: DATA,
+		limit: DATA,
+		remaining: DATA,
+		usedFraction: DATA,
+		remainingFraction: DATA,
+		unit: DATA,
+	}),
+	status: DATA,
+	notes: DATA,
+});
+
+const USAGE_REPORT = fieldsOf<UsageReport>({
+	provider: DATA,
+	fetchedAt: DATA,
+	limits: { kind: "items", items: USAGE_LIMIT },
+	resetCredits: fieldsOf<UsageResetCredits>({
+		availableCount: DATA,
+		redeemableCount: DATA,
+		nextCreditId: DATA,
+		eligible: DATA,
+		reason: DATA,
+		cooldownUntil: DATA,
+		credits: {
+			kind: "items",
+			items: fieldsOf<UsageResetCreditDetail>({
+				id: DATA,
+				title: DATA,
+				program: DATA,
+				remainingCount: DATA,
+				usable: DATA,
+				requiresLimit: DATA,
+				clears: DATA,
+				blocking: DATA,
+				usedFractions: DATA,
+				grantedAt: DATA,
+				expiresAt: DATA,
+				status: DATA,
+			}),
+		},
+	}),
+	notes: DATA,
+	metadata: DATA,
+	raw: DATA,
+});
+
+/** Where a copy is taken, for the error that refuses a function where data belongs. */
+interface ReportSite {
+	readonly provider: string;
+	/** The path walked to the value, the provider method whose result it is first. */
+	readonly path: (string | number)[];
+}
+
+function renderReportPath(path: readonly (string | number)[]): string {
+	let rendered = "";
+	for (const step of path) {
+		if (rendered === "") rendered = String(step);
+		else if (typeof step === "number") rendered += `[${step}]`;
+		else if (/^[A-Za-z_$][\w$]*$/.test(step)) rendered += `.${step}`;
+		else rendered += `[${JSON.stringify(step)}]`;
+	}
+	return rendered;
+}
+
+function copyReportValue(
+	value: unknown,
+	schema: ReportSchema,
+	site: ReportSite,
+	copies: Map<ReportSchema, Map<object, unknown>>,
+): unknown {
+	if (typeof value === "function") {
+		throw new Error(
+			`Usage provider ${site.provider}: ${renderReportPath(site.path)} is a function, but it must be data. Compute the value before returning it.`,
+		);
+	}
+	if (typeof value !== "object" || value === null) return value;
+	let copied = copies.get(schema);
+	if (!copied) {
+		copied = new Map();
+		copies.set(schema, copied);
+	}
+	const known = copied.get(value);
+	if (known !== undefined) return known;
+	if (Array.isArray(value)) {
+		const itemSchema = schema.kind === "items" ? schema.items : DATA;
+		const copy: unknown[] = [];
+		copied.set(value, copy);
+		const length = value.length;
+		for (let index = 0; index < length; index++) {
+			site.path.push(index);
+			copy[index] = copyReportValue(value[index], itemSchema, site, copies);
+			site.path.pop();
+		}
+		return copy;
+	}
+	const copy: Record<string, unknown> = {};
+	copied.set(value, copy);
+	if (schema.kind === "fields") {
+		for (const [key, fieldSchema] of schema.fields) {
+			site.path.push(key);
+			const item = copyReportValue((value as Record<string, unknown>)[key], fieldSchema, site, copies);
+			site.path.pop();
+			if (item !== undefined) copy[key] = item;
+		}
+		return copy;
+	}
+	for (const key of Object.keys(value)) {
+		site.path.push(key);
+		const item = copyReportValue((value as Record<string, unknown>)[key], DATA, site, copies);
+		site.path.pop();
+		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
+		if (key === "__proto__") {
+			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
+		} else {
+			copy[key] = item;
+		}
+	}
+	return copy;
+}
+
+/**
+ * A host-owned plain copy of a usage report a session's provider returned, taken inside that
+ * provider's admission. Call it inside the admitted call the report came back from, then use only
+ * the copy: the author's report is that author's code as much as its methods are — a getter or a
+ * Proxy trap runs whenever the host reads it, and the host reads a report long after the call,
+ * caching, merging and ranking it — and the host never writes into it. What the host adds goes on
+ * the copy.
+ *
+ * The report is copied by its schema, each value read once: the fields a report has, inherited
+ * or not, and nothing else on it. A function where data belongs is author code the host would
+ * otherwise run later with no admission, so it is refused, naming the field it was found at.
+ *
+ * This mirrors the copy coding-agent's `ModelRegistry` takes of a session's model data
+ * (`snapshotAuthorData` in `config/model-registry.ts`), one implementation per package. A host
+ * registration's report is the host's data and is not copied.
+ */
+export function copyUsageReport(
+	report: UsageReport | null,
+	provider: string,
+	method: "fetchUsage" | "parseRateLimitHeaders",
+): UsageReport | null {
+	return copyReportValue(
+		report,
+		USAGE_REPORT,
+		{ provider, path: [`${method}() result`] },
+		new Map(),
+	) as UsageReport | null;
+}
+
+/**
  * Resolve a limit's used fraction (0..1; >1 means overage) from whichever
  * amount fields the provider populated. Precedence mirrors the usage UIs:
  * explicit fraction > used/limit > percent-unit used > inverted remaining.

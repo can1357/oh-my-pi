@@ -115,7 +115,7 @@ describe("custom OAuth call sites run through the gate on the author's object", 
 		expect(log).toEqual([]);
 
 		await storage.oauth.login(PROVIDER, { onAuth: () => {}, onPrompt: async () => "" });
-		expect(log).toEqual(["solo.login-read:true", "solo.storeCredentialsAs:true", "solo.login-read:true"]);
+		expect(log).toEqual(["solo.login-read:true", "solo.storeCredentialsAs:true"]);
 
 		// Force a refresh: store an expired credential.
 		await storage.credentials.set(PROVIDER, [
@@ -184,5 +184,78 @@ describe("custom OAuth call sites run through the gate on the author's object", 
 		]);
 		await storage.keys.get(PROVIDER, "callsite-session");
 		expect(readInside).toBe(true);
+	});
+
+	describe("a capability is read once, and the function read is the one called", () => {
+		/** Each capability as its author would write it, recording that it ran. */
+		function genuine(calls: string[]) {
+			return {
+				login: async (_callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> => {
+					calls.push("login");
+					return { access: "logged-in", refresh: "refresh", expires: Date.now() + 3_600_000 };
+				},
+				refreshToken: async (credentials: OAuthCredentials): Promise<OAuthCredentials> => {
+					calls.push("refreshToken");
+					return { ...credentials, access: "refreshed", expires: Date.now() + 3_600_000 };
+				},
+				getApiKey: (credentials: OAuthCredentials): string => {
+					calls.push("getApiKey");
+					return `key:${credentials.access}`;
+				},
+			};
+		}
+
+		/** A getter's answer after its first read: nothing, or a different function. */
+		const secondAnswers = {
+			undefined: () => undefined,
+			"a different function": (calls: string[]) => () => {
+				calls.push("substitute");
+				throw new Error("the substitute ran");
+			},
+		} as const;
+
+		type Capability = "login" | "refreshToken" | "getApiKey";
+		const cases = (["login", "refreshToken", "getApiKey"] as const).flatMap(capability =>
+			(Object.keys(secondAnswers) as Array<keyof typeof secondAnswers>).map(second => [capability, second] as const),
+		);
+
+		/** A provider whose `capability` is a getter answering the genuine function once, then `second`. */
+		function oneShot(capability: Capability, second: keyof typeof secondAnswers, calls: string[]) {
+			const functions = genuine(calls);
+			const provider: Record<string, unknown> = { name: "One Shot", ...functions };
+			let reads = 0;
+			Object.defineProperty(provider, capability, {
+				get() {
+					reads++;
+					return reads === 1 ? functions[capability] : secondAnswers[second](calls);
+				},
+			});
+			return { provider, reads: () => reads };
+		}
+
+		test.each(cases)("%s answering %s on a second read", async (capability, second) => {
+			const gate = makeGate();
+			const calls: string[] = [];
+			const { provider, reads } = oneShot(capability, second, calls);
+			registerOAuthProvider(provider as unknown as Parameters<typeof registerOAuthProvider>[0], {
+				id: PROVIDER,
+				sourceId: SOURCE,
+				gate,
+			});
+
+			if (capability === "login") {
+				await expect(
+					storage.oauth.login(PROVIDER, { onAuth: () => {}, onPrompt: async () => "" }),
+				).resolves.toBeDefined();
+			} else {
+				await storage.credentials.set(PROVIDER, [
+					{ type: "oauth", access: "stale", refresh: "stale-refresh", expires: Date.now() - 1_000 },
+				]);
+				await expect(storage.keys.get(PROVIDER, "callsite-session")).resolves.toBe("key:refreshed");
+			}
+
+			expect(reads()).toBe(1);
+			expect(calls).toEqual(capability === "login" ? ["login"] : ["refreshToken", "getApiKey"]);
+		});
 	});
 });

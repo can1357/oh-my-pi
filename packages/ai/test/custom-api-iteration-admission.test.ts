@@ -4,13 +4,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	admittedStream,
 	type CustomStreamSimpleFn,
 	clearCustomApis,
 	getCustomApi,
 	registerCustomApi,
 } from "@oh-my-pi/pi-ai/api-registry";
-import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
+import type { AdmittedWorkKind, ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, complete, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
@@ -31,18 +30,54 @@ interface SessionGate extends ProviderCallGate {
 	retired: boolean;
 	/** Whether the caller is running as this session's work. */
 	readonly inside: boolean;
+	/** Whether work this gate admitted still holds the session open, as its disposal sees it. */
+	readonly holding: boolean;
+	/** Settles once nothing this gate admitted holds the session open. */
+	released(): Promise<void>;
 }
 
+/** What a `stream` call's product reports through `result()`, asked as the extension runtime asks
+ *  it; a product without one is refused, as the runtime refuses it. */
+function reportedCompletion(produced: unknown): Promise<unknown> {
+	const result: unknown =
+		typeof produced === "object" && produced !== null ? Reflect.get(produced, "result") : undefined;
+	if (typeof result !== "function") throw new Error("Extension stream reported no completion");
+	return Promise.resolve(Reflect.apply(result, produced, []));
+}
+
+/** A session's gate, holding the session open as the extension runtime does: a `stream` call until
+ *  what its product reports through `result()` settles, any other call until a promise it returned
+ *  settles. */
 function sessionGate(): SessionGate {
 	const session = {};
+	const held = new Set<Promise<void>>();
+	const hold = (work: Promise<unknown>): void => {
+		const settled = work.then(
+			() => {},
+			() => {},
+		);
+		held.add(settled);
+		void settled.finally(() => held.delete(settled));
+	};
 	const gate: SessionGate = {
 		retired: false,
-		run<R>(call: () => R): R {
+		run<R>(call: () => R, kind?: AdmittedWorkKind): R {
 			if (gate.retired) throw new Error("gate retired");
-			return sessionScope.run(session, call);
+			return sessionScope.run(session, () => {
+				const produced = call();
+				if (kind === "stream") hold(reportedCompletion(produced));
+				else if (produced instanceof Promise) hold(produced);
+				return produced;
+			});
 		},
 		get inside() {
 			return sessionScope.getStore() === session;
+		},
+		get holding() {
+			return held.size > 0;
+		},
+		async released() {
+			while (held.size > 0) await Promise.all([...held]);
 		},
 	};
 	return gate;
@@ -479,74 +514,45 @@ describe("the stream the host consumes for a session's producer", () => {
 		expect(records).toEqual(["localWork:true", "localWork:true"]);
 	});
 
-	test("one consumer per producer: asking again returns the same stream, and result() is asked at most once", async () => {
-		const gate = sessionGate();
-		const records: string[] = [];
-		const produced: AssistantMessageEventStream[] = [];
-		let resultCalls = 0;
-		const authored = authoredIteratorReply(gate, records, produced);
-		registerCustomApi(
-			API,
-			(model, ctx, options) => {
-				const output = authored(model, ctx, options);
-				const ownResult = output.result.bind(output);
-				output.result = () => {
-					resultCalls++;
-					return ownResult();
-				};
-				return output;
-			},
-			SOURCE,
-			undefined,
-			gate,
-		);
+	/** A session's producer counting the calls to its `result()`. It ends with a terminal event, or
+	 *  with `end(result)` and none. */
+	function countingProducer(ending: "terminal" | "end", calls: { result: number }): CustomStreamSimpleFn {
+		return model => {
+			const output = new AssistantMessageEventStream();
+			const ownResult = output.result.bind(output);
+			output.result = () => {
+				calls.result++;
+				return ownResult();
+			};
+			queueMicrotask(() => {
+				if (ending === "terminal") output.push({ type: "done", reason: "stop", message: reply(model, "ended") });
+				else output.end(reply(model, "ended"));
+			});
+			return output;
+		};
+	}
 
-		const producer = getCustomApi(API)!.streamSimple(modelFor(), context());
-		const first = admittedStream(producer);
-		const second = admittedStream(producer);
-		expect(second).toBe(first);
-		expect(await drain(first)).toEqual(["start", "done"]);
-		await first.result();
+	test.each(["terminal", "end"] as const)(
+		"ending with %s, the producer's result() is called once: one answer serves the session's hold and the caller",
+		async ending => {
+			const gate = sessionGate();
+			const calls = { result: 0 };
+			registerCustomApi(API, countingProducer(ending, calls), SOURCE, undefined, gate);
 
-		expect(records).toEqual(["body:true", "finally:true"]);
-		// A terminal event settles the stream; the producer's result() is asked only without one.
-		expect(resultCalls).toBe(0);
-	});
+			const response = streamSimple({ ...modelFor(), ...BARE_MODEL_OVERRIDES }, context(), BARE_OPTIONS);
+			await drain(response);
+			expect((await response.result()).content).toEqual([{ type: "text", text: "ended" }]);
+			await gate.released();
 
-	test("without a terminal event the producer's result() is asked exactly once", async () => {
-		const gate = sessionGate();
-		let resultCalls = 0;
-		registerCustomApi(
-			API,
-			model => {
-				const output = new AssistantMessageEventStream();
-				const ownResult = output.result.bind(output);
-				output.result = () => {
-					resultCalls++;
-					return ownResult();
-				};
-				queueMicrotask(() => output.end(reply(model, "ended")));
-				return output;
-			},
-			SOURCE,
-			undefined,
-			gate,
-		);
+			expect(calls.result).toBe(1);
+		},
+	);
 
-		const response = admittedStream(getCustomApi(API)!.streamSimple(modelFor(), context()));
-		await drain(response);
-		expect((await response.result()).content).toEqual([{ type: "text", text: "ended" }]);
-		expect(resultCalls).toBe(1);
-	});
-
-	test("a host registration's stream, or any stream no session produced, comes back as the same object", () => {
+	test("a host registration's view hands back its producer itself", () => {
 		const produced: AssistantMessageEventStream[] = [];
 		registerCustomApi(API, authoredIteratorReply(undefined, [], produced), SOURCE);
 
-		const hostStream = getCustomApi(API)!.streamSimple(modelFor(), context());
-		expect(admittedStream(hostStream)).toBe(hostStream);
-		const unrelated = new AssistantMessageEventStream();
-		expect(admittedStream(unrelated)).toBe(unrelated);
+		expect(getCustomApi(API)!.streamSimple(modelFor(), context())).toBe(produced[0]!);
 	});
 
 	test("with an official endpoint, no loop guard and no in-flight limit, a host registration's stream is the caller's own", async () => {
@@ -559,6 +565,162 @@ describe("the stream the host consumes for a session's producer", () => {
 		expect(response).toBe(produced[0]!);
 		expect(await drain(response)).toEqual(["start", "done"]);
 		expect(records).toEqual(["body:false", "finally:false"]);
+	});
+});
+
+/** Settles after the microtasks queued so far, and the ones they queue, have run. */
+async function nextTurn(): Promise<void> {
+	const turned = Promise.withResolvers<void>();
+	setImmediate(turned.resolve);
+	await turned.promise;
+}
+
+/** `signal` with its abort listeners counted as they are added and removed. */
+function countListeners(signal: AbortSignal): Set<unknown> {
+	const listening = new Set<unknown>();
+	const add = signal.addEventListener.bind(signal);
+	const remove = signal.removeEventListener.bind(signal);
+	signal.addEventListener = (...args: Parameters<typeof add>) => {
+		if (args[0] === "abort") listening.add(args[1]);
+		add(...args);
+	};
+	signal.removeEventListener = (...args: Parameters<typeof remove>) => {
+		if (args[0] === "abort") listening.delete(args[1]);
+		remove(...args);
+	};
+	return listening;
+}
+
+describe("how long a session's stream holds the session open", () => {
+	/** A genuine stream whose authored iterator yields its terminal and then, in an asynchronous
+	 *  `finally`, waits for `finish`; `entered` settles when that `finally` starts. */
+	function heldFinallyReply(gate: SessionGate, records: string[], entered: () => void, finish: Promise<void>) {
+		return ((model: Model<Api>) => {
+			const output = new AssistantMessageEventStream();
+			const message = reply(model, "authored");
+			output[Symbol.asyncIterator] = async function* () {
+				try {
+					output.push({ type: "done", reason: "stop", message });
+					yield { type: "done", reason: "stop", message };
+				} finally {
+					records.push(`finally:${gate.inside}`);
+					entered();
+					await finish;
+					records.push(`closed:${gate.inside}`);
+				}
+			};
+			return output;
+		}) satisfies CustomStreamSimpleFn;
+	}
+
+	test.each([
+		["with an official endpoint, no loop guard and no in-flight limit", BARE_MODEL_OVERRIDES, BARE_OPTIONS],
+		["by default", {}, { apiKey: "key" }],
+	] as const)(
+		"%s: through the authored iterator's asynchronous finally, which the host's close starts",
+		async (_n, overrides, options) => {
+			const gate = sessionGate();
+			const records: string[] = [];
+			const entered = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<void>();
+			registerCustomApi(
+				API,
+				heldFinallyReply(gate, records, entered.resolve, finish.promise),
+				SOURCE,
+				undefined,
+				gate,
+			);
+
+			const response = streamSimple({ ...modelFor(), ...overrides }, context(), options);
+			await response.result();
+			await entered.promise;
+			await nextTurn();
+			const heldDuringFinally = gate.holding;
+			finish.resolve();
+			await gate.released();
+
+			expect(heldDuringFinally).toBe(true);
+			expect(records).toEqual(["finally:true", "closed:true"]);
+		},
+	);
+
+	test("lets go of the caller's signal when, and only when, it stops holding the session", async () => {
+		const gate = sessionGate();
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		registerCustomApi(API, heldFinallyReply(gate, [], entered.resolve, finish.promise), SOURCE, undefined, gate);
+		const controller = new AbortController();
+		const listening = countListeners(controller.signal);
+
+		const response = streamSimple({ ...modelFor(), ...BARE_MODEL_OVERRIDES }, context(), {
+			...BARE_OPTIONS,
+			signal: controller.signal,
+		});
+		await response.result();
+		await entered.promise;
+		await nextTurn();
+		const duringFinally = { listening: listening.size, holding: gate.holding };
+		finish.resolve();
+		await gate.released();
+		await nextTurn();
+
+		expect(duringFinally).toEqual({ listening: 1, holding: true });
+		expect({ listening: listening.size, holding: gate.holding }).toEqual({ listening: 0, holding: false });
+	});
+
+	test("a stream taken from the registry directly is consumed, and lets go of the caller's signal at its producer's terminal", async () => {
+		const gate = sessionGate();
+		registerCustomApi(
+			API,
+			model => {
+				const output = new AssistantMessageEventStream();
+				queueMicrotask(() => output.push({ type: "done", reason: "stop", message: reply(model, "x") }));
+				return output;
+			},
+			SOURCE,
+			undefined,
+			gate,
+		);
+		const controller = new AbortController();
+		const listening = countListeners(controller.signal);
+
+		const response = getCustomApi(API)!.streamSimple(modelFor(), context(), { signal: controller.signal });
+		await response.result();
+		await gate.released();
+		await nextTurn();
+
+		expect({ listening: listening.size, holding: gate.holding }).toEqual({ listening: 0, holding: false });
+	});
+
+	test("until the producer's own reported result settles, even after its iterator's terminal", async () => {
+		const gate = sessionGate();
+		const produced: AssistantMessageEventStream[] = [];
+		registerCustomApi(
+			API,
+			model => {
+				const output = new AssistantMessageEventStream();
+				produced.push(output);
+				const message = reply(model, "authored");
+				// The iterator yields a terminal its stream has not reported: `result()` is still open.
+				output[Symbol.asyncIterator] = async function* () {
+					yield { type: "done", reason: "stop", message };
+				};
+				return output;
+			},
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const response = streamSimple({ ...modelFor(), ...BARE_MODEL_OVERRIDES }, context(), BARE_OPTIONS);
+		await response.result();
+		await nextTurn();
+		const heldBeforeReport = gate.holding;
+		produced[0]!.end(reply(modelFor(), "reported"));
+		await gate.released();
+
+		expect(heldBeforeReport).toBe(true);
+		expect(gate.holding).toBe(false);
 	});
 });
 

@@ -4,6 +4,7 @@
 import type * as fs1 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { types } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -148,32 +149,64 @@ export function ownAcceptedCallbacks(value: unknown, owner: ExtensionCallbackOwn
 	return value;
 }
 
-/** Whether `value` reports completion by settling, asked the way `await` asks: READ the
- *  property and see whether it is callable. `"then" in value` is a different question, and a
- *  Proxy whose `has` says no while its `get` returns a real `then` answers it differently — a
- *  genuine awaitable then slipped past unowned. Objects and functions alike: a thenable may be
- *  either. */
-function isThenable(value: unknown): value is PromiseLike<unknown> {
-	if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
-	return typeof (value as PromiseLike<unknown>).then === "function";
+type Then = (onFulfilled: (value: unknown) => void, onRejected: (reason: unknown) => void) => unknown;
+
+/** The intrinsic `then`, kept so that observing a genuine promise never asks it for `then` again. */
+const promiseThen = Promise.prototype.then;
+
+/** The `then` that makes `value` a thenable, or `undefined` when it is none — asked the way `await`
+ *  asks, and asked ONCE. `await` READS the property and sees whether it is callable; `"then" in
+ *  value` is a different question, and a Proxy whose `has` says no while its `get` returns a real
+ *  `then` answers it differently. And a read is an operation, not an observation: a getter may
+ *  answer differently the next time, so the callable this read returned is the one adopted — see
+ *  {@link adopt}. Objects and functions alike: a thenable may be either. A getter that throws
+ *  propagates, as it does out of `await`. */
+function thenOf(value: unknown): Then | undefined {
+	if (!isObjectLike(value)) return undefined;
+	const then: unknown = Reflect.get(value, "then");
+	return typeof then === "function" ? (then as Then) : undefined;
 }
 
-/** The terminal a producer admitted as a stream reports through `result()`.
+function isObjectLike(value: unknown): value is object {
+	return value !== null && (typeof value === "object" || typeof value === "function");
+}
+
+/** The operation `value` reports through `then`, as a promise, adopted as assimilation adopts it:
+ *  `then` is called once, on `value`, in a later job, and a `then` that throws rejects. `then` is
+ *  the callable {@link thenOf} already read, so the property is not asked again:
+ *  `Promise.resolve(value)` would read it a second time and adopt whatever that read returned.
  *
- *  Throws when there is none: a call site declared this a stream, so a value that cannot say
- *  when it is finished is one this session cannot own, and the refusal belongs at the boundary
- *  rather than as a silent "already complete". */
-function streamCompletion(produced: unknown): PromiseLike<unknown> {
-	const reports =
-		produced !== null &&
-		(typeof produced === "object" || typeof produced === "function") &&
-		"result" in produced &&
-		typeof (produced as { result?: unknown }).result === "function";
-	const completion = reports ? (produced as { result: () => unknown }).result() : undefined;
-	if (!isThenable(completion)) {
-		throw new Error("Extension stream reported no completion; this session cannot own it");
+ *  A genuine promise whose `then` read as the intrinsic one IS its operation, and comes back as it
+ *  is — as `Promise.resolve` and `await` take it, with no extra turn. Whatever observes the result
+ *  goes through {@link promiseThen}, so that promise is not asked for its `then` again either. */
+function adopt(value: unknown, then: Then): Promise<unknown> {
+	if (then === promiseThen && types.isPromise(value)) return value;
+	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+	// A reaction job runs in the async context it was queued in: the admission's.
+	void Promise.resolve().then(() => {
+		try {
+			Reflect.apply(then, value, [resolve, reject]);
+		} catch (error) {
+			reject(error);
+		}
+	});
+	return promise;
+}
+
+/** The terminal a producer admitted as a stream reports through `result()`, adopted.
+ *
+ *  `result` is read once and called on the producer; the completion it returns is a thenable or
+ *  nothing, asked once ({@link thenOf}). Throws when there is none: a call site declared this a
+ *  stream, so a value that cannot say when it is finished is one this session cannot own, and the
+ *  refusal belongs at the boundary rather than as a silent "already complete". */
+function streamCompletion(produced: unknown): Promise<unknown> {
+	const result: unknown = isObjectLike(produced) ? Reflect.get(produced, "result") : undefined;
+	if (typeof result === "function") {
+		const completion: unknown = Reflect.apply(result, produced, []);
+		const then = thenOf(completion);
+		if (then) return adopt(completion, then);
 	}
-	return completion;
+	throw new Error("Extension stream reported no completion; this session cannot own it");
 }
 
 /** One session's hold on an extension surface, counted so that concurrent sessions sharing a
@@ -297,7 +330,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 *
 	 * A thenable says when it is done by settling, and a cold one runs its body on each `then`,
 	 * so observing it by calling `then` and handing the original back would run it twice; the
-	 * adopted promise is returned in its place. Thenable duck-typing, not `instanceof`: a
+	 * adopted promise is returned in its place. Its `then` is read once and the callable that
+	 * read returned is the one adopted ({@link thenOf}, {@link adopt}), so what this session
+	 * watches is exactly what the caller receives. Thenable duck-typing, not `instanceof`: a
 	 * callback compiled in another realm (`node:vm`, an `--import` loader) returns a Promise
 	 * that fails the brand check while being every bit as live, and a thenable may be a
 	 * function as readily as an object.
@@ -307,18 +342,17 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * wrong in both directions — see {@link AdmittedWorkKind}.
 	 */
 	trackCallback<T>(result: T): T {
-		if (!isThenable(result)) return result;
-		const adopted = Promise.resolve(result as PromiseLike<unknown>);
+		const then = thenOf(result);
+		if (!then) return result;
+		const adopted = adopt(result, then);
 		this.#watch(adopted);
 		return adopted as T;
 	}
 
-	/** Holds this session open until `work` settles, however it settles. */
-	#watch(work: PromiseLike<unknown>): void {
-		const settled = Promise.resolve(work).then(
-			() => undefined,
-			() => undefined,
-		);
+	/** Holds this session open until `work` — a promise {@link adopt} returned — settles, however it
+	 *  settles. */
+	#watch(work: Promise<unknown>): void {
+		const settled: Promise<undefined> = Reflect.apply(promiseThen, work, [() => undefined, () => undefined]);
 		this.#pendingCallbacks.add(settled);
 		this.#notifyCallbacksChanged();
 		void settled.finally(() => {
@@ -347,12 +381,15 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		return extensionCallbackScope.run(this, () => {
 			const produced = call();
 			if (kind !== "stream") return this.trackCallback(produced);
-			if (isThenable(produced)) {
-				const resolved = Promise.resolve(produced).then(value => {
-					// Throws here on a malformed producer, so the caller's await rejects.
-					this.#watch(streamCompletion(value));
-					return value;
-				});
+			const then = thenOf(produced);
+			if (then) {
+				const resolved: Promise<unknown> = Reflect.apply(promiseThen, adopt(produced, then), [
+					(value: unknown) => {
+						// Throws here on a malformed producer, so the caller's await rejects.
+						this.#watch(streamCompletion(value));
+						return value;
+					},
+				]);
 				this.#watch(resolved);
 				return resolved as R;
 			}

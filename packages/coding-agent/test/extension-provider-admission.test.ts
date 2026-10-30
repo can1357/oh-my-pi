@@ -198,6 +198,12 @@ describe("every path into an extension's provider is admitted", () => {
 
 	/** Every host route that can reach this provider, each one named for the report. */
 	const drives: Record<string, () => Promise<void>> = {
+		// `registry.getAll` is deliberately NOT a route here. The credential-aware projection runs
+		// when the registration is taken, not when the catalog is read, so `getAll` reaches no
+		// author code afterwards and would sit in this list recording nothing — which is what
+		// four routes did for several rounds while looking green. The projection is covered where
+		// it actually happens: the registration assertion below requires `oauth.modifyModels` to
+		// have been called, and `model.resolveHeaders` exercises what it produced.
 		"usage.reports": async () => {
 			await auth.usage.reports({ provider: PROVIDER }).catch(() => undefined);
 		},
@@ -213,11 +219,8 @@ describe("every path into an extension's provider is admitted", () => {
 		"keys.get": async () => {
 			await auth.keys.get(PROVIDER).catch(() => undefined);
 		},
-		"registry.getAll": async () => {
-			registry.getAll();
-		},
-		"registry.refresh": async () => {
-			await registry.refresh("offline").catch(() => undefined);
+		"registry.refreshRuntimeProviders": async () => {
+			await registry.refreshRuntimeProviders("online").catch(() => undefined);
 		},
 		"model.resolveHeaders": async () => {
 			const model = registry.find(PROVIDER, MODEL_ID) as
@@ -248,20 +251,48 @@ describe("every path into an extension's provider is admitted", () => {
 		initialized: async () => registerThroughRegistry(),
 	})) {
 		test(`${phase} registration: nothing reaches the author outside admission, and nothing at all once the session has gone`, async () => {
+			// The credential comes first: several routes only reach a provider that has one to
+			// work with — header ingestion needs an active OAuth credential, and the
+			// credential-health probe and the credential-aware projection need one to probe and
+			// to project against. Seeded after registration they would each return early and
+			// record nothing, which is indistinguishable from passing.
+			await auth.credentials.set(PROVIDER, {
+				type: "oauth",
+				access: "harness-access",
+				refresh: "harness-refresh",
+				expires: Date.now() + 3_600_000,
+			});
 			await register();
 			// Registration itself is a host route: whatever it read of the author's configuration
-			// is the author's code running, and has to have been admitted like any other.
+			// is the author's code running, and has to have been admitted like any other. It must
+			// also have reached the provider — a registration that read nothing would mean the
+			// fixture, not the host, had changed.
+			const registration = summarise(accesses);
 			expect({ phase, outside: summarise(accesses.filter(access => !access.inside)) }).toEqual({
 				phase,
 				outside: [],
 			});
+			expect({ phase, projected: registration.some(entry => entry.startsWith("oauth.modifyModels call")) }).toEqual({
+				phase,
+				projected: true,
+			});
+			expect(registration.length).toBeGreaterThan(5);
 
+			// A route that records nothing proves nothing, and silence reads exactly like success.
+			// Four of these were green for rounds while reaching no author code at all, and the
+			// health route that recorded nothing was where the next escape was found. So a route
+			// that claims to drive the provider must reach it, and one that genuinely cannot is
+			// removed from this list rather than left here looking like evidence.
+			const silent: string[] = [];
 			for (const [name, drive] of Object.entries(drives)) {
 				const before = accesses.length;
 				await drive();
-				const outside = summarise(accesses.slice(before).filter(access => !access.inside));
+				const reached = accesses.slice(before);
+				const outside = summarise(reached.filter(access => !access.inside));
 				expect({ phase, route: name, outside }).toEqual({ phase, route: name, outside: [] });
+				if (reached.length === 0) silent.push(name);
 			}
+			expect({ phase, reachedNothing: silent }).toEqual({ phase, reachedNothing: [] });
 
 			// Now the session goes. Every route is driven again, and the author must not run.
 			release();

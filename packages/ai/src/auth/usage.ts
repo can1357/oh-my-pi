@@ -4,7 +4,7 @@ import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import { resolveUsedFraction } from "../usage";
+import { copyUsageReport, resolveUsedFraction } from "../usage";
 import type {
 	ClientUsageReport,
 	ClientUsageSummary,
@@ -40,7 +40,7 @@ import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi, UsageProviderRegistration } from "./types";
-import { callThroughGate, selectLiveRegistration } from "./provider-gate";
+import { AdmittedSignal, callThroughGate, selectLiveRegistration } from "./provider-gate";
 import type { ProviderCallGate } from "./provider-gate";
 import {
 	dedupeUsageReports,
@@ -425,6 +425,9 @@ export class UsageService implements UsageApi {
 		const entry = runtime ?? this.providerEntryFor(request.provider);
 		if (!entry || !this.#supports(entry, request.provider, params)) return { report: null, runtime };
 
+		// The timeout fires on the host's timer, long after a quick fetch is over: the signal the
+		// provider is handed follows it only while the fetch runs.
+		const signal = new AdmittedSignal(entry.gate, params.signal);
 		try {
 			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
 				this.#deps.cache.reportKey(request),
@@ -434,7 +437,12 @@ export class UsageService implements UsageApi {
 				logger: this.logger,
 				...(previousReport ? { previousReport } : {}),
 			};
-			const report = await callThroughGate(entry.gate, () => entry.provider.fetchUsage(params, context));
+			const report = await callThroughGate(entry.gate, async () => {
+				const answered = await entry.provider.fetchUsage({ ...params, signal: signal.admit() }, context);
+				// Copied where it comes back, as the session's work: what follows reads and extends
+				// only the copy, never the author's report.
+				return entry.gate ? copyUsageReport(answered, request.provider, "fetchUsage") : answered;
+			});
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
 			// orgId from the `anthropic-organization-id` response header but never
@@ -476,6 +484,8 @@ export class UsageService implements UsageApi {
 				error: String(error),
 			});
 			return { report: null, runtime };
+		} finally {
+			signal.release();
 		}
 	}
 
@@ -690,9 +700,14 @@ export class UsageService implements UsageApi {
 			parsedReport = callThroughGate(entry.gate, () => {
 				const usageProvider = entry.provider;
 				const parse = usageProvider.parseRateLimitHeaders;
-				return parse
-					? Reflect.apply(parse, usageProvider, [headers, now, { responseStatus: options?.responseStatus }])
-					: undefined;
+				if (!parse) return undefined;
+				const parsed = Reflect.apply(parse, usageProvider, [
+					headers,
+					now,
+					{ responseStatus: options?.responseStatus },
+				]);
+				// Copied inside the call, as the session's work: the merge below reads only the copy.
+				return entry.gate ? copyUsageReport(parsed, provider, "parseRateLimitHeaders") : parsed;
 			});
 		} catch (error) {
 			logger.debug("Rate-limit header parser failed; skipping ingest", { provider, error: String(error) });

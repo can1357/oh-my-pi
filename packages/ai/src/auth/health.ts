@@ -1,5 +1,5 @@
 import type { Provider } from "../types";
-import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
+import { copyUsageReport, isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -27,7 +27,7 @@ import type {
 	ModelUsageHealthOptions,
 	UsageProviderRegistration,
 } from "./types";
-import { callThroughGate } from "./provider-gate";
+import { AdmittedSignal, callThroughGate } from "./provider-gate";
 import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential } from "./usage";
 import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
@@ -43,8 +43,11 @@ type DeclinedUsageProbe = "unsupported" | "unvalidated";
  * `validatesCredentials` reads, then `fetchUsage`. Every read of the provider is its author's
  * code — any of them may be a getter — so all of it runs as the owner's work, each property is
  * read once and the value read is the one used, and each method is called with the provider as
- * its receiver, so a host provider reading its own private state works. A throw, including the
- * gate's refusal once the owner has retired, fails this probe only: the caller records it as one
+ * its receiver, so a host provider reading its own private state works. `fetchUsage` is handed
+ * `signal`'s admitted signal in place of the probe's, which the caller releases once the probe is
+ * over, and a session's report is copied by its schema where it comes back, still as that work:
+ * the caller reads only the copy. A throw, including the gate's refusal once the owner has retired
+ * and a report holding a function, fails this probe only: the caller records it as one
  * credential's `ok: false`.
  */
 function probeUsage(
@@ -52,13 +55,15 @@ function probeUsage(
 	request: UsageRequestDescriptor,
 	params: UsageFetchParams,
 	ctx: UsageFetchContext,
-): DeclinedUsageProbe | Promise<UsageReport | null> {
-	return callThroughGate<DeclinedUsageProbe | Promise<UsageReport | null>>(registration.gate, () => {
+	signal: AdmittedSignal,
+): Promise<DeclinedUsageProbe | UsageReport | null> {
+	return callThroughGate(registration.gate, async () => {
 		const provider = registration.provider;
 		const supports = provider.supports;
 		if (supports && !Reflect.apply(supports, provider, [request])) return "unsupported";
 		if (provider.validatesCredentials === false) return "unvalidated";
-		return provider.fetchUsage(params, ctx);
+		const report = await provider.fetchUsage({ ...params, signal: signal.admit() }, ctx);
+		return registration.gate ? copyUsageReport(report, request.provider, "fetchUsage") : report;
 	});
 }
 
@@ -407,8 +412,10 @@ export class CredentialHealth implements HealthApi {
 			if (!registration) {
 				base.reason = `no usage probe configured for provider ${row.provider}`;
 			} else {
+				// The probe's signal follows the provider's work only until the probe is over.
+				const signal = new AdmittedSignal(registration.gate, params.signal);
 				try {
-					const outcome = await probeUsage(registration, initialRequest, params, ctx);
+					const outcome = await probeUsage(registration, initialRequest, params, ctx, signal);
 					if (outcome === "unsupported") {
 						base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
 					} else if (outcome === "unvalidated") {
@@ -427,6 +434,8 @@ export class CredentialHealth implements HealthApi {
 				} catch (error) {
 					base.ok = false;
 					base.reason = error instanceof Error ? error.message : String(error);
+				} finally {
+					signal.release();
 				}
 			}
 

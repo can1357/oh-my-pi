@@ -8,7 +8,7 @@ import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
-import { callThroughGate } from "./provider-gate";
+import { AdmittedSignal, callThroughGate } from "./provider-gate";
 import type { OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
@@ -46,20 +46,21 @@ export interface OAuthAccountsDeps {
 
 /**
  * Runs a runtime-registered provider's login on the author's object. Its caller runs it through the
- * registration's gate: the capability check and the `storeCredentialsAs` read are the author's code
+ * registration's gate: the capability read and the `storeCredentialsAs` read are the author's code
  * as much as the call (either may be a getter), so both happen before the first await, under that
- * gate.
+ * gate, and the function read is the one called.
  */
 async function loginCustomProvider(
 	provider: OAuthProviderId,
 	custom: CustomOAuthProvider,
 	callbacks: OAuthLoginCallbacks,
 ): Promise<{ result: OAuthCredentials | string; storeCredentialsAs: string | undefined }> {
-	if (!custom.login) {
+	const login = custom.login;
+	if (!login) {
 		throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 	}
 	const storeCredentialsAs = custom.storeCredentialsAs;
-	return { result: await custom.login(callbacks), storeCredentialsAs };
+	return { result: await Reflect.apply(login, custom, [callbacks]), storeCredentialsAs };
 }
 
 /** OAuth login, per-account access resolution, and account listings. */
@@ -116,9 +117,16 @@ export class OAuthAccounts implements OAuthApi {
 			if (!entry) {
 				throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 			}
-			({ result, storeCredentialsAs } = await callThroughGate(entry.gate, () =>
-				loginCustomProvider(provider, entry.provider, callbacks),
-			));
+			// Of the callbacks, only the signal dispatches into the author from the host's side: the
+			// others are host functions the author calls and awaits as its own work.
+			const signal = new AdmittedSignal(entry.gate, callbacks.signal);
+			try {
+				({ result, storeCredentialsAs } = await callThroughGate(entry.gate, () =>
+					loginCustomProvider(provider, entry.provider, { ...callbacks, signal: signal.admit() }),
+				));
+			} finally {
+				signal.release();
+			}
 		}
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.

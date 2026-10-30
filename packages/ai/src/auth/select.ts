@@ -1147,10 +1147,13 @@ export class CredentialSelector {
 				// retired during it, and then an earlier live one answers.
 				const { provider: custom, gate } = getOAuthProviderEntry(provider) ?? customProvider;
 				// The capability read is the author's code as much as the call (it may be a getter),
-				// so both run as the owning session's work.
-				const apiKey = callThroughGate(gate, () =>
-					custom.getApiKey ? custom.getApiKey(refreshedCredentials) : refreshedCredentials.access,
-				);
+				// so both run as the owning session's work, and the function read is the one called.
+				const apiKey = callThroughGate(gate, () => {
+					const getApiKey = custom.getApiKey;
+					return getApiKey
+						? Reflect.apply(getApiKey, custom, [refreshedCredentials])
+						: refreshedCredentials.access;
+				});
 				result = { newCredentials: refreshedCredentials, apiKey };
 			} else {
 				// Refresh first through the broker-aware single-flighted machinery

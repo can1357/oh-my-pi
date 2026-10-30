@@ -246,7 +246,13 @@ whoever is consuming the events rather than at their pace, and its `return()` ru
 stream ends rather than when a consumer stops early. The `signal` your function receives is the
 host's own: it aborts with the caller's reason, at the same moment, and stops following once
 your stream has finished. Both exist so that what your stream does while it runs is still your
-session's work, which is what keeps its credentials in place until it ends.
+session's work. That is what keeps your session's credentials in place while it runs — and
+"while it runs" means until your iterator's `return()` has finished, an asynchronous `finally`
+included, **and** the stream's own `result()` has settled. A stream whose `result` is not a
+function is refused at the call, because a producer that cannot say when it is finished is one
+the session cannot be held open for. A `finally` that never settles therefore holds your
+session's account restriction for the life of the process; the alternative would be releasing
+its credentials while your code is still running.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 

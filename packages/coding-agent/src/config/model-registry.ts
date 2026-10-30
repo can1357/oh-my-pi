@@ -63,6 +63,7 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import {
+	AdmittedSignal,
 	callThroughGate,
 	type GatedRegistration,
 	type ProviderCallGate,
@@ -1715,7 +1716,8 @@ export class ModelRegistry {
 	 * A header resolver an extension's model projection put on a row. From then on the HOST holds
 	 * it and calls it itself — the streaming path does, knowing nothing of who wrote it — so it is
 	 * owned the way an accepted handler is: it runs through the producing registration's gate, on
-	 * the row it came with, and what it returns is read inside that admission too.
+	 * the row it came with, and what it returns is read inside that admission too. The abort signal
+	 * it is handed runs its listeners in that admission, and only until the call is over.
 	 *
 	 * It answers only while that registration is the projection in force, checked again once the
 	 * author's resolver settles, whether it fulfils or rejects. After the registration has gone —
@@ -1737,16 +1739,21 @@ export class ModelRegistry {
 		const answers = () =>
 			registration.projection === projection && this.#projectionInForce(providerName) === registration;
 		const authored: HeaderResolver = async signal => {
-			const produced = await callThroughGate(gate, () => resolver.call(receiver, signal));
-			if (!answers()) throw PROJECTION_SUPERSEDED;
-			return callThroughGate(gate, () =>
-				snapshotAuthorData(
-					produced,
-					DATA,
-					authorDataSite(providerName, "resolveHeaders() result", RETURNING_ADVICE),
-					new Map(),
-				),
-			) as Record<string, string> | undefined;
+			const admitted = new AdmittedSignal(gate, signal);
+			try {
+				const produced = await callThroughGate(gate, () => Reflect.apply(resolver, receiver, [admitted.admit()]));
+				if (!answers()) throw PROJECTION_SUPERSEDED;
+				return callThroughGate(gate, () =>
+					snapshotAuthorData(
+						produced,
+						DATA,
+						authorDataSite(providerName, "resolveHeaders() result", RETURNING_ADVICE),
+						new Map(),
+					),
+				) as Record<string, string> | undefined;
+			} finally {
+				admitted.release();
+			}
 		};
 		const own = headers ? (createConfigHeaderResolver([authored, headers]) ?? authored) : authored;
 		const owned: HeaderResolver = async signal => {

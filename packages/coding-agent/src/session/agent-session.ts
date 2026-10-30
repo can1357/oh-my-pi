@@ -6757,6 +6757,20 @@ export class AgentSession implements SettingsScope {
 		// two. One pass that finds nothing new is the only honest stopping point.
 		if (!drained) {
 			void (async () => {
+				// Evidence for a hold that may never end — an authored `finally` that never settles keeps
+				// it for the life of the process — and nothing more: no deadline, no release. Inside this
+				// pass, so that asking cannot fail the disposal.
+				if (
+					typeof this.#extensionRunner?.hasPendingHandlerWork === "function" &&
+					this.#extensionRunner.hasPendingHandlerWork()
+				) {
+					logger.warn(
+						"Extension work outlived the dispose drain; its account pools are lifted only when it ends",
+						{
+							providerSessionId: this.sessionId,
+						},
+					);
+				}
 				await this.#waitForLiveSessionWork();
 				this.#releaseRetainedSessionMemory();
 				// The reset is itself a producer — it notifies queue-change observers synchronously —
