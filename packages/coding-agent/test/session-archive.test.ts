@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
-import { restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/session-archive";
+import { type RestoredSession, restoreArchivedSession } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -715,18 +715,18 @@ test("re-archiving a half-restored session keeps the artifacts only the archive 
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
 	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
 
-	const realCp = fs.cp;
-	const cp = spyOn(fs, "cp").mockImplementation(async (source, destination, options) => {
-		if (String(source) === liveArtifacts) {
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		if (String(source).startsWith(liveArtifacts)) {
 			throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
 		}
-		return await realCp(source, destination, options);
+		return await realCopyFile(source, destination, mode);
 	});
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		cp.mockRestore();
+		copyFile.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -866,7 +866,7 @@ test("restoring over a link into the archive keeps the archive instead of deleti
 	const restored = await restoreArchivedSession(archiveFile, root);
 
 	expect(restored.artifactsRestored).toBe(false);
-	expect(restored.notRestored.join("\n")).toContain("resolves into the archive");
+	expect(restored.notRestored.join("\n")).toContain("sub.jsonl");
 	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe("ONLY-ARCHIVED-CONVERSATION\n");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
@@ -884,7 +884,7 @@ test("restoring into a directory link aimed at the archive keeps the archive", a
 	const restored = await restoreArchivedSession(archiveFile, root);
 
 	expect(restored.artifactsRestored).toBe(false);
-	expect(restored.notRestored.join("\n")).toContain("resolves into the archive");
+	expect(restored.notRestored.join("\n")).toContain(path.basename(liveArtifacts));
 	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe("ONLY-ARCHIVED-CONVERSATION\n");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
@@ -966,6 +966,236 @@ test("a refused archive run does not migrate the settings it read", async () => 
 	expect(await Bun.file(`${legacy}.bak`).exists()).toBe(false);
 	expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
 	expect(await Bun.file(path.join(root, "agent.db")).exists()).toBe(false);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("archiving refuses a conflict below a symlinked archive directory", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "nested", "tool.log"), "PREFIX-ARCHIVED-ONLY-SUFFIX\n");
+	await archiveEverything();
+	// The archive keeps its nested directory somewhere else and links to it —
+	// a walk that stops at the link sees none of the files the copy overwrites.
+	const offloaded = path.join(root, "offloaded-archive-tree");
+	await fs.rename(path.join(archivedArtifacts, "nested"), offloaded);
+	await fs.symlink(offloaded, path.join(archivedArtifacts, "nested"));
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "nested", "tool.log"), "PREFIX");
+
+	const result = await archiveEverything();
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(await Bun.file(path.join(offloaded, "tool.log")).text()).toBe("PREFIX-ARCHIVED-ONLY-SUFFIX\n");
+});
+
+test("archiving checks the bytes it is about to write, not the live file it read earlier", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-ARCHIVED-ONLY-SUFFIX\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-ARCHIVED-ONLY-SUFFIX\n");
+
+	// The live file loses the archived suffix after it was staged for the copy.
+	// The comparison has to run on what is being written, so this is refused.
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		if (String(source) === path.join(liveArtifacts, "tool.log")) {
+			await Bun.write(String(source), "PREFIX");
+		}
+		return await realCopyFile(source, destination, mode);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("PREFIX-ARCHIVED-ONLY-SUFFIX\n");
+});
+
+test("an artifact that only looks like a transcript is compared byte for byte", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	// Tool output whose first line happens to fill a title slot, with the only
+	// copy of its content inside that line. Nothing about the file is a
+	// session, so none of its bytes may be read as a name and skipped.
+	const titled = (content: string) =>
+		`${serializeTitleSlot({ title: content, source: "user", updatedAt: "2026-01-01T00:00:00.000Z" })}SHARED TAIL\n`;
+	await Bun.write(path.join(liveArtifacts, "tool-output.log"), titled("UNIQUE ARCHIVED OUTPUT"));
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "tool-output.log"), titled("DIFFERENT LIVE OUTPUT"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool-output.log")).text()).toBe(
+		titled("UNIQUE ARCHIVED OUTPUT"),
+	);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a restore refuses to delete the archive when the live tree becomes an alias of it mid-copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "ONLY-ARCHIVED-CONVERSATION\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+
+	// The live tree becomes the archived tree under another name once the file
+	// has been carried home. Every path checked before that is stale, so the
+	// question has to be asked again with nothing left to do but delete.
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+		await realRename(source, destination);
+		if (String(destination) !== path.join(liveArtifacts, "sub.jsonl")) return;
+		await fs.rm(liveArtifacts, { recursive: true, force: true });
+		await fs.symlink(archivedArtifacts, liveArtifacts);
+	});
+	let restored: RestoredSession | undefined;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		rename.mockRestore();
+	}
+
+	expect(restored?.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe("ONLY-ARCHIVED-CONVERSATION\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a legacy transcript the writer renames in its header still restores", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const header = {
+		type: "session",
+		version: 3,
+		id: SESSION_ID,
+		timestamp: "2026-01-01T00:00:00.000Z",
+		cwd: root,
+	};
+	const turns = `${[
+		JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: PROMPT } }),
+		JSON.stringify({ type: "message", id: "m2", message: { role: "assistant", content: [] } }),
+	].join("\n")}\n`;
+	// Archived before title slots: the header is the first line and carries no name.
+	await Bun.write(sessionFile, `${JSON.stringify(header)}\n${turns}`);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// What the legacy rewrite leaves: a slot in front and the name written into
+	// the header record too.
+	await Bun.write(
+		sessionFile,
+		`${serializeTitleSlot({ title: "Renamed", source: "user", updatedAt: "2026-01-02T00:00:00.000Z" })}${JSON.stringify(
+			{ ...header, title: "Renamed", titleSource: "user" },
+		)}\n${turns}`,
+	);
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(sessionFile).text()).toContain("Renamed");
+});
+test("a conflict that appears after an earlier artifact copied still keeps its archived bytes", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a-first.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z-later.log"), "BASE");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "a-first.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z-later.log"), "BASE");
+
+	// The second file's archived copy grows after the first one has been
+	// published, so a decision taken before the walk started would be stale.
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		const result = await realCopyFile(source, destination, mode);
+		if (String(source) === path.join(liveArtifacts, "a-first.log")) {
+			await Bun.write(path.join(archivedArtifacts, "z-later.log"), "BASE-ARCHIVED-ONLY");
+		}
+		return result;
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "z-later.log")).text()).toBe("BASE-ARCHIVED-ONLY");
+});
+
+test("a failed archive copy keeps archive-only entries below a symlinked archive directory", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "nested", "shared.log"), "SHARED");
+	await archiveEverything();
+	const offloaded = path.join(root, "offloaded-archive-tree");
+	await fs.rename(path.join(archivedArtifacts, "nested"), offloaded);
+	await fs.symlink(offloaded, path.join(archivedArtifacts, "nested"));
+	await Bun.write(path.join(offloaded, "only.log"), "ARCHIVED ONLY");
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "nested", "shared.log"), "SHARED");
+	await Bun.write(path.join(liveArtifacts, "nested", "new.log"), "NEW");
+
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		if (String(source).endsWith("new.log")) throw new Error("ENOSPC injected");
+		return await realCopyFile(source, destination, mode);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	// The cleanup walks the same tree the copy wrote into, so what the archive
+	// held through the link is still there.
+	expect(await Bun.file(path.join(offloaded, "only.log")).text()).toBe("ARCHIVED ONLY");
+	expect(await Bun.file(path.join(offloaded, "shared.log")).text()).toBe("SHARED");
+});
+
+test("a first archive that runs out of space leaves the live session whole", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "only.log"), "LIVE-ARTIFACT");
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async () => {
+		throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(path.join(liveArtifacts, "only.log")).text()).toBe("LIVE-ARTIFACT");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("a legacy-configured archive phase meets the same refusal as a configured one", async () => {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+	// Archiving is on, but only the pre-config.yml file says so. A gate that
+	// cannot see it would let an unqualified `--apply` reach the phase.
+	await Bun.write(path.join(root, "settings.json"), JSON.stringify({ gc: { archive: true } }));
+
+	await expect(runGcCommand({ flags: { agentDir: root, apply: true, json: true } })).rejects.toThrow("--forward-only");
+
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });

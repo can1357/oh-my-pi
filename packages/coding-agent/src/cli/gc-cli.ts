@@ -35,7 +35,8 @@ import {
 	inflateArchivedTranscript,
 	isArchivedSessionPath,
 	listArchivedSessionFiles,
-	liveFileHoldsArchived,
+	archivedHandleIsHeldBy,
+	isSamePath,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 } from "../session/session-archive";
@@ -1065,56 +1066,100 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 /**
  * Relative paths the archive already holds under `destination`, or undefined
  * when the destination does not exist. Directories are listed too, so a
- * cleanup can tell one it has to keep from one it made.
+ * cleanup can tell one it has to keep from one it made, and symlinks are
+ * followed so the listing covers the same tree the copy writes into.
  */
 async function existingTreePaths(destination: string): Promise<Set<string> | undefined> {
 	if (!(await statIfPresent(destination))) return undefined;
 	const paths = new Set<string>();
-	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: false })) {
+	for await (const name of ANY_FILE_GLOB.scan({
+		cwd: destination,
+		dot: true,
+		onlyFiles: false,
+		followSymlinks: true,
+	})) {
 		paths.add(name);
 	}
 	return paths;
 }
 
 /**
- * Refuse the move while the archive holds artifact bytes the live tree does
- * not, and while either tree is the other under another name.
+ * Publish one live file into the archive, refusing to destroy archived bytes
+ * the live copy does not have.
  *
- * `fs.cp(…, { force: true })` truncates an existing destination before it
- * writes the first byte, so a complete archived copy standing where a
- * shorter or divergent live file lands is gone the moment the copy starts.
- * No cleanup recovers it: a snapshot of the destination records which paths
- * were there, not what they held. The conflict therefore has to be resolved
- * before anything is written, and the rule is the restore's rule in the
- * other direction — the surviving copy must hold everything the other had.
+ * The live content is staged beside its destination first, so the comparison
+ * runs against the bytes that are actually about to land rather than against
+ * a live file that may have changed since. The archived copy standing there
+ * is read through an open descriptor and identified by `dev`/`ino`, so a path
+ * swapped underneath cannot turn an earlier observation into permission to
+ * overwrite a file nothing examined, and the archived file being the live
+ * file under another name is refused instead of copied over itself.
  *
- * The alias check is the same hazard seen from the archive side: with
- * `dereference: true`, copying a live path that resolves to its own archived
- * counterpart would read and truncate one file.
+ * Publishing is a rename over the verified descriptor's path, which is the
+ * narrowest window POSIX offers; the gc lock and the session's ownership
+ * lease are what keep anything cooperative out of it.
  */
-async function assertArchiveTreeIsSafeToOverwrite(source: string, destination: string): Promise<void> {
-	if (!(await statIfPresent(destination))) return;
-	const sourceReal = await fs.realpath(source).catch(() => source);
-	const destinationReal = await fs.realpath(destination).catch(() => destination);
-	if (sourceReal === destinationReal) {
-		throw new Error(
-			`the live artifact tree ${source} resolves to the archived tree ${destinationReal}, so archiving it would copy it over itself`,
-		);
-	}
-	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: true })) {
-		const archived = path.join(destination, name);
-		const live = path.join(source, name);
-		if ((await fs.realpath(live).catch(() => live)) === (await fs.realpath(archived).catch(() => archived))) {
-			throw new Error(`${live} resolves to the archived ${archived}, so archiving it would copy it over itself`);
+async function publishArtifactIntoArchive(source: string, destination: string): Promise<void> {
+	const tempPath = sessionStagingPath(destination);
+	try {
+		await fs.copyFile(source, tempPath);
+		const archived = await fs.open(destination, "r").catch(() => undefined);
+		if (archived) {
+			try {
+				const archivedStat = await archived.stat();
+				if (archivedStat.isFile() && !(await archivedHandleIsHeldBy(archived, archivedStat, tempPath))) {
+					throw new Error(
+						`the archive already holds ${destination}, and ${source} does not hold its bytes; ` +
+							`archiving would overwrite the archived copy with a shorter or different one. ` +
+							`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
+					);
+				}
+			} finally {
+				await archived.close();
+			}
 		}
-		if (!(await statIfPresent(live))) continue;
-		if (await liveFileHoldsArchived(archived, live)) continue;
-		throw new Error(
-			`the archive already holds ${archived}, and ${live} does not hold its bytes; ` +
-				`archiving would overwrite the archived copy with a shorter or different one. ` +
-				`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
-		);
+		await fs.rename(tempPath, destination);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true });
+		throw error;
 	}
+}
+
+/**
+ * Copy one live entry into the archive with symlinks resolved into real files.
+ *
+ * One walk does the deciding and the writing, over the tree the writes land
+ * in: a safety pass that walked a different tree — one that stopped at a
+ * directory symlink the copy follows — would clear files it never looked at.
+ */
+async function copyArtifactEntryIntoArchive(
+	source: string,
+	destination: string,
+	state: { brokenLinks: number },
+): Promise<void> {
+	const stat = await fs.stat(source).catch(error => {
+		// A link whose target is already gone: one of them must not make a
+		// session unarchivable forever.
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!stat) {
+		if ((await fs.lstat(source).catch(() => undefined))?.isSymbolicLink()) state.brokenLinks += 1;
+		return;
+	}
+	if (stat.isDirectory()) {
+		if (await isSamePath(source, destination)) {
+			throw new Error(`the live artifact tree ${source} is the archived tree ${destination} itself`);
+		}
+		await fs.mkdir(destination, { recursive: true });
+		// Sorted, so a run that fails part-way is reproducible from its report.
+		for (const entry of (await fs.readdir(source)).sort()) {
+			await copyArtifactEntryIntoArchive(path.join(source, entry), path.join(destination, entry), state);
+		}
+		return;
+	}
+	if (!stat.isFile()) return;
+	await publishArtifactIntoArchive(source, destination);
 }
 
 /**
@@ -1131,7 +1176,12 @@ async function removeTreeAdditions(destination: string, preexisting: Set<string>
 		await fs.rm(destination, { recursive: true, force: true });
 		return;
 	}
-	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: false })) {
+	for await (const name of ANY_FILE_GLOB.scan({
+		cwd: destination,
+		dot: true,
+		onlyFiles: false,
+		followSymlinks: true,
+	})) {
 		if (preexisting.has(name)) continue;
 		await fs.rm(path.join(destination, name), { recursive: true, force: true }).catch(() => undefined);
 	}
@@ -1142,12 +1192,14 @@ async function removeTreeAdditions(destination: string, preexisting: Set<string>
  * files, then drop the source. The archive must hold the bytes: a link into
  * a tree that is relocated or cleaned later archives a session that cannot
  * come back. `fs.rename` is not an option either — the archive root is
- * routinely a symlink onto another filesystem. `force` lets a run finish a
- * tree that a killed run left half-copied.
+ * routinely a symlink onto another filesystem.
  *
- * A link whose target is already gone is skipped and counted: dereferencing
- * it throws, and one broken link must not make a session unarchivable
- * forever.
+ * A link whose target is already gone is skipped and counted: one broken
+ * link must not make a session unarchivable forever.
+ *
+ * No archived file is replaced with bytes it does not already contain, and
+ * the deciding and the writing are the same walk of the same tree — see
+ * {@link publishArtifactIntoArchive} and {@link copyArtifactEntryIntoArchive}.
  *
  * A failure part-way through removes only what this copy wrote, so a retry
  * finds no stray tree of its own making — but anything the archive already
@@ -1157,11 +1209,6 @@ async function removeTreeAdditions(destination: string, preexisting: Set<string>
  * that removed the destination would delete the only copy of every artifact
  * the restore had not reached yet, and the transcript rollback could not
  * bring those back.
- *
- * A pre-existing archive entry is never overwritten with bytes it does not
- * already contain: {@link assertArchiveTreeIsSafeToOverwrite} settles that
- * before the copy begins, because `force: true` truncates a destination file
- * before it writes and no cleanup can put back contents.
  *
  * Once the copy is complete the archive holds the session, and a failure to
  * drop the live tree (a locked file, a read-only directory) is reported as a
@@ -1174,22 +1221,10 @@ async function moveArtifactsTree(
 	destination: string,
 ): Promise<{ brokenLinks: number; leftoverSource?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	await assertArchiveTreeIsSafeToOverwrite(source, destination);
 	const preexisting = await existingTreePaths(destination);
-	let brokenLinks = 0;
+	const state = { brokenLinks: 0 };
 	try {
-		await fs.cp(source, destination, {
-			recursive: true,
-			dereference: true,
-			force: true,
-			filter: async entry => {
-				const link = await fs.lstat(entry).catch(() => undefined);
-				if (!link?.isSymbolicLink()) return true;
-				if (await pathExists(entry)) return true;
-				brokenLinks += 1;
-				return false;
-			},
-		});
+		await copyArtifactEntryIntoArchive(source, destination, state);
 	} catch (error) {
 		await removeTreeAdditions(destination, preexisting);
 		throw error;
@@ -1197,9 +1232,9 @@ async function moveArtifactsTree(
 	try {
 		await fs.rm(source, { recursive: true, force: true });
 	} catch {
-		return { brokenLinks, leftoverSource: source };
+		return { brokenLinks: state.brokenLinks, leftoverSource: source };
 	}
-	return { brokenLinks };
+	return { brokenLinks: state.brokenLinks };
 }
 
 /**

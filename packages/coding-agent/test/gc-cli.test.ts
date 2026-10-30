@@ -979,8 +979,8 @@ describe("runGcCommand cold-session archive", () => {
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
 		const archiveDir = path.join(root, "archive", "sessions", "project");
-		const cpSpy = spyOn(fs, "cp").mockImplementation(async source => {
-			if (String(source) !== artifacts) throw new Error(`unexpected copy of ${String(source)}`);
+		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
+			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
 			throw new Error("artifact move failed");
 		});
 		let result: GcResult;
@@ -1016,8 +1016,8 @@ describe("runGcCommand cold-session archive", () => {
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
 		const archive = path.join(root, "archive", "sessions", "project", "rollback-corrupt.jsonl.gz");
-		const cpSpy = spyOn(fs, "cp").mockImplementation(async source => {
-			if (String(source) !== artifacts) throw new Error(`unexpected copy of ${String(source)}`);
+		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
+			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
 			const bytes = await Bun.file(archive).bytes();
 			await Bun.write(archive, bytes.subarray(0, -4));
 			throw new Error("artifact move failed");
@@ -1058,7 +1058,7 @@ describe("runGcCommand cold-session archive", () => {
 			if (String(destination) === session) throw new Error("rollback publish failed");
 			await rename(source, destination);
 		});
-		const cpSpy = spyOn(fs, "cp").mockImplementation(async () => {
+		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async () => {
 			throw new Error("artifact move failed");
 		});
 		let result: GcResult;
@@ -1182,8 +1182,8 @@ describe("runGcCommand cold-session archive", () => {
 		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "artifact");
-		const cpSpy = spyOn(fs, "cp").mockImplementation(async source => {
-			if (String(source) !== artifacts) throw new Error(`unexpected copy of ${String(source)}`);
+		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
+			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
 			throw new Error("artifact move failed");
 		});
 		try {
