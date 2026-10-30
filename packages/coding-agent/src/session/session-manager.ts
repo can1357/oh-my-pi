@@ -863,13 +863,19 @@ async function emptyPinnedDirectory(
 		const at = `${dir.at}/${entry.name}`;
 		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
 		const record = created?.get(staged);
+		// The marker stays until the tree it marks is gone. It is what a
+		// sweeper recognises an abandoned tree by, and removing it first opens
+		// a window in which a kill leaves a tree nothing will ever collect —
+		// along with whatever this removal had already moved into a directory
+		// of its own inside it. It leaves with the tree, from inside the
+		// directory the tree is moved into.
+		if (!stagedUnder && entry.name === ARTIFACT_STAGING_MARKER) continue;
 		// With a record of what this copy made, nothing else in the tree is
 		// this copy's to remove — not a file somebody else put there, not a
 		// directory it never created. Without one the tree belongs to a copier
 		// that is gone, and the only things it may still not touch are what it
 		// cannot account for: another filesystem, or anything mounted.
-		// The marker is this copy's own, written when the tree was made.
-		const ours = record !== undefined || staged === ARTIFACT_STAGING_MARKER;
+		const ours = record !== undefined;
 		if (created && !ours) {
 			logger.warn("A session artifact staging entry was not created by this copy; left alone", { path: staged });
 			continue;
@@ -1036,7 +1042,10 @@ async function removeDirectoryIfStillOurs(
 	try {
 		if (!sameNode(inPlace.identity, before)) return;
 		await emptyPinnedDirectory(inPlace, staged, created);
-		empty = (await fs.promises.readdir(inPlace.at).catch(() => ["unreadable"])).length === 0;
+		// The root of a staging tree keeps its marker until the tree itself
+		// goes, so "empty" there means the marker and nothing else.
+		const left = await fs.promises.readdir(inPlace.at).catch(() => ["unreadable"]);
+		empty = left.length === 0 || (staged === "" && left.length === 1 && left[0] === ARTIFACT_STAGING_MARKER);
 	} finally {
 		await inPlace.close();
 	}
@@ -1080,6 +1089,10 @@ async function removeEmptyDirectory(
 			await putDirectoryBack(parent, name, asideDir, staged);
 			return;
 		}
+		// The marker goes here, inside a directory created by this process and
+		// named by it: from the kill that lands a moment earlier, a sweeper
+		// still finds a marked tree — this one — and takes both down.
+		await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
 		await fs.promises.rmdir(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
 	} finally {
 		await removeExclusiveDirectory(parent, aside);
