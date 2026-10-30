@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, path::Path};
 
-use crate::{error, regex, sys, trace_categories};
+use crate::{error, interp, regex, sys, trace_categories};
 
 /// Represents a piece of a shell pattern.
 #[derive(Clone, Debug)]
@@ -252,14 +252,32 @@ impl Pattern {
 		// NoGlob, preserving the argument even when nullglob is enabled.
 		if self.pieces.is_empty() {
 			return Ok(PatternExpansionResult::NoGlob);
+		}
 
 		// Similarly, if we're *confident* the pattern doesn't require expansion,
-		// then we know there's a single expansion (before filtering).
-		} else if !self.pieces.iter().any(|piece| {
-			matches!(piece, PatternPiece::Pattern(_))
-				&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
-		}) {
-			let concatenated: String = self.pieces.iter().map(|piece| piece.as_str()).collect();
+		// then we know there's a single expansion (before filtering). One piece
+		// can be a whole array element, so both the scan and the copy that
+		// follows it read every byte of one and are divided.
+		let mut needs_expansion = false;
+		for piece in &self.pieces {
+			if matches!(piece, PatternPiece::Pattern(_))
+				&& requires_expansion_divided(
+					piece.as_str(),
+					self.enable_extended_globbing,
+					options.cancel.as_ref(),
+				)
+				.await?
+			{
+				needs_expansion = true;
+				break;
+			}
+		}
+
+		if !needs_expansion {
+			let mut concatenated = String::new();
+			for piece in &self.pieces {
+				push_in_strides(&mut concatenated, piece.as_str(), options.cancel.as_ref()).await?;
+			}
 
 			return Ok(PatternExpansionResult::Expanded(vec![concatenated]));
 		}
@@ -764,11 +782,85 @@ impl Pattern {
 	}
 }
 
+/// Appends `text` to `out` a stride at a time, spending a checkpoint before
+/// each stride.
+///
+/// One pattern piece can be a whole array element; copying sixty-four
+/// megabytes of one in a single step is a stretch nothing can interrupt. See
+/// `interp::push_str_in_strides`, which does the same inside the expander.
+async fn push_in_strides(
+	out: &mut String,
+	text: &str,
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	out.reserve(text.len());
+	let mut rest = text;
+	loop {
+		walk_checkpoint(cancel).await?;
+		if rest.len() <= interp::BYTE_CHECKPOINT_STRIDE {
+			out.push_str(rest);
+			return Ok(());
+		}
+		// A stride lands mid-character at most three bytes in.
+		let mut end = interp::BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		out.push_str(piece);
+		rest = remaining;
+	}
+}
+
+/// Whether `byte` can begin a glob metacharacter.
+///
+/// Plain globbing has `*`, `?` and a `[…]` class. Extended globbing adds
+/// `?(`, `*(`, `+(`, `@(` and `!(`, every one of which contains `(`. A string
+/// holding none of these cannot require expansion, whatever the grammar says,
+/// so this is a conservative filter and never a second opinion.
+const fn may_begin_glob_metacharacter(byte: u8, enable_extended_globbing: bool) -> bool {
+	matches!(byte, b'*' | b'?' | b'[' | b']') || (enable_extended_globbing && byte == b'(')
+}
+
 /// Checks whether a string contains glob metacharacters that would trigger
 /// pathname expansion. Delegates to the pattern parser's grammar, which is
 /// the single source of truth for what constitutes a glob metacharacter.
+///
+/// The grammar is a PEG and reads every byte, so the byte filter runs first.
+/// Callers that pass a whole word rather than a path component use
+/// [`requires_expansion_divided`]; a path component is bounded by `NAME_MAX`.
 fn requires_expansion(s: &str, enable_extended_globbing: bool) -> bool {
-	brush_parser::pattern::pattern_has_glob_metacharacters(s, enable_extended_globbing)
+	s.as_bytes().iter().any(|byte| may_begin_glob_metacharacter(*byte, enable_extended_globbing))
+		&& brush_parser::pattern::pattern_has_glob_metacharacters(s, enable_extended_globbing)
+}
+
+/// [`requires_expansion`] for a string of any size, reading it in strides.
+///
+/// One array element can be a whole word: the grammar over sixty-four
+/// megabytes of ordinary text cost 1.5 seconds of a worker with nothing to
+/// show, and a filter that read the same bytes in one undivided pass still
+/// cost 725 ms. The filter can only ever say "certainly not a pattern"; the
+/// grammar decides the rest, and only once a candidate byte has been found.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn requires_expansion_divided(
+	s: &str,
+	enable_extended_globbing: bool,
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<bool, error::Error> {
+	for stride in s.as_bytes().chunks(interp::BYTE_CHECKPOINT_STRIDE) {
+		walk_checkpoint(cancel).await?;
+		if stride.iter().any(|byte| may_begin_glob_metacharacter(*byte, enable_extended_globbing)) {
+			return Ok(brush_parser::pattern::pattern_has_glob_metacharacters(
+				s,
+				enable_extended_globbing,
+			));
+		}
+	}
+
+	Ok(false)
 }
 
 fn pattern_to_regex_str(
@@ -1174,16 +1266,24 @@ mod tests {
 		Ok(())
 	}
 
-	#[test]
-	fn test_requires_expansion() {
+	#[tokio::test]
+	async fn test_requires_expansion() -> Result<()> {
 		// Delegates to the PEG grammar; thorough coverage is in brush-parser.
-		// Here we just verify the integration works.
+		// Here we just verify the integration works, including that the byte
+		// filter in front of the grammar never hides a pattern from it.
 		assert!(requires_expansion("*", false));
 		assert!(requires_expansion("[abc]", false));
 		assert!(!requires_expansion("]", false));
 		assert!(!requires_expansion("hello", false));
 		assert!(!requires_expansion("@(a)", false));
 		assert!(requires_expansion("@(a)", true));
+
+		// The divided form reads the same string in strides, so a pattern whose
+		// only metacharacter sits past the first one must still be found.
+		let late = format!("{}*", "a".repeat(interp::BYTE_CHECKPOINT_STRIDE * 3));
+		assert!(requires_expansion_divided(&late, false, None).await?);
+		assert!(!requires_expansion_divided(&late[..late.len() - 1], false, None).await?);
+		Ok(())
 	}
 
 	/// Extracts the `Expanded` payload from a `PatternExpansionResult`,

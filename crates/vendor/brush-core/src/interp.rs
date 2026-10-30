@@ -462,13 +462,90 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 /// a `case` arm) would otherwise usually have no checkpoint of its own, and
 /// whether the one that led to it is close enough would be a property of every
 /// path into it: one step can do all the work after that checkpoint is spent.
-/// Those loops spend one on every step, and the cost of that on the hot path,
-/// a yield for every 128 spent, is accepted.
+/// Those loops spend one on every step, and the cost of that on the hot path
+/// is accepted.
 pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
+	yield_if_held_too_long().await;
 	// After the cooperative yield, so a cancellation raised while this task was
 	// parked is seen on the step that follows it.
 	ensure_not_cancelled(params)
+}
+
+/// CPU time the calling thread has used so far.
+///
+/// Wall-clock time would count every stretch the machine took the thread away
+/// too, which is not this thread holding anything.
+fn worker_cpu_time() -> std::time::Duration {
+	let mut now = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+	// SAFETY: `clock_gettime` writes only the `timespec` it is given, and
+	// `CLOCK_THREAD_CPUTIME_ID` is always available.
+	unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+	std::time::Duration::new(
+		u64::try_from(now.tv_sec).unwrap_or_default(),
+		u32::try_from(now.tv_nsec).unwrap_or_default(),
+	)
+}
+
+/// How long a worker may run between yields before a checkpoint makes it
+/// yield, whatever Tokio's own budget says.
+///
+/// Tokio yields once per 128 checkpoints spent. That is a count, and a count
+/// says nothing about what a step costs: the byte budget spends one checkpoint
+/// per 64 KiB, so it guaranteed a yield only every 8 MiB — a few milliseconds
+/// at memcpy rate, and 189 ms when a byte costs more than a memcpy, which is
+/// what the expansion path costs. Bounding the interval in time is the
+/// property every stride in this file was reaching for and none could express.
+const LONGEST_HOLD_BETWEEN_YIELDS: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// How many checkpoints pass between readings of the thread's clock.
+///
+/// A reading is a vDSO call of a few tens of nanoseconds, about the cost of a
+/// checkpoint itself, so it is amortised rather than taken on every one. The
+/// number has to stay small: one checkpoint can stand for a whole byte stride
+/// of work, and the clock cannot bound what it does not see.
+const CHECKPOINTS_PER_CLOCK_READING: u32 = 16;
+
+/// What this thread has done since it last yielded.
+#[derive(Clone, Copy)]
+struct Hold {
+	checkpoints_since_reading: u32,
+	last_yield:                std::time::Duration,
+}
+
+thread_local! {
+	static HOLD: std::cell::Cell<Hold> =
+		const {
+			std::cell::Cell::new(Hold {
+				checkpoints_since_reading: 0,
+				last_yield:                std::time::Duration::ZERO,
+			})
+		};
+}
+
+/// Yields if this thread has run for [`LONGEST_HOLD_BETWEEN_YIELDS`] since it
+/// last did, reading the clock once every [`CHECKPOINTS_PER_CLOCK_READING`]
+/// checkpoints.
+async fn yield_if_held_too_long() {
+	let due = HOLD.with(|hold| {
+		let mut state = hold.get();
+		state.checkpoints_since_reading += 1;
+		if state.checkpoints_since_reading < CHECKPOINTS_PER_CLOCK_READING {
+			hold.set(state);
+			return false;
+		}
+		state.checkpoints_since_reading = 0;
+		let now = worker_cpu_time();
+		let due = now.saturating_sub(state.last_yield) >= LONGEST_HOLD_BETWEEN_YIELDS;
+		if due {
+			state.last_yield = now;
+		}
+		hold.set(state);
+		due
+	});
+	if due {
+		tokio::task::yield_now().await;
+	}
 }
 
 /// How many steps of one element each a loop may take between checkpoints.
@@ -529,11 +606,14 @@ pub(crate) async fn extend_in_strides<T>(
 /// same number for the same reason.
 pub(crate) const BYTE_CHECKPOINT_STRIDE: usize = 64 * 1024;
 
-/// How many map insertions a loop may make between checkpoints.
+/// Above how many bytes a single copy is divided into strides rather than made
+/// in one step.
 ///
-/// An insertion is not a move: at [`ELEMENT_CHECKPOINT_STRIDE`] a million of
-/// them held the worker for 19.6 ms at a stretch in an optimised build.
-pub(crate) const INSERTION_CHECKPOINT_STRIDE: usize = 32;
+/// The test is per copy and the dividing path is an `async` call, so this is
+/// also the line between the two: below it a copy takes the plain path,
+/// because calling an `async` function on each of a million fields costs more
+/// than the checkpoints it spends.
+pub(crate) const DIVIDE_COPY_ABOVE_BYTES: usize = BYTE_CHECKPOINT_STRIDE;
 
 /// Counts the checkpoints a loop over elements owes, by both the number of
 /// steps and the bytes those steps copy.
@@ -546,28 +626,22 @@ pub(crate) const INSERTION_CHECKPOINT_STRIDE: usize = 32;
 /// step that owes one. Awaiting a future on every step, even a step that owes
 /// nothing, cost copying a million-element array 9%: more than the
 /// checkpoints it spent.
+///
+/// There was a per-loop step stride here for a while, on the theory that
+/// inserting into a map costs more than moving a value and so should yield
+/// more often. It did not: `array_insertion_yields_throughout` measures the
+/// same longest hold at a stride of 32 as at 256 — 19.31 ms against 19.50 ms —
+/// because that stretch is not the insertion loop but the free of the million
+/// elements the assignment replaced, which no checkpoint can enter. The test
+/// that disproved the knob asserts nanoseconds per element and stays.
 pub(crate) struct ElementBudget {
-	steps:  usize,
-	bytes:  usize,
-	stride: usize,
+	steps: usize,
+	bytes: usize,
 }
 
 impl ElementBudget {
 	pub(crate) const fn new() -> Self {
-		Self { steps: 0, bytes: 0, stride: ELEMENT_CHECKPOINT_STRIDE }
-	}
-
-	/// A budget for a loop whose step costs more than moving a value: it owes
-	/// a checkpoint every `stride` steps instead of every
-	/// [`ELEMENT_CHECKPOINT_STRIDE`].
-	///
-	/// Inserting into a map is such a step. At the default stride, a million
-	/// insertions spent 4,096 checkpoints, which is 32 yields, and the stretch
-	/// between two of them measured 19.6 ms in an optimised build — the step
-	/// stride is a count, and a count says nothing about what a step costs any
-	/// more than it says how much it copies.
-	pub(crate) const fn with_stride(stride: usize) -> Self {
-		Self { steps: 0, bytes: 0, stride }
+		Self { steps: 0, bytes: 0 }
 	}
 
 	/// Call once per step, before it runs, with the bytes that step copies or
@@ -587,7 +661,7 @@ impl ElementBudget {
 		let first = self.steps == 0;
 		self.steps += 1;
 		self.bytes = self.bytes.saturating_add(bytes);
-		let mut due = (first || self.steps % self.stride == 0) as usize;
+		let mut due = (first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0) as usize;
 		if self.bytes >= BYTE_CHECKPOINT_STRIDE {
 			due += self.bytes / BYTE_CHECKPOINT_STRIDE;
 			self.bytes %= BYTE_CHECKPOINT_STRIDE;

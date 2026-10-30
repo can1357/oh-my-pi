@@ -311,7 +311,7 @@ impl ShellVariable {
 					base.push_str(int_value.to_string().as_str());
 				} else {
 					base.push_str(value.as_str());
-					Self::apply_value_transforms(base, treat_as_int, update_transform);
+					ValueConverter::apply_value_transforms(base, treat_as_int, update_transform);
 				}
 				Ok(())
 			},
@@ -496,19 +496,113 @@ impl ShellVariable {
 	}
 
 	fn convert_value_str_for_assignment(&self, s: String) -> String {
-		self.value_converter()(s)
+		self.value_converter().apply(s)
 	}
 
 	/// Returns what this variable's attributes (`declare -i`, `-l`, `-u`,
 	/// `-c`) make of a value assigned to it, for applying one element at a
 	/// time.
-	fn value_converter(&self) -> impl Fn(String) -> String + Copy + Send + Sync + 'static {
-		let treat_as_int = self.is_treated_as_integer();
-		let update_transform = self.get_update_transform();
-		move |mut value| {
-			Self::apply_value_transforms(&mut value, treat_as_int, update_transform);
-			value
+	fn value_converter(&self) -> ValueConverter {
+		ValueConverter {
+			treat_as_int:     self.is_treated_as_integer(),
+			update_transform: self.get_update_transform(),
 		}
+	}
+}
+
+/// What a variable's attributes make of a value assigned to it.
+#[derive(Clone, Copy)]
+pub(crate) struct ValueConverter {
+	treat_as_int:     bool,
+	update_transform: ShellVariableUpdateTransform,
+}
+
+impl ValueConverter {
+	/// A converter that leaves every value as it is.
+	pub(crate) const fn identity() -> Self {
+		Self { treat_as_int: false, update_transform: ShellVariableUpdateTransform::None }
+	}
+
+	/// Converts a value in one step.
+	fn apply(self, mut value: String) -> String {
+		Self::apply_value_transforms(&mut value, self.treat_as_int, self.update_transform);
+		value
+	}
+
+	/// Converts a value a stride at a time, spending a checkpoint between
+	/// pieces.
+	///
+	/// Case conversion rewrites the whole string and one array element can be
+	/// any size: a `ß`-filled element into an uppercase destination held the
+	/// worker for 87 ms at 64 MiB and 672 ms at 512 MiB, after its byte charge
+	/// had already been paid. A charge counts work; only dividing the
+	/// operation interrupts it.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the conversion unfinished and discarded.
+	async fn apply_divided(
+		self,
+		value: String,
+		params: &ExecutionParameters,
+	) -> Result<String, error::Error> {
+		let divisible = !self.treat_as_int
+			&& !matches!(self.update_transform, ShellVariableUpdateTransform::None);
+		if !divisible || value.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			return Ok(self.apply(value));
+		}
+
+		// Only the first piece carries `Capitalize`; the rest lowercase, which
+		// is what capitalising the whole string does to them.
+		let continuation = match self.update_transform {
+			ShellVariableUpdateTransform::Capitalize => ShellVariableUpdateTransform::Lowercase,
+			other => other,
+		};
+		let lowercases = matches!(
+			self.update_transform,
+			ShellVariableUpdateTransform::Lowercase | ShellVariableUpdateTransform::Capitalize
+		);
+
+		let mut converted = String::with_capacity(value.len());
+		let mut rest = value.as_str();
+		let mut transform = self.update_transform;
+		while !rest.is_empty() {
+			interp::loop_checkpoint(params).await?;
+			let end = Self::stride_end(rest, lowercases);
+			let (piece, remaining) = rest.split_at(end);
+			let mut piece = piece.to_owned();
+			Self::apply_value_transforms(&mut piece, false, transform);
+			converted.push_str(&piece);
+			transform = continuation;
+			rest = remaining;
+		}
+
+		Ok(converted)
+	}
+
+	/// Where to cut the next piece.
+	///
+	/// **Do not replace this with a plain byte stride.** Case conversion is
+	/// per-character except for one rule: what `Σ` lowercases to depends on
+	/// whether a cased letter follows it — `σ` inside a word, `ς` at its end —
+	/// so a piece that ended straight after a capital sigma would convert it as
+	/// if the string stopped there. Cutting after the sigma keeps that decision
+	/// inside one piece. The caller carries the matching rule for `Capitalize`:
+	/// only the first piece capitalises and the rest lowercase. Neither of
+	/// these is something a latency test can see.
+	fn stride_end(text: &str, lowercases: bool) -> usize {
+		if text.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			return text.len();
+		}
+		let mut end = interp::DIVIDE_COPY_ABOVE_BYTES;
+		while !text.is_char_boundary(end) {
+			end -= 1;
+		}
+		while lowercases && end < text.len() && text[..end].ends_with('Σ') {
+			end += text[end..].chars().next().map_or(0, char::len_utf8);
+		}
+		end
 	}
 
 	fn apply_value_transforms(
@@ -533,6 +627,9 @@ impl ShellVariable {
 			}
 		}
 	}
+}
+
+impl ShellVariable {
 
 	/// Tries to unset the value stored at the given index in the variable.
 	/// Returns whether or not a value was unset.
@@ -763,7 +860,7 @@ impl ArrayLiteral {
 			// rather than merely charged for; the step charge is what makes a
 			// long list of short elements yield.
 			let long = key.as_ref().map_or(0, |key| key.value.len()) + value.value.len()
-				> interp::BYTE_CHECKPOINT_STRIDE;
+				> interp::DIVIDE_COPY_ABOVE_BYTES;
 			if long {
 				let key = match key {
 					Some(key) => Some(interp::clone_in_strides(params, key.value.as_str()).await?),
@@ -856,7 +953,8 @@ impl ShellValue {
 		params: &ExecutionParameters,
 	) -> Result<Self, error::Error> {
 		let mut values = BTreeMap::new();
-		Self::update_indexed_array_from_literals(&mut values, literals, |value| value, params).await?;
+		Self::update_indexed_array_from_literals(&mut values, literals, ValueConverter::identity(), params)
+			.await?;
 
 		Ok(Self::IndexedArray(values))
 	}
@@ -881,14 +979,14 @@ impl ShellValue {
 	async fn update_indexed_array_from_literals(
 		existing_values: &mut BTreeMap<u64, String>,
 		literal_values: ArrayLiteral,
-		convert: impl Fn(String) -> String,
+		convert: ValueConverter,
 		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
 		let mut new_key = existing_values
 			.last_key_value()
 			.map_or(0, |(largest_index, _)| largest_index + 1);
 
-		let mut budget = interp::ElementBudget::with_stride(interp::INSERTION_CHECKPOINT_STRIDE);
+		let mut budget = interp::ElementBudget::new();
 		for (key, value) in literal_values.0 {
 			// `convert` rewrites the value, so its length is the work.
 			let due = budget.charge(value.len());
@@ -899,7 +997,7 @@ impl ShellValue {
 				new_key = literal_index(&key);
 			}
 
-			existing_values.insert(new_key, convert(value));
+			existing_values.insert(new_key, convert.apply_divided(value, params).await?);
 			new_key += 1;
 		}
 
@@ -917,16 +1015,16 @@ impl ShellValue {
 	async fn update_associative_array_from_literals(
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
-		convert: impl Fn(String) -> String,
+		convert: ValueConverter,
 		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
 		let mut literal_values = literal_values.0.into_iter();
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
-		let mut budget = interp::ElementBudget::with_stride(interp::INSERTION_CHECKPOINT_STRIDE);
+		let mut budget = interp::ElementBudget::new();
 		interp::loop_checkpoints(params, budget.charge(first_value.len())).await?;
-		let first_value = convert(first_value);
+		let first_value = convert.apply_divided(first_value, params).await?;
 
 		if let Some(first_key) = first_key {
 			existing_values.insert(first_key, first_value);
@@ -940,7 +1038,7 @@ impl ShellValue {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
 
-				existing_values.insert(key, convert(value));
+				existing_values.insert(key, convert.apply_divided(value, params).await?);
 			}
 		} else {
 			let mut current_key = Some(first_value);
@@ -949,7 +1047,7 @@ impl ShellValue {
 				if due > 0 {
 					interp::loop_checkpoints(params, due).await?;
 				}
-				let value = convert(value);
+				let value = convert.apply_divided(value, params).await?;
 				let value = if let Some(key) = key {
 					let mut word = String::with_capacity(key.len() + value.len() + 3);
 					word.push('[');

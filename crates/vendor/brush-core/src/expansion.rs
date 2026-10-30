@@ -615,7 +615,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let mut joined = String::new();
 		let mut budget = interp::ElementBudget::new();
 		for (index, field) in expansion.fields.into_iter().enumerate() {
-			let long = field.len() > interp::BYTE_CHECKPOINT_STRIDE;
+			let long = field.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
 			if !long {
 				let due = budget.charge(field.len());
 				if due > 0 {
@@ -895,7 +895,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				// Only a field that cannot be unquoted in one step goes through
 				// the dividing path: calling an `async` function on every field
 				// of a million-element array costs more than the checkpoints.
-				result.push(if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+				result.push(if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
 					self.unquote_in_strides(field).await?
 				} else {
 					String::from(field)
@@ -1003,7 +1003,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// the field itself is still needed below. Only a copy too large to make
 		// in one step is divided; the `async` call to divide it costs more than
 		// the copy does for an ordinary field.
-		let copied = if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+		let copied = if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
 			self.clone_field_in_strides(&field).await?
 		} else {
 			field.clone()
@@ -1041,7 +1041,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				Ok(vec![])
 			} else {
 				// As above: divided only when one step cannot do it.
-				Ok(vec![if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+				Ok(vec![if field.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
 					self.unquote_in_strides(field).await?
 				} else {
 					String::from(field)
@@ -1238,7 +1238,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				for (index, field) in this_fields.into_iter().enumerate() {
 					// Every piece of the field is copied into `concatenated`, and
 					// one field can be of any size.
-					let long = field.len() > interp::BYTE_CHECKPOINT_STRIDE;
+					let long = field.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
 					if !long {
 						let due = budget.charge(field.len());
 						if due > 0 {
@@ -2237,7 +2237,7 @@ async fn fields_copied_from<'a>(
 	let mut fields = Vec::with_capacity(values.size_hint().0);
 	let mut budget = interp::ElementBudget::new();
 	for value in values {
-		if value.len() > interp::BYTE_CHECKPOINT_STRIDE {
+		if value.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
 			fields.push(WordField::from(interp::clone_in_strides(params, value).await?));
 			continue;
 		}

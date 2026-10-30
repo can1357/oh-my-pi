@@ -483,7 +483,7 @@ mod regression {
 		fn longest_hold(
 			command: &str,
 			prepare: fn(&mut Shell<DefaultShellExtensions>),
-		) -> (Duration, Duration, bool) {
+		) -> (Duration, Duration, Duration, bool) {
 			let _serial = lock(&MEASURED_RUN);
 			*lock(&WINDOW) = Window { opened: None, closed: None };
 
@@ -527,91 +527,72 @@ mod regression {
 			let window = lock(&WINDOW);
 			let opened = window.opened.expect("the command opened the window");
 			let closed = window.closed.expect("the command closed the window");
-			let longest = std::iter::once(opened)
+			let mut stretches: Vec<Duration> = std::iter::once(opened)
 				.chain(turns.into_iter().filter(|turn| (opened..closed).contains(turn)))
 				.chain(std::iter::once(closed))
 				.tuple_windows()
 				.map(|(earlier, later)| later - earlier)
-				.max()
-				.unwrap_or_default();
-			(longest, closed - opened, succeeded)
+				.collect();
+			stretches.sort_unstable_by(|a, b| b.cmp(a));
+			let longest = stretches.first().copied().unwrap_or_default();
+			// A window with one stretch has no second: the run never yielded,
+			// and the rule below must see that as its own worst case rather
+			// than as an absence.
+			let second = stretches.get(1).copied().unwrap_or(longest);
+			(longest, second, closed - opened, succeeded)
 		}
 
 		/// The shortest stretch worth failing a test over.
 		///
-		/// The share rule below is there to catch a whole pass that spends no
-		/// checkpoint. It cannot tell one apart from a single allocator step —
-		/// a `realloc` that crosses a power of two, or the `free` that follows,
-		/// on a buffer of tens of megabytes — which no checkpoint can be put
-		/// inside and which is the residual already ruled out of this change.
+		/// The rule below cannot tell a pass that spends no checkpoint apart
+		/// from a single allocator step — a `realloc` that crosses a power of
+		/// two, or the `free` after it, on a buffer the size of the data —
+		/// which no checkpoint can be put inside and which is the residual
+		/// ruled out of this change.
 		///
 		/// **This is a latency tolerance, not evidence that a passing
 		/// measurement checkpoints**, and the number is taken from measuring
 		/// that step rather than chosen: across this module's cases in an
 		/// optimised build the longest such stretch is 5.45 ms, so the floor
-		/// sits just above it. [`the_hold_rule_catches_a_checkpoint_free_stretch`]
-		/// is the control that holds it down — it spins past the floor with no
-		/// checkpoint at all and requires the rule to reject it, so the floor
-		/// cannot be raised over a stretch it is meant to catch without a test
-		/// saying so.
+		/// sits just above it. The two controls below hold it down.
 		const SHORTEST_FAILING_HOLD: Duration = Duration::from_millis(6);
 
-		/// How long [`the_hold_rule_catches_a_checkpoint_free_stretch`] holds
-		/// the worker: above the floor, and short enough that the control costs
-		/// nothing to run.
+		/// How long the controls below hold the worker: above the floor, and
+		/// short enough that they cost nothing to run.
 		const CONTROL_HOLD: Duration = Duration::from_millis(8);
 
-		/// The longest the worker may be held per element a window frees.
+		/// Asserts that `command` succeeded and that it yielded throughout its
+		/// window.
 		///
-		/// Freeing an element is one call to the allocator, measured at 18 ns
-		/// in an optimised build; forty leaves room for a slower machine and
-		/// still fails a pass over the elements that spends no checkpoint,
-		/// which costs an order of magnitude more.
-		const LONGEST_HOLD_PER_ELEMENT: Duration = Duration::from_nanos(40);
-
-		/// Asserts each case succeeded and that no stretch of its window kept
-		/// the worker longer than freeing `elements` of them allows.
-		///
-		/// The share rule cannot be used on a window that closes on an
-		/// assignment: it also holds the free of the elements the assignment
-		/// replaced, one call to the allocator each, and no checkpoint can be
-		/// put inside a destructor. That is the residual ruled out of this
-		/// change, so what these hold is the rate.
-		fn assert_each_yields_throughout(
-			cases: impl IntoIterator<Item = (String, fn(&mut Shell<DefaultShellExtensions>))>,
-			elements: u64,
-		) {
-			let allowed = LONGEST_HOLD_PER_ELEMENT * u32::try_from(elements).expect("elements");
-			for (command, prepare) in cases {
-				let (longest, window, succeeded) = longest_hold(&command, prepare);
-				eprintln!("HOLD {command}: longest={longest:?} window={window:?}");
-				assert!(succeeded, "{command}: the run succeeded");
-				assert!(
-					longest < allowed,
-					"{command}: kept its worker for {longest:?} of a {window:?} window, over the \
-					 {allowed:?} that freeing {elements} elements allows"
-				);
-			}
-		}
-
-		/// Asserts that `command` succeeded and that no stretch of its window
-		/// kept the worker for an eighth of the window or more, unless that
-		/// stretch is shorter than [`SHORTEST_FAILING_HOLD`]. A pass with no
-		/// checkpoint is one stretch as long as the window.
+		/// Two rules, because one cannot do it. An operation no checkpoint can
+		/// enter — one allocator call on a buffer the size of the data —
+		/// contributes **exactly one** long stretch, and a rate allowance wide
+		/// enough to admit it is wide enough to admit a whole pass that spends
+		/// no checkpoint: a mutant with one pass's checkpoints deleted ran
+		/// 10.219 ms checkpoint-free and still passed a 41.943 ms allowance.
+		/// A pass that spends none contributes **many** long stretches. So the
+		/// **second** longest carries the share rule, and the longest gets only
+		/// a loose bound that a window of one stretch — a run that never
+		/// yielded at all — still fails.
 		fn assert_yields_throughout(command: &str, prepare: fn(&mut Shell<DefaultShellExtensions>)) {
-			let (longest, window, succeeded) = longest_hold(command, prepare);
-			eprintln!("HOLD {command}: longest={longest:?} window={window:?} succeeded={succeeded}");
+			let (longest, second, window, succeeded) = longest_hold(command, prepare);
+			eprintln!(
+				"HOLD {command}: longest={longest:?} second={second:?} window={window:?} \
+				 succeeded={succeeded}"
+			);
 			assert!(succeeded, "{command}: the run succeeded");
 			assert!(
-				holds_fairly(longest, window),
-				"{command}: kept its worker for {longest:?} of a {window:?} window"
+				yields_throughout(longest, second, window),
+				"{command}: kept its worker for {longest:?}, then {second:?}, of a {window:?} window"
 			);
 		}
 
-		/// The rule [`assert_yields_throughout`] applies, named so the control
-		/// below can apply the same one.
-		fn holds_fairly(longest: Duration, window: Duration) -> bool {
-			longest * 8 < window || longest < SHORTEST_FAILING_HOLD
+		/// The rule [`assert_yields_throughout`] applies, named so the controls
+		/// can apply the same one.
+		fn yields_throughout(longest: Duration, second: Duration, window: Duration) -> bool {
+			let one_step_allowed = longest * 2 < window;
+			let rest_yields = second * 8 < window || second < SHORTEST_FAILING_HOLD;
+			one_step_allowed && rest_yields
 		}
 
 		/// How many elements the array window tests copy: enough that one pass
@@ -702,23 +683,12 @@ mod regression {
 				),
 			];
 
-			// The share rule cannot be used here. These windows close on the
-			// assignment, so each one also contains the free of the million
-			// expanded elements it replaced: a million calls to the allocator,
-			// measured at 18 ns each in an optimised build and consistent with
-			// the 53 ms a three-million-element map costs. No checkpoint can be
-			// put inside a destructor, which is the residual ruled out of this
-			// change; what a test can hold is the rate.
-			let allowed = LONGEST_HOLD_PER_ELEMENT * u32::try_from(ARRAY_ELEMENTS).unwrap();
+			// These windows close on the assignment, so each also holds the free
+			// of the million expanded elements it replaced — one allocator call
+			// each. That is the single long stretch the rule's second-longest
+			// half is there to see past.
 			for (command, prepare) in cases {
-				let (longest, window, succeeded) = longest_hold(&command, prepare);
-				eprintln!("HOLD {command}: longest={longest:?} window={window:?}");
-				assert!(succeeded, "{command}: the run succeeded");
-				assert!(
-					longest < allowed,
-					"{command}: kept its worker for {longest:?} of a {window:?} window, over the \
-					 {allowed:?} that freeing {ARRAY_ELEMENTS} elements allows"
-				);
+				assert_yields_throughout(&command, prepare);
 			}
 		}
 
@@ -767,7 +737,9 @@ mod regression {
 				),
 			];
 
-			assert_each_yields_throughout(cases, ARRAY_ELEMENTS);
+			for (command, prepare) in cases {
+				assert_yields_throughout(&command, prepare);
+			}
 		}
 
 		/// One word piece can stand for millions of fields (`"${seed[@]}"`),
@@ -794,7 +766,9 @@ mod regression {
 			];
 
 			let prepare: fn(&mut Shell<DefaultShellExtensions>) = seeded;
-			assert_each_yields_throughout(cases.map(|command| (command, prepare)), ARRAY_ELEMENTS);
+			for command in cases {
+				assert_yields_throughout(&command, prepare);
+			}
 		}
 
 		/// How large one element is where the byte budget is pinned, and how
@@ -850,47 +824,54 @@ mod regression {
 				.expect("huge");
 		}
 
-		/// The longest the worker may be held per megabyte of a single element.
-		///
-		/// The share rule cannot be used here. Every copy on this path is now
-		/// divided, and what is left is one allocator step — a `realloc` that
-		/// crosses a power of two, or the `free` that follows — whose cost is
-		/// proportional to the element, so it is a fixed share of the window
-		/// however large the element is. No checkpoint can be put inside
-		/// either, which is the residual already ruled out of this change.
-		/// What a test can hold is the rate: measured at four tenths of a
-		/// millisecond per megabyte before this round and five hundredths
-		/// after, so a tenth leaves room for a slower machine and still fails
-		/// an undivided copy.
-		const LONGEST_HOLD_PER_MIB: Duration = Duration::from_micros(100);
+		/// `huge`: a single element of [`ONE_HUGE_ELEMENT_BYTES`] of `ß`, whose
+		/// uppercase form is twice as long, so a case conversion of it cannot
+		/// be done in place.
+		fn one_sharp(shell: &mut Shell<DefaultShellExtensions>) {
+			let values: BTreeMap<u64, String> =
+				std::iter::once((0, "ß".repeat(ONE_HUGE_ELEMENT_BYTES / 2))).collect();
+			shell
+				.env_mut()
+				.set_global("huge", ShellVariable::new(ShellValue::IndexedArray(values)))
+				.expect("huge");
+		}
 
 		/// Charging a step for the bytes it is about to copy counts the work
 		/// and does not divide it. One element of half a gigabyte owed over
 		/// eight thousand checkpoints, spent every one of them, and then held
 		/// the worker for 195 ms inside a single `clone`, because nothing can
 		/// interrupt a copy already under way. The copies themselves are now
-		/// made a stride at a time.
+		/// made a stride at a time, and so is the case conversion that follows
+		/// them.
 		#[test]
 		fn one_huge_element_yields_throughout() {
-			let allowed = LONGEST_HOLD_PER_MIB * u32::try_from(ONE_HUGE_ELEMENT_BYTES >> 20).unwrap();
-			let cases = [
+			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 5] = [
 				// Copying the element out of the variable into a field.
-				"words=(\"$open\" ${huge[@]}\"$close\"); (( ${#words[@]} == 2 ))".to_owned(),
+				("words=(\"$open\" ${huge[@]}\"$close\"); (( ${#words[@]} == 2 ))".to_owned(), one_huge),
 				// Concatenating it into one quoted field.
-				"words=(\"$open${huge[*]}$close\"); (( ${#words[@]} == 1 ))".to_owned(),
+				("words=(\"$open${huge[*]}$close\"); (( ${#words[@]} == 1 ))".to_owned(), one_huge),
 				// Joining it into the one string a scalar holds.
-				"joined=\"$open${huge[@]}$close\"; [[ ${joined:0:2} == 'hh' ]]".to_owned(),
+				("joined=\"$open${huge[@]}$close\"; [[ ${joined:0:2} == 'hh' ]]".to_owned(), one_huge),
+				// The marker closed after the assignment rather than inside it,
+				// so the window also holds the pathname expansion of an unquoted
+				// element and the assignment itself.
+				("words=(\"$open\" ${huge[@]}); closed=$close; (( ${#words[@]} == 2 ))".to_owned(), one_huge),
+				// The same, with the variable's case conversion applied to it.
+				(
+					"words=(\"$open\" ${huge[@]}); closed=$close; [[ ${words[1]:0:2} == 'SS' ]]"
+						.to_owned(),
+					|shell| {
+						one_sharp(shell);
+						let mut words =
+							ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+						words.set_update_transform(ShellVariableUpdateTransform::Uppercase);
+						shell.env_mut().set_global("words", words).expect("words");
+					},
+				),
 			];
 
-			for command in cases {
-				let (longest, window, succeeded) = longest_hold(&command, one_huge);
-				eprintln!("HOLD {command}: longest={longest:?} window={window:?}");
-				assert!(succeeded, "{command}: the run succeeded");
-				assert!(
-					longest < allowed,
-					"{command}: kept its worker for {longest:?} of a {window:?} window, over the \
-					 {allowed:?} a divided copy of this size allows"
-				);
+			for (command, prepare) in cases {
+				assert_yields_throughout(&command, prepare);
 			}
 		}
 
@@ -911,15 +892,19 @@ mod regression {
 				_context: commands::ExecutionContext<'_, SE>,
 				_args: I,
 			) -> Result<ExecutionResult, error::Error> {
-				let until = std::time::Instant::now() + CONTROL_HOLD;
-				while std::time::Instant::now() < until {
+				// Thread CPU time, not wall clock: the harness measures the
+				// worker's CPU time, so a wall-clock spin that shares its core
+				// with anything else hands back a shorter stretch than it meant
+				// to and the control stops controlling anything.
+				let until = worker_cpu_time() + CONTROL_HOLD;
+				while worker_cpu_time() < until {
 					std::hint::spin_loop();
 				}
 				Ok(ExecutionResult::success())
 			}
 		}
 
-		/// The control for [`SHORTEST_FAILING_HOLD`].
+		/// The control for the longest-stretch half of the rule.
 		///
 		/// A floor is a latency tolerance, not evidence that a passing
 		/// measurement checkpoints: at five milliseconds, a four-millisecond
@@ -929,13 +914,9 @@ mod regression {
 		/// meant to catch without a test saying so.
 		#[test]
 		fn the_hold_rule_catches_a_checkpoint_free_stretch() {
-			let (longest, window, succeeded) = longest_hold("x=$open; spins; closed=$close", |shell| {
-				shell.register_builtin(
-					"spins",
-					builtins::simple_builtin::<SpinsWithoutYielding, DefaultShellExtensions>(),
-				);
-			});
-			eprintln!("CONTROL longest={longest:?} window={window:?} succeeded={succeeded}");
+			let (longest, second, window, succeeded) =
+				longest_hold("x=$open; spins; closed=$close", register_spins);
+			eprintln!("CONTROL one longest={longest:?} second={second:?} window={window:?}");
 
 			assert!(succeeded, "the control run succeeded");
 			assert!(
@@ -943,8 +924,40 @@ mod regression {
 				"the spin was measured: {longest:?} of a {window:?} window"
 			);
 			assert!(
-				!holds_fairly(longest, window),
+				!yields_throughout(longest, second, window),
 				"a {CONTROL_HOLD:?} stretch with no checkpoint is rejected, not excused by the floor"
+			);
+		}
+
+		/// The control for the second-longest half of the rule.
+		///
+		/// The longest stretch is allowed to be one operation no checkpoint can
+		/// enter, so a rule that looked only there would pass a run that holds
+		/// the worker twice. A mutant with one pass's checkpoints deleted ran
+		/// 10.219 ms checkpoint-free and passed the rate allowance this
+		/// replaced; two spins with a yield between them are that mutant's
+		/// shape, and the rule must reject them.
+		#[test]
+		fn the_hold_rule_catches_a_second_long_stretch() {
+			let (longest, second, window, succeeded) =
+				longest_hold("x=$open; spins; spins; closed=$close", register_spins);
+			eprintln!("CONTROL two longest={longest:?} second={second:?} window={window:?}");
+
+			assert!(succeeded, "the control run succeeded");
+			assert!(
+				second >= CONTROL_HOLD,
+				"both spins were measured: {longest:?} then {second:?} of a {window:?} window"
+			);
+			assert!(
+				!yields_throughout(longest, second, window),
+				"a second {CONTROL_HOLD:?} stretch is rejected even where one is allowed"
+			);
+		}
+
+		fn register_spins(shell: &mut Shell<DefaultShellExtensions>) {
+			shell.register_builtin(
+				"spins",
+				builtins::simple_builtin::<SpinsWithoutYielding, DefaultShellExtensions>(),
 			);
 		}
 	}
