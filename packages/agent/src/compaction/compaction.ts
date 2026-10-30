@@ -71,6 +71,7 @@ import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiRemoteCompactionApi,
+	OPENAI_REMOTE_COMPACTION_PRESERVE_KEY,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
@@ -86,6 +87,8 @@ import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
 
 import {
+	collectLoadedSkills,
+	collectLoadedSkillsFromEntries,
 	computeFileLists,
 	createFileOps,
 	escapeSummaryBoundaryTags,
@@ -95,16 +98,19 @@ import {
 	serializeConversationForSummary,
 	stripReadSelector,
 	upsertFileOperations,
+	upsertLoadedSkills,
 } from "./utils";
 
 // ============================================================================
 // File Operation Tracking
 // ============================================================================
 
-/** Details stored in CompactionEntry.details for file tracking */
+/** Details stored in CompactionEntry.details for file and skill tracking. */
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** Previously loaded skills, most recent first. Absent in older sessions. */
+	loadedSkills?: string[];
 }
 
 /**
@@ -1376,6 +1382,8 @@ export interface CompactionPreparation {
 	previousPreserveData?: Record<string, unknown>;
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
+	/** Skills whose content will be summarized, including prior summary metadata. */
+	loadedSkills?: string[];
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -1602,6 +1610,10 @@ export function prepareCompaction(
 		previousSummaryTimestamp: previousCompaction?.timestamp,
 		previousPreserveData: previousCompaction?.preserveData,
 		fileOps,
+		loadedSkills: collectLoadedSkillsFromEntries(
+			compactionEntries.slice(0, cutPoint.firstKeptEntryIndex),
+			previousCompaction ? collectLoadedSkillsFromEntries([previousCompaction]) : [],
+		),
 		settings,
 	};
 }
@@ -1739,6 +1751,9 @@ export async function compact(
 		fileOps,
 		settings,
 	} = preparation;
+	let loadedSkills = preparation.loadedSkills
+		? collectLoadedSkills([], preparation.loadedSkills)
+		: collectLoadedSkills([...messagesToSummarize, ...turnPrefixMessages]);
 
 	const reserveTokens = settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
 
@@ -2247,6 +2262,7 @@ export async function compact(
 					retry: summaryOneshotRetry(summaryOptions),
 				},
 			);
+			loadedSkills = collectLoadedSkills(allMessages.slice(originalCut, safeCut), loadedSkills);
 			nativeSummary = remote.content;
 			nativeSignature = remote.signature;
 			nativeToolChanges = remote.toolChanges;
@@ -2336,14 +2352,44 @@ export async function compact(
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	// Responses compaction replaces the kept tail too, unless the request had to
+	// fall back to compacting only the prefix before that tail.
+	if (usedRemoteCompaction && nativeSummary === undefined && !remoteReplayThroughEntryId) {
+		loadedSkills = collectLoadedSkills(recentMessages, loadedSkills);
+	}
+	summary = upsertLoadedSkills(summary, loadedSkills);
+	if (usedRemoteCompaction && nativeSummary === undefined && loadedSkills.length > 0) {
+		// Responses replay skips the entry's text in favor of replacementHistory.
+		// Neither V1 nor V2 retains developer items in its output: this note is
+		// replayed now, then replaced rather than duplicated on the next compaction.
+		const remote = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
+		if (isRecord(remote) && Array.isArray(remote.replacementHistory)) {
+			preserveData = {
+				...preserveData,
+				[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: {
+					...remote,
+					replacementHistory: [
+						...remote.replacementHistory,
+						{
+							type: "message",
+							role: "developer",
+							content: [{ type: "input_text", text: upsertLoadedSkills("", loadedSkills) }],
+						},
+					],
+				},
+			};
+		}
+	}
 	if (nativeSummary !== undefined) {
 		// The replayed block (summary and any `tool_changes`) stays
 		// byte-identical to the API's output so it matches its signature. The
-		// harness file lists above travel separately: the converter replaces the
-		// summary message with the block and skips its text, so they would
-		// otherwise be invisible to this provider. Every other provider keeps
+		// harness file and skill metadata above travels separately: the converter
+		// replaces the summary message with the block and skips its text, so it
+		// would otherwise be invisible to this provider. Every other provider keeps
 		// reading the entry text.
-		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
+		const filesText =
+			upsertLoadedSkills(upsertFileOperations("", readFiles, modifiedFiles, fileOps.read), loadedSkills) ||
+			undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
@@ -2374,7 +2420,7 @@ export async function compact(
 		...(shortSummary !== undefined ? { shortSummary } : {}),
 		firstKeptEntryId: nativeSummary !== undefined ? nativeFirstKeptEntryId : firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details: { readFiles, modifiedFiles, ...(loadedSkills.length > 0 ? { loadedSkills } : {}) } as CompactionDetails,
 		preserveData: finalPreserveData,
 		...(remoteReplayThroughEntryId ? { providerReplayThroughEntryId: remoteReplayThroughEntryId } : {}),
 	};

@@ -2669,6 +2669,76 @@ describe("compact() remote compaction failure handling", () => {
 		},
 	);
 
+	test.each(["v1", "v2", "codex-v2"])(
+		"carries loaded skills in visible summaries and native replay without duplicate notes (%s)",
+		async protocol => {
+			const streaming = protocol !== "v1";
+			const preparation = makePreparation();
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+			preparation.loadedSkills = ["review"];
+			preparation.recentMessages.push(localSummaryMessage("Use the deployment instructions."), {
+				role: "custom",
+				customType: "skill-prompt",
+				content: "Deployment skill instructions.",
+				display: false,
+				details: { name: "deploy", path: "/skills/deploy/SKILL.md" },
+				timestamp: 3,
+			});
+			const baseModel = makeOpenAiModel({
+				remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const item = { type: "compaction", encrypted_content: `skills-${requests.length}` };
+				return streaming
+					? sseResponse([
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: { usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 } },
+							},
+						])
+					: Response.json({ output: [item] });
+			};
+			const first = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+			expect(first.details).toMatchObject({ loadedSkills: ["deploy", "review"] });
+			expect(first.summary).toContain("- deploy\n- review");
+			const firstReplay = getCompactionV2PreserveData(first.preserveData)?.replacementHistory ?? [];
+			const notes = firstReplay.filter(item => item.role === "developer");
+			expect(notes).toHaveLength(1);
+			expect(JSON.stringify(notes)).toContain("<loaded-skills>");
+			const second = await compact(
+				{
+					...preparation,
+					loadedSkills: ["deploy", "review"],
+					previousSummary: first.summary,
+					previousPreserveData: first.preserveData,
+				},
+				model,
+				"test-key",
+				undefined,
+				undefined,
+				{ fetch: fetchMock },
+			);
+			// The note must actually reach the next provider request, not only entry text.
+			expect(JSON.stringify(requests[1].input)).toContain("<loaded-skills>");
+			const secondReplay = getCompactionV2PreserveData(second.preserveData)?.replacementHistory ?? [];
+			expect(JSON.stringify(secondReplay).match(/<loaded-skills>/g)).toHaveLength(1);
+		},
+	);
+
 	test.each(["v1", "v2"])("does not dispatch a native request that cannot fit the window (%s)", async protocol => {
 		const streaming = protocol === "v2";
 		const preparation = makePreparation();

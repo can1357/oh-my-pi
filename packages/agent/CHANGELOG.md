@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Compaction summaries now list skills loaded before the compaction point so the agent can re-load them.
+
 ## [18.14.1] - 2026-10-31
 
 ### Breaking Changes

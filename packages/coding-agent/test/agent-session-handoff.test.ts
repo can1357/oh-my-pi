@@ -170,6 +170,77 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 	});
 
+	it("persists loaded skills in handoff details and the rebuilt model context", async () => {
+		sessionManager.appendCustomMessageEntry(
+			"skill-prompt",
+			"Review instructions loaded by a slash command.",
+			true,
+			{ name: "review", path: "/skills/review/SKILL.md" },
+			"user",
+		);
+		sessionManager.appendMessage({
+			role: "user",
+			content: "Continue after the review.",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Ready to continue." }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 16,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 24,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("Continue the reviewed work.");
+		await session.handoff();
+		const entry = sessionManager.getBranch().at(-1);
+		if (entry?.type !== "compaction") throw new Error("Expected a handoff compaction entry");
+		expect(entry.details).toMatchObject({ loadedSkills: ["review"] });
+		expect(entry.summary).toContain("<loaded-skills>");
+		const summary = session.agent.state.messages.find(message => message.role === "compactionSummary");
+		expect(summary?.role === "compactionSummary" ? summary.summary : "").toContain("- review");
+	});
+
+	it("persists loaded skills when navigating with a branch summary", async () => {
+		await session.dispose();
+		sessionManager = SessionManager.inMemory(tempDir.path());
+		const mock = createMockModel({ responses: [{ content: ["Branch work completed."] }] });
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry,
+			sideStreamFn: mock.stream,
+		});
+		const targetId = sessionManager.appendMessage({
+			role: "user",
+			content: "Start the reviewed work.",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomMessageEntry(
+			"skill-prompt",
+			"Autoloaded review instructions.",
+			false,
+			{ name: "review", path: "/skills/review/SKILL.md" },
+			"agent",
+		);
+		const result = await session.navigateTree(targetId, { summarize: true });
+		expect(result.cancelled).toBe(false);
+		expect(result.summaryEntry?.details).toMatchObject({ loadedSkills: ["review"] });
+		expect(result.summaryEntry?.summary).toContain("<loaded-skills>");
+		const summary = session.agent.state.messages.find(message => message.role === "branchSummary");
+		expect(summary?.role === "branchSummary" ? summary.summary : "").toContain("- review");
+	});
+
 	it("dispatches a prompt only after manual handoff commits its compaction", async () => {
 		const started = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<string>();

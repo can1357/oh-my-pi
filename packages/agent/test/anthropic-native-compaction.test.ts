@@ -303,6 +303,39 @@ describe("compact() Anthropic native lane", () => {
 		});
 	});
 
+	test("replays loaded skills separately without changing the signed native summary", async () => {
+		const model = makeAnthropicModel();
+		const { completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: model.provider,
+					content: NATIVE_SUMMARY,
+					signature: "signed-native-summary",
+				},
+				stopDetails: { type: "compaction" },
+			}),
+		);
+		const preparation = makePreparation({
+			messagesToSummarize: [
+				assistantMessage(model, {
+					content: [
+						{ type: "toolCall", id: "skill-read", name: "read", arguments: { path: "skill://audit:raw" } },
+					],
+				}),
+			],
+		});
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { completeImpl });
+		expect(result.details).toMatchObject({ loadedSkills: ["audit"] });
+		expect(result.summary).toContain("<loaded-skills>");
+		const payload = getAnthropicCompactionPayload(result.preserveData);
+		expect(payload?.content).toBe(NATIVE_SUMMARY);
+		expect(payload?.signature).toBe("signed-native-summary");
+		expect(payload?.filesText).toContain("<loaded-skills>");
+		expect(payload?.filesText).toContain("- audit");
+		expect(payload?.filesText).not.toContain("<files>");
+	});
+
 	test("persists signed tool_changes verbatim and replays them with the previous summary", async () => {
 		const model = makeAnthropicModel();
 		const toolChanges: Record<string, unknown>[] = [

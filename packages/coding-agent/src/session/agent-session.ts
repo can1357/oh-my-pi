@@ -13933,6 +13933,7 @@ export class AgentSession implements SettingsScope {
 			summaryDetails = {
 				readFiles: result.readFiles || [],
 				modifiedFiles: result.modifiedFiles || [],
+				...(result.loadedSkills?.length ? { loadedSkills: result.loadedSkills } : {}),
 			};
 		} else if (hookSummary) {
 			summaryText = hookSummary.summary;

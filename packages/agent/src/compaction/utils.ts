@@ -7,7 +7,10 @@ import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { escapeHarmonyControlTokens } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { formatGroupedPaths, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
+import type { SessionEntry } from "./entries";
+import { getMessageFromEntry } from "./messages";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
+import loadedSkillsTemplate from "./prompts/loaded-skills.md" with { type: "text" };
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
 
 // ============================================================================
@@ -199,6 +202,80 @@ export function upsertFileOperations(
 	if (!fileOperations) return baseSummary;
 	if (!baseSummary) return fileOperations;
 	return `${baseSummary}\n\n${fileOperations}`;
+}
+
+/** Maximum number of previously loaded skills retained across summary compactions. */
+export const LOADED_SKILLS_LIMIT = 50;
+
+/**
+ * Collect skill loads from chronological messages, newest first, then carry
+ * forward older skills. The coding agent records slash commands and autoloads
+ * as `skill-prompt` custom messages with the skill name in their details.
+ */
+export function collectLoadedSkills(
+	messages: readonly AgentMessage[],
+	previousSkills: readonly string[] = [],
+): string[] {
+	const skills = new Set<string>();
+	const add = (name: unknown): void => {
+		if (typeof name === "string" && name.length > 0 && skills.size < LOADED_SKILLS_LIMIT) skills.add(name);
+	};
+	for (let i = messages.length - 1; i >= 0 && skills.size < LOADED_SKILLS_LIMIT; i--) {
+		const message = messages[i];
+		if (message.role === "custom" && message.customType === "skill-prompt") {
+			const details = message.details;
+			if (details && typeof details === "object" && "name" in details) add(details.name);
+		} else if (message.role === "assistant") {
+			for (let j = message.content.length - 1; j >= 0 && skills.size < LOADED_SKILLS_LIMIT; j--) {
+				const block = message.content[j];
+				if (block.type !== "toolCall") continue;
+				const args = block.arguments as Record<string, unknown> | undefined;
+				if (!args) continue;
+				if (block.name === "skill") {
+					// Pruning still protects this legacy tool name in older transcripts.
+					add(args.name);
+				} else if (block.name === "read" && typeof args.path === "string") {
+					const path = stripReadSelector(args.path);
+					if (path.startsWith("skill://")) add(path.slice("skill://".length).split("/", 1)[0]);
+				}
+			}
+		}
+	}
+	for (const name of previousSkills) add(name);
+	return [...skills];
+}
+
+/** Collect skill loads and pi-generated summary metadata from chronological session entries. */
+export function collectLoadedSkillsFromEntries(
+	entries: readonly SessionEntry[],
+	previousSkills: readonly string[] = [],
+): string[] {
+	let skills = collectLoadedSkills([], previousSkills);
+	for (const entry of entries) {
+		if ((entry.type === "compaction" || entry.type === "branch_summary") && !entry.fromExtension) {
+			const details = entry.details;
+			if (
+				details &&
+				typeof details === "object" &&
+				"loadedSkills" in details &&
+				Array.isArray(details.loadedSkills)
+			) {
+				skills = collectLoadedSkills([], [...details.loadedSkills, ...skills]);
+			}
+		}
+		const message = getMessageFromEntry(entry);
+		if (message) skills = collectLoadedSkills([message], skills);
+	}
+	return skills;
+}
+
+/** Replace any previous loaded-skills blocks with the current, bounded skill list. */
+export function upsertLoadedSkills(summary: string, loadedSkills: readonly string[]): string {
+	const baseSummary = summary.replace(/<loaded-skills>[\s\S]*?<\/loaded-skills>\s*/g, "").trimEnd();
+	const skills = collectLoadedSkills([], loadedSkills);
+	if (skills.length === 0) return baseSummary;
+	const block = prompt.render(loadedSkillsTemplate, { skills });
+	return baseSummary ? `${baseSummary}\n\n${block}` : block;
 }
 
 // ============================================================================

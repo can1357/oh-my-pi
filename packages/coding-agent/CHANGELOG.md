@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Handoff and branch summaries now retain previously loaded skill names so the agent can re-load their instructions after compaction.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

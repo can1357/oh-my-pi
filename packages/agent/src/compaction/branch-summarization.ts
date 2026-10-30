@@ -24,6 +24,7 @@ import {
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
 import {
+	collectLoadedSkillsFromEntries,
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
@@ -33,6 +34,7 @@ import {
 	stripReadSelector,
 	truncateToolResultForSummary,
 	upsertFileOperations,
+	upsertLoadedSkills,
 } from "./utils";
 
 // ============================================================================
@@ -43,14 +45,18 @@ export interface BranchSummaryResult {
 	summary?: string;
 	readFiles?: string[];
 	modifiedFiles?: string[];
+	/** Previously loaded skills, most recent first. */
+	loadedSkills?: string[];
 	aborted?: boolean;
 	error?: string;
 }
 
-/** Details stored in BranchSummaryEntry.details for file tracking */
+/** Details stored in BranchSummaryEntry.details for file and skill tracking. */
 export interface BranchSummaryDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** Previously loaded skills, most recent first. Absent in older sessions. */
+	loadedSkills?: string[];
 }
 
 export type { FileOperations } from "./utils";
@@ -60,6 +66,8 @@ export interface BranchPreparation {
 	messages: AgentMessage[];
 	/** File operations extracted from tool calls */
 	fileOps: FileOperations;
+	/** Skills loaded in the abandoned entries, including nested summary metadata. */
+	loadedSkills?: string[];
 	/** Total estimated tokens in messages */
 	totalTokens: number;
 }
@@ -300,7 +308,7 @@ export function prepareBranchEntries(
 		totalTokens += tokens;
 	}
 
-	return { messages, fileOps, totalTokens };
+	return { messages, fileOps, loadedSkills: collectLoadedSkillsFromEntries(entries), totalTokens };
 }
 
 // ============================================================================
@@ -328,10 +336,17 @@ export async function generateBranchSummary(
 	const tokenBudget = contextWindow - reserveTokens;
 	const tokenizer = new Tokenizer(model);
 
-	const { messages: branchMessages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
+	const {
+		messages: branchMessages,
+		fileOps,
+		loadedSkills = [],
+	} = prepareBranchEntries(entries, tokenizer, tokenBudget);
 
 	if (branchMessages.length === 0) {
-		return { summary: "No content to summarize" };
+		return {
+			summary: upsertLoadedSkills("No content to summarize", loadedSkills),
+			...(loadedSkills.length > 0 ? { loadedSkills } : {}),
+		};
 	}
 
 	// A snapcompact summary rendered for another model may carry reasoning
@@ -398,10 +413,12 @@ export async function generateBranchSummary(
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	summary = upsertLoadedSkills(summary, loadedSkills);
 
 	return {
 		summary: summary || "No summary generated",
 		readFiles,
 		modifiedFiles,
+		...(loadedSkills.length > 0 ? { loadedSkills } : {}),
 	};
 }

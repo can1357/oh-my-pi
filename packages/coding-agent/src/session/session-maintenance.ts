@@ -23,6 +23,7 @@ import {
 	calculateContextTokens,
 	collectShakeRegions,
 	COMPACTION_RECOVERY_BAND,
+	collectLoadedSkills,
 	compact,
 	compactionContextTokens,
 	computeFileLists,
@@ -47,6 +48,7 @@ import {
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 	upsertFileOperations,
+	upsertLoadedSkills,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -375,15 +377,34 @@ function mergeLlmCompactionPreserveData(
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
-/** Wrap a handoff document as a compaction summary: append the cumulative file-operations tag and derive entry details. */
+/** Wrap a handoff document with cumulative file and loaded-skill metadata. */
 function handoffSummaryFromDocument(
 	document: string,
 	preparation: CompactionPreparation,
 ): { summary: string; details: CompactionDetails } {
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	const loadedSkills = preparation.loadedSkills
+		? collectLoadedSkills([], preparation.loadedSkills)
+		: collectLoadedSkills([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]);
 	return {
-		summary: upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
-		details: { readFiles, modifiedFiles },
+		summary: upsertLoadedSkills(
+			upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
+			loadedSkills,
+		),
+		details: { readFiles, modifiedFiles, ...(loadedSkills.length > 0 ? { loadedSkills } : {}) },
+	};
+}
+
+/** Keep skill metadata when snapcompact replaces or re-renders an LLM summary. */
+function withLoadedSkillDetails(
+	result: snapcompact.CompactionResult,
+	loadedSkills: readonly string[] | undefined,
+): snapcompact.CompactionResult<CompactionDetails> {
+	const skills = collectLoadedSkills([], loadedSkills);
+	if (skills.length === 0) return result;
+	return {
+		...result,
+		details: { readFiles: [], modifiedFiles: [], ...result.details, loadedSkills: skills },
 	};
 }
 
@@ -4013,7 +4034,10 @@ export class SessionMaintenance {
 			result = await snapcompact.compact(preparation, { ...options, maxFrames });
 			framePayloadBytes = this.#snapcompactFramePayloadBytes(result);
 		}
-		return { result, framePayloadBytes };
+		const loadedSkills =
+			preparation.loadedSkills ??
+			collectLoadedSkills([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]);
+		return { result: withLoadedSkillDetails(result, loadedSkills), framePayloadBytes };
 	}
 
 	/**
@@ -4658,13 +4682,13 @@ export class SessionMaintenance {
 		model: Model,
 		maxFrames: number,
 	): Promise<snapcompact.CompactionResult> {
-		const details = entry.details as snapcompact.CompactionDetails | undefined;
+		const details = entry.details as CompactionDetails | undefined;
 		const fileOps = snapcompact.createFileOps();
 		for (const file of details?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of details?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 		const shape = snapcompact.resolveShapeForText(archiveText, model, shapeSetting);
-		return await snapcompact.compact(
+		const result = await snapcompact.compact(
 			{
 				firstKeptEntryId: entry.firstKeptEntryId,
 				messagesToSummarize: [],
@@ -4682,6 +4706,7 @@ export class SessionMaintenance {
 				includeThinking: snapcompact.readerIncludesThinking(model),
 			},
 		);
+		return withLoadedSkillDetails(result, details?.loadedSkills);
 	}
 
 	/**

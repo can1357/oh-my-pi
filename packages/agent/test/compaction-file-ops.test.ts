@@ -1,10 +1,21 @@
 import { describe, expect, it } from "bun:test";
+import type { AgentMessage } from "../src/types";
+import {
+	type CompactionDetails,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	prepareCompaction,
+} from "../src/compaction/compaction";
+import type { SessionEntry } from "../src/compaction/entries";
+import { createCustomMessage } from "../src/compaction/messages";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	formatFileOperations,
 	isUrlSchemePath,
+	LOADED_SKILLS_LIMIT,
 	stripReadSelector,
 } from "../src/compaction/utils";
 import { createAssistantMessage } from "./helpers";
@@ -142,5 +153,155 @@ describe("isUrlSchemePath", () => {
 		expect(isUrlSchemePath("db.sqlite:users")).toBe(false);
 		expect(isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
 		expect(isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
+	});
+});
+
+describe("loaded skills in compaction summaries", () => {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1, remoteEnabled: false };
+
+	function appendMessages(entries: SessionEntry[], messages: AgentMessage[]): void {
+		for (const message of messages) {
+			entries.push({
+				type: "message",
+				id: `entry-${entries.length}`,
+				parentId: entries.at(-1)?.id ?? null,
+				timestamp: new Date(entries.length).toISOString(),
+				message,
+			});
+		}
+	}
+
+	function appendReadTurn(entries: SessionEntry[], paths: string[]): void {
+		appendMessages(entries, [
+			{ role: "user", content: "Load the instructions and inspect the source.", timestamp: entries.length },
+			createAssistantMessage(
+				paths.map((path, i) => readCall(`read-${entries.length}-${i}`, path)),
+				"toolUse",
+			),
+			...paths.map((_, i) => ({
+				role: "toolResult" as const,
+				toolCallId: `read-${entries.length}-${i}`,
+				toolName: "read",
+				content: [{ type: "text" as const, text: "Loaded instructions or source." }],
+				isError: false,
+				timestamp: entries.length,
+			})),
+			createAssistantMessage([{ type: "text", text: "Inspection complete." }]),
+		]);
+	}
+
+	async function summarize(entries: SessionEntry[], generatedSummary = "Work completed.") {
+		const preparation = prepareCompaction(entries, settings, model);
+		if (!preparation) throw new Error("Expected discarded history");
+		return compact(preparation, model, "test-key", undefined, undefined, {
+			completeImpl: async () => createAssistantMessage([{ type: "text", text: generatedSummary }]),
+			oneshotRetry: false,
+		});
+	}
+
+	function appendTail(entries: SessionEntry[]): void {
+		appendMessages(entries, [
+			{ role: "user", content: "Continue with the next task.", timestamp: entries.length },
+			createAssistantMessage([{ type: "text", text: "Ready for the next task." }]),
+		]);
+	}
+
+	it("retains discarded skill reads outside <files> and omits the block for sessions without loads", async () => {
+		for (const skills of [[], ["skill://review:raw", "skill://build/ref.md:10-20:raw"]]) {
+			const entries: SessionEntry[] = [];
+			appendReadTurn(entries, [...skills, "src/main.ts:10-20"]);
+			appendTail(entries);
+			const result = await summarize(entries);
+			const details = result.details as CompactionDetails;
+			expect(details.readFiles).toEqual(["src/main.ts"]);
+			const files = result.summary.match(/<files>[\s\S]*?<\/files>/)?.[0];
+			expect(files).toBeDefined();
+			expect(files).not.toContain("skill://");
+			if (skills.length > 0) {
+				expect(details.loadedSkills).toEqual(["build", "review"]);
+				expect(result.summary).toContain("<loaded-skills>");
+				expect(result.summary).toContain("`read skill://<name>`");
+				expect(result.summary).toContain("- build\n- review");
+			} else {
+				expect(details.loadedSkills).toBeUndefined();
+				expect(result.summary).not.toContain("<loaded-skills>");
+			}
+		}
+	});
+
+	it("carries skills across compactions, promotes newer loads, and replaces echoed blocks", async () => {
+		const entries: SessionEntry[] = [];
+		appendReadTurn(entries, ["skill://review:raw", "skill://build"]);
+		appendTail(entries);
+		const first = await summarize(entries);
+		entries.push({
+			type: "compaction",
+			id: "compaction-1",
+			parentId: entries.at(-1)?.id ?? null,
+			timestamp: new Date(entries.length).toISOString(),
+			...first,
+		});
+		appendReadTurn(entries, ["skill://deploy/ref.md:raw", "skill://review:10-20"]);
+		appendTail(entries);
+		const second = await summarize(entries, first.summary);
+		expect((second.details as CompactionDetails).loadedSkills).toEqual(["review", "deploy", "build"]);
+		expect(second.summary.match(/<loaded-skills>/g)).toHaveLength(1);
+		expect(second.summary).toContain("- review\n- deploy\n- build");
+	});
+
+	it("recognizes slash-command and autoload custom entries while accepting older summary details", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "compaction",
+				id: "old-compaction",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				summary: "Earlier work.",
+				firstKeptEntryId: "entry-1",
+				tokensBefore: 1000,
+				details: { readFiles: [], modifiedFiles: [] },
+			},
+			{
+				type: "custom_message",
+				id: "entry-1",
+				parentId: "old-compaction",
+				timestamp: new Date(1).toISOString(),
+				customType: "skill-prompt",
+				content: "Expanded slash-command skill instructions.",
+				display: true,
+				attribution: "user",
+				details: { name: "review", path: "/skills/review/SKILL.md", args: "this change" },
+			},
+		];
+		appendMessages(entries, [
+			createCustomMessage(
+				"skill-prompt",
+				"Expanded autoloaded skill instructions.",
+				false,
+				{ name: "build", path: "/skills/build/SKILL.md" },
+				new Date(2).toISOString(),
+			),
+			createAssistantMessage([{ type: "text", text: "Followed the loaded skills." }]),
+		]);
+		appendTail(entries);
+		const result = await summarize(entries);
+		expect((result.details as CompactionDetails).loadedSkills).toEqual(["build", "review"]);
+		expect(result.summary).toContain("- build\n- review");
+	});
+
+	it("bounds the deduplicated history to the most recently loaded skills", async () => {
+		const entries: SessionEntry[] = [];
+		const names = Array.from({ length: LOADED_SKILLS_LIMIT + 2 }, (_, i) => `skill-${i}`);
+		appendReadTurn(entries, [...names.map(name => `skill://${name}`), "skill://skill-1/ref.md:raw"]);
+		appendTail(entries);
+		const result = await summarize(entries);
+		const expected = ["skill-1", ...names.toReversed().filter(name => name !== "skill-1")].slice(
+			0,
+			LOADED_SKILLS_LIMIT,
+		);
+		expect((result.details as CompactionDetails).loadedSkills).toEqual(expected);
+		const block = result.summary.match(/<loaded-skills>[\s\S]*?<\/loaded-skills>/)?.[0] ?? "";
+		expect(block.split("\n").filter(line => line.startsWith("- "))).toEqual(expected.map(name => `- ${name}`));
 	});
 });
