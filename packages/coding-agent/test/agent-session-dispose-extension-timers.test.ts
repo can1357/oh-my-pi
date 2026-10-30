@@ -91,7 +91,7 @@ describe("AgentSession disposal stops extension timers", () => {
 										_args: unknown,
 										ctx: { setTimeout: (callback: () => void, ms: number) => unknown },
 									) => {
-										armTimer(ctx, observed);
+										armTimer(ctx, observed, FALLBACK_TIMER_MS);
 										return "";
 									},
 								},
@@ -102,12 +102,25 @@ describe("AgentSession disposal stops extension timers", () => {
 		return observed;
 	}
 
+	/** Deadline of the runner-owned timers, which the runner cases drive with a fake clock. */
+	const RUNNER_TIMER_MS = 1000;
+	/**
+	 * Deadline of the fallback-registry timers. The fallback cases arm through the real
+	 * `prompt("/arm")` path, which cannot run under a fake clock, so their timer is a real one and
+	 * the case waits past this deadline instead of advancing a fake clock.
+	 */
+	const FALLBACK_TIMER_MS = 150;
+
 	/** What a typical extension timer does: wake the session with a message. */
-	function armTimer(ctx: { setTimeout: (callback: () => void, ms: number) => unknown }, observed: Observed): void {
+	function armTimer(
+		ctx: { setTimeout: (callback: () => void, ms: number) => unknown },
+		observed: Observed,
+		ms: number,
+	): void {
 		ctx.setTimeout(() => {
 			observed.fired.push(session?.isDisposed === true);
 			void session?.sendUserMessage("message from extension timer").catch(() => {});
-		}, 1000);
+		}, ms);
 	}
 
 	/** Let the prompt flow run to its first provider call without advancing the clock further. */
@@ -121,8 +134,8 @@ describe("AgentSession disposal stops extension timers", () => {
 			const runner = session?.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			vi.useFakeTimers();
-			armTimer(runner.createContext(), observed);
-			vi.advanceTimersByTime(1000);
+			armTimer(runner.createContext(), observed, RUNNER_TIMER_MS);
+			vi.advanceTimersByTime(RUNNER_TIMER_MS);
 			// The callback has run; the turn it starts is ordinary async work, so hand the clock
 			// back and await the provider call the session really makes.
 			vi.useRealTimers();
@@ -137,7 +150,7 @@ describe("AgentSession disposal stops extension timers", () => {
 			const runner = session?.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			vi.useFakeTimers();
-			armTimer(runner.createContext(), observed);
+			armTimer(runner.createContext(), observed, RUNNER_TIMER_MS);
 
 			session?.beginDispose();
 			vi.advanceTimersByTime(5000);
@@ -153,7 +166,7 @@ describe("AgentSession disposal stops extension timers", () => {
 			const runner = current?.extensionRunner;
 			if (!current || !runner) throw new Error("expected session with extension runner");
 			vi.useFakeTimers();
-			armTimer(runner.createContext(), observed);
+			armTimer(runner.createContext(), observed, RUNNER_TIMER_MS);
 
 			const draftHeld = Promise.withResolvers<void>();
 			const draftStarted = Promise.withResolvers<void>();
@@ -183,12 +196,12 @@ describe("AgentSession disposal stops extension timers", () => {
 	});
 
 	describe("fallback timers of the runner-less command context", () => {
+		// These cases arm the timer through the real `/arm` command, which cannot run under a fake
+		// clock, so the registry holds a real timer: a fake clock advanced afterwards leaves it
+		// pending and reports green whether or not disposal stopped it. Hence the real waits below.
 		it("fires and starts a turn while the session is live", async () => {
 			const observed = createSession(false);
 			await session?.prompt("/arm");
-			vi.useFakeTimers();
-			vi.advanceTimersByTime(1000);
-			vi.useRealTimers();
 			await observed.firstCall.promise;
 
 			expect(observed.fired).toEqual([false]);
@@ -199,14 +212,44 @@ describe("AgentSession disposal stops extension timers", () => {
 			const observed = createSession(false);
 			await session?.prompt("/arm");
 			expect(observed.providerCalls).toEqual([]);
-			vi.useFakeTimers();
 
 			session?.beginDispose();
-			vi.advanceTimersByTime(5000);
+			await Bun.sleep(FALLBACK_TIMER_MS * 4);
 			await settle();
 
 			expect(observed.fired).toEqual([]);
 			expect(observed.providerCalls).toEqual([]);
+		});
+
+		it("does not fire in the draft-write gap of the interactive teardown", async () => {
+			const observed = createSession(false);
+			const current = session;
+			if (!current) throw new Error("expected session");
+			await current.prompt("/arm");
+
+			const draftHeld = Promise.withResolvers<void>();
+			const draftStarted = Promise.withResolvers<void>();
+			const close = createSessionTeardown({
+				getDraftText: () => "",
+				beginDispose: () => current.beginDispose(),
+				saveDraft: async () => {
+					draftStarted.resolve();
+					await draftHeld.promise;
+				},
+				disposeSession: () => current.dispose(),
+			});
+			const closing = close();
+			await draftStarted.promise;
+			expect(current.isDisposed).toBe(true);
+
+			await Bun.sleep(FALLBACK_TIMER_MS * 4);
+			await settle();
+
+			expect(observed.fired).toEqual([]);
+			expect(observed.providerCalls).toEqual([]);
+
+			draftHeld.resolve();
+			await closing;
 		});
 	});
 });
