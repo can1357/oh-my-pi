@@ -71,6 +71,7 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 			tasks.push(task);
 		},
 		discardAssistantTurn() {},
+		compactForToolLoop: async () => false,
 	});
 	return { guard, state, aborts, appended, persisted, notices, tasks, continueCount: () => continueCount };
 }
