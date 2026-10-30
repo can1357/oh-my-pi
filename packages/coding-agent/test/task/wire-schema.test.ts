@@ -193,6 +193,32 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines).toContain("Task:\naudit the auth module");
 	});
 
+	const perCallModels = [
+		["mock/target:high", "mock/target:high"],
+		["@review:high", "@review:high"],
+		[["@review:high", "mock/target"], '["@review:high","mock/target"]'],
+	] as const;
+
+	it.each(perCallModels)("surfaces the requested per-call selector %j for a flat spawn", async (model, display) => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({ task: "review the patch", model });
+		expect(lines).toContain(`Model: ${display}`);
+	});
+
+	it.each(perCallModels)("shows every requested per-call selector in a batch (%j)", async (model, display) => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({
+			context: "review the patch",
+			tasks: [
+				{ task: "review auth", model },
+				{ task: "map the files" },
+				{ task: "review storage", model: "mock/other" },
+			],
+		});
+		expect(lines).toContain(`Task 1 model: ${display}`);
+		expect(lines).toContain("Task 3 model: mock/other");
+	});
+
 	it("summarizes a homogeneous batch whose agents use the session default", async () => {
 		const tool = await makeTool("scout,reviewer");
 		const lines = tool.formatApprovalDetails({

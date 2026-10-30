@@ -618,9 +618,10 @@ export interface CreateAgentSessionOptions {
 	 */
 	assertDispatchModel?: (model: Model) => void;
 	/**
-	 * Never switch the main-loop model: no retry fallback, context promotion or usage-aware fallback;
-	 * the turn retries on, or fails with, its own model instead. Per-call `model` subagents set it
-	 * unless `task.perCallModelFallbacks: runtime` allows approved retry fallbacks.
+	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
+	 * with, its own model instead. Startup model selection, and the return to the primary after a
+	 * startup fallback, are not affected. Per-call `model` subagents set it unless
+	 * `task.perCallModelFallbacks: runtime` allows approved retry fallbacks.
 	 */
 	disableModelFallback?: boolean;
 	/** Never promote to a larger-context model (implied by {@link disableModelFallback}). Per-call `model` subagents set it. */

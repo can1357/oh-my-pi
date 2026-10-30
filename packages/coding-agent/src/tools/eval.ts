@@ -203,7 +203,7 @@ export interface EvalToolDescriptionOptions {
 	perCallModel?: boolean;
 	/** `task.perCallModelFallbacks: runtime` lets a per-call worker fall back to configured chain models. Default: false. */
 	perCallModelFallbacks?: boolean;
-	/** Operator-owned role selectors and narrowing allowlist; independent of model availability. */
+	/** Operator-owned role selectors and narrowing allowlist; bare values use the current model registry. */
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	/** Canonical and wire names currently accepted by the session tool bridge. */
 	toolNames?: readonly string[];
@@ -409,7 +409,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			perCallModel,
 			perCallModelFallbacks: cfgTaskPerCallModelFallbacks.get(session.settings.grantAuthority()) === "runtime",
 			perCallModelAdvertisement: perCallModel
-				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.())
+				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.(), session.modelRegistry)
 				: undefined,
 			toolNames: session.getEvalBridgeToolNames?.(),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),

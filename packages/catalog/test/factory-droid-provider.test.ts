@@ -7,7 +7,6 @@ import { quotaTierFor } from "../src/compat/behavior";
 import {
 	type FactoryDroidModelPolicy,
 	type FactoryDroidRegistryModel,
-	factoryDroidOffKeepsReasoning,
 	factoryDroidRegistry,
 	resolveFactoryDroidPolicy,
 	resolveFactoryDroidRotation,
@@ -284,28 +283,6 @@ describe("Factory Droid offline seed", () => {
 		const opus = models.find(model => model.id === "claude-opus-5");
 		expect(opus?.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
 		expect(opus?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
-	});
-});
-
-describe("Factory Droid thinking-off routes", () => {
-	it("uses the account's Fireworks-only rotation instead of the registry's forced-on alternatives", () => {
-		const model = buildFactoryDroidModel(registryModel("deepseek-v4.1-flash"));
-		expect(factoryDroidOffKeepsReasoning({ ...model, factoryDroidApiProviders: ["fireworks"] })).toBe(false);
-		expect(factoryDroidOffKeepsReasoning({ ...model, factoryDroidApiProviders: ["fireworks", "baseten"] })).toBe(
-			true,
-		);
-		expect(factoryDroidOffKeepsReasoning(model)).toBe(true);
-	});
-
-	it("resolves a custom model's forced-on route without requiring a registry entry", () => {
-		const model = buildModel({
-			...syntheticModel({}).spec,
-			id: "deepseek-custom",
-			factoryDroidApiProviders: ["baseten"],
-		});
-		expect(resolveFactoryDroidPolicy(model)).toBeUndefined();
-		expect(factoryDroidOffKeepsReasoning(model)).toBe(true);
-		expect(factoryDroidOffKeepsReasoning({ ...model, factoryDroidApiProviders: ["fireworks"] })).toBe(false);
 	});
 });
 

@@ -15,6 +15,7 @@ import {
 	getPerCallModelAdvertisement,
 	parentModelGrantPattern,
 	PerCallModelError,
+	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 import { cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -43,17 +44,18 @@ const pinnedSonnet = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5@a
 // Separate catalog models: the base costs 8x the `:low` variant's input price.
 const codingRouter = routerModel("nanogpt", "nanogpt/coding-router", "https://nano-gpt.com/api/v1");
 const codingRouterLow = routerModel("nanogpt", "nanogpt/coding-router:low", "https://nano-gpt.com/api/v1");
-const droidModel = (id: string, rotation: string[]) =>
-	buildModel(
-		buildFactoryDroidModel(
-			factoryDroidRegistry().find(entry => entry.spec.id === id)!,
-			{ apiProviders: rotation },
-		),
-	);
-// Factory sends Fable's refusal chain to Opus 5 natively on the first-party Anthropic upstream.
-const droidFable = droidModel("claude-fable-5", ["anthropic"]);
-const droidVertexFable = droidModel("claude-fable-5.1", ["vertex_anthropic"]);
-const droidOpus = droidModel("claude-opus-5", ["anthropic"]);
+const droidFable = buildModel(
+	buildFactoryDroidModel(
+		factoryDroidRegistry().find(entry => entry.spec.id === "claude-fable-5")!,
+		{ apiProviders: ["anthropic"] },
+	),
+);
+const droidVertexFable = buildModel(
+	buildFactoryDroidModel(
+		factoryDroidRegistry().find(entry => entry.spec.id === "claude-fable-5.1")!,
+		{ apiProviders: ["vertex_anthropic"] },
+	),
+);
 const chat = [
 	target,
 	other,
@@ -64,7 +66,6 @@ const chat = [
 	codingRouterLow,
 	droidFable,
 	droidVertexFable,
-	droidOpus,
 ];
 const registry = {
 	getAll: () => [...chat, image],
@@ -458,6 +459,91 @@ describe("per-call model advertisement", () => {
 		});
 	});
 
+	it.each([{ allowlist: [] }, { allowlist: ["mock/target"] }])(
+		"advertises a bare role as an exact selector with allowlist $allowlist",
+		({ allowlist }) => {
+			const settings = Settings.isolated({
+				modelRoles: { review: "target" },
+				"task.perCallModelAllow": allowlist,
+			});
+			expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+			expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
+				{ role: "review", patterns: ["mock/target"] },
+			]);
+		},
+	);
+
+	it.each([
+		{ allow: ["mock/target"], expected: true },
+		{ allow: ["@review"], expected: true },
+		{ allow: ["mock/t*"], expected: true },
+		{ allow: ["tar?et"], expected: true },
+		{ allow: ["mock/TARGET"], expected: false },
+		{ allow: ["mock/target:high"], expected: false },
+		{ allow: ["@unconfigured"], expected: false },
+		{ allow: ["other/*"], expected: false },
+	])("keeps registry-resolved advertisements and dispatch aligned for $allow", ({ allow, expected }) => {
+		for (const value of ["target", "mock/*"]) {
+			const settings = Settings.isolated({
+				modelRoles: { review: value, custom: value },
+				"task.perCallModelAllow": allow,
+			});
+			const advertisement = getPerCallModelAdvertisement(settings, target, registry);
+			expect(approved(target, { settings, agentName: "worker" })).toBe(expected);
+			expect(advertisement.roles).toEqual(
+				expected
+					? ["review", "custom"].map(role => ({
+							role,
+							patterns: [value === "target" ? "mock/target" : value],
+						}))
+					: [],
+			);
+			expect(advertisement.parentModelWithheld).toBe(!expected);
+		}
+	});
+
+	it("uses full-catalog literal precedence for role allowlists in advertisements", () => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "nanogpt/nanogpt/coding-router:low", smol: "nanogpt/nanogpt/coding-router" },
+			"task.perCallModelAllow": ["@review"],
+		});
+		const modelRegistry = { ...registry, getAvailable: () => chat.filter(model => model !== codingRouterLow) };
+		expect(approved(codingRouter, { settings, agentName: "worker" }, modelRegistry)).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, codingRouter, modelRegistry)).toMatchObject({
+			roles: [{ role: "review", patterns: ["nanogpt/nanogpt/coding-router:low"] }],
+			parentModelWithheld: true,
+		});
+	});
+
+	it("uses the dispatch allowlist's literal case comparison in advertisements", () => {
+		const mixedCase = createMockModel({ id: "MiniMax-M2" });
+		const modelRegistry = { getAll: () => [mixedCase], getAvailable: () => [mixedCase] };
+		const settings = Settings.isolated({
+			modelRoles: { review: "mock/MiniMax-M2" },
+			"task.perCallModelAllow": ["mock/minimax-m2"],
+		});
+		expect(approved(mixedCase, { settings, agentName: "worker" }, modelRegistry)).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles).toEqual([]);
+	});
+
+	it("withholds the own-model clause when the parent's routing cannot be written as one selector", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "mock/target" } });
+		const multiRoute = {
+			...sonnet,
+			compat: { ...sonnet.compat, openRouterRouting: { only: ["anthropic", "google-vertex"] } },
+		} as Model;
+		expect(getPerCallModelAdvertisement(settings, multiRoute).parentModelWithheld).toBe(true);
+		expect(getPerCallModelAdvertisement(settings, sonnet).parentModelWithheld).toBe(false);
+		expect(getPerCallModelAdvertisement(settings).parentModelWithheld).toBe(false);
+	});
+
+	it("withholds the own-model clause when a non-empty allowlist does not list the parent's model", () => {
+		const listed = Settings.isolated({ "task.perCallModelAllow": ["openrouter/anthropic/claude-sonnet-4.5"] });
+		const unlisted = Settings.isolated({ "task.perCallModelAllow": ["mock/target"] });
+		expect(getPerCallModelAdvertisement(listed, sonnet).parentModelWithheld).toBe(false);
+		expect(getPerCallModelAdvertisement(unlisted, sonnet).parentModelWithheld).toBe(true);
+	});
+
 	it("reads live grant authority, excluding derived settings but honoring host overlays", () => {
 		const root = Settings.isolated({
 			modelRoles: { smol: "mock/target" },
@@ -638,6 +724,23 @@ describe("per-call dispatch with runtime fallbacks", () => {
 		() =>
 			assertPerCallDispatchModel(model, { settings: Settings.isolated(settings), agentName: "worker" }, registry);
 
+	it.each(["off", "runtime"] as const)("distinguishes unavailable chat models with fallbacks %s", mode => {
+		const grants = {
+			settings: Settings.isolated({
+				...chained,
+				modelRoles: { review: "mock/target" },
+				"task.perCallModelFallbacks": mode,
+			}),
+			agentName: "worker",
+		};
+		const unavailable = { ...registry, getAvailable: () => chat.filter(model => model !== target) };
+		expect(() => assertPerCallModelApproved(target, grants, unavailable)).toThrow(PerCallModelUnavailableError);
+		expect(() => assertPerCallDispatchModel(target, grants, unavailable)).toThrow(PerCallModelUnavailableError);
+		expect(dispatch({ ...chained, "retry.fallbackChains": {}, "task.perCallModelFallbacks": mode })).toThrow(
+			/not approved/,
+		);
+	});
+
 	it.each([
 		["off: a chain entry is refused", chained, /perCallModelFallbacks: runtime/],
 		[
@@ -670,7 +773,7 @@ describe("per-call dispatch with runtime fallbacks", () => {
 		expect(approved(target, { settings: Settings.isolated(settings), agentName: "worker" }, registry)).toBe(false);
 		// A non-chat model named in a chain stays out of reach.
 		const imageChain = { ...settings, "retry.fallbackChains": { review: ["mock/painter"] } };
-		expect(dispatch(imageChain, image)).toThrow(/not approved/);
+		expect(dispatch(imageChain, image)).toThrow(PerCallModelUnavailableError);
 	});
 
 	it("runtime: reads the opt-in and chain from the operator's settings, never a subagent overlay", () => {

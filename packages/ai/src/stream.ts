@@ -935,6 +935,7 @@ function streamDispatch<TApi extends Api>(
 			return streamAnthropic(providerModel as Model<"anthropic-messages">, context, {
 				...anthropicOptions,
 				isOAuth: anthropicOptions.isOAuth ?? providerModel.isOAuth,
+				waitForTerminalDrain: limited,
 			});
 		}
 
@@ -2331,6 +2332,7 @@ function mapOptionsForApi<TApi extends Api>(
 				maxTokens: options?.maxTokens,
 				reasoning,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				disableServerSideFallback: options?.disableServerSideFallback,
 				hideThinkingSummary: options?.hideThinkingSummary,
 				textVerbosity: options?.textVerbosity,
 				serviceTier: options?.serviceTier,

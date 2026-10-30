@@ -362,7 +362,7 @@ export const cfgTaskPerCallModelAllow = register({
 		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
 		condition: "perCallModelAllowNotProject",
 		description:
-			'Exact provider/model-id entries; OpenRouter/Vercel models must include `@upstream` (e.g. `openrouter/x@y`), even when only one route exists. Configured @role entries or globs, e.g. ["anthropic/claude-sonnet-4-5", "@review", "openai/*"]. When set, a per-call model must also match an entry here; the list only narrows what the configuration grants. Empty: every model the configuration grants.',
+			'Exact provider/model-id entries, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`), configured @role entries or globs, e.g. ["anthropic/claude-sonnet-4-5", "@review", "openai/*"]. When set, a per-call model must also match an entry here; the list only narrows what the configuration grants. Exact entries compare literally. Empty: every model the configuration grants.',
 	},
 });
 

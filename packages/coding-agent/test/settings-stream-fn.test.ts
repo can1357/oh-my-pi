@@ -12,6 +12,9 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -538,6 +541,45 @@ describe("createSettingsAwareStreamFn", () => {
 });
 
 describe("per-call Factory server-side fallback switch", () => {
+	it.each([false, true])("preserves the Factory wire opt-out through streamSimple: %p", async disabled => {
+		const entry = factoryDroidRegistry().find(model => model.spec.id === "claude-fable-5");
+		if (!entry) throw new Error("Expected Factory Fable model");
+		const model = buildModel(buildFactoryDroidModel(entry, { apiProviders: ["anthropic"] }));
+		const frames = [
+			{
+				type: "message_start",
+				message: { id: "msg_factory", model: model.id, role: "assistant", content: [], usage: { input_tokens: 1 } },
+			},
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "OK" } },
+			{ type: "content_block_stop", index: 0 },
+			{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+			{ type: "message_stop" },
+		];
+		let body: Record<string, unknown> | undefined;
+		let headers = new Headers();
+		const fetch = (async (_url: unknown, init?: RequestInit) => {
+			body = JSON.parse(String(init?.body));
+			headers = new Headers(init?.headers);
+			return new Response(frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), {
+				headers: { "content-type": "text/event-stream" },
+			});
+		}) as FetchImpl;
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), streamSimple, {
+			disableServerSideFallback: disabled,
+		});
+		const stream = await wrapped(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: "factory-test-token", fetch },
+		);
+
+		expect((await stream.result()).stopReason).toBe("stop");
+		expect(body?.fallbacks).toEqual(disabled ? undefined : [{ model: "claude-opus-5" }]);
+		const betas = headers.get("anthropic-beta") ?? "";
+		expect(betas.includes("server-side-fallback-2026-06-01")).toBe(!disabled);
+		expect(betas.includes("fallback-credit-2026-06-01")).toBe(!disabled);
+	});
 	it("forwards disableServerSideFallback to Factory models only", () => {
 		const settings = Settings.isolated({});
 		const factory = captureBase();

@@ -19,6 +19,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
 	formatModelStringWithRouting,
+	getModelMatchPreferences,
 	type ModelMatchPreferences,
 	normalizeModelPatternList,
 	resolveExplicitModelRole,
@@ -30,7 +31,7 @@ import type { Settings } from "../config/settings";
 import { cfgRetryFallbackChains } from "../session/settings";
 import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow, cfgTaskPerCallModelFallbacks } from "./settings";
 
-/** A per-call model was rejected: not approved by the operator's configuration. */
+/** A per-call model request could not be dispatched or restored. */
 export class PerCallModelError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -38,10 +39,18 @@ export class PerCallModelError extends Error {
 	}
 }
 
+/** The per-call model is not an available chat model, so no grant applies. */
+export class PerCallModelUnavailableError extends PerCallModelError {
+	constructor(message: string) {
+		super(message);
+		this.name = "PerCallModelUnavailableError";
+	}
+}
+
 /**
  * Inputs that grant per-call models; nothing here is persisted as a grant. `settings` is read live,
- * so configuration changes apply to the next request; the agent, parent and match preferences
- * are captured when the child spawns (or is revived).
+ * so configuration changes apply to the next request. Spawn snapshots the agent, parent model and
+ * match preferences; cold revival snapshots the agent and preferences but reads the live parent on each request.
  */
 export interface PerCallModelGrants {
 	settings: Settings;
@@ -51,7 +60,7 @@ export interface PerCallModelGrants {
 	agentModel?: string | string[];
 	/** The selected agent is no longer discovered (cold revival): its frontmatter grants nothing. */
 	agentRemoved?: boolean;
-	/** The parent session's live model, as `provider/model-id` plus any `@upstream` pin. */
+	/** The parent's model at spawn, or its live model on each cold-revival request, including any `@upstream` pin. */
 	parentModelPattern?: string;
 	/** Spawn-time selector preferences; unrelated later model usage cannot change a grant. */
 	matchPreferences?: ModelMatchPreferences;
@@ -94,11 +103,14 @@ export function parentModelGrantPattern(model: Model<Api>): string | undefined {
 	return selector;
 }
 
-/** Settings-only selectors advertised without resolving the model catalog or availability. */
+/** Operator-owned grant selectors, with bare role values resolved to exact selectors when a registry is supplied. */
 export interface PerCallModelAdvertisement {
 	roles: { role: string; patterns: string[] }[];
 	allowlist: string[];
-	/** True when the caller's live model cannot be written as one selector, so the own-model clause never grants. */
+	/**
+	 * True when the caller's live model cannot be written as one selector, or the allowlist excludes it,
+	 * so the own-model clause would name a model dispatch refuses.
+	 */
 	parentModelWithheld: boolean;
 }
 
@@ -125,52 +137,160 @@ function configuredRoleGrantPatterns(settings: Settings): PerCallModelAdvertisem
 	});
 }
 
+interface GrantResolution {
+	chat: Model<Api>[];
+	catalog: Model<Api>[];
+	matchPreferences?: ModelMatchPreferences;
+}
+
+/** Exact entries stay literal; configured roles and scoped globs only narrow the existing grants. */
+function allowlistAdmitsIdentity(
+	allow: string[],
+	identity: string,
+	settings: Settings,
+	resolution: GrantResolution,
+): boolean {
+	return (
+		allow.length === 0 ||
+		allow.some(entry => {
+			const selector = entry.trim();
+			const role = resolveExplicitModelRole(selector, settings);
+			if (role !== undefined) {
+				return (
+					!isKindRole(role) &&
+					modelGrantPatterns(settings.getModelRole(role), settings).some(pattern =>
+						grantPatternAdmitsIdentity(pattern, identity, resolution),
+					)
+				);
+			}
+			return selector === identity || (/[*?]/.test(selector) && globGrantsIdentity(selector, identity));
+		})
+	);
+}
+
+/** A non-exact role value resolves by the same preferences for approval and advertisement. */
+function resolveGrantPattern(
+	pattern: string,
+	chat: Model<Api>[],
+	catalog: Model<Api>[],
+	matchPreferences?: ModelMatchPreferences,
+) {
+	const knownLiteralId = catalog.some(candidate => candidate.id === pattern);
+	const candidates = knownLiteralId ? chat.filter(candidate => candidate.id === pattern) : chat;
+	return resolveModelRoleValue(pattern, candidates, { matchPreferences });
+}
+
 /**
- * Whether an allowlist entry could admit a model matched by this role's grant
- * pattern. Syntactic only, mirroring the dispatch checks: the advertisement is
- * built without a registry, so a glob pattern is kept whenever an entry could
- * name a model it matches.
+ * Filter advertisements with the dispatch predicate. Globs remain syntactic promises,
+ * not availability checks; bare role values use the registry's canonical identities.
  */
-function allowEntryCouldAdmitPattern(role: string, pattern: string, entry: string): boolean {
-	const selector = entry.trim().toLowerCase();
-	if (selector.length === 0) return false;
-	if (selector.startsWith("@")) return selector.slice(1) === role.toLowerCase();
-	const source = pattern.toLowerCase();
-	// A `:level` suffix narrows the spawn, never the model identity an entry names.
-	const base = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base.toLowerCase();
-	for (const candidate of base === source ? [source] : [source, base]) {
-		if (candidate === selector) return true;
-		if (!/[*?]/.test(candidate)) continue;
-		// Two globs cannot be intersected syntactically; keep the pattern rather than hide it.
-		if (/[*?]/.test(selector)) return true;
-		const expression = candidate.replace(/[\\^$.*+?()[\]{}|]/g, char =>
-			char === "*" ? "[^@]*" : char === "?" ? "[^@]" : `\\${char}`,
-		);
-		const slash = selector.indexOf("/");
-		const target = candidate.includes("/") || slash < 0 ? selector : selector.slice(slash + 1);
-		if (new RegExp(`^${expression}$`).test(target)) return true;
+function allowlistCouldAdmitPattern(
+	pattern: string,
+	allow: string[],
+	settings: Settings,
+	resolution: GrantResolution,
+): boolean {
+	const exact = exactIdentity(pattern, resolution.catalog);
+	if (exact !== undefined) return allowlistAdmitsIdentity(allow, exact, settings, resolution);
+	const suffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	const source =
+		suffix.level &&
+		!resolution.catalog.some(model => globGrantsIdentity(pattern, formatModelStringWithRouting(model)))
+			? suffix.base
+			: pattern;
+	if (!/[*?]/.test(source)) {
+		const resolved = resolveGrantPattern(source, resolution.chat, resolution.catalog, resolution.matchPreferences).model;
+		const identity = resolved ? formatModelStringWithRouting(resolved) : source;
+		return allowlistAdmitsIdentity(allow, identity, settings, resolution);
 	}
-	return false;
+	return allow.some(entry => {
+		const selector = entry.trim();
+		const role = resolveExplicitModelRole(selector, settings);
+		const patterns =
+			role !== undefined
+				? isKindRole(role)
+					? []
+					: modelGrantPatterns(settings.getModelRole(role), settings)
+				: [selector];
+		return patterns.some(candidate => {
+			// Preserve potential glob intersections, but fixed providers and pin scopes cannot disagree.
+			if (/[*?]/.test(candidate)) {
+				if (source.includes("@") !== candidate.includes("@")) return false;
+				const sourceProvider = source.includes("/") ? source.slice(0, source.indexOf("/")) : undefined;
+				const candidateProvider = candidate.includes("/") ? candidate.slice(0, candidate.indexOf("/")) : undefined;
+				return (
+					sourceProvider === undefined ||
+					candidateProvider === undefined ||
+					/[*?]/.test(sourceProvider) ||
+					/[*?]/.test(candidateProvider) ||
+					sourceProvider.toLowerCase() === candidateProvider.toLowerCase()
+				);
+			}
+			const resolved = resolveGrantPattern(
+				candidate,
+				resolution.chat,
+				resolution.catalog,
+				resolution.matchPreferences,
+			).model;
+			const identity =
+				exactIdentity(candidate, resolution.catalog) ??
+				(resolved ? formatModelStringWithRouting(resolved) : candidate);
+			return (
+				grantPatternAdmitsIdentity(pattern, identity, resolution) &&
+				allowlistAdmitsIdentity(allow, identity, settings, resolution)
+			);
+		});
+	});
 }
 
 /** Stable prompt data: only operator-owned settings grant or narrow the advertised selectors. */
-export function getPerCallModelAdvertisement(settings: Settings, parentModel?: Model<Api>): PerCallModelAdvertisement {
+export function getPerCallModelAdvertisement(
+	settings: Settings,
+	parentModel?: Model<Api>,
+	registry?: ApprovalRegistry,
+): PerCallModelAdvertisement {
 	const authority = settings.grantAuthority();
 	const allow = cfgTaskPerCallModelAllow.get(authority);
+	let resolution: GrantResolution | undefined;
+	const grantResolution = (): GrantResolution =>
+		(resolution ??= {
+			chat: registry?.getAvailable("chat") ?? (parentModel ? [parentModel] : []),
+			catalog: registry?.getAll() ?? (parentModel ? [parentModel] : []),
+			matchPreferences: getModelMatchPreferences(authority),
+		});
 	const roles = configuredRoleGrantPatterns(authority)
 		.map(({ role, patterns }) => ({
 			role,
-			// Advertise only patterns the allowlist could admit, so the prompt never names a model dispatch refuses.
-			patterns:
-				allow.length === 0
-					? patterns
-					: patterns.filter(pattern => allow.some(entry => allowEntryCouldAdmitPattern(role, pattern, entry))),
+			patterns: patterns
+				.flatMap(pattern => {
+					if (pattern.includes("/") || /[*?]/.test(pattern)) return [pattern];
+					// A bare role value is a grant, but the per-call selector must include its provider.
+					if (!registry) return [];
+					const { chat, catalog, matchPreferences } = grantResolution();
+					const resolved = resolveGrantPattern(pattern, chat, catalog, matchPreferences);
+					if (!resolved.model) return [];
+					const identity = formatModelStringWithRouting(resolved.model);
+					return [
+						resolved.explicitThinkingLevel && resolved.thinkingLevel
+							? `${identity}:${resolved.thinkingLevel}`
+							: identity,
+					];
+				})
+				.filter(
+					pattern =>
+						allow.length === 0 || allowlistCouldAdmitPattern(pattern, allow, authority, grantResolution()),
+				),
 		}))
 		.filter(({ patterns }) => patterns.length > 0);
+	const parentPattern = parentModel && parentModelGrantPattern(parentModel);
 	return {
 		roles,
 		allowlist: [...new Set(allow.map(entry => entry.trim()))],
-		parentModelWithheld: parentModel !== undefined && parentModelGrantPattern(parentModel) === undefined,
+		// The same literal, role and glob checks dispatch applies to the allowlist.
+		parentModelWithheld:
+			parentModel !== undefined &&
+			(parentPattern === undefined ||
+				(allow.length > 0 && !allowlistAdmitsIdentity(allow, parentPattern, authority, grantResolution()))),
 	};
 }
 
@@ -195,79 +315,48 @@ function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
  * any characters except `@`, including `/` in aggregator ids; `?` matches one such character.
  * Brackets and all other punctuation are literal, and an upstream pin must be written explicitly.
  */
-function globGrants(pattern: string, model: Model<Api>): boolean {
+function globGrantsIdentity(pattern: string, identity: string): boolean {
 	const source = pattern
 		.toLowerCase()
 		.replace(/[\\^$.*+?()[\]{}|]/g, char => (char === "*" ? "[^@]*" : char === "?" ? "[^@]" : `\\${char}`));
-	const identity = formatModelStringWithRouting(model);
 	return new RegExp(`^${source}$`).test(
-		(pattern.includes("/") ? identity : identity.slice(model.provider.length + 1)).toLowerCase(),
+		(pattern.includes("/") ? identity : identity.slice(identity.indexOf("/") + 1)).toLowerCase(),
 	);
 }
 
-/** Grant-value matching uses full-catalog literals and the spawn's frozen preferences. */
-function patternGrants(
-	pattern: string,
-	model: Model<Api>,
-	chat: Model<Api>[],
-	catalog: Model<Api>[],
-	matchPreferences?: ModelMatchPreferences,
-): boolean {
-	const target = formatModelStringWithRouting(model);
+/** Full-catalog literals win even when unavailable, so :low and [1m] never broaden a grant. */
+function grantPatternAdmitsIdentity(pattern: string, identity: string, resolution: GrantResolution): boolean {
+	const { chat, catalog, matchPreferences } = resolution;
 	const exact = exactIdentity(pattern, catalog);
-	if (exact !== undefined) return exact === target;
+	if (exact !== undefined) return exact === identity;
 	if (/[*?]/.test(pattern)) {
 		const suffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
-		const globPattern =
-			suffix.level && !catalog.some(candidate => globGrants(pattern, candidate)) ? suffix.base : pattern;
-		return globGrants(globPattern, model);
+		const source =
+			suffix.level && !catalog.some(model => globGrantsIdentity(pattern, formatModelStringWithRouting(model)))
+				? suffix.base
+				: pattern;
+		return globGrantsIdentity(source, identity);
 	}
-	const knownLiteralId = catalog.some(candidate => candidate.id === pattern);
-	const candidates = knownLiteralId ? chat.filter(candidate => candidate.id === pattern) : chat;
-	const resolved = resolveModelRoleValue(pattern, candidates, { matchPreferences }).model;
-	return resolved !== undefined && formatModelStringWithRouting(resolved) === target;
+	const resolved = resolveGrantPattern(pattern, chat, catalog, matchPreferences).model;
+	if (resolved) return formatModelStringWithRouting(resolved) === identity;
+	// Fully qualified configured selectors remain advertisable without a registry.
+	return catalog.length === 0 && splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base === identity;
 }
 
-/** Exact allowlist entries stay literal; roles and globs only narrow the existing grants. */
-function allowlistAdmits(
-	model: Model<Api>,
-	grants: PerCallModelGrants,
-	chat: Model<Api>[],
-	catalog: Model<Api>[],
-): boolean {
-	const settings = grants.settings.grantAuthority();
-	const target = formatModelStringWithRouting(model);
-	const allow = cfgTaskPerCallModelAllow.get(settings);
-	return (
-		allow.length === 0 ||
-		allow.some(entry => {
-			const selector = entry.trim();
-			const role = resolveExplicitModelRole(selector, settings);
-			if (role !== undefined) {
-				return (
-					!isKindRole(role) &&
-					modelGrantPatterns(settings.getModelRole(role), settings).some(pattern =>
-						patternGrants(pattern, model, chat, catalog, grants.matchPreferences),
-					)
-				);
-			}
-			return selector === target || (/[*?]/.test(selector) && globGrants(selector, model));
-		})
-	);
-}
-
-/** Whether the operator's current configuration names this available chat model itself. */
+/** Whether the configuration grants this model; the caller has already checked chat availability. */
 function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Api>[], catalog: Model<Api>[]): boolean {
-	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) return false;
-	if (!allowlistAdmits(model, grants, chat, catalog)) return false;
-	return perCallModelGrantPatterns(grants).some(pattern =>
-		patternGrants(pattern, model, chat, catalog, grants.matchPreferences),
+	const settings = grants.settings.grantAuthority();
+	const identity = formatModelStringWithRouting(model);
+	const resolution = { chat, catalog, matchPreferences: grants.matchPreferences };
+	return (
+		allowlistAdmitsIdentity(cfgTaskPerCallModelAllow.get(settings), identity, settings, resolution) &&
+		perCallModelGrantPatterns(grants).some(pattern => grantPatternAdmitsIdentity(pattern, identity, resolution))
 	);
 }
 
 /**
  * Whether a running worker may switch to an available chat model named by a concrete chain entry.
- * The live grant authority and allowlist apply; an executor's derived chain never grants.
+ * The live grant authority and shared allowlist predicate apply; an executor's derived chain never grants.
  */
 function isRuntimeFallback(
 	model: Model<Api>,
@@ -277,19 +366,28 @@ function isRuntimeFallback(
 ): boolean {
 	const settings = grants.settings.grantAuthority();
 	if (cfgTaskPerCallModelFallbacks.get(settings) !== "runtime") return false;
-	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) return false;
-	if (!allowlistAdmits(model, grants, chat, catalog)) return false;
-	return modelGrantPatterns(concreteChainEntries(settings), settings).some(pattern =>
-		patternGrants(pattern, model, chat, catalog, grants.matchPreferences),
+	const identity = formatModelStringWithRouting(model);
+	const resolution = { chat, catalog, matchPreferences: grants.matchPreferences };
+	return (
+		allowlistAdmitsIdentity(cfgTaskPerCallModelAllow.get(settings), identity, settings, resolution) &&
+		modelGrantPatterns(concreteChainEntries(settings), settings).some(pattern =>
+			grantPatternAdmitsIdentity(pattern, identity, resolution),
+		)
 	);
 }
-/** Throw {@link PerCallModelError} unless `model` is approved. */
+
+/** Throw {@link PerCallModelError} unless `model` is an available chat model the configuration approves. */
 export function assertPerCallModelApproved(
 	model: Model<Api>,
 	grants: PerCallModelGrants,
 	registry: ApprovalRegistry,
 ): void {
 	const chat = registry.getAvailable("chat");
+	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
+		throw new PerCallModelUnavailableError(
+			`Per-call model ${formatModelStringWithRouting(model)} is not an available chat model.`,
+		);
+	}
 	if (isGranted(model, grants, chat, registry.getAll())) return;
 	const allowGuidance =
 		cfgTaskPerCallModelAllow.get(grants.settings.grantAuthority()).length > 0
@@ -325,12 +423,17 @@ export function assertPerCallDispatchModel(
 		try {
 			assertPerCallModelApproved(model, grants, registry);
 		} catch (error) {
-			if (!(error instanceof PerCallModelError)) throw error;
+			if (!(error instanceof PerCallModelError) || error instanceof PerCallModelUnavailableError) throw error;
 			throw new PerCallModelError(`${error.message} Runtime fallbacks need task.perCallModelFallbacks: runtime.`);
 		}
 		return;
 	}
 	const chat = registry.getAvailable("chat");
+	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
+		throw new PerCallModelUnavailableError(
+			`Per-call model ${formatModelStringWithRouting(model)} is not an available chat model.`,
+		);
+	}
 	const catalog = registry.getAll();
 	const target = formatModelStringWithRouting(model);
 	if (isGranted(model, grants, chat, catalog) || isRuntimeFallback(model, grants, chat, catalog)) {
