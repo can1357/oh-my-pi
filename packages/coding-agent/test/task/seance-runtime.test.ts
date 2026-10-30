@@ -245,6 +245,45 @@ describe("model-facing seance model approval", () => {
 		}
 	});
 
+	it.each([
+		{ allow: "mock/approved-seance-model", approved: true },
+		{ allow: "@review", approved: true },
+		{ allow: "mock/approved-*", approved: true },
+		{ allow: "mock/APPROVED-SEANCE-MODEL", approved: false },
+		{ allow: "approved-seance-model", approved: false },
+		{ allow: "mock/approved-seance-model:high", approved: false },
+	])("narrows saved and explicit seance models with the same allowlist entry $allow", async ({ allow, approved }) => {
+		using tempDir = TempDir.createSync("@omp-seance-allowlist-");
+		const fixture = await modelGateFixture(tempDir.path(), {
+			modelRoles: { review: "approved-seance-model" },
+			"task.perCallModelAllow": [allow],
+		});
+		try {
+			for (const seanceModel of [undefined, `mock/${fixture.approved.id}`, "@review", ["@review"]]) {
+				const policy = resolveEffectiveSubagentPolicy({
+					session: fixture.session,
+					invocationKind: "task",
+					agent: "seance",
+					assignment: "Read the historical request.",
+					sourceSession: fixture.sourceFile,
+					seanceModel,
+				});
+				if (approved) {
+					const resolved = await policy;
+					expect(resolved.modelOverride).toEqual([`mock/${fixture.approved.id}`]);
+					expect(resolved.perCallModelGrants).toBeDefined();
+				} else {
+					await expect(policy).rejects.toThrow(/approved/);
+				}
+			}
+			expect(fixture.approved.calls).toHaveLength(0);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+			expect(await Bun.file(fixture.sourceFile).text()).toBe(fixture.sourceText);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
 	it("skips an unapproved saved active model and dispatches the approved saved default with per-call models off", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-approved-default-");
 		const fixture = await modelGateFixture(tempDir.path(), { "task.perCallModel": "off" });

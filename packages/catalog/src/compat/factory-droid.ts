@@ -10,7 +10,7 @@ import type { Api, ModelSpec } from "../types";
 import { FACTORY_DROID_WIRES, type FactoryDroidRegion, type FactoryDroidWire } from "../wire/factory-droid";
 import { apiRouteFor } from "./behavior";
 import { seedModels } from "./providers";
-import { resolveCatalogAxes, resolveModelPolicy } from "./resolve";
+import { resolveCatalogAxes } from "./resolve";
 
 const PROVIDER = "factory-droid";
 
@@ -145,26 +145,6 @@ export function resolveFactoryDroidPolicy(
 ): FactoryDroidModelPolicy | undefined {
 	const id = model.requestModelId ?? model.id;
 	return factoryDroidRegistry().find(entry => entry.spec.id === id)?.policy;
-}
-
-/**
- * Whether a thinking-off request still reasons on an upstream that may serve the
- * model: the wire's KDL `disabled-thinking` keeps adaptive or between-tools
- * thinking, or its completions dialect is `forced-on`. Follow the transport's
- * actual model-scoped rotation and policy, including custom models.
- */
-export function factoryDroidOffKeepsReasoning(model: ModelSpec<Api>): boolean {
-	const registry = resolveFactoryDroidPolicy(model);
-	const wire = registry?.wire ?? "openai-completions";
-	return (model.factoryDroidApiProviders ?? registry?.rotation ?? ["fireworks"]).some(upstream => {
-		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
-		const disabled = (resolved.compat as { disabledThinking?: string } | undefined)?.disabledThinking;
-		return (
-			disabled === "adaptive" ||
-			disabled === "between-tools" ||
-			resolved.request.completionsReasoningMode === "forced-on"
-		);
-	});
 }
 
 /**

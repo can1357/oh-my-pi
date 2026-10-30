@@ -241,24 +241,6 @@ function resolveRoute(
 	return route;
 }
 
-/**
- * Every server-side refusal fallback target a request for `model` can carry on
- * any upstream it may route to. Factory sends the chain natively, so callers
- * cannot opt out: the request may switch to these models server-side.
- */
-export function factoryDroidServerSideFallbackModels(model: Model<"factory-droid-agent">): string[] {
-	const registry = resolveFactoryDroidPolicy(model);
-	const wire = registry?.wire ?? "openai-completions";
-	if (wire === "google-generate") return [];
-	const targets = new Set<string>();
-	for (const upstream of model.factoryDroidApiProviders ?? registry?.rotation ?? []) {
-		const fallbackModels = resolveModelPolicy({ ...model, api: wire }, { upstream }).catalog.serverSideFallbackModels;
-		if (!Array.isArray(fallbackModels)) continue;
-		for (const entry of fallbackModels) if (typeof entry === "string") targets.add(entry);
-	}
-	return [...targets];
-}
-
 /** The attempt's effort: undefined when reasoning is off. */
 function selectEffort(
 	model: Model<"factory-droid-agent">,
@@ -407,6 +389,8 @@ type ForwardedOptions = Pick<
 interface Attempt {
 	model: Model<"factory-droid-agent">;
 	route: ResolvedRoute;
+	/** Registry base model whose wire identity may serve this fast tier. */
+	baseVariant?: string;
 	baseUrl: string;
 	effort: Effort | undefined;
 	disabled: boolean;
@@ -414,8 +398,8 @@ interface Attempt {
 	context: Context;
 	options: FactoryDroidOptions | undefined;
 	forwarded: ForwardedOptions;
-	/** Served-model id observed on the raw stream; only a per-call request sets it. */
-	servedModelId?: string;
+	/** Disallowed served model or handoff observed before forwarding its content. */
+	modelSwitchReason?: string;
 }
 
 function streamGoogleWire(a: Attempt): AssistantMessageEventStream {
@@ -450,25 +434,41 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		options?.disableServerSideFallback || !fallbackModels?.length
 			? undefined
 			: fallbackModels.map(model => ({ model }));
-	// A per-call request omits the chain, but the proxy could still answer with
-	// another model. The shared transport only adopts a served-model id when the
-	// request opted into the chain, so the raw frame is the one place the answer
-	// names itself; record it for the caller's fail-closed check.
-	const observeServedModel = options?.disableServerSideFallback
+	// Check raw frames before the shared transport can emit content events.
+	// Diagnostic observers cannot throw through that transport, so abort the
+	// attempt and let the outer stream surface the model-switch error instead.
+	const fallbackAbort = options?.disableServerSideFallback ? new AbortController() : undefined;
+	const observeServedModel = fallbackAbort
 		? (((event, servedFor) => {
-				options?.onSseEvent?.(event, servedFor);
-				if (event.event !== "message_start") return;
 				try {
-					const parsed = JSON.parse(event.data) as { message?: { model?: unknown } };
-					const served = parsed.message?.model;
-					if (typeof served === "string" && served.trim()) a.servedModelId = served.trim();
+					const parsed = JSON.parse(event.data) as {
+						type?: string;
+						message?: { model?: unknown };
+						content_block?: { type?: string };
+					};
+					const type = parsed.type ?? event.event;
+					if (type === "message_start") {
+						const served = parsed.message?.model;
+						if (typeof served === "string" && served.trim()) {
+							a.modelSwitchReason ??= servedByAnotherModel(a.model.id, served.trim(), a.baseVariant);
+						}
+					} else if (type === "content_block_start" && parsed.content_block?.type === "fallback") {
+						a.modelSwitchReason ??= "it carries a fallback handoff block";
+					}
 				} catch {
-					// Diagnostic only: an unparseable frame tells us nothing about the served model.
+					// An unparseable frame tells us nothing about the served model.
 				}
+				if (a.modelSwitchReason !== undefined) fallbackAbort.abort();
+				options?.onSseEvent?.(event, servedFor);
 			}) satisfies NonNullable<AnthropicOptions["onSseEvent"]>)
 		: undefined;
 	return streamAnthropic(inner, a.context, {
 		...a.forwarded,
+		signal: fallbackAbort
+			? a.forwarded.signal
+				? AbortSignal.any([a.forwarded.signal, fallbackAbort.signal])
+				: fallbackAbort.signal
+			: a.forwarded.signal,
 		...(observeServedModel ? { onSseEvent: observeServedModel } : {}),
 		// The non-OAuth client keeps Factory's system channel intact and sends
 		// its WorkOS bearer token in Authorization.
@@ -509,21 +509,17 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 }
 
 /**
- * A per-call worker must be answered by the model it was granted. The request
- * omits the refusal chain, but the proxy could still reroute, so report the
- * handoff for the caller to fail closed on.
+ * Live Factory responses observed on 2026-10-30 report Anthropic ids with dots
+ * replaced by hyphens and fast tiers as their registry baseVariant. Accept
+ * those wire identities case-insensitively, but no other model or tier.
  */
-function servedByAnotherModel(
-	message: AssistantMessage,
-	requestedId: string,
-	observedServedId: string | undefined,
-): string | undefined {
-	if (observedServedId !== undefined && observedServedId.toLowerCase() !== requestedId.toLowerCase()) {
-		return `it was served by ${observedServedId}`;
-	}
-	if (message.model !== requestedId) return `it was served by ${message.model}`;
-	if (message.content.some(block => block.type === "fallback")) return "it carries a fallback handoff block";
-	return undefined;
+function servedByAnotherModel(requestedId: string, servedId: string, baseVariant?: string): string | undefined {
+	const requested = requestedId.toLowerCase();
+	const served = servedId.toLowerCase();
+	if (served === requested || served === requested.replaceAll(".", "-")) return undefined;
+	const base = baseVariant?.toLowerCase();
+	if (base !== undefined && (served === base || served === base.replaceAll(".", "-"))) return undefined;
+	return `it was served by ${servedId}`;
 }
 
 function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): AssistantMessageEventStream {
@@ -748,6 +744,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			const attempt: Attempt = {
 				model: scope.model,
 				route,
+				baseVariant: registry?.entitlement.baseVariant,
 				baseUrl: scope.baseUrl,
 				...selectEffort(scope.model, registry, options),
 				sessionUuid,
@@ -794,26 +791,24 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			};
 
 			for await (const event of streamWire(wire, attempt)) {
+				if (options?.disableServerSideFallback && wire === "anthropic-messages") {
+					const switchReason =
+						attempt.modelSwitchReason ??
+						(event.type === "done"
+							? (servedByAnotherModel(model.id, event.message.model, attempt.baseVariant) ??
+								(event.message.content.some(block => block.type === "fallback")
+									? "it carries a fallback handoff block"
+									: undefined))
+							: undefined);
+					if (switchReason !== undefined) {
+						throw new Error(`Factory did not keep this per-call request on ${model.id}: ${switchReason}.`);
+					}
+				}
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
 					if (regionMessage != null) {
 						stream.push({ ...event, error: { ...event.error, errorMessage: regionMessage } });
 						continue;
-					}
-				}
-				if (options?.disableServerSideFallback && wire === "anthropic-messages" && event.type === "done") {
-					const switchReason = servedByAnotherModel(event.message, model.id, attempt.servedModelId);
-					if (switchReason !== undefined) {
-						stream.push({
-							type: "error",
-							reason: "error",
-							error: createProviderErrorMessage(
-								model,
-								new Error(`Factory did not keep this per-call request on ${model.id}: ${switchReason}.`),
-							),
-						});
-						stream.end();
-						return;
 					}
 				}
 				stream.push(event);

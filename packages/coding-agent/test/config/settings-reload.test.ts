@@ -54,6 +54,19 @@ describe("Settings layer refresh", () => {
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
 	});
 
+	it("reloads an overlay's persisted role layers without discarding its own overrides", async () => {
+		await writeConfig({ modelRoles: { review: "mock/target" }, temperature: 0.1 });
+		const settings = await Settings.loadIsolated({ cwd: startProject, agentDir });
+		const overlay = settings.overlay({ temperature: 0.7 });
+		expect(overlay.getModelRole("review")).toBe("mock/target");
+
+		await writeConfig({ temperature: 0.2 });
+		await overlay.reloadFromDisk();
+		expect(overlay.getModelRole("review")).toBeUndefined();
+		expect(cfgTemperature.get(settings)).toBe(0.2);
+		expect(cfgTemperature.get(overlay)).toBe(0.7);
+	});
+
 	it("never adopts an invalid on-disk value through the save that merges external edits", async () => {
 		await writeConfig({ providers: { maxInFlightRequests: { openai: 2 } } });
 		const settings = await Settings.init({ cwd: startProject, agentDir });
