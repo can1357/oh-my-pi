@@ -51,10 +51,12 @@ function createHost(
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
 		shakeSucceeds?: boolean;
+		extraSettings?: Record<string, unknown>;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
 		"retry.baseDelayMs": 1,
+		...options.extraSettings,
 		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
 		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 	});
@@ -1379,5 +1381,69 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			]);
 			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
+	});
+});
+
+describe("TurnRecovery classifier-refusal continuation", () => {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
+
+	let tempDir: TempDir;
+	let modelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		tempDir = TempDir.createSync("@pi-turn-recovery-refusal-");
+		const authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: Settings.isolated() });
+	});
+
+	afterAll(() => {
+		tempDir.removeSync();
+	});
+
+	function refusal(): AssistantMessage {
+		return {
+			...makeMessage([], model),
+			errorMessage: "Refusal (cyber): declined",
+			stopDetails: { type: "refusal", category: "cyber", explanation: "declined" },
+		};
+	}
+
+	function createHostWithContinuation(extra: Record<string, unknown>, messages?: readonly AgentMessage[]) {
+		const host = createHost(model, modelRegistry, {
+			messages,
+			extraSettings: { "retry.continueClassifierRefusals": true, ...extra },
+		});
+		Object.assign(host.agent, { appendMessage: () => {} });
+		Object.assign(host.sessionManager, { appendMessage: () => "entry" });
+		return host;
+	}
+
+	it("stays saturated after the cap until the next prompt", () => {
+		const recovery = new TurnRecovery(createHostWithContinuation({ "retry.maxClassifierRefusalContinuations": 1 }));
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		// Another owner continuing the same prompt must not re-arm the budget.
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		recovery.resetForNewPrompt();
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+	});
+
+	it("does not continue a refusal after the user cancelled a retry wait", async () => {
+		const failed = makeMessage([], model);
+		const host = createHostWithContinuation({ "retry.baseDelayMs": 60_000 }, [failed]);
+		const recovery = new TurnRecovery(host);
+		// Cancel right after the failed turn is pruned: the backoff sleep is registered
+		// synchronously after that point, so the microtask lands inside the wait.
+		const replaceMessages = host.agent.replaceMessages.bind(host.agent);
+		host.agent.replaceMessages = messages => {
+			replaceMessages(messages);
+			queueMicrotask(() => recovery.abortRetry());
+		};
+		expect(await recovery.handleRetryableError(failed)).toBe(false);
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		recovery.resetForNewPrompt();
+		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
 	});
 });

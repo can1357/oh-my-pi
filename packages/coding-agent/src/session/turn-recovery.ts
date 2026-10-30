@@ -411,6 +411,8 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#classifierRefusalContinueCount = 0;
+	/** The user cancelled a retry wait this prompt; a refusal follow-on must not undo that. */
+	#retryCancelledForPrompt = false;
 	#streamStallContinueCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
@@ -550,6 +552,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#classifierRefusalContinueCount = 0;
+		this.#retryCancelledForPrompt = false;
 		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
@@ -723,6 +726,7 @@ export class TurnRecovery {
 		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (!retrySettings.continueClassifierRefusals) return false;
 		if (this.#activeRetryFallback) return false;
+		if (this.#retryCancelledForPrompt) return false;
 
 		const text: string[] = [];
 		for (const block of message.content) {
@@ -752,7 +756,7 @@ export class TurnRecovery {
 				model: message.model,
 				provider: message.provider,
 			});
-			this.#classifierRefusalContinueCount = 0;
+			// Stay saturated until the next prompt so another owner cannot re-arm the budget.
 			return false;
 		}
 
@@ -3239,6 +3243,7 @@ export class TurnRecovery {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
+		this.#retryCancelledForPrompt = true;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
