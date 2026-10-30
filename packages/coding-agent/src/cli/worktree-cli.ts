@@ -246,8 +246,9 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					// lock, ask again — unless `--all` was asked for, which
 					// deletes whatever is there.
 					const sandbox = await resolveSandboxIdentity(target.path);
+					const lockStartedAt = Date.now();
 					const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT).catch(async (error: unknown) => {
-						throw await describeSandboxLockFailure(sandbox, "remove", error);
+						throw await describeSandboxLockFailure(sandbox, "remove", error, Date.now() - lockStartedAt);
 					});
 					try {
 						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) {

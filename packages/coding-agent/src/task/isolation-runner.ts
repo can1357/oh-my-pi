@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -38,6 +38,7 @@ const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
+import { resolveSandboxIdentity, SANDBOX_LOCK_WAIT } from "./isolation-ownership";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -319,8 +320,27 @@ export interface RetainedWorkspace {
 export async function retainIsolationWorkspace(
 	isolationDir: string,
 	backend?: natives.IsoBackendKind,
+	options: { lockHeld?: boolean } = {},
 ): Promise<RetainedWorkspace> {
-	const baseDir = path.dirname(isolationDir);
+	const baseDir = await resolveSandboxIdentity(path.dirname(isolationDir));
+	// Check and act under one hold. A session admitted *after* the check and
+	// before the rename got `ENOENT` at its own cwd: a check-then-act window
+	// is not a decision, and a lease taken in it is as real as one taken
+	// before. The teardown path already holds this lock, and re-taking it
+	// there would deadlock against itself, so it says so.
+	const lock = options.lockHeld ? undefined : await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+	try {
+		return await retainUnderLock(isolationDir, baseDir, backend);
+	} finally {
+		lock?.release();
+	}
+}
+
+async function retainUnderLock(
+	isolationDir: string,
+	baseDir: string,
+	backend: natives.IsoBackendKind | undefined,
+): Promise<RetainedWorkspace> {
 	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
 	// Nothing renames a workspace somebody is in — the same rule deletion
 	// already follows. A recorded writer keeps its cwd, and so does a live
@@ -437,7 +457,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle, { capture });
+			if (handle && !retainWorkspace)
+				await cleanupIsolation(handle, {
+					capture,
+					onLockHeld: held => {
+						captureHoldsSandboxLock = held;
+					},
+				});
 		})();
 		return cleanupPromise;
 	};
@@ -454,6 +480,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	 * throwing out of it abandons the caller's hold and replaces a child's real
 	 * output with a blank failure.
 	 */
+	/** True while the teardown is running this capture under the sandbox lock. */
+	let captureHoldsSandboxLock = false;
 	const capture = async (): Promise<void> => {
 		if (!handle || !taskBaseline || retainWorkspace) {
 			return;
@@ -545,9 +573,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// cleanup runs — capture under the sandbox lock, then removal — so
 			// a late departure gets the same guarantee, and it re-enters
 			// `cleanupIsolation` rather than the memoised handle cleanup.
-			armTeardown(handle.mergedDir, async () => await cleanupIsolation(sandbox, { capture }), {
-				generation: handle.generation,
-			});
+			armTeardown(
+				handle.mergedDir,
+				async () =>
+					await cleanupIsolation(sandbox, {
+						capture,
+						onLockHeld: held => {
+							captureHoldsSandboxLock = held;
+						},
+					}),
+				{
+					generation: handle.generation,
+				},
+			);
 			await cleanupHandle();
 		})();
 		return releasePromise;

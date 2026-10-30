@@ -894,16 +894,17 @@ async function settleAbandonedStop(
  */
 /** Take the sandbox lock, and explain the wait when it cannot be taken. */
 async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ release: () => void }> {
+	const startedAt = Date.now();
 	try {
 		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	} catch (error) {
-		throw await describeSandboxLockFailure(baseDir, purpose, error);
+		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
 	}
 }
 
 export async function cleanupIsolation(
 	handle: IsolationHandle,
-	options: { capture?: () => Promise<void> } = {},
+	options: { capture?: () => Promise<void>; onLockHeld?: (held: boolean) => void } = {},
 ): Promise<void> {
 	// baseDir is the parent of the merged directory, resolved to the directory
 	// itself: a lock on an alias of this path excludes nobody.
@@ -958,6 +959,7 @@ export async function cleanupIsolation(
 		// the capture really stops; past the deadline the only thing that
 		// changes is that this teardown no longer deletes.
 		if (options.capture) {
+			options.onLockHeld?.(true);
 			const capturing = options
 				.capture()
 				.then(() => true)
@@ -979,6 +981,7 @@ export async function cleanupIsolation(
 				),
 			]);
 			deadline.abort();
+			options.onLockHeld?.(false);
 			if (overran) {
 				logger.warn(
 					"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",

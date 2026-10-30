@@ -217,7 +217,14 @@ export type IsolationClaim =
 	| { kind: "claimed"; generation: string }
 	/** A teardown is still running on this path; nothing may materialise here. */
 	| { kind: "retiring" }
-	/** The marker cannot be read, or carries no generation. */
+	/** There is no marker here at all: this is not a sandbox. */
+	| { kind: "absent" }
+	/**
+	 * A marker is here and cannot be read. Distinct from `absent` on purpose: a
+	 * failure to look is not an absence, and treating an unreadable marker as
+	 * "not a sandbox" is how a lease and a writer record both became successful
+	 * no-ops over a workspace somebody was using.
+	 */
 	| { kind: "unknown"; reason: string };
 
 /** Read the claim recorded for the sandbox at `baseDir`. */
@@ -226,6 +233,7 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	try {
 		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
 	} catch (error) {
+		if (isEnoent(error)) return { kind: "absent" };
 		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
 	}
 	if (typeof decoded !== "object" || decoded === null) {
@@ -405,27 +413,44 @@ function errorText(error: unknown): string {
  * Descriptor exhaustion is the one case where nothing can be said about the
  * holder, and it says that instead of guessing.
  */
-export async function describeSandboxLockFailure(baseDir: string, purpose: string, error: unknown): Promise<Error> {
+export async function describeSandboxLockFailure(
+	baseDir: string,
+	purpose: string,
+	error: unknown,
+	waitedMs: number,
+): Promise<Error> {
 	const code = (error as NodeJS.ErrnoException | undefined)?.code;
 	const text = error instanceof Error ? error.message : String(error);
+	const waited = `${(waitedMs / 1000).toFixed(1)}s`;
 	if (code === "EMFILE" || code === "ENFILE" || /EMFILE|ENFILE|too many open files/i.test(text)) {
 		return new Error(
-			`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code ?? "reported by the lock"}). ` +
-				"The lock could not be opened at all, so whether anything holds the workspace is unknown; raise " +
-				"the open-file limit (`ulimit -n`) or reduce how many sessions run at once.",
+			`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors ` +
+				`(${code ?? "reported by the lock"}). The lock could not be opened at all, so whether anything ` +
+				"holds the workspace is unknown; raise the open-file limit (`ulimit -n`) or reduce how many " +
+				"sessions run at once.",
 			{ cause: error },
 		);
 	}
-	const claim = await readIsolationClaim(baseDir).catch(() => undefined);
+	// Who *holds* the lock is not knowable from here — it is an anonymous
+	// kernel object, and the pid in the marker is the run that recorded the
+	// workspace, which is often a different process. Saying "held by pid N"
+	// sent callers after the wrong one, and a lock that failed to open in a
+	// millisecond is not contention at all; both are reported as what they are.
 	const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
-	const held =
-		owner === undefined || owner === "unreadable" ? "its owner is not readable" : `it is held by pid ${owner.pid}`;
+	const recorded =
+		owner === undefined || owner === "unreadable"
+			? "its recorded owner is not readable"
+			: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
+	const claim = await readIsolationClaim(baseDir).catch(() => undefined);
 	const state = claim === undefined ? "unknown" : claim.kind;
-	const waited = Math.round((SANDBOX_LOCK_WAIT.retries * SANDBOX_LOCK_WAIT.retryDelayMs) / 1000);
+	const contended = waitedMs >= SANDBOX_LOCK_WAIT.retryDelayMs * 2;
 	return new Error(
-		`Could not ${purpose} isolation workspace ${baseDir} (${state}; ${held}): another run has held it for ${waited}s. ` +
-			"A workspace is held while its task's patch is being saved, while it is being built, and while it is " +
-			"being removed; the hold ends when that finishes. Retry, or run `omp worktree list` to see what owns it.",
+		`Could not ${purpose} isolation workspace ${baseDir} after ${waited} (${state}): ` +
+			(contended
+				? `another run holds the lock; the holder is not identifiable, and ${recorded}. A workspace is held ` +
+					"while its task's patch is being saved, while it is being built, and while it is being removed. " +
+					"Retry, or run `omp worktree list` to see what owns it."
+				: `the lock could not be taken at all (${text}); nothing is known about a holder, and ${recorded}.`),
 		{ cause: error },
 	);
 }

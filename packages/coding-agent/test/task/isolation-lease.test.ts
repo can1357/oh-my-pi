@@ -249,17 +249,24 @@ describe("isolation workspace leases", () => {
 		await viaAlias();
 		expect(await hasLiveIsolationLease(baseDir)).toBe(false);
 
-		// A directory named `m` is not a sandbox: the marker beside it has to
-		// name a claim, or anything with an `m` in it hands out leases nobody
-		// honours.
+		// A marker that is here and cannot be read is unknown, not absent: the
+		// caller is refused rather than handed a successful no-op it would
+		// treat as protection.
 		const plain = await fs.mkdtemp(path.join(os.tmpdir(), "omp-not-a-sandbox-"));
 		temporary.push(plain);
 		await fs.mkdir(path.join(plain, "m"));
 		await Bun.write(path.join(plain, ISOLATION_OWNER_FILE), "{ not json");
-		await (
-			await leaseIsolationWorkspace(path.join(plain, "m"))
-		)();
+		await expect(leaseIsolationWorkspace(path.join(plain, "m"))).rejects.toThrow("unreadable owner marker");
 		expect(await fs.readdir(plain)).not.toContain(ISOLATION_LEASE_DIR);
+
+		// A directory named `m` with no marker at all is simply not a sandbox.
+		const bare = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bare-m-"));
+		temporary.push(bare);
+		await fs.mkdir(path.join(bare, "m"));
+		await (
+			await leaseIsolationWorkspace(path.join(bare, "m"))
+		)();
+		expect(await fs.readdir(bare)).not.toContain(ISOLATION_LEASE_DIR);
 
 		expect(mergedDir).toContain(baseDir);
 	});

@@ -110,7 +110,9 @@ export function forgetIsolationWorkspace(mergedDir: string, generation?: string)
 }
 
 /** What a cwd walk found above it. */
-type FoundSandbox = { kind: "sandbox" | "retiring"; baseDir: string };
+type FoundSandbox =
+	| { kind: "sandbox" | "retiring"; baseDir: string }
+	| { kind: "unknown"; baseDir: string; reason: string };
 
 /** Mount directory names a sandbox's merged view uses (`merged` is the legacy name). */
 const ISOLATION_MOUNT_DIRS = ["m", "merged"];
@@ -136,6 +138,10 @@ async function findSandboxBase(cwd: string): Promise<FoundSandbox | undefined> {
 			// A sandbox whose teardown is still running is not a sandbox a new
 			// user may join, and it is not "no sandbox" either.
 			if (claim.kind === "retiring") return { kind: "retiring", baseDir: parent };
+			// A marker that is here and cannot be read is unknown, not absent.
+			// Walking past it returns "no sandbox", and the caller then gets a
+			// successful no-op where it asked for protection.
+			if (claim.kind === "unknown") return { kind: "unknown", baseDir: parent, reason: claim.reason };
 		}
 		dir = parent;
 	}
@@ -230,10 +236,17 @@ export async function leaseIsolationWorkspace(
 	if (found.kind === "retiring") {
 		throw new Error(`Isolation workspace ${found.baseDir} is being torn down and cannot be leased.`);
 	}
+	if (found.kind === "unknown") {
+		throw new Error(
+			`Isolation workspace ${found.baseDir} has an unreadable owner marker (${found.reason}); refusing to ` +
+				"hand out a lease nothing would honour.",
+		);
+	}
 	const sandbox = found.baseDir;
 	const leaseFile = path.join(sandbox, ISOLATION_LEASE_DIR, `${process.pid}-${Snowflake.next()}.json`);
+	const leaseLockStartedAt = Date.now();
 	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT).catch(async (error: unknown) => {
-		throw await describeSandboxLockFailure(sandbox, "lease", error);
+		throw await describeSandboxLockFailure(sandbox, "lease", error, Date.now() - leaseLockStartedAt);
 	});
 	try {
 		const claim = await readIsolationClaim(sandbox);
@@ -269,6 +282,13 @@ export async function leaseIsolationWorkspace(
 export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<void>> {
 	const found = await findSandboxBase(cwd);
 	if (found === undefined) return async () => {};
+	if (found.kind === "unknown") {
+		// Refuses rather than returning a no-op the caller would cache as a
+		// successful publication: an unreadable marker is not "no sandbox".
+		throw new Error(
+			`Isolation workspace ${found.baseDir} has an unreadable owner marker (${found.reason}); cannot record a writer.`,
+		);
+	}
 	const record = path.join(found.baseDir, ISOLATION_UNFINISHED_DIR, `${process.pid}-${Snowflake.next()}.json`);
 	await writeProcessIdentity(record);
 	return async () => {
@@ -306,6 +326,50 @@ export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
 		await fs.rm(file, { force: true }).catch(() => undefined);
 	}
 	return unfinished;
+}
+
+/** One reading of a record or lease directory: what is live, and whether it is all ours. */
+interface HolderReading {
+	/** A live holder is present. */
+	anyLive: boolean;
+	/** Every live holder is this process. Meaningless unless {@link anyLive}. */
+	allOurs: boolean;
+	/** The directory could not be read, so neither answer is known. */
+	unknown: boolean;
+}
+
+/**
+ * Read one directory of holder records once.
+ *
+ * Once, deliberately: asking "is anybody here?" and then "are they all ours?"
+ * as two listings turns a departure between them into "all ours", and the
+ * owner then exits without the final capture. One listing cannot see a
+ * transition as a state.
+ */
+async function readHolders(dir: string): Promise<HolderReading> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch (error) {
+		if (isEnoent(error)) return { anyLive: false, allOurs: true, unknown: false };
+		// A failure to look is not an absence.
+		return { anyLive: true, allOurs: false, unknown: true };
+	}
+	let anyLive = false;
+	let allOurs = true;
+	for (const entry of entries) {
+		const holder = await readProcessIdentity(path.join(dir, entry));
+		if (holder === undefined) continue;
+		if (holder === "unreadable") {
+			anyLive = true;
+			allOurs = false;
+			continue;
+		}
+		if (!(await isProcessStillLive(holder))) continue;
+		anyLive = true;
+		if (holder.pid !== process.pid) allOurs = false;
+	}
+	return { anyLive, allOurs, unknown: false };
 }
 
 /** Whether every unfinished-writer record at `baseDir` belongs to this process. */
@@ -423,24 +487,33 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// let a teardown delete the workspace its own child was still writing
 		// in; the run's result no longer depends on that exclusion, because the
 		// capture at release has already happened by the time this runs.
-		if (await hasLiveIsolationLease(baseDir)) {
+		const leases = await readHolders(path.join(baseDir, ISOLATION_LEASE_DIR));
+		if (leases.anyLive) {
 			// Somebody else arrived after a writer record let this process
-			// unreference its wait. The work is this process's to do, so the
-			// references come back: exiting now leaves it uncaptured.
-			workspace.poll?.ref?.();
-			workspace.watcher?.ref?.();
+			// unreference its wait: the work is this process's to do, so the
+			// references come back. A lease that is only *ours* is different —
+			// waiting for ourselves is not a reason to keep the process alive,
+			// and a retained self-lease kept a finished program from exiting.
+			if (leases.allOurs && !leases.unknown) {
+				workspace.poll?.unref?.();
+				workspace.watcher?.unref?.();
+			} else {
+				workspace.poll?.ref?.();
+				workspace.watcher?.ref?.();
+			}
 			return;
 		}
 		// A writer that gave up its lease but has not finished is still a user:
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.
-		if (await hasUnfinishedWriter(baseDir)) {
+		const writers = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+		if (writers.anyLive) {
 			// Our own record is kept until this process exits, so waiting for it
 			// must not keep this process alive: the record is on disk and
 			// reclamation takes the workspace afterwards. A *foreign* writer's
 			// record is different — it will go while this process can still do
 			// the final capture, and exiting early leaves that work uncaptured.
-			if (await ownsEveryUnfinishedWriter(baseDir)) {
+			if (writers.allOurs && !writers.unknown) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();
 			} else {
