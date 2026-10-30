@@ -27,8 +27,8 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { createReleaseHold, type ReleaseHold } from "../utils/release-hold";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -590,18 +590,22 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 /**
  * One release for the child's lifecycle out of the caller's and this module's.
  * Each runs at most once, and the first one's failure never skips the second.
+ *
+ * The result is a {@link ReleaseHold} whose claim reaches the caller's hold:
+ * whatever takes this composed release over owns both, and the boundary that
+ * created the caller's hold reads that off its own object.
  */
 function composeLifecycleRelease(
-	callerRelease: (() => void | Promise<void>) | undefined,
+	callerRelease: ReleaseHold | undefined,
 	artifactsRelease: (() => Promise<void>) | undefined,
-): (() => Promise<void>) | undefined {
-	if (!callerRelease) return artifactsRelease;
-	if (!artifactsRelease) return async () => await callerRelease();
-	return async () => {
+): ReleaseHold | undefined {
+	if (!callerRelease) return artifactsRelease ? createReleaseHold(artifactsRelease) : undefined;
+	if (!artifactsRelease) return callerRelease;
+	return createReleaseHold(async () => {
 		const settled = await Promise.allSettled([callerRelease(), artifactsRelease()]);
 		const failure = settled.find(result => result.status === "rejected");
 		if (failure?.status === "rejected") throw failure.reason;
-	};
+	}, callerRelease.claim);
 }
 
 function buildExecutorOptions(
@@ -609,7 +613,7 @@ function buildExecutorOptions(
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
-	callerRelease: (() => Promise<void>) | undefined,
+	callerRelease: ReleaseHold | undefined,
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
@@ -858,39 +862,27 @@ function describeSalvagedWork(result: SingleResult): string {
  * declaring the handover at dispatch — which is earlier than the child exists,
  * so a spawn cancelled before its first turn or an isolation workspace that
  * could not be created would strand it — this boundary asks on the way out
- * whether the hold is still owed. It is, unless the agent lifecycle took the
- * child over: that is the one thing that outlives this call and will release
- * it when the kept-alive child's lifecycle ends.
+ * whether the hold is still owed. It is, unless something that will certainly
+ * end has taken it over.
  *
- * The question is {@link AgentLifecycleManager.owesRelease}, not `has`: a
- * release already under way has dropped the adoption and not yet run what it
- * captured, and reading that gap as "never adopted" would discharge the hold
- * while the child is still being disposed on top of it.
+ * The question is put to the {@link ReleaseHold} itself, not to a lifecycle
+ * manager looked up by id. A manager can be mid-release (the adoption already
+ * dropped, the captured release not yet run), torn down and replaced between
+ * the adoption and this line, or have had a concurrent operation rewrite its
+ * bookkeeping; none of that can reach the one object both parties hold.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
-	const callerRelease = request.onRelease;
-	let callerReleased = false;
-	const releaseOnce = callerRelease
-		? async (): Promise<void> => {
-				if (callerReleased) return;
-				callerReleased = true;
-				await callerRelease();
-			}
-		: undefined;
-	let childId: string | undefined;
+	const hold = request.onRelease ? createReleaseHold(request.onRelease) : undefined;
 	try {
-		return await runStructuredSubagentDispatch(request, releaseOnce, id => {
-			childId = id;
-		});
+		return await runStructuredSubagentDispatch(request, hold);
 	} finally {
-		if (childId === undefined || !AgentLifecycleManager.global().owesRelease(childId)) await releaseOnce?.();
+		if (hold?.isOwed()) await hold();
 	}
 }
 
 async function runStructuredSubagentDispatch(
 	request: StructuredSubagentRequest,
-	onRelease: (() => Promise<void>) | undefined,
-	reportChildId: (id: string) => void,
+	onRelease: ReleaseHold | undefined,
 ): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
@@ -914,9 +906,6 @@ async function runStructuredSubagentDispatch(
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		// The id this run's hold is attached to, so the boundary above can ask
-		// whether the agent lifecycle took it over.
-		reportChildId(id);
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
 		const baseOptions = buildExecutorOptions(request, policy, lease, id, onRelease);
 		baseOptions.onCleanupDeferred = completion => {

@@ -458,6 +458,73 @@ describe("AgentLifecycleManager", () => {
 		expect(releaseResource).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps the debt of a release in flight when a second release finds no adoption", async () => {
+		// The first release owns the discharge: it dropped the adoption and is
+		// waiting inside the child's disposal. A second release finds the ref but
+		// no adoption, so it took nothing over and has nothing to clear.
+		const gate = deferred();
+		const stub = makeSessionStub(() => gate.promise);
+		const releaseResource = vi.fn(async () => {});
+		const ref = registerIdleSub("Raced-Sub", stub.session, null);
+		lifecycle.adopt("Raced-Sub", { idleTtlMs: 0, onRelease: releaseResource });
+		const first = lifecycle.release("Raced-Sub", ref, { tombstone: true });
+		await flushAsync();
+
+		// The ref it finds is the one the first release detached; with no
+		// adoption left there is nothing for it to take over.
+		expect(await lifecycle.release("Raced-Sub", ref, { tombstone: true })).toBe(true);
+		expect(lifecycle.owesRelease("Raced-Sub")).toBe(true);
+		expect(releaseResource).not.toHaveBeenCalled();
+
+		gate.resolve();
+		await first;
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+		expect(lifecycle.owesRelease("Raced-Sub")).toBe(false);
+	});
+
+	it("waits for a release already disposing a child before teardown returns", async () => {
+		const gate = deferred();
+		const stub = makeSessionStub(() => gate.promise);
+		const releaseResource = vi.fn(async () => {});
+		const ref = registerIdleSub("Teardown-Sub", stub.session);
+		lifecycle.adopt("Teardown-Sub", { idleTtlMs: 0, onRelease: releaseResource });
+		const releasing = lifecycle.release("Teardown-Sub", ref);
+		await flushAsync();
+
+		// The release is in neither the adoption map nor the park map, and
+		// teardown that walks away from it leaves the next manager to be asked
+		// about a debt it never had.
+		let disposed = false;
+		const disposing = lifecycle.dispose(Date.now() + 1000).then(() => {
+			disposed = true;
+		});
+		await flushAsync();
+		expect(disposed).toBe(false);
+
+		gate.resolve();
+		await releasing;
+		await disposing;
+		expect(disposed).toBe(true);
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+	});
+
+	it("discharges an adopted agent's owned resources when its ref is removed elsewhere", async () => {
+		// A session that disposes itself unregisters its own ref (sdk.ts). The
+		// adoption ends there, so what the caller held for that child — its
+		// parent's retained eval kernel — is due, not dropped with it.
+		const stub = makeSessionStub();
+		const releaseResource = vi.fn(async () => {});
+		const ref = registerIdleSub("Removed-Sub", stub.session);
+		lifecycle.adopt("Removed-Sub", { idleTtlMs: TTL, onRelease: releaseResource });
+
+		registry.unregister("Removed-Sub", ref);
+		await flushAsync();
+
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+		expect(lifecycle.has("Removed-Sub")).toBe(false);
+		expect(lifecycle.owesRelease("Removed-Sub")).toBe(false);
+	});
+
 	it("does not let one stuck adopted agent block sibling disposal", async () => {
 		const gate = deferred();
 		const stuck = makeSessionStub(() => gate.promise);

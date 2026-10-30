@@ -1369,6 +1369,64 @@ describe("structured subagent primitive", () => {
 		expect(released).toBe(1);
 	});
 
+	it("keeps the caller hold when the lifecycle that owns it is torn down and replaced", async () => {
+		// Ownership is the hold, not a lookup: a manager disposed mid-release is
+		// gone from the global slot, and the manager that answers afterwards
+		// never adopted this child. Asking it would say nobody owes the hold
+		// while the first manager is still inside the child's disposal with the
+		// release it captured.
+		mockDiscovery();
+		const disposeStarted = Promise.withResolvers<void>();
+		const finishDispose = Promise.withResolvers<void>();
+		const childSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {
+				disposeStarted.resolve();
+				await finishDispose.promise;
+			},
+		} as unknown as AgentSession;
+		let releasing: Promise<boolean> | undefined;
+		let owner: AgentLifecycleManager | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: childSession,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: childSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: false,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => childSession,
+				onRelease: options.onRelease,
+			});
+			owner = AgentLifecycleManager.global();
+			releasing = owner.release(options.id);
+			await disposeStarted.promise;
+			// Teardown with a deadline it cannot meet: the release stays in
+			// flight, this manager leaves the global slot, and the next caller of
+			// `global()` gets one that knows nothing about the child.
+			await owner.dispose(Date.now());
+			return { ...result(), id: options.id };
+		});
+		let released = 0;
+
+		await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
+
+		expect(AgentLifecycleManager.global()).not.toBe(owner);
+		expect(released).toBe(0);
+		finishDispose.resolve();
+		expect(await releasing).toBe(true);
+		expect(released).toBe(1);
+	});
+
 	it("runs the caller hold's release when the spawn fails before any child exists", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess");

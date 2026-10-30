@@ -25,11 +25,11 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { asReleaseHold, createReleaseHold, type ReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -451,12 +451,30 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		})();
 		return releasePromise;
 	};
+	let lifecycleOwnsRelease = false;
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
 		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
 		taskBaseline = baseline;
+		/**
+		 * What this run hands the child, built only once there is a child to
+		 * hand it to: the base release for a one-shot run (it never touches the
+		 * worktree, and its `finalizeSubagentLifecycle` runs `onRelease` before
+		 * the post-run capture below, so the handle must survive to the
+		 * `finally`), full capture-and-cleanup for a kept-alive one. Claiming it
+		 * says the agent lifecycle owns the workspace and everything the caller
+		 * held behind it, which is what the `finally` asks instead of looking a
+		 * manager up by id — a manager mid-release, replaced, or rewritten by a
+		 * concurrent operation answers for neither.
+		 */
+		const childHold = createReleaseHold(opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation, () => {
+			lifecycleOwnsRelease = true;
+			// Whatever owns this owns the caller's hold behind it, since
+			// discharging this discharges that.
+			asReleaseHold(opts.baseOptions.onRelease)?.claim();
+		});
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -472,7 +490,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// post-run capture, so the handle must survive until the `finally`
 			// below cleans it up. Only kept-alive runs hand full capture+cleanup
 			// (`releaseIsolation`) to the agent lifecycle.
-			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
+			onRelease: childHold,
 			deferIrcWakeRelease: release => {
 				releaseIrcWakes = release;
 			},
@@ -594,14 +612,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// holds for this child is still owed, and this is the last place
 			// that can discharge it.
 			await releaseBase();
-		} else if (
-			!releasePromise &&
-			// `owesRelease`, not `has`: a lifecycle release that is already running
-			// has dropped the adoption and not yet called the capture-and-cleanup
-			// it holds, and tearing the worktree down inside that gap destroys the
-			// workspace the child is still being disposed in.
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().owesRelease(opts.agentId))
-		) {
+		} else if (!releasePromise && !lifecycleOwnsRelease) {
 			if (retainWorkspace) {
 				// The workspace stays on disk, but the caller's hold is not part
 				// of it: nothing left will end to release it. `releaseBase` runs
