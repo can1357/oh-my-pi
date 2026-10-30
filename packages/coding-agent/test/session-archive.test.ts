@@ -831,3 +831,141 @@ test("an unqualified gc --apply leaves every session where it is", async () => {
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });
+
+test("archiving refuses while the archive holds artifact bytes the live tree lost", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "TOOL OUTPUT: KEEP USER HISTORY\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// A restore that refused to merge this artifact, so the archive kept the
+	// complete copy and the live tree holds a truncated one.
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "TOOL OUTPUT: ");
+
+	const result = await archiveEverything();
+
+	// `fs.cp(force)` truncates before it writes, so this must never start.
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("does not hold its bytes");
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: KEEP USER HISTORY\n");
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("TOOL OUTPUT: ");
+});
+
+test("restoring over a link into the archive keeps the archive instead of deleting the only copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "ONLY-ARCHIVED-CONVERSATION\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The live artifact is the archived file under another name. Reading equal
+	// bytes through it proves the archive is reachable, not that a second copy
+	// exists — and the restore is about to delete the tree it points into.
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await fs.symlink(path.join(archivedArtifacts, "sub.jsonl"), path.join(liveArtifacts, "sub.jsonl"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(false);
+	expect(restored.notRestored.join("\n")).toContain("resolves into the archive");
+	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe("ONLY-ARCHIVED-CONVERSATION\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("restoring into a directory link aimed at the archive keeps the archive", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "ONLY-ARCHIVED-CONVERSATION\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The parent alias: every child resolves into the archive without any
+	// child itself being a link.
+	await fs.symlink(archivedArtifacts, liveArtifacts);
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(false);
+	expect(restored.notRestored.join("\n")).toContain("resolves into the archive");
+	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe("ONLY-ARCHIVED-CONVERSATION\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a legacy transcript that gains a title slot after a half restore still restores", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	// Archived before title slots existed: the body starts at the header.
+	await Bun.write(sessionFile, sessionBody(SESSION_ID, PROMPT, root));
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// Resuming it on a build that writes slots inserts one ahead of the body.
+	await Bun.write(
+		sessionFile,
+		`${serializeTitleSlot({ title: "Named on resume", source: "user", updatedAt: "2026-01-02T00:00:00.000Z" })}${sessionBody(SESSION_ID, PROMPT, root)}`,
+	);
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(true);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("a nested transcript renamed after a half restore is not read as a collision", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const stamp = "2026-01-01T00:00:00.000Z";
+	const nested = (title: string) =>
+		`${serializeTitleSlot({ title, source: "user", updatedAt: stamp })}${sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4c", "nested turn", root)}`;
+	await Bun.write(path.join(artifacts, "sub.jsonl"), nested("Before"));
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The subagent session was resumed and renamed: its fixed-width slot was
+	// rewritten in place, every other byte untouched.
+	await Bun.write(path.join(artifacts, "sub.jsonl"), nested("After"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(restored.artifactsRestored).toBe(true);
+	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe(nested("After"));
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});
+
+test("a short title record does not let the comparison skip the session header", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	// A record the title-slot parser accepts in full, but far short of the
+	// fixed width, so the header that carries the session id still lies inside
+	// the first slot-sized window.
+	const short = `${JSON.stringify({ type: "title", v: 1, title: "t", updatedAt: "2026-01-01T00:00:00.000Z", pad: "" })}\n`;
+	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	await Bun.write(sessionFile, `${short}${sessionBody(SESSION_ID, PROMPT, root)}`);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "ONLY-ARCHIVED-CHILD\n");
+	await archiveEverything();
+	// A different session under the archived name: same shape, different id.
+	await Bun.write(sessionFile, `${short}${sessionBody(other, PROMPT, root)}`);
+
+	await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("different session file");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+	expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toBe(
+		"ONLY-ARCHIVED-CHILD\n",
+	);
+});
+
+test("a refused archive run does not migrate the settings it read", async () => {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+	// A legacy agent directory: `Settings.loadIsolated` renames this on its way
+	// in and writes `config.yml` beside it, so a refusal decided after that
+	// load has already changed the directory it refused to touch.
+	const legacy = path.join(root, "settings.json");
+	await Bun.write(legacy, JSON.stringify({ gc: { archive: true } }));
+
+	await expect(runGcCommand({ flags: { agentDir: root, archive: true, apply: true, json: true } })).rejects.toThrow(
+		"--forward-only",
+	);
+
+	expect(await Bun.file(legacy).exists()).toBe(true);
+	expect(await Bun.file(`${legacy}.bak`).exists()).toBe(false);
+	expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
+	expect(await Bun.file(path.join(root, "agent.db")).exists()).toBe(false);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
+});

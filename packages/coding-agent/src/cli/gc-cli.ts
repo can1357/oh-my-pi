@@ -35,6 +35,7 @@ import {
 	inflateArchivedTranscript,
 	isArchivedSessionPath,
 	listArchivedSessionFiles,
+	liveFileHoldsArchived,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 } from "../session/session-archive";
@@ -341,12 +342,35 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	const needsStaleSettings =
 		staleSelected && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
 	const needsCompressSettings = compressSelected && flags.compressAfterDays === undefined;
-	const settings =
-		!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings
-			? flags.apply === true
-				? await Settings.loadIsolated({ agentDir })
-				: await Settings.loadReadOnly({ agentDir })
-			: undefined;
+	const needsSettings = !selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings;
+	// Read-only first, always. `Settings.loadIsolated` migrates a legacy agent
+	// directory on the way in — it renames `settings.json` to
+	// `settings.json.bak` and writes `config.yml` — and a run this gate refuses
+	// must leave the agent directory exactly as it found it.
+	const configured = needsSettings ? await Settings.loadReadOnly({ agentDir }) : undefined;
+	const runArchive = selected
+		? flags.archive === true
+		: configured
+			? cfgGcArchive.get(configured)
+			: cfgGcArchive.default;
+	// Archiving is the one step omp cannot undo for a reader that does not know
+	// about it. A release without `gc --restore` searches `*.jsonl` under the
+	// sessions tree and reads a transcript as plain text, so a transcript under
+	// `archive/sessions` is invisible to it whether or not it is compressed.
+	// Pin a machine back to one of those and its own archived sessions stop
+	// resuming until someone inflates them by hand. Nothing is lost and the way
+	// back is one command, but nobody takes that step by accident: refusing
+	// here, before the gc lock and before settings are migrated, leaves the
+	// agent directory exactly as it was found.
+	if (runArchive && flags.apply === true && flags.restore === undefined && flags.forwardOnly !== true) {
+		const archiveRoot = getArchivedSessionsDir(agentDir);
+		throw new Error(
+			`--archive --apply moves cold sessions to ${archiveRoot}, where only an omp with \`gc --restore\` can find them; ` +
+				`a release pinned back from this one cannot resume them, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
+				`Pass --forward-only to accept that, or drop --archive and run \`omp gc --apply\` for the phases that keep every session where it is.`,
+		);
+	}
+	const settings = needsSettings && flags.apply === true ? await Settings.loadIsolated({ agentDir }) : configured;
 	const read = <T>(setting: Setting<T>): T => (settings ? setting.get(settings) : setting.default);
 	return {
 		apply: flags.apply === true,
@@ -358,7 +382,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 			phase => flags[phase] === true,
 		),
 		runBlobs: selected ? flags.blobs === true : read(cfgGcBlobs),
-		runArchive: selected ? flags.archive === true : read(cfgGcArchive),
+		runArchive,
 		runWal: selected ? flags.wal === true : read(cfgGcWal),
 		runStale: selected ? flags.stale === true : read(cfgGcStale),
 		runCompress: selected ? flags.compress === true : read(cfgGcCompress),
@@ -1053,6 +1077,47 @@ async function existingTreePaths(destination: string): Promise<Set<string> | und
 }
 
 /**
+ * Refuse the move while the archive holds artifact bytes the live tree does
+ * not, and while either tree is the other under another name.
+ *
+ * `fs.cp(…, { force: true })` truncates an existing destination before it
+ * writes the first byte, so a complete archived copy standing where a
+ * shorter or divergent live file lands is gone the moment the copy starts.
+ * No cleanup recovers it: a snapshot of the destination records which paths
+ * were there, not what they held. The conflict therefore has to be resolved
+ * before anything is written, and the rule is the restore's rule in the
+ * other direction — the surviving copy must hold everything the other had.
+ *
+ * The alias check is the same hazard seen from the archive side: with
+ * `dereference: true`, copying a live path that resolves to its own archived
+ * counterpart would read and truncate one file.
+ */
+async function assertArchiveTreeIsSafeToOverwrite(source: string, destination: string): Promise<void> {
+	if (!(await statIfPresent(destination))) return;
+	const sourceReal = await fs.realpath(source).catch(() => source);
+	const destinationReal = await fs.realpath(destination).catch(() => destination);
+	if (sourceReal === destinationReal) {
+		throw new Error(
+			`the live artifact tree ${source} resolves to the archived tree ${destinationReal}, so archiving it would copy it over itself`,
+		);
+	}
+	for await (const name of ANY_FILE_GLOB.scan({ cwd: destination, dot: true, onlyFiles: true })) {
+		const archived = path.join(destination, name);
+		const live = path.join(source, name);
+		if ((await fs.realpath(live).catch(() => live)) === (await fs.realpath(archived).catch(() => archived))) {
+			throw new Error(`${live} resolves to the archived ${archived}, so archiving it would copy it over itself`);
+		}
+		if (!(await statIfPresent(live))) continue;
+		if (await liveFileHoldsArchived(archived, live)) continue;
+		throw new Error(
+			`the archive already holds ${archived}, and ${live} does not hold its bytes; ` +
+				`archiving would overwrite the archived copy with a shorter or different one. ` +
+				`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
+		);
+	}
+}
+
+/**
  * Undo one failed copy into the archive, and nothing more. With no
  * `preexisting` set the destination is this run's own creation and goes
  * whole; otherwise every path absent from that snapshot goes and every path
@@ -1093,6 +1158,11 @@ async function removeTreeAdditions(destination: string, preexisting: Set<string>
  * the restore had not reached yet, and the transcript rollback could not
  * bring those back.
  *
+ * A pre-existing archive entry is never overwritten with bytes it does not
+ * already contain: {@link assertArchiveTreeIsSafeToOverwrite} settles that
+ * before the copy begins, because `force: true` truncates a destination file
+ * before it writes and no cleanup can put back contents.
+ *
  * Once the copy is complete the archive holds the session, and a failure to
  * drop the live tree (a locked file, a read-only directory) is reported as a
  * leftover rather than thrown: rolling the move back from here would delete
@@ -1104,6 +1174,7 @@ async function moveArtifactsTree(
 	destination: string,
 ): Promise<{ brokenLinks: number; leftoverSource?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
+	await assertArchiveTreeIsSafeToOverwrite(source, destination);
 	const preexisting = await existingTreePaths(destination);
 	let brokenLinks = 0;
 	try {
@@ -1829,22 +1900,6 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// Saying nothing about phases it dropped is how a command reports success
 		// for work it never did.
 		throw new Error(`--restore runs alone; drop ${options.explicitPhases.map(flag => `--${flag}`).join(" ")}`);
-	}
-	// Archiving is the one step `omp` cannot undo for a reader that does not
-	// know about it. A release without `gc --restore` searches `*.jsonl` under
-	// the sessions tree and reads a transcript as plain text, so a transcript
-	// under `archive/sessions` is invisible to it whether or not it is
-	// compressed. Pin a machine back to one of those and its own archived
-	// sessions stop resuming until someone inflates them by hand. Nothing is
-	// lost and the way back is one command, but nobody takes that step by
-	// accident: it is refused before any phase runs, so a refused run leaves
-	// the agent directory exactly as it found it.
-	if (options.restoreTarget === undefined && options.runArchive && options.apply && !options.forwardOnly) {
-		throw new Error(
-			`--archive --apply moves cold sessions to ${archiveRoot}, where only an omp with \`gc --restore\` can find them; ` +
-				`a release pinned back from this one cannot resume them, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
-				`Pass --forward-only to accept that, or drop --archive and run \`omp gc --apply\` for the phases that keep every session where it is.`,
-		);
 	}
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };

@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off), and `omp gc --archive --apply` refuses until you pass `--forward-only`: an omp without `gc --restore` cannot find or read an archived session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs and checkpoints database WAL files, but on Linux — where `--compress` needs APFS or NTFS — it no longer reclaims cold-session storage; `omp gc --archive --apply --forward-only` does, and refuses without the flag, because an omp without `gc --restore` cannot find or read an archived session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
@@ -41,6 +41,10 @@
 - `omp gc --archive` no longer deletes archived artifacts when it fails to re-archive a session whose restore had not finished, so the files only the archive held survive a full disk ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --restore` keeps the archived copy of an artifact when something else stands at its path (another file of the same name, a dangling link) instead of deleting it and reporting success ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --archive` no longer archives a session whose subagent transcript a live process owns through a symlinked artifact directory ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` refuses a session whose archived artifacts hold bytes the live tree no longer has, instead of overwriting the archived copy with a shorter one ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore` refuses a live artifact path that resolves back into the archive, instead of reading the archive's own bytes as a second copy and then deleting them ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- Restoring works for a legacy transcript that gained a title slot and for a renamed subagent transcript, and a title record that does not fill the fixed-width slot no longer lets the identity check skip the session header ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A refused `omp gc --archive --apply` no longer migrates the agent directory's settings on its way to the refusal ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - A session renamed after a half-finished restore can be restored again, instead of refusing for ever with "a different session file" ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
