@@ -21,6 +21,8 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import * as modelScope from "../config/model-resolver";
+import { cfgEnabledModels } from "../config/model-settings";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -449,6 +451,31 @@ export async function resolveEffectiveSubagentPolicy(
 			"preflight",
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
+	}
+	const { settings, modelRegistry } = request.session;
+	const enabledPatterns = cfgEnabledModels.get(settings);
+	if (enabledPatterns.length > 0 && modelOverride.length > 0 && modelRegistry) {
+		const available = modelRegistry.getAvailable();
+		const scopedModels = modelScope.filterAvailableModelsByEnabledPatterns(available, enabledPatterns, settings);
+		// Reject only what the registry can already decide: the selection resolves, every
+		// enabledModels pattern matches something, and none of it is in scope. A selection
+		// or scoped model that extensions or discovery may still register is left to
+		// execution, which resolves the same scope once models are loaded.
+		const decidable =
+			modelScope.resolveModelOverride(modelOverride, { getAvailable: () => available }, settings).model !==
+				undefined &&
+			enabledPatterns.every(
+				pattern => modelScope.filterAvailableModelsByEnabledPatterns(available, [pattern], settings).length > 0,
+			);
+		if (
+			decidable &&
+			!modelScope.resolveModelOverride(modelOverride, { getAvailable: () => scopedModels }, settings).model
+		) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`No enabled model matches the subagent selection: ${JSON.stringify(modelOverride)}. Check enabledModels.`,
+			);
+		}
 	}
 	return {
 		discovery,
