@@ -805,8 +805,11 @@ fn locale_utility_output_at(
 	// The child and the handle on it are made by the same call: a number a
 	// spawn hands back is already recyclable, and opening a handle from it
 	// afterwards can open whatever took it.
-	let child = start_locale_utility(&program_c, &argv, &envp, answer.as_raw_fd(), cwd_c.as_deref(), ask)
-		.map_err(|err| report(format!("{named} could not be started: {err}")))?;
+	// The deadline is this query's, and the only one: a wait inside the
+	// spawn that started its own used the whole of it over again.
+	let child =
+		start_locale_utility(&program_c, &argv, &envp, answer.as_raw_fd(), cwd_c.as_deref(), ask, deadline)
+			.map_err(|err| report(format!("{named} could not be started: {err}")))?;
 	let completion = reap_locale_utility(&child, deadline, false);
 	let printed = read_from_start(&answer, LOCALE_ANSWER_LIMIT + 1)
 		.map_err(|err| report(format!("{named} could not be read: {err}")))?;
@@ -1040,15 +1043,6 @@ const CHILD_NO_PROGRAM: libc::c_int = 126;
 #[cfg(target_os = "linux")]
 const CHILD_NO_SETUP: libc::c_int = 124;
 
-/// The kernel's first realtime signal, which is where the library's
-/// reserved block begins. It is 32 on every Linux architecture this
-/// builds for — `asm-generic/signal.h` and each architecture's
-/// `uapi/asm/signal.h` — while the block's far end, the first number the
-/// library hands to applications, is `SIGRTMIN` and moves with the
-/// library.
-#[cfg(target_os = "linux")]
-const FIRST_REALTIME_SIGNAL: libc::c_int = 32;
-
 /// `clone3`'s argument block, as much of it as this uses.
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -1128,7 +1122,9 @@ static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 /// is left as it is, which is the pre-exec contract `posix_spawn` was
 /// keeping here: a handler of this process's that ran between the clone
 /// and the `execve` wrote into the answer and turned a loadable locale
-/// into a refusal.
+/// into a refusal. A disposition the child cannot *read* is left blocked
+/// instead, which closes the same window without having to know why the
+/// read failed.
 #[cfg(target_os = "linux")]
 fn start_locale_utility(
 	program: &std::ffi::CStr,
@@ -1137,6 +1133,7 @@ fn start_locale_utility(
 	answer: std::os::fd::RawFd,
 	cwd: Option<&std::ffi::CStr>,
 	ask: Ask,
+	deadline: std::time::Instant,
 ) -> Result<ChildHandle, std::io::Error> {
 	use std::os::fd::FromRawFd as _;
 
@@ -1187,29 +1184,39 @@ fn start_locale_utility(
 			// and not a window of any kind: with `SIGPIPE` ignored in the
 			// caller, a utility that raises it and then answers succeeds
 			// under `posix_spawn` and died on signal 13 when this reset it.
+			//
+			// A disposition that cannot be read is the awkward case, and
+			// two readings of it were both wrong. Skipping every failed
+			// read let a handler live where a filter denied one
+			// application signal. Skipping a *range* instead — the
+			// numbers below the library's own minimum — assumed that
+			// minimum is where unreadable numbers stop, and it is not: a
+			// library that allocates realtime signals moves its minimum
+			// up (34 to 54 over twenty allocations on glibc 2.39) while
+			// refusing only the fixed numbers it keeps, so 34 to 53 took
+			// handlers and an inherited one on 34 ran before the
+			// `execve`.
+			//
+			// So the test is what the calls themselves answer. A number
+			// whose disposition will not be read is left *blocked* in the
+			// mask the utility starts with: a blocked signal cannot be
+			// delivered before the `execve`, which is the whole hazard,
+			// and the `execve` drops whatever handler was there. A number
+			// the library will not even let a set *name* — `sigaddset`
+			// refuses exactly the ones it keeps for itself, 32 and 33 on
+			// glibc 2.39 and 32 to 34 on musl — is one it never delivers
+			// to an application, so nothing of this process's can be
+			// waiting on it either. Neither case has to be told apart
+			// from a filter's denial, and neither refuses the query.
+			let mut starts_with = held;
 			for signal in 1..=libc::SIGRTMAX() {
-				// The library keeps a block of the kernel's realtime
-				// numbers for itself and refuses `sigaction` on one, so no
-				// handler of this process's can be there and a read that
-				// fails inside the block is a reservation rather than a
-				// denial. The block starts at the kernel's first realtime
-				// signal and ends just below the library's own minimum;
-				// its *width* is the library's business and differs —
-				// two on glibc 2.39 (32 and 33, `SIGRTMIN` 34), one on
-				// glibc 2.3.2 with LinuxThreads (32, `SIGRTMIN` 33) and
-				// three on musl (32 to 34, `SIGRTMIN` 35). Taking the
-				// width to be two skipped `SIGSYS` and its handler on the
-				// second and read a reserved number on the third. Every
-				// read failure *outside* the block still ends the child,
-				// because passing over one leaves an inherited handler to
-				// run before the `execve`.
-				let reserved = signal >= FIRST_REALTIME_SIGNAL && signal < libc::SIGRTMIN();
-				if signal == libc::SIGKILL || signal == libc::SIGSTOP || reserved {
+				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
 					continue;
 				}
 				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
 				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) != 0 {
-					libc::_exit(CHILD_NO_SETUP);
+					libc::sigaddset(&raw mut starts_with, signal);
+					continue;
 				}
 				let current = current.assume_init();
 				if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
@@ -1223,12 +1230,12 @@ fn start_locale_utility(
 					libc::_exit(CHILD_NO_SETUP);
 				}
 			}
-			// The mask this thread had is what the utility should start
-			// with. Nothing can carry the number this call returns out of
-			// a child, so the setup status is all the caller is told —
+			// The mask this thread had, plus whatever could not be read.
+			// Nothing can carry the number this call returns out of a
+			// child, so the setup status is all the caller is told —
 			// which is why "the return value is reported on every failure"
 			// is not something this code claims.
-			if libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) != 0 {
+			if libc::pthread_sigmask(libc::SIG_SETMASK, &raw const starts_with, std::ptr::null_mut()) != 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
 			if libc::setpgid(0, 0) != 0 {
@@ -1324,13 +1331,13 @@ fn start_locale_utility(
 		},
 		// A child with no handle cannot be signalled safely — an unheld
 		// number is the one thing this code will not reach — so it is
-		// waited for, and for no longer than the query it was started for
-		// would have lived. A review that erased the descriptor to reach
-		// this branch left the wait still pending at 6.5 seconds, past
-		// the five-second deadline.
+		// waited for, and no longer than the query it was started for was
+		// going to live: the deadline is the query's own, not a second
+		// one starting here. A review that erased the descriptor to reach
+		// this branch left the wait pending at 6.5 seconds, and a fresh
+		// five seconds after a parent held up for two took 7.
 		None => {
 			if let Some(number) = libc::pid_t::try_from(child).ok().filter(|number| *number > 0) {
-				let deadline = std::time::Instant::now() + LOCALE_QUERY_TIMEOUT;
 				let mut status: libc::c_int = 0;
 				loop {
 					// SAFETY: `number` names this scope's child; no signal
