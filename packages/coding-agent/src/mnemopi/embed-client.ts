@@ -1,4 +1,3 @@
-import * as path from "node:path";
 import { isFastembedModelCached } from "@oh-my-pi/pi-mnemopi/core/fastembed-model-cache";
 import { getFastembedCacheDir, getMnemopiEmbedRuntimeDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { MNEMOPI_EMBED_SERVER_WORKER_ARG } from "../cli/worker-selectors";
@@ -29,6 +28,7 @@ import {
 	MNEMOPI_EMBED_MODEL_ENV,
 	MNEMOPI_EMBED_SOCKET_ENV,
 	MNEMOPI_EMBED_TAG_ENV,
+	mnemopiEmbedServerName,
 	type MnemopiEmbedCall,
 	type MnemopiEmbedModelId,
 	type MnemopiEmbedServerRequest,
@@ -126,11 +126,6 @@ export function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
 		createUnavailableMnemopiEmbedWorker,
 		"mnemopi embed worker spawn failed; local embeddings disabled",
 	);
-}
-
-/** Shared-server name for one (model, cache dir): the model id plus a hash of the resolved cache dir. */
-export function mnemopiEmbedServerName(model: MnemopiEmbedModelId, cacheDir: string): string {
-	return `${model}-${Bun.hash.crc32(path.resolve(cacheDir)).toString(16).padStart(8, "0")}`;
 }
 
 /** How to start the shared embedding server for `model`; `env` overlays the inherited environment. @internal */
