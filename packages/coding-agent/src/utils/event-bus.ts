@@ -7,11 +7,11 @@ export type AcceptedCallbackOwner = {
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
 };
 
-/** The session accepting extension callbacks on this stack. `pi.events` is handed to extensions
- *  as the bus itself — an extension comparing it across bindings must see one object — so a
- *  subscription cannot be owned by wrapping the bus. It is owned by WHO IS SUBSCRIBING instead:
- *  the loader runs each factory inside this scope, and every owned callback re-enters it, so a
- *  bus two sessions share attributes each subscription to its own registrant. */
+/** The session accepting extension callbacks on this stack. It is what attributes a subscription
+ *  made while an extension factory or an owned callback is running: a bus two sessions share
+ *  gives each handler to its own registrant. It says nothing about a `pi` reference captured and
+ *  used later, which is why `pi.events` is an {@link OwnedEventBus} view of the session's bus
+ *  rather than the bus itself. */
 export const extensionCallbackScope = new AsyncLocalStorage<AcceptedCallbackOwner>();
 
 /**
@@ -73,18 +73,38 @@ export class EventBus {
 export class OwnedEventBus extends EventBus {
 	constructor(bus: EventBus, owner: AcceptedCallbackOwner) {
 		super();
+		// The TRANSPORT, never another view. A host may pass one session's `pi.events` as the
+		// next session's bus — the SDK takes an `EventBus` and this is one — and subscribing
+		// through the outer view would then call the inner view's `on`, which re-enters the inner
+		// session's scope and takes the subscription from the session that is registering it.
+		// Both directions of that were observed: the child's credential restriction released
+		// while its callback ran, and a live child's handler disabled by the parent's disposal.
+		const transport = busTransport(bus);
 		// Assigned over the base's bound fields: the base's own listener map is never used, every
-		// call goes to the shared bus.
-		this.emit = bus.emit;
-		this.on = (channel, handler) => extensionCallbackScope.run(owner, () => bus.on(channel, handler));
-		this.clear = bus.clear;
+		// call goes to the shared transport.
+		this.emit = transport.emit;
+		this.on = (channel, handler) => extensionCallbackScope.run(owner, () => transport.on(channel, handler));
+		this.clear = transport.clear;
+		transports.set(this, transport);
 	}
+}
+
+/** Views to the bus each one speaks for. A view is not registered as its own transport, so
+ *  {@link busTransport} resolves any chain of them in one step. */
+const transports = new WeakMap<EventBus, EventBus>();
+
+/** The bus a view speaks for, or the bus itself. Two handles onto one transport — a raw bus and
+ *  the view an extension was given — carry the same listeners, so anything deciding whether two
+ *  buses are the same must compare this rather than the objects. */
+export function busTransport(bus: EventBus): EventBus {
+	return transports.get(bus) ?? bus;
 }
 
 /**
  * Publishes a subagent frame on the session bus and the observability bus.
- * SDK embedders may pass the same EventBus for both slots; the identity check
- * skips the aliased re-emit so listeners never see duplicate frames.
+ * SDK embedders may pass the same EventBus for both slots — or a bus and a view onto it, which
+ * delivers to the same listeners; comparing transports skips the aliased re-emit so listeners
+ * never see duplicate frames.
  */
 export function emitSubagentFrame(
 	eventBus: EventBus | undefined,
@@ -93,7 +113,7 @@ export function emitSubagentFrame(
 	payload: unknown,
 ): void {
 	eventBus?.emit(channel, payload);
-	if (subagentEventBus && subagentEventBus !== eventBus) {
+	if (subagentEventBus && (!eventBus || busTransport(subagentEventBus) !== busTransport(eventBus))) {
 		subagentEventBus.emit(channel, payload);
 	}
 }

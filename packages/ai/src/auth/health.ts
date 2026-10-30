@@ -36,12 +36,25 @@ import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } f
 
 /** Asks a usage provider whether it handles this request, treating a refusal as "no".
  *
- *  The predicate belongs to whoever registered the provider, usually an extension, and one that
- *  throws — a provider whose session has been disposed refuses that way — must cost this probe
- *  one credential's answer, not the whole health check. */
+ *  Both the read and the call belong inside the guard: the predicate belongs to whoever
+ *  registered the provider, usually an extension, it may be exposed through a getter, and a
+ *  provider whose session has been disposed refuses from the moment it is asked. A refusal must
+ *  cost this probe one credential's answer, not the whole health check. */
 function probeSupports(provider: UsageProvider, request: UsageRequestDescriptor): boolean {
 	try {
-		return provider.supports?.(request) ?? true;
+		const supports = provider.supports;
+		return supports ? supports(request) : true;
+	} catch {
+		return false;
+	}
+}
+
+/** Whether a usage provider claims it validates credentials. Same boundary as
+ *  {@link probeSupports}: the property may be an accessor the provider's author wrote, and a
+ *  provider that refuses to answer is treated as not validating rather than failing the check. */
+function probeValidatesCredentials(provider: UsageProvider): boolean {
+	try {
+		return provider.validatesCredentials !== false;
 	} catch {
 		return false;
 	}
@@ -390,9 +403,9 @@ export class CredentialHealth implements HealthApi {
 			const providerImpl = this.#deps.usage.providerFor(row.provider as Provider);
 			if (!providerImpl) {
 				base.reason = `no usage probe configured for provider ${row.provider}`;
-			} else if (providerImpl.supports && !probeSupports(providerImpl, initialRequest)) {
+			} else if (!probeSupports(providerImpl, initialRequest)) {
 				base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
-			} else if (providerImpl.validatesCredentials === false) {
+			} else if (probeValidatesCredentials(providerImpl) === false) {
 				base.reason = `usage probe for ${row.provider} does not validate credentials`;
 			} else {
 				try {

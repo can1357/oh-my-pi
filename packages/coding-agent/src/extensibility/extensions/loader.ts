@@ -33,6 +33,7 @@ import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
+import { ownCallableSurface } from "./callback-ownership";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -307,10 +308,11 @@ export class ExtensionRuntime implements IExtensionRuntime {
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		// Owned at the queue, not at each drain site: main.ts, sdk.ts and models-cli.ts all hand
-		// this configuration to ModelRegistry, and a host that drains it itself must not be able to
-		// lose the ownership by not knowing to pass an owner. Fresh copies — the extension's own
-		// objects are never rewritten.
-		this.pendingProviderRegistrations.push({ name, config: ownProviderConfigCallbacks(config, this), sourceId });
+		// this configuration to ModelRegistry, and a host that drains it itself must not be able
+		// to lose the ownership by not knowing to pass an owner. A read-through view, so the
+		// extension's own object is neither rewritten nor copied, and a callback it declared as a
+		// class method, a getter or a non-enumerable property is owned like any other.
+		this.pendingProviderRegistrations.push({ name, config: ownCallableSurface(config, this, true), sourceId });
 	}
 
 	unregisterProvider(name: string): void {
@@ -974,46 +976,4 @@ export async function discoverAndLoadExtensions(
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
 	return loadExtensions(paths, cwd, eventBus);
-}
-
-/** Owns every callback a provider configuration carries, in fresh copies. The rule, not a list:
- *  whatever an `oauth` or `usage` block holds is invoked by the registry or the auth storage on
- *  this session's behalf, so a route added later is owned the day it appears rather than the round
- *  after a probe finds it. */
-function ownProviderConfigCallbacks<T extends object>(config: T, owner: ExtensionCallbackOwner): T {
-	const own = (value: object): object => {
-		let owned: Record<string, unknown> | undefined;
-		for (const [key, entry] of Object.entries(value)) {
-			if (typeof entry !== "function") continue;
-			// The copy keeps the prototype: a provider written as a class instance carries its
-			// methods there, and a plain spread would hand the invoker an object without them.
-			owned ??= Object.assign(Object.create(Object.getPrototypeOf(value) as object | null), value) as Record<
-				string,
-				unknown
-			>;
-			owned[key] = owner.ownInvocation(entry as (...args: unknown[]) => unknown);
-		}
-		return owned ?? value;
-	};
-	const source = config as Record<string, unknown>;
-	let result: Record<string, unknown> | undefined;
-	// `oauth` and `usage` alike. The earlier exemption for `usage` rested on unregister matching
-	// the object it was handed; it does not — `ModelRegistry.#clearRuntimeProviderState` calls
-	// `removeProvider(providerName)` and `UsageService.removeProvider` deletes by NAME. The
-	// owner-aware registry route already hands the auth storage a copy, so exempting the queue
-	// drain only made one of the two paths unowned.
-	for (const key of ["oauth", "usage"]) {
-		const block = source[key];
-		if (block === null || typeof block !== "object") continue;
-		const ownedBlock = own(block);
-		if (ownedBlock === block) continue;
-		result ??= { ...source };
-		result[key] = ownedBlock;
-	}
-	const fetchDynamicModels = source.fetchDynamicModels;
-	if (typeof fetchDynamicModels === "function") {
-		result ??= { ...source };
-		result.fetchDynamicModels = owner.ownInvocation(fetchDynamicModels as (...args: unknown[]) => unknown);
-	}
-	return (result as T | undefined) ?? config;
 }

@@ -270,6 +270,67 @@ describe("extension provider registration rollback", () => {
 		}
 	});
 
+	test("owns a usage provider written as a class, through its prototype and its private fields", async () => {
+		// What an extension hands over is not always an object literal. A class instance keeps its
+		// methods on the prototype and its state in private fields, and a getter is a callback
+		// route like any other; ownership has to see all of them and still run them against the
+		// instance that owns the slots.
+		const tempDir = TempDir.createSync("@extension-usage-class-");
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const provider = "extension-usage-class";
+		let calls = 0;
+		class ClassUsage {
+			readonly #id = provider;
+			get id(): string {
+				return this.#id;
+			}
+			async fetchUsage(): Promise<UsageReport | null> {
+				calls++;
+				// Reads a private field: proof the method ran against this instance.
+				return { provider: this.#id, fetchedAt: 1, limits: [] };
+			}
+		}
+		const extensionUsage = new ClassUsage();
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
+			const runtime = new ExtensionRuntime();
+			const release = runtime.beginSession();
+			await loadExtensionFromFactory(
+				pi => {
+					pi.registerProvider(provider, { apiKey: "class-usage-key", usage: extensionUsage });
+				},
+				process.cwd(),
+				new EventBus(),
+				runtime,
+				provider,
+			);
+			for (const registration of runtime.pendingProviderRegistrations) {
+				modelRegistry.registerProvider(registration.name, registration.config, registration.sourceId);
+			}
+
+			const stored = authStorage.usage.providerFor(provider);
+			// The inherited method and the getter both resolve, and both see the instance.
+			expect(stored?.id).toBe(provider);
+			await expect(
+				stored?.fetchUsage({ provider, credential: { type: "api_key", apiKey: "class-usage-key" } }, { fetch }),
+			).resolves.toEqual({ provider, fetchedAt: 1, limits: [] });
+			expect(calls).toBe(1);
+
+			// And the session owns them: once it has gone, the prototype method refuses.
+			release();
+			expect(() =>
+				stored?.fetchUsage({ provider, credential: { type: "api_key", apiKey: "class-usage-key" } }, { fetch }),
+			).toThrow("retired");
+			expect(calls).toBe(1);
+
+			modelRegistry.unregisterProvider(provider);
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
+		} finally {
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	});
+
 	test("rolls back every provider added by the failed extension", async () => {
 		const runtime = new ExtensionRuntime();
 		const events = new EventBus();

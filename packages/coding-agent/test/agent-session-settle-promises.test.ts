@@ -24,7 +24,7 @@ import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-ma
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
-import { EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { emitSubagentFrame, EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession settles what it promised", () => {
@@ -1821,6 +1821,72 @@ describe("AgentSession settles what it promised", () => {
 		bus.emit("r15-captured-late", {});
 		for (let i = 0; i < 5; i++) await setImmediate();
 		expect(calls).toBe(1);
+	}, 20_000);
+
+	it("owns a subscription made through a view of a view, and deduplicates aliased transports", async () => {
+		// A host may hand one session's `pi.events` to the next session as its bus — the SDK takes
+		// an `EventBus` and a view is one. The inner view must not take the subscription back from
+		// the session that is registering it.
+		const bus = new EventBus();
+		const parent = new ExtensionRuntime();
+		const child = new ExtensionRuntime();
+		const releaseParent = parent.beginSession();
+		const releaseChild = child.beginSession();
+		let parentApi!: ExtensionAPI;
+		let childApi!: ExtensionAPI;
+		await loadExtensionFromFactory(
+			pi => {
+				parentApi = pi;
+			},
+			tempDir.path(),
+			bus,
+			parent,
+			"r16-parent",
+		);
+		await loadExtensionFromFactory(
+			pi => {
+				childApi = pi;
+			},
+			tempDir.path(),
+			parentApi.events,
+			child,
+			"r16-child",
+		);
+
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		childApi.events.on("r16-nested", async () => {
+			calls++;
+			await release.promise;
+		});
+		bus.emit("r16-nested", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(calls).toBe(1);
+		// The child's work is the child's: the parent must not be holding it open, and must not
+		// be able to end it either.
+		expect(child.hasPendingCallbacks()).toBe(true);
+		expect(parent.hasPendingCallbacks()).toBe(false);
+		release.resolve();
+		await child.waitForPendingCallbacks();
+
+		releaseParent();
+		bus.emit("r16-nested", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(calls).toBe(2);
+		releaseChild();
+		bus.emit("r16-nested", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(calls).toBe(2);
+
+		// A raw bus and a view onto it are two handles on one transport, so a frame published to
+		// both must reach a subscriber once.
+		let frames = 0;
+		bus.on("r16-frame", () => {
+			frames++;
+		});
+		emitSubagentFrame(bus, parentApi.events, "r16-frame", {});
+		for (let i = 0; i < 5; i++) await setImmediate();
+		expect(frames).toBe(1);
 	}, 20_000);
 
 	it("owns a promise from another realm, which fails the Promise brand check", async () => {

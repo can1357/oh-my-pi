@@ -501,7 +501,16 @@ export class UsageService implements UsageApi {
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
 	): boolean {
-		const parseHeaders = this.providerFor(provider)?.parseRateLimitHeaders;
+		// Reading the property is already third-party code: a provider may expose its parser
+		// through a getter, and a registered provider whose session has been disposed refuses
+		// from the moment it is asked. The read belongs inside the same guard as the call.
+		let parseHeaders: UsageProvider["parseRateLimitHeaders"];
+		try {
+			parseHeaders = this.providerFor(provider)?.parseRateLimitHeaders;
+		} catch (error) {
+			logger.debug("Rate-limit header parser unavailable; skipping ingest", { provider, error: String(error) });
+			return false;
+		}
 		if (!parseHeaders) return false;
 
 		const credential = this.#deps.affinity.activeOAuth(provider, options?.sessionId);

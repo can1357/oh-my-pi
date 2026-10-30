@@ -52,6 +52,7 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
+import { ownCallableSurface } from "../extensibility/extensions/callback-ownership";
 import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -3595,11 +3596,12 @@ export class ModelRegistry {
 		}
 
 		if (oauth) {
-			registerOAuthProvider({
-				...oauth,
-				id: providerName,
-				sourceId,
-			});
+			// Delegation, not a spread: a spread copies own enumerable properties only, so a
+			// provider written as a class loses the very methods this registry then calls — its
+			// `modifyModels` and `getApiKey` were observed to disappear. `id` and `sourceId` are
+			// this registry's own; everything else resolves through the owned view.
+			const registered = Object.assign(Object.create(oauth) as typeof oauth, { id: providerName, sourceId });
+			registerOAuthProvider(registered);
 		}
 
 		let sourceHandoff = false;
@@ -3914,22 +3916,14 @@ export interface ProviderConfigInput {
 	}>;
 }
 
-/** Owns every callback a provider configuration hands this registry, in a fresh copy — the
- *  extension's own object is never rewritten. The rule, not a list: this registry is the invoker
- *  for whatever an `oauth` or `usage` block carries, so a route added later is owned the day it
- *  appears instead of the round after a probe finds it. */
+/** Owns every callback a provider configuration hands this registry, as a read-through view — the
+ *  extension's own object is neither rewritten nor copied. The rule, not a list: this registry is
+ *  the invoker for whatever an `oauth` or `usage` block carries, however the extension declared
+ *  it, so a class method, a getter, a non-enumerable property or a route added later is owned the
+ *  day it appears instead of the round after a probe finds it. See {@link ownCallableSurface}.
+ *
+ *  Returns the configuration untouched when no owner registered it: a host configuration has no
+ *  session to retire with. */
 function ownProviderCallbacks<T extends object>(config: T, owner: ExtensionCallbackOwner | undefined): T {
-	if (!owner) return config;
-	let owned: Record<string, unknown> | undefined;
-	for (const [key, value] of Object.entries(config)) {
-		if (typeof value !== "function") continue;
-		// Prototype preserved: a provider written as a class instance keeps its methods there,
-		// and a plain spread would hand the invoker an object without them.
-		owned ??= Object.assign(Object.create(Object.getPrototypeOf(config) as object | null), config) as Record<
-			string,
-			unknown
-		>;
-		owned[key] = owner.ownInvocation(value as (...args: unknown[]) => unknown);
-	}
-	return (owned as T | undefined) ?? config;
+	return owner ? ownCallableSurface(config, owner) : config;
 }
