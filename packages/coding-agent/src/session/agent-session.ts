@@ -448,6 +448,7 @@ import {
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import {
+	type CacheRefreshOutcome,
 	type CacheWarmer,
 	type CacheWarmingMode,
 	type CacheWarmingStatus,
@@ -792,11 +793,11 @@ function scanBranchPromptCache(scan: BranchPromptCacheScan): void {
 			if (observation) observation.compacted = true;
 			continue;
 		}
-		if (entry.type === "model_usage" && entry.purpose.startsWith("cache-warm")) {
+		// Failed, replaced and outdated refreshes carry no outcome: they say nothing about this entry.
+		if (entry.type === "model_usage" && entry.cacheRefresh !== undefined) {
 			if (!observation) continue;
-			const hit = entry.usage.cacheRead > 0 && entry.usage.cacheWrite === 0;
-			// Only a send time proves when a hit restarted the lifetime.
-			observation.warmedAt = hit ? (entry.sentAt ?? 0) : 0;
+			const { sentAt, hit } = entry.cacheRefresh;
+			observation.warmedAt = hit ? sentAt : 0;
 			observation.refreshMissed = !hit;
 			continue;
 		}
@@ -2210,8 +2211,8 @@ export class AgentSession implements SettingsScope {
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
-			warmer.onWarmed = (message, extensionOverride, sentAt) =>
-				this.#recordCacheWarmUsage(message, extensionOverride, sentAt);
+			warmer.onWarmed = (message, extensionOverride, refresh) =>
+				this.#recordCacheWarmUsage(message, extensionOverride, refresh);
 			warmer.onRefreshStart = refresh => void this.#emitSessionEvent({ type: "cache_warming_start", ...refresh });
 			warmer.onRefreshEnd = refresh => void this.#emitSessionEvent({ type: "cache_warming_end", ...refresh });
 			this.subscribeRunState(state => {
@@ -6066,7 +6067,8 @@ export class AgentSession implements SettingsScope {
 			model: model ? `${model.provider}/${model.id}` : "",
 			modelName: model?.name ?? "no model",
 			thinkingLevel,
-			tools: JSON.stringify(tools.map(tool => tool.name)),
+			// Descriptions and schemas are sent too: a refreshed MCP tool keeps its name.
+			tools: JSON.stringify(tools.map(tool => [tool.name, tool.description, tool.parameters])),
 			systemPrompt: Bun.hash(JSON.stringify(systemPrompt)),
 			retention,
 		};
@@ -6083,11 +6085,17 @@ export class AgentSession implements SettingsScope {
 		const warmer = this.#cacheWarmer;
 		if (!warmer) return undefined;
 		const confirmed = this.#promptCacheArmSessionId === this.sessionId ? warmer.confirmedEntry : undefined;
-		const entry = confirmed ? { ...confirmed, inferred: false } : this.#inferredPromptCacheEntry();
+		const change = confirmed?.change;
+		// A replaced transcript (rewind, branch switch, reload) no longer extends the
+		// armed request; the branch now on screen says what its own replies cached.
+		const live = confirmed !== undefined && change?.kind !== "history";
+		const entry: ObservedPromptCacheEntry | undefined = live
+			? { ...confirmed, change, inferred: false }
+			: this.#inferredPromptCacheEntry();
 		if (!entry) return undefined;
 		return promptCacheStatus(entry, {
 			nowMs,
-			warming: confirmed ? warmer.status : undefined,
+			warming: live ? warmer.status : undefined,
 			nextTokens: this.getContextUsage()?.tokens ?? 0,
 		});
 	}
@@ -6104,22 +6112,29 @@ export class AgentSession implements SettingsScope {
 		const observed = this.#branchPromptCacheObservation();
 		if (!observed) return undefined;
 		const { reply } = observed;
-		const model = this.#modelRegistry.find(reply.provider, reply.model);
+		// A server-side fallback retags the reply with the served model; the cache entry is the requested one's.
+		const fallback = reply.content.find(block => block.type === "fallback");
+		const model = this.#modelRegistry.find(
+			reply.provider,
+			fallback?.type === "fallback" ? fallback.from.model : reply.model,
+		);
 		if (!model) return undefined;
 		const retention = cfgProvidersCacheRetention.get(this.settings);
-		const tier =
-			observedPromptCacheTier(reply.usage) ??
-			resolvePromptCacheTier(
-				model,
-				{ cacheRetention: retention === "auto" ? undefined : retention },
-				model.api === "anthropic-messages" && this.#modelRegistry.isUsingOAuth(model),
-			);
+		const requestedTier = resolvePromptCacheTier(
+			model,
+			{ cacheRetention: retention === "auto" ? undefined : retention },
+			model.api === "anthropic-messages" && this.#modelRegistry.isUsingOAuth(model),
+		);
+		const tier = observedPromptCacheTier(reply.usage) ?? requestedTier;
 		if (tier === undefined) return undefined;
 		const seconds = model.promptCache?.[tier];
 		const current = this.model;
-		let change: PromptCacheChange | undefined;
+		let change: ObservedPromptCacheEntry["change"];
 		if (current?.provider !== model.provider || current.id !== model.id) {
 			change = { kind: "model", from: model.name, to: current?.name ?? "no model" };
+		} else if (requestedTier !== tier) {
+			// The next request asks for another tier, or for no caching at all.
+			change = { kind: "retention" };
 		} else if (observed.compacted) {
 			change = { kind: "compaction" };
 		} else if (observed.promptDigest !== undefined && observed.promptDigest !== this.#tools.currentPromptDigest()) {
@@ -6165,7 +6180,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Persist a completed warm request as off-transcript usage so session totals include its cost. */
-	#recordCacheWarmUsage(message: AssistantMessage, extensionOverride: boolean, sentAt: number): void {
+	#recordCacheWarmUsage(
+		message: AssistantMessage,
+		extensionOverride: boolean,
+		refresh: CacheRefreshOutcome | undefined,
+	): void {
 		try {
 			this.sessionManager.appendModelUsage(
 				{
@@ -6175,7 +6194,7 @@ export class AgentSession implements SettingsScope {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
-					sentAt,
+					...(refresh ? { cacheRefresh: refresh } : {}),
 				},
 				{ sessionId: this.sessionId, parentId: this.sessionManager.getLeafId() },
 			);

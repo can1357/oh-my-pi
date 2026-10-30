@@ -728,9 +728,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
-	/** One wall-clock wakeup when the warm prompt-cache entry expires, so the chip turns cold without ticking. */
+	/** One wall-clock wakeup when the warm prompt-cache entry expires or the local day turns, so the chip changes without ticking. */
 	#promptCacheTimer: NodeJS.Timeout | undefined;
-	#promptCacheExpiry: number | undefined;
+	#promptCacheWakeAt: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
@@ -1505,30 +1505,36 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#stopPromptCacheTimer(): void {
 		clearTimeout(this.#promptCacheTimer);
 		this.#promptCacheTimer = undefined;
-		this.#promptCacheExpiry = undefined;
+		this.#promptCacheWakeAt = undefined;
 	}
 
 	/**
-	 * One wakeup at the moment the warm prompt cache the bar shows lapses, so the
-	 * chip turns cold without a ticking repaint. Synced wherever the chip's status
-	 * is computed; a warm refresh moves the expiry and re-arms it on the next build.
+	 * One wakeup at the next moment what the chip shows can change: the warm
+	 * prompt cache lapsing, or the local day turning, which redates the hover
+	 * card's times. No ticking repaint; a warm refresh moves the expiry and
+	 * re-arms it on the next build.
 	 */
 	#syncPromptCacheTimer(status: PromptCacheStatus | undefined, now: number): void {
-		const expiry =
-			status?.state === "warm" && status.ttlMs !== undefined ? status.touchedAt + status.ttlMs : undefined;
-		if (this.#disposed || !this.#onBranchChange || expiry === undefined || expiry <= now) {
+		if (this.#disposed || !this.#onBranchChange || status === undefined) {
 			this.#stopPromptCacheTimer();
 			return;
 		}
-		if (this.#promptCacheExpiry === expiry) return;
+		const midnight = new Date(now);
+		midnight.setHours(24, 0, 0, 0);
+		let wakeAt = midnight.getTime();
+		if (status.state === "warm" && status.ttlMs !== undefined) {
+			const expiry = status.touchedAt + status.ttlMs;
+			if (expiry > now) wakeAt = Math.min(wakeAt, expiry);
+		}
+		if (this.#promptCacheWakeAt === wakeAt) return;
 		this.#stopPromptCacheTimer();
-		this.#promptCacheExpiry = expiry;
+		this.#promptCacheWakeAt = wakeAt;
 		const timer = setTimeout(() => {
 			if (this.#disposed || this.#promptCacheTimer !== timer) return;
 			this.#stopPromptCacheTimer();
 			this.invalidate();
 			this.#onBranchChange?.();
-		}, expiry - now);
+		}, wakeAt - now);
 		this.#promptCacheTimer = timer;
 		timer.unref();
 	}
