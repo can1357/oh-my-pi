@@ -3,9 +3,7 @@ import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetached
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { logger } from "@oh-my-pi/pi-utils";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
@@ -21,7 +19,7 @@ import {
 	type SessionWorktree,
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { relocateSessionCwd } from "../session/cwd-relocation";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -63,27 +61,11 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
+/** Report a move that could not be undone: the workspace may be inconsistent. */
 async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	await runtime.output(text);
 	await runtime.session.dispose();
 	return commandConsumed();
-}
-
-/** A move rollback failed: re-align the workspace to wherever the session ended up and report it. */
-async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError: unknown): Promise<SlashCommandResult> {
-	const actual = runtime.sessionManager.getCwd();
-	try {
-		await rescopeHeadlessToCwd(runtime, actual);
-	} catch {
-		return fatalMoveFailure(
-			`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
-			runtime,
-		);
-	}
-	return usage(
-		`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
-		runtime,
-	);
 }
 
 /**
@@ -96,37 +78,19 @@ async function relocateHeadlessSession(
 	runtime: SlashCommandRuntime,
 	resolvedPath: string,
 ): Promise<SlashCommandResult | undefined> {
-	try {
-		await runtime.settings.flush();
-	} catch (err) {
-		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
-	}
-	const previousState = runtime.sessionManager.captureState();
-	try {
-		await runtime.session.moveSession(resolvedPath);
-	} catch (err) {
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
-	}
-	try {
-		setProjectDir(resolvedPath);
-	} catch (err) {
-		try {
-			await runtime.sessionManager.rollbackMove(previousState);
-		} catch (rollbackError) {
-			return reportFailedRollback(runtime, rollbackError);
-		}
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
-	}
-	try {
-		await rescopeHeadlessToCwd(runtime, resolvedPath);
-	} catch (err) {
-		try {
-			await runtime.sessionManager.rollbackMove(previousState);
-			await rescopeHeadlessToCwd(runtime, previousState.cwd);
-		} catch (rollbackError) {
-			return reportFailedRollback(runtime, rollbackError);
-		}
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	const result = await relocateSessionCwd(
+		{
+			session: runtime.session,
+			settings: runtime.settings,
+			afterRescope: async () => {
+				await runtime.refreshCommands?.();
+				await runtime.reloadPlugins();
+			},
+		},
+		resolvedPath,
+	);
+	if (!result.ok) {
+		return result.fatal ? fatalMoveFailure(result.error, runtime) : usage(result.error, runtime);
 	}
 	await runtime.notifyConfigChanged?.();
 	await runtime.notifyTitleChanged?.();
@@ -889,15 +853,3 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 ];
-async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
-	setProjectDir(cwd);
-	await runtime.settings.reloadForCwd(cwd);
-	await rebindMemoryBackendForCwd(runtime.session);
-	clearClaudePluginRootsCache();
-	const src = discoverTitleSystemPromptFile(cwd);
-	const p = await resolvePromptInput(src, "title system prompt");
-	runtime.session.setTitleSystemPrompt(p);
-	await runtime.session.refreshSkillsAndCommands();
-	await runtime.refreshCommands?.();
-	await runtime.reloadPlugins();
-}

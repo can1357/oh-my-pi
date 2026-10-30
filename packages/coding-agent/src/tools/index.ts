@@ -48,6 +48,7 @@ import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
+import { CdTool } from "./cd";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
@@ -212,6 +213,12 @@ export interface ToolSession {
 	cwd: string;
 	/** Cost gate of the session tree, forwarded to subagents. */
 	costGate?: CostGate;
+	/**
+	 * Relocate this session's working directory: session file, process cwd, and
+	 * every cwd-derived scope. Resolves with the absolute directory now in
+	 * effect, rejects with the reason when the move could not commit.
+	 */
+	changeWorkingDirectory?: (newCwd: string) => Promise<string>;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
@@ -571,6 +578,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
 	security_scan: s => new SecurityScanTool(s),
 	bash: s => new BashTool(s),
+	cd: s => new CdTool(s),
 	edit: s => new EditTool(s),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),

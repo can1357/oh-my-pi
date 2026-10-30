@@ -2409,6 +2409,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get costGate() {
 				return currentCostGate();
 			},
+			changeWorkingDirectory: newCwd => {
+				if (!hasSession) return Promise.reject(new Error("The session is not ready to change directory yet"));
+				return session.changeWorkingDirectory(newCwd);
+			},
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
