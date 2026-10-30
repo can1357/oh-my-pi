@@ -117,12 +117,51 @@ export function armPreResponseTimeout(
 ): { signal: AbortSignal | undefined; clear: () => void } {
 	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, clear: () => {} };
 	const controller = new AbortController();
-	const timer = setTimeout(() => {
-		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
-	}, timeoutMs);
-	timer.unref?.();
-	const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
+	let timer: NodeJS.Timeout | undefined;
+	const arm = () => {
+		timer = setTimeout(() => {
+			controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+		}, timeoutMs);
+		timer.unref?.();
+	};
+	arm();
+	const signal: PreResponseGuardedSignal = callerSignal
+		? AbortSignal.any([callerSignal, controller.signal])
+		: controller.signal;
+	// The guard is armed where the request is built, but what it bounds is the
+	// provider's latency. Everything between the two — a caller's dispatch hold
+	// above all, which a human releases — is our own preparation: the transport
+	// suspends the deadline while it prepares and starts it again at the wire.
+	signal[PRE_RESPONSE_GUARD] = {
+		suspend: () => clearTimeout(timer),
+		restart: () => {
+			clearTimeout(timer);
+			arm();
+		},
+	};
 	return { signal, clear: () => clearTimeout(timer) };
+}
+
+/** Attached by {@link armPreResponseTimeout} to the signal it hands the transport. */
+const PRE_RESPONSE_GUARD = Symbol("omp.preResponseTimeout");
+
+interface PreResponseGuard {
+	/** Stop counting: the request is still being prepared or held. */
+	suspend: () => void;
+	/** Start the deadline from now: the request is going out. */
+	restart: () => void;
+}
+
+type PreResponseGuardedSignal = AbortSignal & { [PRE_RESPONSE_GUARD]?: PreResponseGuard };
+
+/**
+ * The pre-response deadline riding on a request's signal, if any: the
+ * transport suspends it while it prepares and holds the request, and starts it
+ * again when the request reaches the wire. A signal without one yields
+ * `undefined` and nothing changes.
+ */
+export function preResponseGuard(signal: AbortSignal | undefined | null): PreResponseGuard | undefined {
+	return (signal as PreResponseGuardedSignal | undefined | null)?.[PRE_RESPONSE_GUARD];
 }
 
 export interface IdleTimeoutIteratorOptions {

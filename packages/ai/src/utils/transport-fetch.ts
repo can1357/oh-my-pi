@@ -3,6 +3,7 @@ import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, DispatchHold, FetchImpl, Model } from "../types";
 import { holdBeforeDispatch } from "./dispatch-hold";
+import { preResponseGuard } from "./idle-iterator";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
@@ -77,16 +78,23 @@ function buildTransportFetch(model: Model<Api>, base: FetchImpl, holds: readonly
 
 	const fetch: TransportFetch = async (input, init) => {
 		const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+		const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+		// A pre-response deadline bounds the provider's latency, so it must not
+		// run while we prepare the request or hold it: a hold a human releases
+		// would otherwise fail the resumed request with `TimeoutError` instead
+		// of sending it. It starts again below, when the request goes out.
+		const deadline = preResponseGuard(signal);
+		deadline?.suspend();
 		init = withInferenceUserAgent(input, init);
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
 		const debug = isRequestDebugEnabled() ? await createFetchRequestDebugSession(input, init) : undefined;
-		const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
 		for (const pending of holds) await holdBeforeDispatch(pending, signal);
 		// Recorded for the request that is now going out, not for one a hold
 		// still gates or an abort cancelled.
 		if (method === "POST") recordDispatchOrigin(model, input);
+		deadline?.restart();
 		const response = await base(input, init);
 		return debug ? debug.wrapResponse(response) : response;
 	};

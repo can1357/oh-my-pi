@@ -27,6 +27,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { armPreResponseTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 import * as requestDebug from "@oh-my-pi/pi-ai/utils/request-debug";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 
@@ -758,5 +759,33 @@ describe("beforeDispatch", () => {
 		}
 
 		expect(events).toEqual(["connect:held=false", "send:held=false"]);
+	});
+
+	// A pre-response deadline bounds how long the provider may take to answer.
+	// Armed where the request is built, it also counted the hold, so resuming a
+	// pause longer than the deadline failed the request with `TimeoutError`
+	// instead of sending it. Real time is the contract here, hence the timers.
+	test("does not charge a dispatch hold to the pre-response deadline", async () => {
+		const holdMs = 60;
+		const deadlineMs = 25;
+		let abortedAtWire: boolean | undefined;
+		const watchdog = armPreResponseTimeout(undefined, deadlineMs);
+		const fetch = transportFetch(
+			model(),
+			async (_input, init) => {
+				abortedAtWire = init?.signal?.aborted ?? false;
+				return new Response("{}", { status: 200 });
+			},
+			() => Bun.sleep(holdMs),
+		);
+
+		const response = await fetch("https://example.invalid/v1/messages", {
+			method: "POST",
+			signal: watchdog.signal,
+		});
+		watchdog.clear();
+
+		expect(abortedAtWire).toBe(false);
+		expect(response.status).toBe(200);
 	});
 });

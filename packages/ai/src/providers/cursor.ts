@@ -226,6 +226,7 @@ import {
 import { deterministicUuid } from "../utils/deterministic-id";
 import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { armPreResponseTimeout } from "../utils/idle-iterator";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
@@ -804,12 +805,22 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		const timeoutMs =
 			CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS +
 			Math.ceil(append.data.byteLength / CURSOR_HTTP1_APPEND_BYTES_PER_SECOND) * 1_000;
-		const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
-			method: "POST",
-			headers: { ...options.headers, "content-type": "application/proto" },
-			body: toBinary(BidiAppendRequestSchema, body),
-			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-		});
+		// The guard restarts when the request leaves the transport, so a caller's
+		// dispatch hold is not charged to Cursor's latency, and it is cleared as
+		// soon as the response arrives so a slow body is the idle watchdog's
+		// business (issue #2422).
+		const watchdog = armPreResponseTimeout(signal, timeoutMs);
+		let response: Response;
+		try {
+			response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
+				method: "POST",
+				headers: { ...options.headers, "content-type": "application/proto" },
+				body: toBinary(BidiAppendRequestSchema, body),
+				signal: watchdog.signal,
+			});
+		} finally {
+			watchdog.clear();
+		}
 		if (response.ok) {
 			await response.body?.cancel();
 			return;
