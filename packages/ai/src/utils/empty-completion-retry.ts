@@ -100,6 +100,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
+		/** Replays the attempts this wrapper discarded had already spent. */
+		let discardedReplays = 0;
+		let sawInnerReplays = false;
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
@@ -166,6 +169,16 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
 				providerErrorRetries++;
 			}
+			if (delayMs !== undefined) {
+				// The attempt about to be thrown away may itself have replayed the
+				// request several times; those requests happened, so they stay in the
+				// total this wrapper finally reports.
+				const discarded = failedMessage?.providerReplays ?? completedMessage?.providerReplays;
+				if (discarded !== undefined) {
+					discardedReplays += discarded;
+					sawInnerReplays = true;
+				}
+			}
 
 			if (delayMs !== undefined && !signal?.aborted) {
 				try {
@@ -185,17 +198,28 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			flush();
 			if (terminal) {
 				const wrapperReplays = emptyRetries + providerErrorRetries;
-				// Only report what is actually known. A `0` here would claim the
-				// request went out once on behalf of a provider loop that reports
-				// nothing and may have replayed it many times (`anthropic.ts` runs
-				// under this wrapper), and recovery above reads a reported `0` as
-				// exactly that claim. Adding to an inner count can undercount when
-				// the inner loop stays silent, which only ever makes a reader more
-				// cautious.
-				if (terminal.type === "error" && (terminal.error.providerReplays !== undefined || wrapperReplays > 0)) {
-					terminal.error.providerReplays = (terminal.error.providerReplays ?? 0) + wrapperReplays;
+				const innerReplays =
+					terminal.type === "error"
+						? terminal.error.providerReplays
+						: terminal.type === "done"
+							? terminal.message.providerReplays
+							: undefined;
+				// Every request this wrapper is responsible for: the replays the
+				// attempts it threw away had already spent, the ones this attempt
+				// spent, and its own. Only reported when at least one of those is
+				// known — a bare `0` would claim the request went out once on behalf
+				// of a loop that reports nothing and may have replayed it many times
+				// (`anthropic.ts` runs under this wrapper), and recovery above reads
+				// a reported `0` as exactly that claim.
+				const total = discardedReplays + (innerReplays ?? 0) + wrapperReplays;
+				if (terminal.type === "error" && (innerReplays !== undefined || sawInnerReplays || wrapperReplays > 0)) {
+					// A copy, not a write: the message belongs to the layer below and
+					// may be the same object on the next call, where adding to a count
+					// this wrapper already wrote would compound it.
+					outer.push({ ...terminal, error: { ...terminal.error, providerReplays: total } });
+				} else {
+					outer.push(terminal);
 				}
-				outer.push(terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());

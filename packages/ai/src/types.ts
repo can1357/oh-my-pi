@@ -1330,18 +1330,25 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
-	 * Requests a layer below the caller replayed before this failure surfaced;
-	 * `0` when the failing request was made exactly once. Set by the layers
-	 * that run their own replay loop (`openai-codex-responses`, `cursor`,
-	 * `empty-completion-retry`) and left `undefined` by the ones that do not,
-	 * so `undefined` means "unknown", never "none".
+	 * Wire requests a layer below the caller sent beyond the first, before this
+	 * failure surfaced; `0` when the failing request went out exactly once.
+	 * `undefined` means "nothing here reports", never "none".
+	 *
+	 * Counted at the request boundary — before the request goes out, so an
+	 * attempt that never opens counts too — by one counter that lives for the
+	 * whole provider call. That is what makes it whole rather than a sum of
+	 * rungs: it covers the provider's own replays (a transport reopen, a
+	 * transport fallback, a checkpoint resume, rebuilt parameters) and the
+	 * replays `fetchWithRetry` makes underneath them on its own budget, which
+	 * no layer above it can otherwise see.
 	 *
 	 * Recovery above the provider has to know whether a request was already
-	 * replayed — replaying it again multiplies the loop below. Each loop stops
-	 * at its own commitment boundary and those boundaries differ (the Codex
-	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
-	 * the same opened block as committed), so streamed content cannot stand in
-	 * for the count.
+	 * replayed — replaying it again multiplies the work below. Streamed content
+	 * cannot stand in for the count: each loop stops at its own commitment
+	 * boundary and those boundaries differ (the Codex loop replays an *empty*
+	 * reasoning block, while the Anthropic loop counts the same opened block as
+	 * committed), and a loop that replayed a 503 before the attempt that
+	 * finally streamed leaves content the first attempt never produced.
 	 */
 	providerReplays?: number;
 	/**

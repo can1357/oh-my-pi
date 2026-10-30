@@ -1773,40 +1773,42 @@ export class TurnRecovery {
 	 *
 	 * "No layer below replayed it" is answered in three ways, in this order.
 	 *
-	 * - **The layer that replays says so.** A loop that re-sends a request
-	 *   reports the count on the message it finally surfaces
-	 *   ({@link AssistantMessage.providerReplays} — `openai-codex-responses`,
-	 *   `cursor`, `empty-completion-retry`). A non-zero count is direct
-	 *   evidence and ends the question. No count at all means that layer
-	 *   reports nothing, not that nothing happened, so the two stand-ins below
-	 *   still run.
-	 * - **The model had begun streaming.** Where a loop reports nothing, its
-	 *   own commitment boundary is what stopped it: the Anthropic provider loop
-	 *   retries only while `firstTokenTime === undefined` and nothing
-	 *   replay-unsafe has streamed (`anthropic.ts`, `canRetryProviderFailure`),
-	 *   and `fetchWithRetry` only before a response body exists at all. A block
-	 *   the stream opened counts even while it is still empty:
-	 *   `content_block_start` is where the Anthropic loop sets `firstTokenTime`
-	 *   and `streamedReplayUnsafeContent` and pushes the empty block, so a cut
-	 *   between that frame and the first delta leaves an empty block behind and
-	 *   no replay below at all.
+	 * - **The layer that replays says so.** A provider that re-sends a request
+	 *   reports what the wire saw on the message it finally surfaces
+	 *   ({@link AssistantMessage.providerReplays} — `anthropic`,
+	 *   `openai-codex-responses`, `cursor`, `empty-completion-retry`). The
+	 *   count is taken at the request boundary for the whole call, so it covers
+	 *   the provider's own rungs and the replays `fetchWithRetry` makes under
+	 *   them alike. A non-zero count is direct evidence and ends the question.
+	 *   No count at all means that layer reports nothing, not that nothing
+	 *   happened, so the two stand-ins below still run.
+	 * - **The model had begun streaming.** Where a provider reports nothing,
+	 *   its own commitment boundary is what stopped it: a caller-supplied
+	 *   Anthropic transport runs the same loop, which retries only while
+	 *   `firstTokenTime === undefined` and nothing replay-unsafe has streamed
+	 *   (`anthropic.ts`, `canRetryProviderFailure`). A block the stream opened
+	 *   counts even while it is still empty: `content_block_start` is where
+	 *   that loop sets `firstTokenTime` and `streamedReplayUnsafeContent` and
+	 *   pushes the empty block, so a cut between that frame and the first delta
+	 *   leaves an empty block behind and no replay below at all.
 	 * - **The wording is one no provider loop retries.** Their gate is
 	 *   `AIError.isProviderRetryableError`; a diagnostic it rejects — an in-band
 	 *   `TransferEncodingError`, `premature close`, `read ECONNRESET`, `write
 	 *   EPIPE`, `upstream closed the connection` — was made once and never
-	 *   replayed, whether or not anything streamed. This is also the only read
-	 *   available for `fetchWithRetry`, which builds no message and so can
-	 *   report no count; its gate is the same predicate.
+	 *   replayed, whether or not anything streamed.
 	 *
 	 * A hold only applies where no lower retry layer has already replayed the
 	 * request, so it does not multiply provider retry work.
 	 *
 	 * Streamed content alone is not that answer, which is why the count exists.
-	 * The loops disagree about what commits a request: `openai-codex-responses`
-	 * measures a block by its streamed length and replays an empty reasoning
-	 * start up to five times, while the Anthropic loop treats the same opened
-	 * block as committed. Reading "a block exists" as "nothing replayed" made
-	 * three held attempts land on top of three six-request Codex loops.
+	 * Two ways it lies. The loops disagree about what commits a request:
+	 * `openai-codex-responses` measures a block by its streamed length and
+	 * replays an empty reasoning start up to five times, while the Anthropic
+	 * loop treats the same opened block as committed. And a replay that
+	 * happened before the attempt that streamed leaves content the first
+	 * request never produced: a 503 replayed by `fetchWithRetry`, then a second
+	 * response that streams reasoning and dies on the socket, reads as a first
+	 * and only request under any content test.
 	 *
 	 * Held for the first {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} retry
 	 * attempts, so the failing model is asked three times in all. Each held

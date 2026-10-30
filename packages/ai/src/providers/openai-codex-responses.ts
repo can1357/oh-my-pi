@@ -75,6 +75,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { countWireAttempts, createWireAttempts, providerReplaysFrom, type WireAttempts } from "../utils/wire-attempts";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -740,6 +741,8 @@ interface CodexRequestContext {
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
+	/** Wire requests this call has issued, counted at the request boundary. */
+	wireAttempts: WireAttempts;
 }
 
 interface CodexRequestSetup {
@@ -795,15 +798,6 @@ class CodexStreamRuntime {
 	pendingSummaryDeltas = new Map<CodexOpenItem, string[]>();
 	websocketStreamRetries = 0;
 	providerRetryAttempt = 0;
-	/**
-	 * Requests this stream re-sent after the first one, counted at the two
-	 * transport reopens every recovery rung funnels through — the retry
-	 * budgets above (`providerRetryAttempt`, `websocketStreamRetries`) each
-	 * cover one rung and none of them covers the websocket→SSE replay.
-	 * Surfaced on the failed message as `providerReplays` so recovery above
-	 * the provider never replays a request this loop already replayed.
-	 */
-	providerReplays = 0;
 	sawTerminalEvent = false;
 	canSafelyReplayWebsocketOverSse = true;
 	whitespaceToolCallArgumentsDelta?: CodexWhitespaceToolCallArgumentsDeltaState;
@@ -1454,6 +1448,7 @@ function createCodexRequestContext(
 		codexClientVersion,
 		transformedBody,
 		rawRequestDump,
+		wireAttempts: createWireAttempts(),
 	};
 }
 
@@ -1789,6 +1784,9 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
+	// The websocket lane carries no fetch, so its request boundary is here: one
+	// call to this opener is one request sent, whether or not the socket answers.
+	requestContext.wireAttempts.count += 1;
 	const canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
@@ -1992,7 +1990,13 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				// Under the counter, not beside it: `openCodexSseEventStream` hands
+				// this to `fetchWithRetry`, whose own 5xx and network-failure
+				// replays are otherwise invisible to every layer above.
+				countWireAttempts(
+					requestContext.wireAttempts,
+					wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				),
 			),
 		);
 	};
@@ -2137,9 +2141,9 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorId = result.id;
 	output.errorMessage = result.message;
 	// Always a number, 0 included: recovery above reads the absence of this
-	// field as "no loop here reports", so a failure that never reached the
-	// processor (`runtime` undefined) must still say the request went out once.
-	output.providerReplays = context.runtime?.providerReplays ?? 0;
+	// field as "no layer here reports", so a failure that never reached the
+	// processor must still say what the wire saw.
+	output.providerReplays = providerReplaysFrom(context.requestContext.wireAttempts);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -3218,7 +3222,6 @@ class CodexStreamProcessor {
 				this.runtime.websocketStreamRetries,
 				this.options ? event => this.options?.onSseEvent?.(event, this.model) : undefined,
 			);
-			this.runtime.providerReplays += 1;
 			this.runtime.eventStream = next.eventStream;
 			this.runtime.requestBodyForState = next.requestBodyForState;
 			this.runtime.transport = next.transport;
@@ -3241,7 +3244,6 @@ class CodexStreamProcessor {
 
 	async #reopenSseStream(state: CodexWebSocketSessionState | undefined): Promise<void> {
 		const next = await openCodexSseTransport(this.model, this.requestContext, this.requestSetup, this.options, state);
-		this.runtime.providerReplays += 1;
 		this.runtime.eventStream = next.eventStream;
 		this.runtime.requestBodyForState = next.requestBodyForState;
 		this.runtime.transport = next.transport;
@@ -3353,6 +3355,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							url: "",
 							body: { model: model.id },
 						},
+						// No context means the failure predates the first request.
+						wireAttempts: createWireAttempts(),
 					},
 					startTime,
 				} satisfies CodexStreamFailureContext);

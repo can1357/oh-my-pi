@@ -372,37 +372,65 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
-	it("adds its own replays to the count, and claims none when the loop below reports none", async () => {
-		// Recovery above a provider reads a reported `0` as "this request went
-		// out exactly once" and holds its fallback chain on it. The wrapper runs
-		// over providers that report nothing (`anthropic.ts`), so it must add to
-		// a count that exists and leave the field absent when none does.
-		const failing = (providerReplays?: number) => () => {
-			const message = assistant();
-			message.stopReason = "error";
-			message.errorMessage = "The socket connection was closed unexpectedly";
-			message.providerReplays = providerReplays;
-			return streamFromEvents([
-				{ type: "start", partial: message },
-				{ type: "error", reason: "error", error: message },
-			]);
+	it("keeps the replays a discarded attempt spent, and claims none when nothing below reports", async () => {
+		// Every request this wrapper is responsible for has to survive into the
+		// count, including the ones the attempt it threw away had already spent.
+		// Recovery above reads a reported `0` as "this request went out exactly
+		// once" and holds its fallback chain on it, so the field stays absent
+		// when neither the wrapper nor the loop below knows a number.
+		const failing = (counts: ReadonlyArray<number | undefined>) => {
+			let index = 0;
+			return () => {
+				const message = assistant();
+				message.stopReason = "error";
+				message.errorMessage = "The socket connection was closed unexpectedly";
+				message.providerReplays = counts[Math.min(index++, counts.length - 1)];
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]);
+			};
 		};
-		const run = async (providerReplays?: number): Promise<AssistantMessage> => {
-			const stream = withReplaySafeStreamRetry(
-				{},
-				CTX,
-				{ providerRetryWait: async () => {} },
-				failing(providerReplays),
-				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
-			);
+		const run = async (counts: ReadonlyArray<number | undefined>): Promise<AssistantMessage> => {
+			const stream = withReplaySafeStreamRetry({}, CTX, { providerRetryWait: async () => {} }, failing(counts), {
+				retryProviderErrors: true,
+				maxProviderErrorRetries: 1,
+			});
 			await drain(stream);
 			return await stream.result();
 		};
 
-		// One wrapper replay spent, on top of the five the loop below reported.
-		expect((await run(5)).providerReplays).toBe(6);
-		// Same wrapper replay, over a loop that reports nothing: still known.
-		expect((await run(undefined)).providerReplays).toBe(1);
+		// Five spent by the attempt that was discarded, none by the one that
+		// surfaced, one by the wrapper itself.
+		expect((await run([5, 0])).providerReplays).toBe(6);
+		// Both attempts replayed below, plus the wrapper's own.
+		expect((await run([5, 5])).providerReplays).toBe(11);
+		// A loop that reports nothing: only the wrapper's own replay is known.
+		expect((await run([undefined])).providerReplays).toBe(1);
+	});
+
+	it("does not compound its count when the layer below reuses one terminal message", async () => {
+		// The message belongs to the layer below. Writing the total into it would
+		// make the next call that surfaces the same object report that total plus
+		// its own.
+		const shared = assistant();
+		shared.stopReason = "error";
+		shared.errorMessage = "The socket connection was closed unexpectedly";
+		shared.providerReplays = 0;
+		const counts: Array<number | undefined> = [];
+		for (let run = 0; run < 2; run++) {
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				() => streamFromEvents([{ type: "error", reason: "error", error: shared }]),
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			await drain(stream);
+			counts.push((await stream.result()).providerReplays);
+		}
+		expect(counts).toEqual([1, 1]);
+		expect(shared.providerReplays).toBe(0);
 	});
 
 	it("leaves the replay count absent when neither it nor the loop below replayed", async () => {
