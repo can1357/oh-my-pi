@@ -150,6 +150,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#listScroll = 0;
 	#listHeight = 1;
 	#focused = false;
+	#useTerminalCursor = false;
 	#composer: FollowUpComposer | undefined;
 	readonly #pasteHandler = new BracketedPasteHandler();
 	#followUpPending = false;
@@ -223,6 +224,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	set focused(value: boolean) {
 		this.#focused = value;
+	}
+
+	/** Keep the follow-up input's cursor mode aligned so the hardware cursor (and IME preedit) lands on its caret. */
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#useTerminalCursor = useTerminalCursor;
+		this.#composer?.input.setUseTerminalCursor(useTerminalCursor);
 	}
 
 	update(records: readonly BtwHistoryRecord[]): void {
@@ -329,6 +336,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const input = new Input();
 		input.prompt = theme.fg("accent", "Follow up: ");
 		input.placeholder = "Ask about this answer…";
+		input.setUseTerminalCursor(this.#useTerminalCursor);
 		if (this.#options.spaceHoldKeys !== undefined) input.spaceHold.keys = this.#options.spaceHoldKeys;
 		input.spaceHold.handler = this.#options.spaceHold?.(input);
 		const composer: FollowUpComposer = {
