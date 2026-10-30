@@ -259,6 +259,7 @@ export function getPerCallModelAdvertisement(
 			matchPreferences: getModelMatchPreferences(authority),
 		});
 	const roles = configuredRoleGrantPatterns(authority)
+		.filter(({ role }) => role !== "default")
 		.map(({ role, patterns }) => ({
 			role,
 			patterns: patterns
