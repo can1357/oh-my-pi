@@ -364,4 +364,84 @@ describe("createUsageRowBlock describe", () => {
 		expect(twentyFour.title).toBe("2026-01-01 18:05:09");
 		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
 	});
+
+	it("puts a late step summary on its own line above the unchanged metrics", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		// Describe first so the caption has to replace a memoized node, as it does live.
+		const metrics = block.describe?.(cx);
+		if (!metrics) throw new Error("usage row did not describe");
+		const ansiMetrics = block.render(100).filter(line => line.trim() !== "");
+
+		block.setSummary({ text: "  Fixed the add operator in calc.py  " });
+		const captioned = block.describe?.(cx);
+		if (!captioned) throw new Error("usage row did not describe");
+		expect(captioned.k).toBe("col");
+		const [caption, row] = captioned.c ?? [];
+		expect(isNode(caption) && caption.p).toMatchObject({
+			spans: [
+				{ t: "› ", s: "accent" },
+				{ t: "Fixed the add operator in calc.py", s: "muted em" },
+			],
+		});
+		expect(row).toEqual(metrics);
+
+		const ansi = block.render(100).filter(line => line.trim() !== "");
+		expect(ansi).toHaveLength(ansiMetrics.length + 1);
+		expect(Bun.stripANSI(ansi[0] ?? "").trim()).toBe("› Fixed the add operator in calc.py");
+		expect(ansi.slice(1)).toEqual(ansiMetrics);
+
+		// A failed step's caption carries the error tone on its marker.
+		block.setSummary({ text: "Fixed the add operator in calc.py", tone: "error" });
+		const toned = block.describe?.(cx);
+		expect(isNode(toned?.c?.[0]) && toned?.c?.[0].p).toMatchObject({
+			spans: [
+				{ t: "› ", s: "error" },
+				{ t: "Fixed the add operator in calc.py", s: "muted em" },
+			],
+		});
+	});
+
+	it("strips escapes, controls, tabs, and line breaks from a caption and keeps it to one line", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const ansiMetrics = block.render(40).filter(line => line.trim() !== "");
+
+		block.setSummary({ text: `Fixed calc.py\x1b[2J\tand\x07 kept\r\noutput \ud800${"word ".repeat(60)}` });
+		const caption = block.summary?.text ?? "";
+		expect(caption.startsWith("Fixed calc.py and kept output word word")).toBe(true);
+		expect(caption).not.toMatch(/[\x00-\x1f\x7f-\x9f\ud800-\udfff]/);
+		expect(Bun.stringWidth(caption)).toBeLessThanOrEqual(120);
+		expect(caption.endsWith("…")).toBe(true);
+
+		const captioned = block.describe?.(cx);
+		const line = captioned?.c?.[0];
+		expect(isNode(line) && line.p).toMatchObject({
+			wrap: "none",
+			truncate: "end",
+			lines: 1,
+			spans: [{ t: "› " }, { t: caption, s: "muted em" }],
+		});
+
+		// A caption wider than the terminal still takes exactly one ANSI line above the metrics.
+		const ansi = block.render(40).filter(line => line.trim() !== "");
+		expect(ansi).toHaveLength(ansiMetrics.length + 1);
+		expect(ansi[0]).not.toContain("\x1b[2J");
+		expect(Bun.stringWidth(ansi[0] ?? "")).toBeLessThanOrEqual(40);
+		expect(ansi.slice(1)).toEqual(ansiMetrics);
+	});
 });
