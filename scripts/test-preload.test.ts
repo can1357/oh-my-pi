@@ -57,6 +57,12 @@ describe("the test preload", () => {
 					processEnv: "1",
 					nodeChildProcess: "1",
 					bunShell: "1",
+					// The next four copy the environment of the process, not the test's JavaScript
+					// realm: native code reads it directly, and a Worker builds its children's from it.
+					nativeShell: "1",
+					nativePty: "1",
+					workerBunSpawn: "1",
+					workerBunSpawnSync: "1",
 					// A test that runs a child as production removes the marker itself.
 					removedByCaller: "unset",
 				},

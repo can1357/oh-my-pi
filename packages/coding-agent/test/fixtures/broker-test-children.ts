@@ -3,15 +3,38 @@
  * test-runtime marker, the way a developer's `bun test` starts. It starts an omp RPC child
  * and an omp ACP child the way tests do and completes each protocol's startup. Each child
  * gets its own home and agent dir but keeps the auth broker the environment names, so the
- * parent can count the requests that reached that broker.
+ * parent can count the requests that reached that broker. It also runs credential discovery
+ * in a child that a native shell, a native terminal and a Worker each start with the
+ * environment it inherits, which the parent has already given a home of its own.
  */
 import { expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { PtySession, Shell } from "@oh-my-pi/pi-natives";
 import { readLines, TempDir } from "@oh-my-pi/pi-utils";
 
 const cliPath = path.join(import.meta.dir, "..", "..", "src", "cli.ts");
+const discoveryChild = path.join(import.meta.dir, "broker-discovery-child.ts");
+
+/** What broker-discovery-child.ts reports as a test child: it read no broker credential. */
+const TEST_CHILD_DISCOVERY = { exitCode: 0, report: { testRuntime: true, brokerKey: null } };
+
+function discoveryResult(exitCode: number | undefined, output: string): { exitCode?: number; report: unknown } {
+	const line = output.split(/\r?\n/).find(entry => entry.startsWith("DISCOVERY "));
+	return { exitCode, report: line === undefined ? output : JSON.parse(line.slice("DISCOVERY ".length)) };
+}
+
+async function nativeDiscovery(
+	start: (onChunk: (error: Error | null, chunk: string) => void) => Promise<{ exitCode?: number }>,
+): Promise<{ exitCode?: number; report: unknown }> {
+	let output = "";
+	const { exitCode } = await start((error, chunk) => {
+		if (error) throw error;
+		output += chunk;
+	});
+	return discoveryResult(exitCode, output);
+}
 
 function isolatedEnv(dir: TempDir): Record<string, string> {
 	fs.mkdirSync(dir.join("home"));
@@ -78,5 +101,31 @@ it("starts an ACP child and opens a session", async () => {
 		child.stdin.end();
 		child.kill("SIGKILL");
 		await child.exited;
+	}
+}, 30_000);
+
+it("runs credential discovery in a child of a native shell", async () => {
+	const command = [process.execPath, discoveryChild].map(word => `'${word.replaceAll("'", `'\\''`)}'`).join(" ");
+	const result = await nativeDiscovery(onChunk => new Shell().run({ command, timeoutMs: 25_000 }, onChunk));
+	expect(result).toEqual(TEST_CHILD_DISCOVERY);
+}, 30_000);
+
+it("runs credential discovery in a child of a native terminal", async () => {
+	const result = await nativeDiscovery(onChunk =>
+		new PtySession().startArgv({ application: process.execPath, args: [discoveryChild], timeoutMs: 25_000 }, onChunk),
+	);
+	expect(result).toEqual(TEST_CHILD_DISCOVERY);
+}, 30_000);
+
+it("runs credential discovery in a child a Worker spawns", async () => {
+	const worker = new Worker(new URL("./broker-discovery-worker.ts", import.meta.url));
+	const done = Promise.withResolvers<{ output: string; exitCode: number }>();
+	worker.onmessage = event => done.resolve(event.data);
+	worker.onerror = event => done.reject(new Error(event.message));
+	try {
+		const { output, exitCode } = await done.promise;
+		expect(discoveryResult(exitCode, output)).toEqual(TEST_CHILD_DISCOVERY);
+	} finally {
+		worker.terminate();
 	}
 }, 30_000);

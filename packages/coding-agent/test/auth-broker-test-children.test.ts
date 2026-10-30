@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -11,16 +12,25 @@ const fixture = path.join(import.meta.dir, "fixtures/broker-test-children.ts");
 /**
  * An omp CLI that a test spawns has a production entrypoint, so only the test-runtime
  * marker it inherits keeps it off the broker the developer's environment names. A direct
- * `bun test` starts without that marker; the test preload must give it to every child.
+ * `bun test` starts without that marker; the test preload must give it to every child,
+ * including one that native code or a Worker starts, which never sees the test's realm.
  */
 describe("omp children of a direct `bun test`", () => {
 	it.each([
-		["RPC", "starts an RPC child and reads its state"],
-		["ACP", "starts an ACP child and opens a session"],
+		["an RPC child completes startup", "starts an RPC child and reads its state"],
+		["an ACP child completes startup", "starts an ACP child and opens a session"],
+		["a native shell's child runs credential discovery", "runs credential discovery in a child of a native shell"],
+		[
+			"a native terminal's child runs credential discovery",
+			"runs credential discovery in a child of a native terminal",
+		],
+		["a Worker's child runs credential discovery", "runs credential discovery in a child a Worker spawns"],
 	])(
-		"an %s child completes startup without a request to the inherited auth broker",
-		async (_protocol, fixtureTest) => {
+		"%s without a request to the inherited auth broker",
+		async (_child, fixtureTest) => {
 			using dir = TempDir.createSync("@omp-broker-test-children-");
+			fs.mkdirSync(dir.join("home"));
+			fs.mkdirSync(dir.join("agent"));
 			const brokerStore = await SqliteAuthCredentialStore.open(dir.join("developer-broker.db"));
 			const brokerStorage = new AuthStorage(brokerStore);
 			await brokerStorage.credentials.set("inherited-broker-provider", { type: "api_key", key: "developer-key" });
@@ -53,6 +63,14 @@ describe("omp children of a direct `bun test`", () => {
 						OMP_AUTH_BROKER_URL: `http://127.0.0.1:${front.port}`,
 						OMP_AUTH_BROKER_TOKEN: TOKEN,
 						OMP_AUTH_BROKER_SNAPSHOT_CACHE: dir.join("snapshot.enc"),
+						// A child started with the run's own environment gets this home, not the
+						// developer's; the RPC and ACP children replace it with homes of their own.
+						HOME: dir.join("home"),
+						USERPROFILE: dir.join("home"),
+						PI_CODING_AGENT_DIR: dir.join("agent"),
+						XDG_DATA_HOME: undefined,
+						XDG_STATE_HOME: undefined,
+						XDG_CACHE_HOME: undefined,
 					},
 					stdin: "ignore",
 					stdout: "pipe",
