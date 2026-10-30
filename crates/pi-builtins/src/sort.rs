@@ -3478,7 +3478,7 @@ use uucore::{
 };
 
 #[cfg(unix)]
-use crate::locale::locale_loadable;
+use crate::locale::locale_loadable_in_shell;
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
 	locale::{numeric_symbols, parse_locale_name, shell_locale},
@@ -5359,7 +5359,7 @@ fn locale_failed_to_set(host: &Host) -> bool {
 #[cfg(unix)]
 fn locale_failed_to_set(host: &Host) -> bool {
 	shell_locale(host, "LC_COLLATE")
-		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
+		.is_some_and(|locale| !locale_loadable_in_shell(host, locale, nix::libc::LC_COLLATE_MASK))
 }
 
 fn key_zero_width(selector: &FieldSelector) -> bool {
@@ -7204,7 +7204,7 @@ mod tests {
 	/// locale (as GNU does) for one that is not installed.
 	#[cfg(unix)]
 	fn locale_installed(locale: &str) -> bool {
-		locale_loadable(locale, nix::libc::LC_ALL_MASK)
+		crate::locale::locale_loadable(locale, nix::libc::LC_ALL_MASK)
 	}
 
 	/// Windows sort reads ICU's data for any locale name: nothing to install.

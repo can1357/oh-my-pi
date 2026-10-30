@@ -315,14 +315,20 @@ fn a_working_directory_the_child_cannot_enter_is_reported() {
 /// A working directory the child cannot be put into does not stop an answer
 /// that never needed one.
 ///
-/// libc takes the first search-path directory whose data loads
-/// (`_nl_find_locale`), so a locale found before the first relative entry is
-/// the one the reference finds too. Measured in a mode-0600 directory and
-/// in a removed one, where the reference reports the same: cutting the list
-/// at its first relative entry is order-preserving, unlike dropping those
-/// entries, which also emptied `LOCPATH` and brought glibc's archive back.
-/// `PATH_LOCALE` is the BSDs' variable and asks for no directory here at
-/// all.
+/// `PATH_LOCALE` is the BSDs' variable, and no libc that runs on Linux
+/// reads it, so a relative value there asks for no directory at all: the
+/// lookup goes ahead and agrees with the reference.
+///
+/// A search path whose absolute entries come before its relative ones does
+/// *not* get the same treatment, and the second half of this test holds
+/// that line. Cutting the list at its first relative entry looked
+/// order-preserving and is not: glibc tries each *name* candidate across
+/// every directory before the next candidate (`intl/l10nflist.c`), so a
+/// prefix can answer from fallback data where the whole list would have
+/// found an exact match further along — measured for `astra@special`,
+/// where the reference inside the directory chose UTF-8 and the prefix
+/// chose Latin-1. A trailing cut can also invent a source: `/nonexistent::missing`
+/// cut to `/nonexistent:` ends in an empty entry, which is the root.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_answer_that_needs_no_working_directory_is_still_given() {
@@ -330,50 +336,79 @@ fn an_answer_that_needs_no_working_directory_is_still_given() {
 
 	let dir = tempfile::tempdir().unwrap();
 	let Some(locales) = shell_only_locale(dir.path()) else { return };
-	let Some(utf8) = generated_locale(&dir.path().join("utf8"), SHELL_ONLY_LOCALE, "UTF-8") else { return };
-	let latin_first = format!("{}:missing", locales.display());
-	let utf8_first = format!("{}:missing", utf8.display());
 	let absolute = locales.display().to_string();
-	let cases: [(&str, &str, Option<&str>, &str); 4] = [
-		("unsearchable-latin", &latin_first, None, "ISO-8859-1"),
-		("unsearchable-utf8", &utf8_first, None, "UTF-8"),
-		("unsearchable-bsd-variable", &absolute, Some("relative-locales"), "ISO-8859-1"),
-		("removed-latin", &latin_first, None, "ISO-8859-1"),
-	];
-	for (at, path, bsd, expected) in cases {
-		let cwd = dir.path().join(at);
-		fs::create_dir_all(&cwd).unwrap();
-		let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
-		let child = host.child_env();
-		match at.starts_with("removed") {
-			true => fs::remove_dir_all(&cwd).unwrap(),
-			false => fs::set_permissions(&cwd, fs::Permissions::from_mode(0o600)).unwrap(),
-		}
-		let env = |key: &str| match key {
-			"LOCPATH" => Some(path.to_owned()),
-			"PATH_LOCALE" => bsd.map(str::to_owned),
-			_ => None,
-		};
-		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
-		if !at.starts_with("removed") {
-			fs::set_permissions(&cwd, fs::Permissions::from_mode(0o755)).unwrap();
-		}
-		assert!(
-			matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == expected),
-			"{at}: {answer:?}"
-		);
-	}
+	let cwd = dir.path().join("unsearchable");
+	fs::create_dir_all(&cwd).unwrap();
+	let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+	let child = host.child_env();
+	fs::set_permissions(&cwd, fs::Permissions::from_mode(0o600)).unwrap();
+	let free = |key: &str| match key {
+		"LOCPATH" => Some(absolute.clone()),
+		"PATH_LOCALE" => Some("relative-locales".to_owned()),
+		_ => None,
+	};
+	let answered = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &free, Some(&child));
+	// A list that starts absolute still needs the directory, because a
+	// later entry can hold the better name candidate.
+	let mixed = format!("{absolute}:missing");
+	let bound = |key: &str| (key == "LOCPATH").then(|| mixed.clone());
+	let reported = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &bound, Some(&child));
+	fs::set_permissions(&cwd, fs::Permissions::from_mode(0o755)).unwrap();
+	assert!(
+		matches!(&answered, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"),
+		"{answered:?}"
+	);
+	assert!(matches!(&reported, crate::locale::Codeset::Unasked(_)), "{reported:?}");
+}
+
+/// A process that has the kernel reap its children cannot hold the
+/// utility's number, so no query is started there.
+///
+/// With `SIGCHLD` ignored or `SA_NOCLDWAIT` set the leader is reaped the
+/// moment it exits: `waitid` then says `ECHILD`, the number is back in
+/// circulation, and `kill(-pid, SIGKILL)` reaches whatever took it — an
+/// unrelated process, three times out of three in a private PID namespace,
+/// under each disposition. The lookup reports instead, and nothing it did
+/// can have signalled anyone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_process_whose_children_are_reaped_for_it_asks_nothing() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let shell_path = locales.to_str().unwrap().to_owned();
+	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+	// The same query answers under the ordinary disposition, so what the
+	// second half measures is the disposition and nothing else.
+	let ordinary = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
+	// SAFETY: nextest gives this test its own process, which starts no other
+	// child; the disposition is put back below.
+	let kept = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+	let reaped_for_us = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
+	// SAFETY: as above.
+	unsafe { libc::signal(libc::SIGCHLD, kept) };
+	assert!(
+		matches!(&ordinary, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"),
+		"{ordinary:?}"
+	);
+	let crate::locale::Codeset::Unasked(why) = &reaped_for_us else {
+		panic!("{reaped_for_us:?}");
+	};
+	assert!(why.contains("reap its children"), "{why}");
 }
 
 /// Every caller of [`crate::locale::locale_loadable`] models
 /// `setlocale(CATEGORY, "")`, which takes a name whole where `newlocale`
-/// splits one carrying a `;` per category.
+/// splits one carrying a `;` per category — and asks about the category it
+/// was given, which a codeset cannot report on.
 ///
 /// Measured: with no data named `LC_CTYPE=C;LC_TIME=C.UTF-8` the reference
 /// reports `ANSI_X3.4-1968` and `fold -w1` splits the two bytes of `é`,
 /// while `newlocale` loads that name and its `.UTF-8` tail reads as a UTF-8
-/// locale; and data literally named `astra;latin` loads as Latin-1 for the
-/// reference while `newlocale` refuses it.
+/// locale; data literally named `astra;latin` loads as Latin-1 for the
+/// reference while `newlocale` refuses it; and a German locale generated
+/// against the ASCII charmap loads with a decimal comma while its codeset
+/// is the C locale's, so reading loadability off `charmap` called its
+/// numerics absent.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_composite_looking_name_is_loadable_only_as_the_reference_loads_it() {
@@ -382,11 +417,19 @@ fn a_composite_looking_name_is_loadable_only_as_the_reference_loads_it() {
 	let mut copy = Command::new("cp");
 	copy.arg("-a").arg(locales.join(SHELL_ONLY_LOCALE)).arg(locales.join("astra;latin"));
 	assert!(copy.output().unwrap().status.success());
+	// A locale whose charset is the C locale's but whose numerics are not.
+	let ascii = "de_DE@ascii;valid";
+	let built = Command::new("localedef")
+		.args(["-i", "de_DE", "-f", "ANSI_X3.4-1968"])
+		.arg(locales.join(ascii))
+		.output()
+		.is_ok_and(|built| built.status.success());
 	// SAFETY: nextest gives this test its own process, and nothing else in
 	// it reads `LOCPATH` concurrently.
 	unsafe { std::env::set_var("LOCPATH", &locales) };
 	let absent = crate::locale::locale_loadable("LC_CTYPE=C;LC_TIME=C.UTF-8", libc::LC_CTYPE_MASK);
 	let present = crate::locale::locale_loadable("astra;latin", libc::LC_CTYPE_MASK);
+	let numerics = built.then(|| crate::locale::locale_loadable(ascii, libc::LC_NUMERIC_MASK));
 	let (utf8, _) = crate::host::Host::for_test("rsync", "", dir.path());
 	let mut utf8 = utf8;
 	utf8.set_test_var("LC_CTYPE", "LC_CTYPE=C;LC_TIME=C.UTF-8");
@@ -395,6 +438,7 @@ fn a_composite_looking_name_is_loadable_only_as_the_reference_loads_it() {
 	unsafe { std::env::remove_var("LOCPATH") };
 	assert!(!absent, "a name with no data of its own is not loadable");
 	assert!(present, "data literally named with a semicolon is loadable");
+	assert_ne!(numerics, Some(false), "an ASCII-charset locale still has its own numerics");
 	assert!(!reads_as_utf8, "a name that loads nothing is not a UTF-8 locale");
 }
 
