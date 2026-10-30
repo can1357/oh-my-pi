@@ -580,6 +580,90 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("keeps a published cycle's sentinel even when something older took a turn first", () => {
+		// A cycle whose turn was spent elsewhere leaves nothing behind when it
+		// gives up. That has to stop the moment it receives and publishes its
+		// own colour: its sentinel is then outstanding and nothing is guessing
+		// about it, and deleting that slot handed the late arrival to the next
+		// question and ended it unanswered — the next request's own answer
+		// disappeared.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(15_100);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		expect(terminal.refreshAppearance?.(43)).toBe(43);
+
+		// 41's whole exchange, then 42's own colour, then 42's late sentinel
+		// after its deadline, then 43's exchange — all in the order asked.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		vi.advanceTimersByTime(5_100);
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events.filter(event => event.token === 43)).toEqual([{ appearance: "light", token: 43 }]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("releases the queued refresh when a reply ends a cycle still inside multiplexer settlement", () => {
+		// Through a multiplexer cache the direct query waits on a settle timer
+		// that checks its cycle is still live. A reply that ends the cycle first
+		// made that callback return without sending anything, and nothing was
+		// left to start the request parked behind it: the terminal never asked
+		// about its colour again.
+		vi.useFakeTimers();
+		const originalTmux = Bun.env.TMUX;
+		Bun.env.TMUX = "/tmp/omp-appearance-settle,0,0";
+		const { terminal, queryCount } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+			// 41 is retired unanswered, 42 goes out and 43 queues behind it.
+			expect(terminal.refreshAppearance?.(41)).toBe(41);
+			vi.advanceTimersByTime(15_100);
+			expect(terminal.refreshAppearance?.(42)).toBe(42);
+			expect(terminal.refreshAppearance?.(43)).toBe(43);
+
+			// 41's own exchange finally lands; its claim takes it.
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+
+			// 42 gives up, so 43 goes out and enters multiplexer settlement with
+			// 44 parked behind it.
+			vi.advanceTimersByTime(5_100);
+			expect(terminal.refreshAppearance?.(44)).toBe(44);
+			const before = queryCount();
+
+			// 42's own answer arrives before the settle timer fires, ending 43's
+			// cycle. 44 must still reach the terminal.
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+			vi.advanceTimersByTime(120_000);
+
+			expect(queryCount()).toBeGreaterThan(before);
+			terminal.stop();
+		} finally {
+			if (originalTmux === undefined) delete Bun.env.TMUX;
+			else Bun.env.TMUX = originalTmux;
+		}
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];

@@ -862,9 +862,10 @@ type Da1SentinelOwner =
 	 * with nothing left to resolve, because the FIFO is positional: dropping it
 	 * would hand a reply that is merely late to the next probe's sentinel, and
 	 * that probe would resolve as unanswered. Here the late reply is matched to
-	 * the cycle that asked for it and discarded. Swept once
-	 * {@link OSC11_LATE_REPLY_GRACE_MS} has passed, so a sentinel that is lost
-	 * rather than late cannot offset the FIFO for good.
+	 * the cycle that asked for it and discarded. The marker itself is retired
+	 * once {@link OSC11_LATE_REPLY_GRACE_MS} has passed, so a sentinel that is
+	 * lost rather than late cannot offset the FIFO for good; what the cycle is
+	 * still owed outlives the marker as a claim, which carries no deadline.
 	 */
 	| { kind: "abandoned"; cycle?: Osc11Cycle };
 
@@ -2123,17 +2124,23 @@ export class ProcessTerminal implements Terminal {
 	 * sentinel to the replacement query and resolve that query as unanswered.
 	 * Its place in the reply queue is kept for the same reason — a late colour
 	 * reply is still this cycle's, and publishing it under the replacement's
-	 * request token is the error the queue exists to prevent. Both markers are
-	 * swept {@link OSC11_LATE_REPLY_GRACE_MS} later.
+	 * request token is the error the queue exists to prevent. The markers are
+	 * retired {@link OSC11_LATE_REPLY_GRACE_MS} later, and what the cycle is
+	 * still owed becomes a claim with no deadline of its own.
 	 */
 	#abandonOsc11Cycle(owner: Da1SentinelOwner & { kind: "osc11" }): void {
 		const index = this.#da1SentinelOwners.indexOf(owner);
 		if (index < 0 || this.#dead) return;
-		if (owner.cycle.absorbed) {
+		if (owner.cycle.absorbed && this.#osc11Cycles.includes(owner.cycle)) {
 			// Its turn was spent on somebody older's answer, and the sentinel
 			// that went with it too. There is nothing left for this cycle to be
 			// owed, so it leaves no marker: a lost answer costs one update, not
 			// every update after it.
+			//
+			// Only while it is still owed a colour. A cycle that went on to
+			// receive and publish its own answer has an outstanding sentinel
+			// that nothing is guessing about, and deleting that slot hands its
+			// late arrival to the next question and ends that one unanswered.
 			this.#da1SentinelOwners.splice(index, 1);
 			const spent = this.#osc11Cycles.indexOf(owner.cycle);
 			if (spent >= 0) this.#osc11Cycles.splice(spent, 1);
@@ -2183,7 +2190,7 @@ export class ProcessTerminal implements Terminal {
 		// claimed when that colour actually arrives, not before: a cycle that
 		// turns out to have sent nothing at all must not hold a sentinel back
 		// from the questions asked after it.
-		this.#addOsc11Claim("reply");
+		this.#addOsc11ReplyClaim();
 	}
 
 	/**
@@ -2216,7 +2223,18 @@ export class ProcessTerminal implements Terminal {
 		if (!cycle.live) return;
 		this.#osc11Pending = false;
 		this.#osc11LiveCycle = undefined;
+		// The cycle is over, so whatever it still had running is over with it.
+		// Through a multiplexer cache the direct query is armed on a settle
+		// timer that checks this cycle is still the live one: without cancelling
+		// it and releasing the queue here, a reply that ends the cycle before
+		// that timer fires leaves the request parked behind it with nothing left
+		// to start it, and the terminal never asks about its colour again.
+		if (this.#osc11CacheRefreshTimer) {
+			clearTimeout(this.#osc11CacheRefreshTimer);
+			this.#osc11CacheRefreshTimer = undefined;
+		}
 		this.#handleOsc11Response(rHex, gHex, bHex, cycle.token);
+		this.#startQueuedOsc11Query();
 	}
 
 	/** Note that somebody older spent the answer the live cycle was waiting for. */
@@ -2225,16 +2243,19 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
-	 * Record one more answer a retired cycle may still send. Plain data with no
+	 * Record one more colour a retired cycle may still send. Plain data with no
 	 * deadline: a timer here would be another statement about waiting standing
 	 * in for proof that an answer cannot arrive, and every such deadline became
 	 * the next place that inference was wrong. The count is capped instead, so
 	 * a terminal that stops answering altogether cannot leave a backlog that
-	 * swallows answers for ever.
+	 * swallows answers for ever — at the price named in {@link OSC11_MAX_CLAIMS}.
+	 *
+	 * Sentinel claims are not recorded here. One is raised only where a claim
+	 * has just taken a colour, because that is the only evidence that a
+	 * sentinel without a question is on its way.
 	 */
-	#addOsc11Claim(kind: "reply" | "sentinel"): void {
-		if (kind === "reply") this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);
-		else this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
+	#addOsc11ReplyClaim(): void {
+		this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);
 	}
 
 	#clearOsc11Claims(): void {
