@@ -21,9 +21,10 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { acquireFileLock } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+import { decideIsolationReclaim, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
@@ -215,7 +216,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 		return { removed: 0, failed: 0 };
 	}
 
-	const results: { path: string; ok: boolean; error?: string }[] = [];
+	const results: { path: string; ok: boolean; error?: string; skipped?: boolean }[] = [];
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
 		try {
@@ -229,7 +230,25 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					parentsToPrune.add(target.parentRepo);
 				}
 			} else {
-				if (target.kind === "task-isolation") await stopRetainedMount(target.path);
+				if (target.kind === "task-isolation") {
+					// The scan is a decision taken earlier; this is the moment of
+					// deletion. Under the sandbox's own lock, so a materialisation
+					// cannot land between the two, ask again — unless `--all` was
+					// asked for, which deletes whatever is there.
+					const lock = await acquireFileLock(target.path);
+					try {
+						if (!options.all && !(await decideIsolationReclaim(target.path)).reclaimable) {
+							results.push({ path: target.path, ok: true, skipped: true });
+							continue;
+						}
+						await stopRetainedMount(target.path);
+						await fs.rm(target.path, { recursive: true, force: true });
+					} finally {
+						lock.release();
+					}
+					results.push({ path: target.path, ok: true });
+					continue;
+				}
 				await fs.rm(target.path, { recursive: true, force: true });
 				if (target.parentRepo) parentsToPrune.add(target.parentRepo);
 			}
@@ -248,16 +267,19 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 		}
 	}
 
-	const succeeded = results.filter(r => r.ok).length;
-	const failed = results.length - succeeded;
-
+	const succeeded = results.filter(result => result.ok && !result.skipped).length;
+	const skipped = results.filter(result => result.skipped).length;
+	const failed = results.filter(result => !result.ok).length;
 	if (options.json) {
-		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
+		console.log(JSON.stringify({ removed: succeeded, failed, skipped, results }, null, 2));
 		return { removed: succeeded, failed };
 	}
 
 	for (const result of results) {
-		if (result.ok) {
+		if (result.skipped) {
+			console.log(`${chalk.dim("kept   ")}  ${result.path}`);
+			console.log(`          ${chalk.dim("in use when the removal came round")}`);
+		} else if (result.ok) {
 			console.log(`${chalk.green("removed")}  ${result.path}`);
 		} else {
 			console.log(`${chalk.red("failed ")}  ${result.path}`);
@@ -345,13 +367,14 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 		}
 	}
 	if (!isIsolation) return null;
-	const live = await hasLiveIsolationOwner(dir);
+	// The same rule the owner's teardown follows, asked from the other side: an
+	// unreadable marker is not proof that nobody is in there, and a live lease
+	// counts as much as a live owner. `--all` deletes regardless.
+	const decision = await decideIsolationReclaim(dir);
 	return {
 		path: dir,
 		kind: "task-isolation",
-		// Only after confirming no live owner is the "no live task" claim true.
-		// A running subagent's sandbox stays live so `clear` won't delete it.
-		orphanReason: live ? undefined : "task-isolation leftover (no live task owns it)",
+		orphanReason: decision.reclaimable ? decision.reason : undefined,
 	};
 }
 

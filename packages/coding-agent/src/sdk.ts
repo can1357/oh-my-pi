@@ -167,6 +167,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
+import { leaseIsolationWorkspace } from "./task/isolation-lease";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -4469,6 +4470,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			model => modelRegistry.getApiKey(model, providerSessionId),
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
+		// A session opened inside a task-isolation sandbox is a user of a
+		// workspace it did not materialise, and may well be in another process
+		// than the run that owns it. Holding a lease keeps that owner's teardown
+		// — capture included — waiting for this session rather than deleting the
+		// directory it is working in.
+		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd());
+		disposeCallbacks.add(() => void workspaceLease());
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(

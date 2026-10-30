@@ -5,6 +5,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import { scheduler } from "node:timers/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
@@ -163,6 +164,14 @@ import {
 } from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+
+/**
+ * How long a refused child's release waits for a disposal that outran its
+ * cleanup deadline. Long enough for a slow flush to land, short enough that a
+ * disposal which never finishes cannot hold a kernel or an isolation workspace
+ * for the life of the host.
+ */
+const REFUSED_RELEASE_MAX_WAIT_MS = 60_000;
 
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
@@ -3681,16 +3690,29 @@ export async function finalizeSubagentLifecycle(args: {
 	}
 	// The disposal outran the cleanup deadline. What the caller held is what the
 	// child is still being disposed on — its isolation workspace, its kernel —
-	// so the release waits for the disposal to finish rather than pulling the
-	// ground out from under it, and the wait is tracked rather than awaited
-	// here, which is what the deadline was for. Claiming says so: this
-	// discharge is owned now, and the boundary that created the hold must not
-	// run it the moment this returns.
+	// so the release waits for the disposal rather than pulling the ground out
+	// from under it, and the wait is tracked rather than awaited here, which is
+	// what the deadline was for. Claiming says so: this discharge is owned now,
+	// and the boundary that created the hold must not run it on the way out.
+	//
+	// The wait is bounded. A disposal that never finishes — a subsystem flush
+	// with nothing to flush it — would otherwise hold the kernel and the
+	// workspace for the life of the host, which is the leak this whole change
+	// exists to end. Past the bound the release runs anyway and says why.
 	asReleaseHold(args.onRelease)?.claim();
-	trackLateCleanup(deferred.catch(() => undefined).then(releaseOwnedResources), {
-		id: args.id,
-		resource: "refused-adoption-release",
+	const settled = Promise.race([
+		deferred.catch(() => undefined).then(() => true),
+		scheduler.wait(REFUSED_RELEASE_MAX_WAIT_MS).then(() => false),
+	]).then(async disposed => {
+		if (!disposed) {
+			logger.warn("Subagent disposal outran its release wait; releasing its resources anyway", {
+				id: args.id,
+				waitedMs: REFUSED_RELEASE_MAX_WAIT_MS,
+			});
+		}
+		await releaseOwnedResources();
 	});
+	trackLateCleanup(settled, { id: args.id, resource: "refused-adoption-release" });
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */

@@ -9,8 +9,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { isEnoent, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { hasLiveIsolationLease } from "./isolation-lease";
 
 const { IsoBackendKind } = natives;
 
@@ -69,20 +70,92 @@ async function processStartToken(pid: number): Promise<string | null> {
 	return started.length > 0 ? started : null;
 }
 
+/** A process identity recorded in a marker or a lease. */
+export interface ProcessIdentity {
+	pid: number;
+	startToken?: string;
+}
+
+/** Write this process's identity to `file`, replacing it atomically. */
+export async function writeProcessIdentity(file: string, extra: Record<string, unknown> = {}): Promise<void> {
+	const startToken = await processStartToken(process.pid);
+	const record = { pid: process.pid, ...(startToken ? { startToken } : {}), ...extra };
+	await writeFileAtomically(file, JSON.stringify(record));
+}
+
+/**
+ * Replace `file` in one step. A marker rewritten in place is readable as a
+ * truncated, generation-less file for the length of the write, and a failure
+ * part-way leaves it that way for good — which is exactly when something else
+ * is deciding whether the sandbox still has an owner.
+ */
+async function writeFileAtomically(file: string, contents: string): Promise<void> {
+	const temporary = `${file}.${process.pid}.${Snowflake.next()}.tmp`;
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	try {
+		await Bun.write(temporary, contents);
+		await fs.rename(temporary, file);
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+/** The identity recorded in `file`, `undefined` when there is none, `"unreadable"` when it cannot be read. */
+export async function readProcessIdentity(file: string): Promise<ProcessIdentity | "unreadable" | undefined> {
+	let decoded: unknown;
+	try {
+		decoded = await Bun.file(file).json();
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		return "unreadable";
+	}
+	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return "unreadable";
+	const pid = decoded.pid;
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return "unreadable";
+	const startToken =
+		"startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0
+			? decoded.startToken
+			: undefined;
+	return { pid, ...(startToken ? { startToken } : {}) };
+}
+
+/**
+ * Whether the process named by `identity` is still running. `process.kill(pid,
+ * 0)` can fail with `EPERM` even when the process is alive, so only an explicit
+ * `ESRCH` counts as dead; a live pid whose start token no longer matches is a
+ * recycled pid, which is a different process.
+ */
+export async function isProcessStillLive(identity: ProcessIdentity): Promise<boolean> {
+	try {
+		process.kill(identity.pid, 0);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+	}
+	if (identity.startToken === undefined) return true;
+	const current = await processStartToken(identity.pid);
+	return current === null || current === identity.startToken;
+}
+
 /**
  * Record the current process as owner of the sandbox rooted at `baseDir`, and
  * return the {@link IsolationOwner.generation} this materialisation is
  * recorded under.
  *
  * Written before the isolation backend materialises `m` so a concurrent
- * `omp worktree clear` never sees an owner-less sandbox mid-creation.
+ * `omp worktree clear` never sees an owner-less sandbox mid-creation, and
+ * written atomically so a failure part-way never leaves a marker that reads as
+ * owner-less.
  */
 export async function writeIsolationOwner(baseDir: string, id: string): Promise<string> {
-	const startToken = await processStartToken(process.pid);
 	const generation = `${process.pid}-${Snowflake.next()}`;
-	const owner: IsolationOwner = { pid: process.pid, id, generation, ...(startToken ? { startToken } : {}) };
-	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { id, generation });
 	return generation;
+}
+
+/** Mark a renamed-away sandbox as retired, so reclamation never mistakes it for a live owner's. */
+export async function markIsolationRetired(baseDir: string): Promise<void> {
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { retired: true });
 }
 
 /**
@@ -134,40 +207,58 @@ export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	}
 }
 
+/** Why a sandbox may or may not be reclaimed by something that did not materialise it. */
+export interface IsolationReclaimDecision {
+	/** True only when nothing provably still needs the sandbox. */
+	reclaimable: boolean;
+	/** The judgement in one phrase, for `omp worktree list` and the clear log. */
+	reason: string;
+}
+
 /**
- * Whether a live omp process still owns the sandbox at `baseDir`.
+ * Whether the sandbox at `baseDir` may be reclaimed by a reclaimer — `omp
+ * worktree clear` — that did not materialise it.
  *
- * A missing or malformed marker means no verifiable owner — a crashed run or a
- * sandbox from before markers existed, both safe to reclaim. `process.kill(pid,
- * 0)` can fail with `EPERM` even when the process is alive, so only an explicit
- * `ESRCH` ("no such process") counts as dead; any other error is treated as
- * alive to avoid deleting a sandbox that is actually in use. When the marker
- * carries a {@link IsolationOwner.startToken}, a live pid whose current token no
- * longer matches is a recycled pid — a different process — and counts as dead.
+ * This is the same rule the owner's teardown follows, asked from the other
+ * side: deletion needs proof, and an error is not proof. A marker that cannot
+ * be read says nothing about whether a task is running in there, so it keeps
+ * the directory (`--all` is the way to delete anyway); a live owner or a live
+ * lease keeps it; a marker a teardown retired is always reclaimable, because
+ * its owner has already decided it is finished with it.
  */
-export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
+export async function decideIsolationReclaim(baseDir: string): Promise<IsolationReclaimDecision> {
+	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
 	let decoded: unknown;
 	try {
-		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
-	} catch {
-		return false;
+		decoded = await Bun.file(markerFile).json();
+	} catch (error) {
+		if (isEnoent(error)) {
+			// A sandbox with no marker at all: a pre-marker leftover, or one whose
+			// marker something removed. Neither is proof that no task is working
+			// in there, and the marker is written before the backend materialises
+			// anything, so a crashed run leaves one naming its dead process.
+			// `--all` is the way to remove what cannot prove itself.
+			return { reclaimable: false, reason: "no owner marker (use --all to remove)" };
+		}
+		return { reclaimable: false, reason: `owner marker unreadable (${errorText(error)})` };
 	}
-	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return false;
-	const pid = decoded.pid;
-	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+	if (typeof decoded !== "object" || decoded === null) {
+		return { reclaimable: false, reason: "owner marker unreadable (not an object)" };
 	}
-	// The pid is live (or unknowable via EPERM). Reject a recycled pid: if the
-	// marker pinned the owner's start-time token, the process wearing that pid
-	// now must still present the same token.
-	if ("startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0) {
-		const current = await processStartToken(pid);
-		if (current !== null && current !== decoded.startToken) return false;
+	if ("retired" in decoded && decoded.retired === true) {
+		return { reclaimable: true, reason: "task-isolation leftover (retired by its owner)" };
 	}
-	return true;
+	const identity = await readProcessIdentity(markerFile);
+	if (identity === "unreadable" || identity === undefined) {
+		return { reclaimable: false, reason: "owner marker unreadable (no usable owner identity)" };
+	}
+	if (await isProcessStillLive(identity)) {
+		return { reclaimable: false, reason: "a live task owns it" };
+	}
+	if (await hasLiveIsolationLease(baseDir)) {
+		return { reclaimable: false, reason: "a live session is working in it" };
+	}
+	return { reclaimable: true, reason: "task-isolation leftover (no live task owns it)" };
 }
 
 /** Sidecar recording the native-teardown backend of a retained workspace. */
@@ -226,4 +317,9 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	}
 	if (!needsNativeTeardown(backend)) return undefined;
 	return backend;
+}
+
+/** One-line text for an error recorded in a reclaim decision. */
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }

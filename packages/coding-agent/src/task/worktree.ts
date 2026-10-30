@@ -3,6 +3,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -11,7 +12,12 @@ import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
 import { deferTeardownWhileLeased, forgetIsolationWorkspace, registerIsolationWorkspace } from "./isolation-lease";
-import { clearClaimedWorkspace, readIsolationClaim, writeIsolationOwner } from "./isolation-ownership";
+import {
+	clearClaimedWorkspace,
+	markIsolationRetired,
+	readIsolationClaim,
+	writeIsolationOwner,
+} from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -20,6 +26,10 @@ const { IsoBackendKind } = natives;
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
+/** How long a materialisation or teardown waits for the sandbox lock another one holds. */
+const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
+/** How long an in-place teardown holds the lock for a backend stop before leaving it to reclamation. */
+const SANDBOX_STOP_MAX_WAIT_MS = 10_000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
 async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
@@ -652,6 +662,27 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	}
 }
 
+/**
+ * The canonical path of a sandbox, which is its identity.
+ *
+ * A lock is a name, not a directory: two paths that reach the same directory
+ * through different symlinks hash to different lock names, so each would think
+ * it had exclusive access while both materialised and deleted the same files.
+ * Resolving symlinks before locking, claiming or deleting makes the name the
+ * directory. The sandbox need not exist yet, so an unresolvable leaf is taken
+ * from its nearest existing parent.
+ */
+export async function resolveSandboxIdentity(baseDir: string): Promise<string> {
+	const absolute = path.resolve(baseDir);
+	try {
+		return await fs.realpath(absolute);
+	} catch {
+		const parent = path.dirname(absolute);
+		if (parent === absolute) return absolute;
+		return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
+	}
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
@@ -659,7 +690,7 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+	const baseDir = await resolveSandboxIdentity(getWorktreeDir(getTaskIsolationSegment(repoRoot, id)));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -669,7 +700,7 @@ export async function ensureIsolation(
 		// The whole attempt runs under the sandbox lock, so a teardown cannot
 		// retire the directory out from under a materialisation that has already
 		// claimed it, and two materialisations of one id cannot interleave.
-		const lock = await acquireFileLock(baseDir);
+		const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 		let claimed = false;
 		try {
 			// Claim ownership before anything is destroyed or materialised. The
@@ -749,14 +780,12 @@ export async function ensureIsolation(
  * and keeps the old unconditional behaviour.
  */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	// A descendant session is still working in here — a nested child spawned
-	// from an isolated parent inherits this cwd without materialising anything
-	// of its own. The owner keeps the teardown; the last descendant to end runs
-	// it. See `isolation-lease`.
-	if (deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle))) return;
-	// baseDir is the parent of the merged directory
-	const baseDir = path.dirname(handle.mergedDir);
-	const lock = await acquireFileLock(baseDir);
+	// baseDir is the parent of the merged directory, resolved to the directory
+	// itself: a lock on an alias of this path excludes nobody.
+	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
+	// Waiting for a slow materialisation or teardown is the point of the lock,
+	// so wait generously rather than failing the run that needs the sandbox.
+	const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	let retiredDir: string | undefined;
 	let proceed = false;
 	try {
@@ -771,10 +800,21 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 				return;
 			}
 		}
+		// Someone is still working in here — a nested child that inherited this
+		// cwd, a session another process opened in it. Asked under the lock and
+		// after the claim check, so a lease taken while this teardown was
+		// deciding still counts. The owner keeps the teardown; the last user to
+		// leave runs it. See `isolation-lease`.
+		if (await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle))) return;
 		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 		try {
 			await fs.rename(baseDir, candidate);
 			retiredDir = candidate;
+			// The copy left behind is nobody's sandbox now. Saying so keeps a
+			// failed removal below from looking like a live owner's workspace to
+			// `omp worktree clear`, which would then never reclaim it while this
+			// process lives.
+			await markIsolationRetired(candidate).catch(() => undefined);
 		} catch {
 			// A live mount pins the directory in place; hold the lock across the
 			// teardown instead, so no materialisation can start beside it.
@@ -787,9 +827,29 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 	}
 	const teardownBase = retiredDir ?? baseDir;
 	const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
+	// An in-place teardown holds the lock, so a backend stop that never settles
+	// would deny every later materialisation of this id. Bounded: past the
+	// bound the stop is left running, the lock goes back, and the directory is
+	// left to `omp worktree clear`, which can tell a retired sandbox from a
+	// live one.
+	let abandoned = false;
 	try {
 		try {
-			await natives.isoStop(handle.backend, teardownMerged);
+			const stop = natives.isoStop(handle.backend, teardownMerged);
+			if (retiredDir === undefined) {
+				abandoned = !(await Promise.race([
+					stop.then(() => true),
+					scheduler.wait(SANDBOX_STOP_MAX_WAIT_MS).then(() => false),
+				]));
+				if (abandoned) {
+					logger.warn("isolation backend stop outran its teardown bound; releasing the sandbox lock", {
+						backend: handle.backend,
+						mergedDir: teardownMerged,
+					});
+				}
+			} else {
+				await stop;
+			}
 		} catch (err) {
 			logger.warn("isolation backend stop failed during cleanup", {
 				backend: handle.backend,
@@ -798,9 +858,19 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			});
 		}
 	} finally {
-		await fs.rm(teardownBase, { recursive: true, force: true });
-		forgetIsolationWorkspace(handle.mergedDir);
-		if (retiredDir === undefined) lock.release();
+		try {
+			if (!abandoned) await fs.rm(teardownBase, { recursive: true, force: true });
+		} catch (err) {
+			logger.warn("isolation workspace removal failed; leaving it for reclamation", {
+				mergedDir: teardownMerged,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		} finally {
+			// Always: a removal that threw must not keep the sandbox locked for
+			// the life of this process.
+			forgetIsolationWorkspace(handle.mergedDir);
+			if (retiredDir === undefined) lock.release();
+		}
 	}
 }
 

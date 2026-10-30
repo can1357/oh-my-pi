@@ -877,13 +877,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	// materialise and does not own. Holding it keeps the owner's teardown
 	// waiting for this child rather than deleting the workspace under it; the
 	// hold ends where everything else this child holds ends.
-	const workspace = leaseIsolationWorkspace(request.session.cwd);
+	const workspace = await leaseIsolationWorkspace(request.session.cwd);
 	const callerRelease = request.onRelease;
 	const hold = createReleaseHold(async () => {
 		try {
 			await callerRelease?.();
 		} finally {
-			workspace();
+			await workspace();
 		}
 	});
 	try {

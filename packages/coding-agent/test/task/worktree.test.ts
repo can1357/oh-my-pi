@@ -17,12 +17,13 @@ import {
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
+	resolveSandboxIdentity,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import { ISOLATION_OWNER_FILE, writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
-import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, setWorktreesDir, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -1119,7 +1120,7 @@ describe("detachGitDir", () => {
 			});
 			const write = Bun.write.bind(Bun);
 			vi.spyOn(Bun, "write").mockImplementation((destination, input, options) =>
-				String(destination).endsWith(ISOLATION_OWNER_FILE)
+				String(destination).includes(ISOLATION_OWNER_FILE)
 					? Promise.reject(new Error("claim write failed"))
 					: write(destination as Parameters<typeof write>[0], input as Parameters<typeof write>[1], options),
 			);
@@ -1157,14 +1158,14 @@ describe("detachGitDir", () => {
 			await fs.mkdir(nested, { recursive: true });
 			const data = path.join(nested, "descendant.txt");
 			await fs.writeFile(data, "written by a descendant\n");
-			const descendant = leaseIsolationWorkspace(nested);
+			const descendant = await leaseIsolationWorkspace(nested);
 
 			await cleanupIsolation(handle);
 			expect(await Bun.file(data).exists()).toBe(true);
 
 			// The owner's teardown is not cancelled, only deferred: it runs when
 			// the last descendant ends.
-			descendant();
+			await descendant();
 			await scheduler.wait(50);
 			expect(await Bun.file(data).exists()).toBe(false);
 		} finally {
@@ -1172,6 +1173,63 @@ describe("detachGitDir", () => {
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
 			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
+	});
+
+	it("gives the sandbox lock back when an in-place teardown cannot remove the directory", async () => {
+		// The in-place path (a mount refuses the rename) holds the lock across
+		// the teardown. A removal that throws must still hand it back, or this
+		// id can never be materialised again while the process lives.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-release-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "lock-release");
+			const baseDir = path.dirname(handle.mergedDir);
+			const rename = fs.rename;
+			vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+				if (String(from) === baseDir) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+				return await rename(from, to);
+			});
+			const remove = fs.rm;
+			vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+				if (String(target) === baseDir) throw Object.assign(new Error("EIO"), { code: "EIO" });
+				return await remove(target, options);
+			});
+
+			await cleanupIsolation(handle);
+
+			const lock = tryAcquireFileLock(await resolveSandboxIdentity(baseDir));
+			expect(lock).not.toBeNull();
+			lock?.release();
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("resolves a sandbox reached through a symlink to the same identity", async () => {
+		// A lock is a name. Two paths that reach one directory through
+		// different symlinks hash to different names, so each would believe it
+		// had exclusive access to the same files.
+		const real = await fs.mkdtemp(path.join(os.tmpdir(), "omp-identity-"));
+		tempDirs.push(real);
+		const alias = path.join(path.dirname(real), `${path.basename(real)}-alias`);
+		await fs.symlink(real, alias);
+		tempDirs.push(alias);
+
+		expect(await resolveSandboxIdentity(path.join(alias, "sandbox"))).toBe(
+			path.join(await fs.realpath(real), "sandbox"),
+		);
 	});
 });
 

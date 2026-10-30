@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import { ISOLATION_LEASE_DIR } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	ISOLATION_OWNER_FILE,
+	markIsolationRetired,
 	RETAINED_BACKEND_FILE,
 	writeIsolationOwner,
 	writeRetainedBackend,
@@ -51,15 +53,21 @@ describe("worktree clear task-isolation ownership", () => {
 		return proc.pid;
 	}
 
-	it("keeps live-owned sandboxes and reclaims dead/markerless/corrupt ones", async () => {
+	it("keeps live-owned, unreadable-marker and markerless sandboxes, reclaims dead-owner ones", async () => {
 		const live = await makeSandbox("tlive0001");
 		await writeIsolationOwner(live, "live0001"); // marker names this test process
 
 		const dead = await makeSandbox("tdead0002");
 		await Bun.write(path.join(dead, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "dead0002" }));
 
-		const orphan = await makeSandbox("tnone0003"); // no marker at all (crashed pre-marker run)
+		// No marker at all: a pre-marker leftover, or one whose marker something
+		// removed. Neither proves no task is working in there, and a crashed run
+		// now always leaves a marker naming its dead process.
+		const orphan = await makeSandbox("tnone0003");
 
+		// A marker nobody can parse says nothing about whether a task is
+		// running in there, and deletion needs proof. `--all` is the way to
+		// remove it anyway.
 		const corrupt = await makeSandbox("tbad00004");
 		await Bun.write(path.join(corrupt, ISOLATION_OWNER_FILE), "{ not json");
 
@@ -86,12 +94,30 @@ describe("worktree clear task-isolation ownership", () => {
 			);
 		expect(await Bun.file(path.join(live, "m", "work.txt")).exists()).toBe(true);
 		expect(await exists(dead)).toBe(false);
-		expect(await exists(orphan)).toBe(false);
-		expect(await exists(corrupt)).toBe(false);
+		expect(await exists(orphan)).toBe(true);
+		expect(await exists(corrupt)).toBe(true);
 		expect(await exists(pending)).toBe(true);
 		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
 		// cannot spot the recycled pid and the sandbox is conservatively kept.
 		expect(await exists(recycled)).toBe(process.platform === "win32");
+	});
+
+	it("keeps a sandbox a live session still leases, and reclaims one its owner retired", async () => {
+		// `clear` judges by proof, like the owner's teardown: a dead owner whose
+		// sandbox a live session is working in stays, and a directory the
+		// owner's teardown already retired goes even though its marker names a
+		// live process.
+		const leased = await makeSandbox("tlease10");
+		await Bun.write(path.join(leased, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "lease10" }));
+		await Bun.write(path.join(leased, ISOLATION_LEASE_DIR, "live.json"), JSON.stringify({ pid: process.pid }));
+
+		const retired = await makeSandbox("tretire11");
+		await markIsolationRetired(retired);
+
+		await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(await Bun.file(path.join(leased, "m", "work.txt")).exists()).toBe(true);
+		await expect(fs.stat(retired)).rejects.toThrow();
 	});
 
 	it("unmounts retained mounting-backend workspaces before removal", async () => {
