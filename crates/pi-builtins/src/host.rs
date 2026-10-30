@@ -1627,6 +1627,16 @@ impl ChildEnv {
 		Ok(command)
 	}
 
+	/// The shell's working directory, for something that resolves a relative
+	/// path the way the shell's children do without starting one.
+	///
+	/// `Err` when the shell sits in a virtual directory, which no process can
+	/// enter.
+	#[cfg(unix)]
+	pub fn native_cwd(&self) -> io::Result<&Path> {
+		native_working_dir(&self.filesystem, &self.cwd)
+	}
+
 	/// Drains a child's piped stderr into the command's standard error on a
 	/// helper thread.
 	///

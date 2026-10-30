@@ -40,8 +40,8 @@ pub(crate) fn side_charset(spec: &[u8], am_server: bool) -> &[u8] {
 /// object, so an alias whose name carries no codeset (a generated bare
 /// `en_US`, `ISO-8859-1`) reads as the charset it really has, and a name libc
 /// cannot load reads as the C locale's ASCII, which is what `setlocale`
-/// leaves behind when it fails. `child` carries the shell's working directory
-/// and environment for the locales only it can see (see
+/// leaves behind when it fails. `child` carries the shell's working
+/// directory, which a relative locale search path resolves against (see
 /// [`crate::locale::loaded_codeset`]).
 pub(crate) fn locale_charset(
 	env: &dyn Fn(&str) -> Option<String>,

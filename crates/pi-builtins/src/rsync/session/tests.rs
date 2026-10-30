@@ -120,37 +120,45 @@ fn option_errors_escape_unless_8_bit_output_was_parsed() {
 	assert!(cap.err().starts_with("rsync: --bogus-ün: unknown option\n"), "{}", cap.err());
 }
 
-/// A locale only the shell knows about: generated with `localedef` into a
-/// temporary directory, reachable through `LOCPATH`, which libc reads from the
-/// process environment the builtin does not share with its shell. The locale
-/// is ISO-8859-1, which represents every byte, so rsync 3.5.1 under it prints
-/// a non-ASCII name's bytes (measured: `env -i LOCPATH=… LC_ALL=en_US rsync
-/// -ai "src/ünï cødé.txt" dst/` prints them), and the builtin must too rather
-/// than fall back to the C locale's escaping.
+/// A locale name no installed locale archive can answer for, so only the
+/// directory the test generates can supply it.
+#[cfg(target_os = "linux")]
+const SHELL_ONLY_LOCALE: &str = "omp_rsync_latin1";
+
+/// An ISO-8859-1 locale under `<dir>/locales/<SHELL_ONLY_LOCALE>`, built with
+/// `localedef`. ISO-8859-1 represents every byte, so rsync 3.5.1 under it
+/// prints a non-ASCII name's bytes (measured: `env -i LOCPATH=… LC_ALL=…
+/// rsync -ai "src/ünï.txt" dst/` prints them) where the C locale escapes
+/// them. `None` on a host without locale sources, which cannot host the
+/// scenario at all.
+#[cfg(target_os = "linux")]
+fn shell_only_locale(dir: &Path) -> Option<PathBuf> {
+	let locales = dir.join("locales");
+	fs::create_dir_all(locales.join(SHELL_ONLY_LOCALE)).unwrap();
+	let built = Command::new("localedef")
+		.args(["-i", "en_US", "-f", "ISO-8859-1"])
+		.arg(locales.join(SHELL_ONLY_LOCALE))
+		.output();
+	fs::create_dir_all(dir.join("src")).unwrap();
+	fs::write(dir.join("src/ünï.txt"), b"x\n").unwrap();
+	built.is_ok_and(|built| built.status.success()).then_some(locales)
+}
+
+/// A locale only the shell knows about, reachable through `LOCPATH`, which
+/// libc reads from the process environment the builtin does not share with its
+/// shell: the builtin must print the name's bytes rather than fall back to the
+/// C locale's escaping.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_locale_only_the_shell_exports_is_honoured() {
 	let dir = tempfile::tempdir().unwrap();
-	let locales = dir.path().join("locales");
-	fs::create_dir_all(locales.join("en_US")).unwrap();
-	let built = Command::new("localedef")
-		.args(["-i", "en_US", "-f", "ISO-8859-1"])
-		.arg(locales.join("en_US"))
-		.output();
-	let has_locale_command = Command::new("locale").arg("charmap").output().is_ok_and(|o| o.status.success());
-	// Hosts without locale sources or the POSIX `locale` command cannot host
-	// this scenario at all; nothing to compare there.
-	if !built.is_ok_and(|o| o.status.success()) || !has_locale_command {
-		return;
-	}
-	fs::create_dir_all(dir.path().join("src")).unwrap();
-	fs::write(dir.path().join("src/ünï.txt"), b"x\n").unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
 	// Absolute, then relative: a relative entry resolves against the *shell's*
 	// working directory (`cd /tmp/job; LOCPATH=locales rsync …`), which is this
 	// run's `cwd` and not the one the test process sits in.
 	for path in [locales.to_str().unwrap(), "locales"] {
 		let dest = format!("dst-{}/", path.replace('/', "_"));
-		let env = [("LC_ALL", "en_US"), ("LOCPATH", path)];
+		let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", path)];
 		let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", &dest], "", dir.path(), &env);
 		assert_eq!(code, 0, "{path}: {}", cap.err());
 		assert!(cap.out().contains("ünï.txt"), "{path}: {}", cap.out());
@@ -163,19 +171,78 @@ fn a_locale_only_the_shell_exports_is_honoured() {
 	// SAFETY: nextest gives this test its own process, and nothing else in it
 	// reads `LOCPATH` concurrently.
 	unsafe { std::env::set_var("LOCPATH", shared) };
-	let env = [("LC_ALL", "en_US"), ("LOCPATH", shared)];
+	let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", shared)];
 	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst-list/"], "", dir.path(), &env);
 	// SAFETY: as above.
 	unsafe { std::env::remove_var("LOCPATH") };
 	assert_eq!(code, 0, "{shared}: {}", cap.err());
 	assert!(cap.out().contains("ünï.txt"), "{shared}: {}", cap.out());
-	// The shell's `PATH` decides nothing: the helper that reads the codeset is
-	// ours, and an absolute rsync under a restricted `PATH` still loads the
-	// locale through libc.
-	let env = [("LC_ALL", "en_US"), ("LOCPATH", "locales"), ("PATH", "/nonexistent")];
+	// The shell's `PATH` decides nothing: the codeset comes from libc, not from
+	// a command the shell's search path selects.
+	let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", "locales"), ("PATH", "/nonexistent")];
 	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst-nopath/"], "", dir.path(), &env);
 	assert_eq!(code, 0, "restricted PATH: {}", cap.err());
 	assert!(cap.out().contains("ünï.txt"), "restricted PATH: {}", cap.out());
+}
+
+/// The shell's working directory holds the files of whoever ran `cd`, so
+/// nothing in it may be executed to settle the locale — not even through a
+/// relative entry of this process's own `PATH`, which names that directory
+/// for a child started there.
+#[cfg(target_os = "linux")]
+#[test]
+fn nothing_in_the_shells_directory_runs_for_the_locale() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	// A `locale` command the shell's working directory supplies: it records
+	// that it ran, and answers with the C locale's charset, which escapes the
+	// name the real locale prints.
+	let ran = dir.path().join("ran");
+	let rogue = dir.path().join("locale");
+	fs::write(&rogue, format!("#!/bin/sh\n: > '{}'\necho ANSI_X3.4-1968\n", ran.display())).unwrap();
+	fs::set_permissions(&rogue, fs::Permissions::from_mode(0o755)).unwrap();
+	let path = format!(".:{}", std::env::var("PATH").unwrap_or_default());
+	// SAFETY: nextest gives this test its own process, and nothing else in it
+	// reads `PATH` concurrently.
+	unsafe { std::env::set_var("PATH", &path) };
+	let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", locales.to_str().unwrap())];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst/"], "", dir.path(), &env);
+	assert_eq!(code, 0, "{}", cap.err());
+	assert!(!ran.exists(), "a program in the shell's directory ran: {}", cap.out());
+	assert!(cap.out().contains("ünï.txt"), "{}", cap.out());
+}
+
+/// No `locale` command is reachable: the codeset still has to come from the
+/// shell's locale search path, and never from this process's, which is a
+/// different question. Measured on rsync 3.5.1 under `env -i
+/// LOCPATH=/nonexistent LC_ALL=… rsync -ai src/ünï.txt dst/`: `>f+++++++++
+/// \#303\#274n\#303\#257.txt`, the C locale's escaping.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_a_locale_command_the_shells_search_path_still_answers() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let empty = dir.path().join("empty-bin");
+	fs::create_dir_all(&empty).unwrap();
+	// SAFETY: nextest gives this test its own process, and nothing else in it
+	// reads `PATH` or `LOCPATH` concurrently.
+	unsafe { std::env::set_var("PATH", &empty) };
+	let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", locales.to_str().unwrap())];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst/"], "", dir.path(), &env);
+	assert_eq!(code, 0, "{}", cap.err());
+	assert!(cap.out().contains("ünï.txt"), "{}", cap.out());
+	// And the other way round: this process's search path finds the locale,
+	// the shell's does not, so the C locale is the answer.
+	// SAFETY: as above.
+	unsafe { std::env::set_var("LOCPATH", &locales) };
+	let env = [("LC_ALL", SHELL_ONLY_LOCALE), ("LOCPATH", "/nonexistent-locales")];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst-host/"], "", dir.path(), &env);
+	// SAFETY: as above.
+	unsafe { std::env::remove_var("LOCPATH") };
+	assert_eq!(code, 0, "{}", cap.err());
+	assert!(cap.out().contains("\\#303\\#274n\\#303\\#257.txt"), "{}", cap.out());
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
