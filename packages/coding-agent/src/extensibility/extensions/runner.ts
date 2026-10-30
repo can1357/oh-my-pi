@@ -877,14 +877,15 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
-		// The owner goes with the configuration here too. `initialize()` replaces the queue with a
-		// direct registration, and that is the path a real SDK extension takes: without this the
-		// queue-time wrapper is simply skipped and every provider callback runs unowned.
+		// The session goes with the configuration here too. `initialize()` replaces the queue
+		// with a direct registration, and that is the path a real SDK extension takes: without
+		// this the registry would have no owner to ask before calling the provider, and a
+		// withdrawal would take away a sibling session's registration along with this one's.
 		this.runtime.registerProvider = (name, config, sourceId) => {
 			this.modelRegistry.registerProvider(name, config, sourceId, this.runtime);
 		};
 		this.runtime.unregisterProvider = name => {
-			this.modelRegistry.unregisterProvider(name);
+			this.modelRegistry.unregisterProvider(name, this.runtime);
 		};
 
 		// Context actions (required)

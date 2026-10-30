@@ -1,13 +1,14 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { getOAuthProvider } from "../registry/oauth";
-import type { OAuthProviderId } from "../registry/oauth/types";
+import { type CustomOAuthProvider, getOAuthProviderEntry } from "../registry/oauth";
+import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
+import { callThroughGate } from "./provider-gate";
 import type { OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
@@ -43,6 +44,24 @@ export interface OAuthAccountsDeps {
 	refresher: OAuthRefresher;
 }
 
+/**
+ * Runs a runtime-registered provider's login on the author's object. Its caller runs it through the
+ * registration's gate: the capability check and the `storeCredentialsAs` read are the author's code
+ * as much as the call (either may be a getter), so both happen before the first await, under that
+ * gate.
+ */
+async function loginCustomProvider(
+	provider: OAuthProviderId,
+	custom: CustomOAuthProvider,
+	callbacks: OAuthLoginCallbacks,
+): Promise<{ result: OAuthCredentials | string; storeCredentialsAs: string | undefined }> {
+	if (!custom.login) {
+		throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
+	}
+	const storeCredentialsAs = custom.storeCredentialsAs;
+	return { result: await custom.login(callbacks), storeCredentialsAs };
+}
+
 /** OAuth login, per-account access resolution, and account listings. */
 export class OAuthAccounts implements OAuthApi {
 	#deps: OAuthAccountsDeps;
@@ -73,12 +92,7 @@ export class OAuthAccounts implements OAuthApi {
 						}),
 					)
 			: undefined;
-		// Built-in registry first, then runtime-registered extension providers.
-		const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
-		if (!def?.login) {
-			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
-		}
-		const result = await def.login({
+		const callbacks: OAuthLoginCallbacks = {
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
 			onPrompt: ctrl.onPrompt,
@@ -86,7 +100,26 @@ export class OAuthAccounts implements OAuthApi {
 			onBrowserSession: ctrl.onBrowserSession,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
-		});
+		};
+		// Built-in registry first, then runtime-registered extension providers.
+		const def = getProviderDefinition(provider);
+		let result: OAuthCredentials | string;
+		let storeCredentialsAs: string | undefined;
+		if (def) {
+			if (!def.login) {
+				throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
+			}
+			result = await def.login(callbacks);
+			storeCredentialsAs = def.storeCredentialsAs;
+		} else {
+			const entry = getOAuthProviderEntry(provider);
+			if (!entry) {
+				throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
+			}
+			({ result, storeCredentialsAs } = await callThroughGate(entry.gate, () =>
+				loginCustomProvider(provider, entry.provider, callbacks),
+			));
+		}
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.
 			if (!result) {
@@ -106,7 +139,7 @@ export class OAuthAccounts implements OAuthApi {
 		// Use pool.upsertOAuth to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		await this.#deps.pool.upsertOAuth(storeCredentialsAs ?? provider, newCredential);
 		return {
 			type: "oauth",
 			email: newCredential.email,

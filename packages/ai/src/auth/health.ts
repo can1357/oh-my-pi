@@ -5,7 +5,6 @@ import type {
 	UsageCredential,
 	UsageFetchContext,
 	UsageFetchParams,
-	UsageProvider,
 	UsageReport,
 } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
@@ -26,7 +25,9 @@ import type {
 	ModelUsageAccountHealth,
 	ModelUsageHealth,
 	ModelUsageHealthOptions,
+	UsageProviderRegistration,
 } from "./types";
+import { callThroughGate } from "./provider-gate";
 import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential } from "./usage";
 import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
@@ -34,30 +35,29 @@ import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cac
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
 
-/** Asks a usage provider whether it handles this request, treating a refusal as "no".
- *
- *  Both the read and the call belong inside the guard: the predicate belongs to whoever
- *  registered the provider, usually an extension, it may be exposed through a getter, and a
- *  provider whose session has been disposed refuses from the moment it is asked. A refusal must
- *  cost this probe one credential's answer, not the whole health check. */
-function probeSupports(provider: UsageProvider, request: UsageRequestDescriptor): boolean {
-	try {
-		const supports = provider.supports;
-		return supports ? supports(request) : true;
-	} catch {
-		return false;
-	}
-}
+/** Why a usage probe declined to contact upstream for a credential. */
+type DeclinedUsageProbe = "unsupported" | "unvalidated";
 
-/** Whether a usage provider claims it validates credentials. Same boundary as
- *  {@link probeSupports}: the property may be an accessor the provider's author wrote, and a
- *  provider that refuses to answer is treated as not validating rather than failing the check. */
-function probeValidatesCredentials(provider: UsageProvider): boolean {
-	try {
-		return provider.validatesCredentials !== false;
-	} catch {
-		return false;
-	}
+/**
+ * Runs one credential's usage probe through the registration's gate: the `supports` and
+ * `validatesCredentials` reads, then `fetchUsage`. Every read of the provider is its author's
+ * code — any of them may be a getter — so all of it runs as the owner's work, and each method is
+ * called with the provider as its receiver, so a host provider reading its own private state
+ * works. A throw, including the gate's refusal once the owner has retired, fails this probe only:
+ * the caller records it as one credential's `ok: false`.
+ */
+function probeUsage(
+	registration: UsageProviderRegistration,
+	request: UsageRequestDescriptor,
+	params: UsageFetchParams,
+	ctx: UsageFetchContext,
+): DeclinedUsageProbe | Promise<UsageReport | null> {
+	return callThroughGate<DeclinedUsageProbe | Promise<UsageReport | null>>(registration.gate, () => {
+		const provider = registration.provider;
+		if (provider.supports && !provider.supports(request)) return "unsupported";
+		if (provider.validatesCredentials === false) return "unvalidated";
+		return provider.fetchUsage(params, ctx);
+	});
 }
 
 /** Dependencies for model pool health and stored credential probes. */
@@ -400,25 +400,26 @@ export class CredentialHealth implements HealthApi {
 				continue;
 			}
 
-			const providerImpl = this.#deps.usage.providerFor(row.provider as Provider);
-			if (!providerImpl) {
+			// Selected after the refresh, so an owner that retired while it ran no longer answers.
+			const registration = this.#deps.usage.providerEntryFor(row.provider as Provider);
+			if (!registration) {
 				base.reason = `no usage probe configured for provider ${row.provider}`;
-			} else if (!probeSupports(providerImpl, initialRequest)) {
-				base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
-			} else if (probeValidatesCredentials(providerImpl) === false) {
-				base.reason = `usage probe for ${row.provider} does not validate credentials`;
 			} else {
 				try {
-					const report = await providerImpl.fetchUsage(params, ctx);
-					if (report === null) {
+					const outcome = await probeUsage(registration, initialRequest, params, ctx);
+					if (outcome === "unsupported") {
+						base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
+					} else if (outcome === "unvalidated") {
+						base.reason = `usage probe for ${row.provider} does not validate credentials`;
+					} else if (outcome === null) {
 						base.reason = "usage probe returned no data for this credential";
 					} else {
 						base.ok = true;
-						const accountId = usageReportMetadataValue(report, "accountId");
-						const email = usageReportMetadataValue(report, "email");
+						const accountId = usageReportMetadataValue(outcome, "accountId");
+						const email = usageReportMetadataValue(outcome, "email");
 						if (accountId) base.accountId = accountId;
 						if (email) base.email = email;
-						const { raw: _raw, ...trimmed } = report;
+						const { raw: _raw, ...trimmed } = outcome;
 						base.report = trimmed;
 					}
 				} catch (error) {

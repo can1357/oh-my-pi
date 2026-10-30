@@ -1,11 +1,12 @@
 import { scheduler } from "node:timers/promises";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
+import { getOAuthProviderEntry, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
+import { callThroughGate } from "./provider-gate";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -1030,15 +1031,20 @@ export class OAuthRefresher {
 		if (overrideRefresh && credentialId !== undefined) {
 			refreshPromise = overrideRefresh(provider, credentialId, credential, signal, reason);
 		} else {
-			const customProvider = getOAuthProvider(provider);
+			const customProvider = getOAuthProviderEntry(provider);
 			if (customProvider) {
-				if (!customProvider.refreshToken) {
-					throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
-						kind: "configuration",
-						provider,
-					});
-				}
-				refreshPromise = customProvider.refreshToken(credential, signal);
+				const custom = customProvider.provider;
+				// The capability read is the author's code as much as the call (it may be a getter),
+				// so both run as the owning session's work.
+				refreshPromise = callThroughGate(customProvider.gate, () => {
+					if (!custom.refreshToken) {
+						throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
+							kind: "configuration",
+							provider,
+						});
+					}
+					return custom.refreshToken(credential, signal);
+				});
 			} else {
 				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
 			}

@@ -52,7 +52,8 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
-import { ownCallableSurface } from "../extensibility/extensions/callback-ownership";
+import { callThroughGate, type ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
+import { providerCallGate, providerConfigOwner } from "../extensibility/extensions/callback-ownership";
 import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -405,7 +406,9 @@ export class ModelRegistry {
 	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
 	// definitions, so without re-applying the projection every static reload
 	// would silently revert the provider to its unprojected catalog.
-	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
+	// Each entry carries the lifetime of the session that registered it; a retired session's
+	// projection is skipped rather than applied or refused.
+	#runtimeModelModifiers: Map<string, { modify: ModifyModelsHook; gate?: ProviderCallGate }> = new Map();
 	#lastModelModifierWarnings: Map<string, string> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
@@ -1122,7 +1125,11 @@ export class ModelRegistry {
 	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
-		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
+		for (const [providerName, modifier] of this.#runtimeModelModifiers) {
+			// A modifier belongs to the session that registered it. Once that session is gone the
+			// projection is simply not applied — the catalog keeps the rows it already has, and
+			// no extension code runs for a session that cannot own what it would do.
+			if (modifier.gate?.retired === true) continue;
 			const credential = this.authStorage.credentials.getOAuth(providerName);
 			if (!credential) continue;
 			try {
@@ -1145,7 +1152,7 @@ export class ModelRegistry {
 				// reader crashes, or an identity left over from a different id.
 				// Rows of other providers pass through untouched; rebuilding a
 				// full catalog on every projection costs more than it can fix.
-				projected = modifyModels(snapshot, credential).map(model => {
+				projected = callThroughGate(modifier.gate, () => modifier.modify(snapshot, credential)).map(model => {
 					const withHeaders =
 						model.resolveHeaders && model.headers
 							? {
@@ -3462,7 +3469,7 @@ export class ModelRegistry {
 		return this.authStorage.credentials.hasOAuth(model.provider);
 	}
 
-	#clearRuntimeProviderState(providerName: string): void {
+	#clearRuntimeProviderState(providerName: string, gate?: ProviderCallGate): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
@@ -3486,7 +3493,7 @@ export class ModelRegistry {
 		}
 		this.#invalidateProviderModelCache(providerName);
 		this.authStorage.keys.removeConfig(providerName);
-		this.authStorage.usage.removeProvider(providerName);
+		this.authStorage.usage.removeProvider(providerName, gate);
 	}
 
 	/**
@@ -3520,8 +3527,14 @@ export class ModelRegistry {
 
 	/**
 	 * Remove one extension-registered provider and restore its static models.
+	 *
+	 * `callbackOwner` is the session withdrawing it. Several sessions can hold a registration for
+	 * one provider name — a subagent that rebound its parent's extensions does — so a withdrawal
+	 * takes away only the caller's own entry and leaves a sibling's to be selected again. Without
+	 * it, every entry for the name goes, which is what a host teardown means.
 	 */
-	unregisterProvider(providerName: string): void {
+	unregisterProvider(providerName: string, callbackOwner?: ExtensionCallbackOwner): void {
+		const gate = callbackOwner ? providerCallGate(callbackOwner) : undefined;
 		const sourceId = this.#runtimeProviderSourceByName.get(providerName);
 		if (sourceId) {
 			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
@@ -3531,9 +3544,9 @@ export class ModelRegistry {
 			}
 			this.#runtimeProviderSourceByName.delete(providerName);
 		}
-		unregisterOAuthProvider(providerName);
+		unregisterOAuthProvider(providerName, gate);
 		this.#ensureFullSnapshot();
-		this.#clearRuntimeProviderState(providerName);
+		this.#clearRuntimeProviderState(providerName, gate);
 		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
@@ -3561,16 +3574,23 @@ export class ModelRegistry {
 		providerName: string,
 		config: ProviderConfigInput,
 		sourceId?: string,
-		/** The session that accepted these callbacks, when an extension registered them. This
-		 *  registry is the party that CALLS `oauth.login` and `fetchDynamicModels`, so it is the
-		 *  only one that knows when those calls start and end; the configuration object is never
-		 *  rewritten, so nothing downstream sees a value other than the one it was handed. */
+		/** The session that registered this configuration, when an extension did. Optional here
+		 *  because a host that drains the runtime's queue itself cannot be expected to know: the
+		 *  owner is recorded beside the configuration object and looked up below. */
 		callbackOwner?: ExtensionCallbackOwner,
 	): void {
-		// Owned once, here, and used everywhere below. This block has two consumers inside this
-		// method — the OAuth provider registry and the credential-aware model modifier — and
-		// owning it at only one of them left the other calling the extension's raw function.
-		const oauth = config.oauth ? ownProviderCallbacks(config.oauth, callbackOwner) : undefined;
+		// The configuration object is used exactly as its author wrote it. What this registry
+		// keeps is the LIFETIME beside each registration: every registry it installs into selects
+		// the most recent entry whose session is still live, and asks that session before it
+		// calls. See `ProviderCallGate`.
+		const owner = callbackOwner ?? providerConfigOwner(config);
+		const gate = owner ? providerCallGate(owner) : undefined;
+		// The one hook this registry stores for later rather than handing to a registry of its
+		// own. Reading it is already the author's code — a provider may expose it through a
+		// getter — so the read is admitted too, once, while the session that registered it is by
+		// definition still live.
+		const modifyModels =
+			config.oauth && gate?.retired !== true ? callThroughGate(gate, () => config.oauth?.modifyModels) : undefined;
 		if (config.streamSimple && !config.api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
@@ -3590,18 +3610,21 @@ export class ModelRegistry {
 
 		if (config.streamSimple && config.api) {
 			const streamSimple = config.streamSimple;
-			registerCustomApi(config.api, streamSimple, sourceId, (model, context, options) =>
-				streamSimple(model, context, options as SimpleStreamOptions),
+			registerCustomApi(
+				config.api,
+				streamSimple,
+				sourceId,
+				(model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
+				gate,
 			);
 		}
 
-		if (oauth) {
-			// Delegation, not a spread: a spread copies own enumerable properties only, so a
-			// provider written as a class loses the very methods this registry then calls — its
-			// `modifyModels` and `getApiKey` were observed to disappear. `id` and `sourceId` are
-			// this registry's own; everything else resolves through the owned view.
-			const registered = Object.assign(Object.create(oauth) as typeof oauth, { id: providerName, sourceId });
-			registerOAuthProvider(registered);
+		if (config.oauth) {
+			// The author's object, registered as it stands. `id` and `sourceId` are this
+			// registry's own and live on the registration entry, not on the extension's block:
+			// a spread lost inherited methods and a delegating copy could not override a
+			// getter-only `id`.
+			registerOAuthProvider(config.oauth, { id: providerName, sourceId, gate });
 		}
 
 		let sourceHandoff = false;
@@ -3630,11 +3653,9 @@ export class ModelRegistry {
 		// provider lifetime. #clearRuntimeProviderState removes this override when
 		// the owning extension is unregistered or replaced.
 		if (config.usage) {
-			this.authStorage.usage.setProvider(
-				providerName,
-				ownProviderCallbacks(config.usage, callbackOwner),
-				config.apiKey,
-			);
+			// The author's object and its lifetime, side by side: the usage service selects the
+			// newest live registration for a provider name and asks this gate before it calls.
+			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey, gate);
 		}
 		if (config.apiKey) {
 			// A provider that owns a /login flow must not let its default key
@@ -3677,11 +3698,11 @@ export class ModelRegistry {
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
 			// execution/error reporting by materializing only for this case.
-			if (oauth?.modifyModels && !this.#hasFullSnapshot) {
+			if (modifyModels && !this.#hasFullSnapshot) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
-			if (oauth?.modifyModels) {
-				this.#runtimeModelModifiers.set(providerName, oauth.modifyModels);
+			if (modifyModels) {
+				this.#runtimeModelModifiers.set(providerName, { modify: modifyModels, gate });
 			} else {
 				this.#runtimeModelModifiers.delete(providerName);
 			}
@@ -3689,7 +3710,7 @@ export class ModelRegistry {
 				// Lazy compositions read runtime overlays directly. A whole-catalog
 				// modifier can affect providers beyond its owner, so discard every
 				// provider slice; an ordinary overlay only invalidates its provider.
-				if (oauth?.modifyModels) {
+				if (modifyModels) {
 					this.#providerLookupSnapshots.clear();
 					this.#internedStaticModels.clear();
 				} else {
@@ -3725,8 +3746,7 @@ export class ModelRegistry {
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
 			const providerHeaders = config.headers;
-			const rawFetcher = config.fetchDynamicModels;
-			const fetcher = callbackOwner ? callbackOwner.ownInvocation(rawFetcher) : rawFetcher;
+			const fetcher = config.fetchDynamicModels;
 			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
@@ -3739,8 +3759,11 @@ export class ModelRegistry {
 				fetchDynamicModels: async () => {
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
+					// Discovery is the registering session's work, and a retired session's
+					// discovery is simply not run: there is no catalog of its to refresh.
+					if (gate?.retired === true) return [];
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-						fetcher(resolvedKey),
+						callThroughGate(gate, () => fetcher(resolvedKey)),
 					);
 					// Dynamic rows can carry `!command` headers that are not on the
 					// registerProvider() config; track them so F5 / 401 can evict the cache.
@@ -3914,16 +3937,4 @@ export interface ProviderConfigInput {
 		remoteCompaction?: RemoteCompactionConfig<Api>;
 		premiumMultiplier?: number;
 	}>;
-}
-
-/** Owns every callback a provider configuration hands this registry, as a read-through view — the
- *  extension's own object is neither rewritten nor copied. The rule, not a list: this registry is
- *  the invoker for whatever an `oauth` or `usage` block carries, however the extension declared
- *  it, so a class method, a getter, a non-enumerable property or a route added later is owned the
- *  day it appears instead of the round after a probe finds it. See {@link ownCallableSurface}.
- *
- *  Returns the configuration untouched when no owner registered it: a host configuration has no
- *  session to retire with. */
-function ownProviderCallbacks<T extends object>(config: T, owner: ExtensionCallbackOwner | undefined): T {
-	return owner ? ownCallableSurface(config, owner) : config;
 }

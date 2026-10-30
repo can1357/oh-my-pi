@@ -2401,10 +2401,11 @@ export interface ExtensionCallbackOwner {
 	/** Wraps a callback this session accepts: inert once the last session hold on this surface has
 	 *  been released, owned while it runs. */
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
-	/** Wraps a callback whose return value the invoker needs, so it cannot be made to return
-	 *  `undefined`. Throws once the surface is retired: an invoker that needs a value cannot be
-	 *  fobbed off with one, and a session that is gone has none to give. */
-	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R;
+	/** Runs one call into extension code this session accepted — a provider's `fetchUsage`, an
+	 *  `oauth.login`, a registered stream function — as this session's work: attributed to it,
+	 *  counted while it runs, and refused once the session is gone. The caller holds the
+	 *  extension's own object and calls its method on it; nothing of the author's is wrapped. */
+	runOwned<R>(call: () => R): R;
 	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
 	 *  more — a cold thenable must not be run twice. */
 	trackCallback<T>(result: T): T;

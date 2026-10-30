@@ -244,14 +244,10 @@ describe("extension provider registration rollback", () => {
 			}
 
 			await expect(authStorage.usage.reports()).resolves.toEqual([report]);
-			// What this guards is the routing and the rollback, not the reference: a configuration
-			// an extension registered through `pi` arrives with its callbacks owned by that
-			// session, so the stored provider is a copy by design. Removal is by provider NAME
-			// (`UsageService.removeProvider`), so the copy unregisters exactly as the original
-			// would, and the extension's own object is never rewritten.
-			const registered = authStorage.usage.providerFor(provider);
-			expect(registered?.id).toBe(provider);
-			expect(registered).not.toBe(extensionUsage);
+			// The object an extension registered is stored exactly as it handed it over: its
+			// lifetime is kept beside the registration, not wrapped around it, so identity,
+			// shape and receiver are the author's throughout.
+			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
 			expect(extensionUsage.fetchUsage).toBe(originalFetchUsage);
 
 			modelRegistry.unregisterProvider(provider);
@@ -270,11 +266,11 @@ describe("extension provider registration rollback", () => {
 		}
 	});
 
-	test("owns a usage provider written as a class, through its prototype and its private fields", async () => {
-		// What an extension hands over is not always an object literal. A class instance keeps its
-		// methods on the prototype and its state in private fields, and a getter is a callback
-		// route like any other; ownership has to see all of them and still run them against the
-		// instance that owns the slots.
+	test("keeps a class-written usage provider intact, and stops selecting it once its session goes", async () => {
+		// What an extension hands over is not always an object literal: a class instance keeps
+		// its methods on the prototype and its state in private fields. It is stored as it was
+		// written — the real consumer calls it with itself as the receiver, so `#private` works
+		// — and the session that registered it decides whether it may be called at all.
 		const tempDir = TempDir.createSync("@extension-usage-class-");
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		const provider = "extension-usage-class";
@@ -308,19 +304,15 @@ describe("extension provider registration rollback", () => {
 				modelRegistry.registerProvider(registration.name, registration.config, registration.sourceId);
 			}
 
-			const stored = authStorage.usage.providerFor(provider);
-			// The inherited method and the getter both resolve, and both see the instance.
-			expect(stored?.id).toBe(provider);
-			await expect(
-				stored?.fetchUsage({ provider, credential: { type: "api_key", apiKey: "class-usage-key" } }, { fetch }),
-			).resolves.toEqual({ provider, fetchedAt: 1, limits: [] });
+			// Stored as written: same object, prototype method, getter and private field alike.
+			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
+			await expect(authStorage.usage.reports()).resolves.toEqual([{ provider, fetchedAt: 1, limits: [] }]);
 			expect(calls).toBe(1);
 
-			// And the session owns them: once it has gone, the prototype method refuses.
+			// Its session goes: the entry stops being selected, so the consumer never reaches it.
 			release();
-			expect(() =>
-				stored?.fetchUsage({ provider, credential: { type: "api_key", apiKey: "class-usage-key" } }, { fetch }),
-			).toThrow("retired");
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
+			await expect(authStorage.usage.reports()).resolves.toEqual([]);
 			expect(calls).toBe(1);
 
 			modelRegistry.unregisterProvider(provider);

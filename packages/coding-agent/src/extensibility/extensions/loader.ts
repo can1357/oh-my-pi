@@ -33,7 +33,7 @@ import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { ownCallableSurface } from "./callback-ownership";
+import { rememberProviderConfigOwner } from "./callback-ownership";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -274,12 +274,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		return adopted as T;
 	}
 
-	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
-		const owner = this;
-		return function (this: unknown, ...args: A): R {
-			if (owner.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
-			return extensionCallbackScope.run(owner, () => owner.trackCallback(fn.apply(this, args)));
-		};
+	runOwned<R>(call: () => R): R {
+		if (this.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
+		return extensionCallbackScope.run(this, () => this.trackCallback(call()));
 	}
 
 	/** Whether any extension callback is executing. */
@@ -307,12 +304,13 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
-		// Owned at the queue, not at each drain site: main.ts, sdk.ts and models-cli.ts all hand
-		// this configuration to ModelRegistry, and a host that drains it itself must not be able
-		// to lose the ownership by not knowing to pass an owner. A read-through view, so the
-		// extension's own object is neither rewritten nor copied, and a callback it declared as a
-		// class method, a getter or a non-enumerable property is owned like any other.
-		this.pendingProviderRegistrations.push({ name, config: ownCallableSurface(config, this, true), sourceId });
+		// The configuration is queued exactly as the extension wrote it. Ownership travels beside
+		// it: main.ts, sdk.ts and models-cli.ts each drain this queue into ModelRegistry, and a
+		// host that drains it itself must not lose the owner by not knowing to pass one, so the
+		// registry looks it up. Nothing of the author's object is wrapped, copied or extended —
+		// the places that CALL a provider ask the owner first instead.
+		rememberProviderConfigOwner(config, this);
+		this.pendingProviderRegistrations.push({ name, config, sourceId });
 	}
 
 	unregisterProvider(name: string): void {
@@ -446,8 +444,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.ownCallback(fn);
 	}
 
-	ownInvocation<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
-		return this.runtime.ownInvocation(fn);
+	runOwned<R>(call: () => R): R {
+		return this.runtime.runOwned(call);
 	}
 
 	/** Callback ownership belongs to the one runtime behind every facade for this session; this

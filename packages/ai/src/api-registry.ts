@@ -5,6 +5,12 @@
  * (e.g., "vertex-claude-api") that are not built into stream.ts.
  */
 
+import {
+	callThroughGate,
+	type GatedRegistration,
+	type ProviderCallGate,
+	selectLiveRegistration,
+} from "./auth/provider-gate";
 import * as AIError from "./error";
 import type {
 	Api,
@@ -60,7 +66,18 @@ export interface RegisteredCustomApi {
 	sourceId?: string;
 }
 
-const customApiRegistry = new Map<string, RegisteredCustomApi>();
+/** One registration of a custom API. `registered` holds the functions as they were registered;
+ *  `view` is what {@link getCustomApi} hands out: `registered` itself for the host, or a record
+ *  whose functions run `registered`'s as the owning session's work. */
+interface CustomApiRegistration extends GatedRegistration {
+	readonly registered: RegisteredCustomApi;
+	readonly view: RegisteredCustomApi;
+}
+
+/** Registrations by API id, oldest first. A parent session and a subagent that rebinds its
+ *  extensions register the same id; the newest live one answers. A retired registration stays
+ *  until it is unregistered: retirement only stops it being selected. */
+const customApiRegistry = new Map<string, CustomApiRegistration[]>();
 
 function assertCustomApiName(api: string): void {
 	if (BUILTIN_APIS.has(api as KnownApi)) {
@@ -69,36 +86,74 @@ function assertCustomApiName(api: string): void {
 }
 
 /**
- * Register a custom API streaming function.
+ * Register a custom API streaming function. `gate` is the lifetime of the session that registered
+ * it, omitted for the host's own. Registering an API again with the same gate (or, for the host,
+ * again without one) replaces that registration in place.
  */
 export function registerCustomApi(
 	api: string,
 	streamSimple: CustomStreamSimpleFn,
 	sourceId?: string,
 	stream?: CustomStreamFn,
+	gate?: ProviderCallGate,
 ): void {
 	assertCustomApiName(api);
-	customApiRegistry.set(api, {
+	const registered: RegisteredCustomApi = {
 		stream: stream ?? ((model, context, options) => streamSimple(model, context, options as SimpleStreamOptions)),
 		streamSimple,
 		sourceId,
-	});
+	};
+	const registration: CustomApiRegistration = {
+		registered,
+		// A session's view is this registry's own record, so its functions can run the registered
+		// ones through the gate. Those are called unchanged, on `registered`: the receiver they had
+		// when the registry handed out `registered` itself.
+		view: gate
+			? {
+					stream: (model, context, options) =>
+						callThroughGate(gate, () => registered.stream(model, context, options)),
+					streamSimple: (model, context, options) =>
+						callThroughGate(gate, () => registered.streamSimple(model, context, options)),
+					sourceId,
+				}
+			: registered,
+		gate,
+	};
+	const registrations = customApiRegistry.get(api);
+	if (!registrations) {
+		customApiRegistry.set(api, [registration]);
+		return;
+	}
+	const index = registrations.findIndex(entry => entry.gate === gate);
+	if (index === -1) {
+		registrations.push(registration);
+	} else {
+		registrations[index] = registration;
+	}
 }
 
 /**
- * Get a custom API provider by API identifier.
+ * Get a custom API provider by API identifier: the newest registration whose session is still
+ * live.
  */
 export function getCustomApi(api: string): RegisteredCustomApi | undefined {
-	return customApiRegistry.get(api);
+	const registrations = customApiRegistry.get(api);
+	return registrations ? selectLiveRegistration(registrations)?.view : undefined;
 }
 
 /**
- * Remove all custom APIs registered by a specific source (e.g., extension path).
+ * Remove the custom APIs registered by a specific source (e.g., extension path): only `gate`'s
+ * registrations when a gate is given, every session's otherwise.
  */
-export function unregisterCustomApis(sourceId: string): void {
-	for (const [api, entry] of customApiRegistry.entries()) {
-		if (entry.sourceId === sourceId) {
+export function unregisterCustomApis(sourceId: string, gate?: ProviderCallGate): void {
+	for (const [api, registrations] of customApiRegistry) {
+		const kept = registrations.filter(
+			entry => entry.registered.sourceId !== sourceId || (gate !== undefined && entry.gate !== gate),
+		);
+		if (kept.length === 0) {
 			customApiRegistry.delete(api);
+		} else if (kept.length !== registrations.length) {
+			customApiRegistry.set(api, kept);
 		}
 	}
 }

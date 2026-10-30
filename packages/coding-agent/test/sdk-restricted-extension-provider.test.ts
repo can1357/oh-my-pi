@@ -333,6 +333,65 @@ describe("restricted sessions sharing extension providers", () => {
 		}
 	});
 
+	test("keeps the parent's usage and OAuth providers answering after the restricted child goes", async () => {
+		// Streaming was only the first shared registry. A restricted child rebinds the same
+		// extension and registers the same provider name into the same usage service and the
+		// same process-global OAuth registry, so retirement has to be a SELECTION question: the
+		// child's entry stops being chosen and the parent's earlier one answers again.
+		let usageCalls = 0;
+		let loginCalls = 0;
+		const sharedProvider: ExtensionFactory = pi => {
+			pi.registerProvider(providerName, {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: apiId,
+				usage: {
+					id: providerName,
+					async fetchUsage() {
+						usageCalls++;
+						return { provider: providerName, fetchedAt: 7, limits: [] };
+					},
+				},
+				oauth: {
+					name: "Restricted shared provider",
+					login: async () => {
+						loginCalls++;
+						return { access: "shared-access", refresh: "shared-refresh", expires: Date.now() + 3_600_000 };
+					},
+					getApiKey: credentials => credentials.access,
+				},
+			});
+		};
+
+		const { session: parent } = await createAgentSession({
+			...createOptions(),
+			extensions: [sharedProvider],
+		});
+		try {
+			const { session: child } = await createAgentSession({
+				...createOptions(),
+				model: parent.model,
+				restrictToolNames: true,
+				preloadedPreparedExtensions: parent.preparedExtensions,
+				toolNames: ["read"],
+			});
+			// Both live: the child's registration is the one in force and it answers.
+			await expect(authStorage.usage.reports({ provider: providerName })).resolves.toHaveLength(1);
+			expect(usageCalls).toBeGreaterThan(0);
+			await child.dispose();
+
+			// The child is gone and the parent is not. Its registration answers again rather
+			// than the retired child's refusing.
+			const usageAfterChild = usageCalls;
+			await expect(authStorage.usage.reports({ provider: providerName })).resolves.toHaveLength(1);
+			expect(usageCalls).toBeGreaterThan(usageAfterChild);
+			await authStorage.oauth.login(providerName, { onAuth: () => undefined, onPrompt: async () => "" });
+			expect(loginCalls).toBeGreaterThan(0);
+		} finally {
+			await parent.dispose();
+		}
+	});
+
 	test("commit agent keeps the selected extension provider credential", async () => {
 		await $`git init --initial-branch=main`.cwd(tempDir).quiet();
 		vi.spyOn(commitTools, "createCommitTools").mockImplementation(options => [
