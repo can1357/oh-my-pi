@@ -2,6 +2,7 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -14,11 +15,13 @@ import {
 	type Model,
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
+import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -600,8 +603,97 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	return sanitizeTerminalTitlePart(baseName);
 }
 
+/** The task half of the label stays one short subject, in terminal columns. */
+const SESSION_TASK_MAX_COLUMNS = 40;
+/** Separates the project from the task in the tab label. */
+const SESSION_LABEL_PROJECT_SEPARATOR = " · ";
+
+/**
+ * Root of the Git/Jujutsu repository containing `from`, through the shared VCS
+ * API (sync, no subprocess). Starts from the real path so a symlinked cwd
+ * resolves inside the repo it points into.
+ */
+function findRepoRoot(from: string): string | undefined {
+	let dir: string;
+	try {
+		dir = fs.realpathSync(from);
+	} catch {
+		dir = from;
+	}
+	try {
+		return vcs.repo(dir)?.root() ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Last non-empty segment of a path from any platform (`/` and `\` both separate). */
+function remoteBasename(remotePath: string): string | undefined {
+	return remotePath.split(/[\\/]+/).findLast(segment => segment !== "");
+}
+
+/**
+ * The project owning `cwd`: basename of the containing repo root, falling back
+ * to basename(cwd) outside a repo. A `remote` cwd belongs to another machine
+ * (a collab host's cwd echoed to a guest): it is never looked up on the local
+ * filesystem, so it can neither match an unrelated local checkout nor depend on
+ * the guest's path syntax — only its last segment, split on both `/` and `\`,
+ * is used. Returns undefined when nothing yields a name.
+ */
+function resolveProjectName(cwd: string, remote = false): string | undefined {
+	if (remote) return sanitizeTerminalTitlePart(remoteBasename(cwd));
+	const resolved = path.resolve(cwd);
+	// Re-discover on session/task updates: an agent can initialize a nearer
+	// repository or remove one without changing cwd. Spinner frames reuse label.
+	return sanitizeTerminalTitlePart(path.basename(findRepoRoot(resolved) ?? resolved));
+}
+
+/**
+ * Tab-label requirements (R1–R5). The tab label for a session is
+ * `<project> · <task>`:
+ *   R1. The label begins with the project name: the basename of the repo root
+ *       containing the cwd, or the cwd basename outside a repo. Project-first
+ *       ordering means a label truncated at 25 characters still shows the
+ *       project; the project itself is never truncated.
+ *   R2. The task part is short, one subject, about 40 columns or less. An
+ *       overlong generated title is shortened with `…` rather than kept as a
+ *       long sentence.
+ *   R3. The composed title keeps the `π <state>` prefix, and the label never
+ *       loses the project when the session is renamed or a new title is
+ *       generated — every recompose resolves the project from the stored cwd.
+ *   R4. Generic code: no hardcoded project names; the project always comes
+ *       from the filesystem, never from a literal.
+ *   R5. The task part shows what the session is doing now: the current
+ *       in-progress todo row when one exists, the session title otherwise.
+ * Repository discovery runs only when composing a new session/task label.
+ */
+export function buildSessionTerminalLabel(
+	sessionName: string | undefined,
+	cwd?: string,
+	taskNow?: string,
+	remoteCwd = false,
+): string | undefined {
+	const name = sanitizeTerminalTitlePart(sessionName);
+	const task = sanitizeTerminalTitlePart(taskNow) ?? name;
+	if (!task) {
+		if (cwd === undefined) return undefined;
+		return resolveProjectName(cwd, remoteCwd) ?? (remoteCwd ? undefined : getFallbackTerminalTitle(cwd));
+	}
+	if (cwd === undefined) return truncateToWidth(task, SESSION_TASK_MAX_COLUMNS);
+	const project = resolveProjectName(cwd, remoteCwd);
+	// The task that is exactly the project IS the label: the project is never
+	// truncated, however long its name.
+	if (project && project === task) return project;
+	if (!project) return truncateToWidth(task, SESSION_TASK_MAX_COLUMNS);
+	const bare = task.startsWith(project + SESSION_LABEL_PROJECT_SEPARATOR)
+		? task.slice(project.length + SESSION_LABEL_PROJECT_SEPARATOR.length)
+		: task;
+	if (!sanitizeTerminalTitlePart(bare)) return project;
+	return `${project}${SESSION_LABEL_PROJECT_SEPARATOR}${truncateToWidth(bare, SESSION_TASK_MAX_COLUMNS)}`;
+}
+
 export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
-	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	const label = buildSessionTerminalLabel(sessionName, cwd);
 	return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 }
 
@@ -672,11 +764,15 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 }
 
 /**
- * Set the session's base terminal title: the session name, which a generated
- * title carries in the card form `<icon> <CODE>: <name>` that Tern indexes
- * parked panes by, else the cwd.
+ * Set the project-first terminal label, using the current task or session name.
+ * Generated session names retain the `<icon> <CODE>: <name>` card form that
+ * Tern indexes parked panes by; the cwd supplies the project prefix.
  */
-export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
+export function setSessionTerminalTitle(
+	sessionName: string | undefined,
+	cwd?: string,
+	options?: { remoteCwd?: boolean },
+): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
 	//
@@ -689,7 +785,14 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
-	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
+	terminalTitleRuntime.cwd = cwd;
+	terminalTitleRuntime.remoteCwd = options?.remoteCwd === true;
+	terminalTitleRuntime.label = buildSessionTerminalLabel(
+		sessionName,
+		cwd,
+		terminalTitleRuntime.taskNow,
+		terminalTitleRuntime.remoteCwd,
+	);
 	emitTerminalTitle();
 	reportTernSession();
 }
@@ -700,6 +803,36 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  */
 export function nerdGlyphsActive(): boolean {
 	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
+}
+
+/**
+ * Point the label's task half at what the session is doing now — the current
+ * in-progress todo row — or clear it back to the session title. Renames and
+ * new titles keep flowing through `setSessionTerminalTitle`, which recomposes
+ * against the same stored cwd, so the project is never lost either way.
+ */
+export function setTerminalTitleTaskNow(
+	task: string | undefined,
+	source?: { sessionName: string | undefined; cwd: string; remoteCwd?: boolean },
+): void {
+	terminalTitleRuntime.taskNow = sanitizeTerminalTitlePart(task);
+	// The todo list belongs to the session the UI displays, which is a focused subagent (with its own
+	// name and, when isolated, worktree cwd) rather than the main session. Compose against that session.
+	if (source && terminalTitleRuntime.titleClaimed) {
+		terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(source.sessionName);
+		terminalTitleRuntime.cwd = source.cwd;
+		terminalTitleRuntime.remoteCwd = source.remoteCwd === true;
+	}
+	// Initial TODO loading precedes the shell-title push. Keep the task pending
+	// until ownership is claimed and the session supplies its project/cwd.
+	if (!terminalTitleRuntime.titleClaimed) return;
+	terminalTitleRuntime.label = buildSessionTerminalLabel(
+		terminalTitleRuntime.sessionName,
+		terminalTitleRuntime.cwd,
+		terminalTitleRuntime.taskNow,
+		terminalTitleRuntime.remoteCwd,
+	);
+	emitTerminalTitle();
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
@@ -825,6 +958,12 @@ const terminalTitleRuntime: {
 	label: string | undefined;
 	/** The session's own name, without the cwd fallback `label` uses. */
 	sessionName: string | undefined;
+	/** The cwd the label's project resolves from, stored so a later task update recomposes without losing the project. */
+	cwd: string | undefined;
+	/** True when `cwd` is another machine's path (collab guest), never resolved locally. */
+	remoteCwd: boolean;
+	/** The current in-progress todo row; shown as the task half while set. */
+	taskNow: string | undefined;
 	/** The branch's pull request, shown in the native title only. */
 	pullRequest: number | undefined;
 	/** Unsubscribes the native-rendering watch taken by `initTerminalTitleState()`. */
@@ -850,6 +989,7 @@ const terminalTitleRuntime: {
 	 *  reintroduce the write-loop CPU cost the static separator exists to avoid.
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
+	titleClaimed: boolean;
 	nativeTitleFailed: boolean;
 	/** The console title `initTerminalTitleState()` read on a Windows console.
 	 *  The console has no title stack, so teardown puts it back through
@@ -862,6 +1002,9 @@ const terminalTitleRuntime: {
 } = {
 	label: undefined,
 	sessionName: undefined,
+	cwd: undefined,
+	remoteCwd: false,
+	taskNow: undefined,
 	pullRequest: undefined,
 	unwatchNative: undefined,
 	state: "idle",
@@ -871,6 +1014,7 @@ const terminalTitleRuntime: {
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
+	titleClaimed: false,
 	nativeTitleFailed: false,
 	initialWindowsConsoleTitle: undefined,
 	nativeTitleRestored: false,
@@ -930,7 +1074,10 @@ function emitTerminalTitle(): void {
 	const next =
 		terminalTitleRuntime.extensionOverride ??
 		(native
-			? buildNativeTerminalTitle(terminalTitleRuntime.sessionName, terminalTitleRuntime.pullRequest)
+			? buildNativeTerminalTitle(
+					terminalTitleRuntime.label ?? terminalTitleRuntime.sessionName,
+					terminalTitleRuntime.pullRequest,
+				)
 			: buildTerminalTitleWithState(
 					terminalTitleRuntime.label,
 					terminalTitleRuntime.state,
@@ -1028,6 +1175,7 @@ export function setTerminalTitleSpinnerStyle(style: string | undefined): void {
  */
 export function initTerminalTitleState(): void {
 	terminalTitleRuntime.disposed = false;
+	terminalTitleRuntime.titleClaimed = true;
 	// The native-failure latch is claim-scoped like the spinner timer: a fresh
 	// owner gets a re-probed native path, so a transient SetConsoleTitleW
 	// failure in one session must not pin every later session static. The next
@@ -1070,6 +1218,7 @@ export function disposeTerminalTitleState(): void {
 	sessionSource = undefined;
 	reportTernSession();
 	terminalTitleRuntime.disposed = true;
+	terminalTitleRuntime.titleClaimed = false;
 	terminalTitleRuntime.unwatchNative?.();
 	terminalTitleRuntime.unwatchNative = undefined;
 	// `popTerminalTitle()` hands the terminal back to the shell, so the runtime no

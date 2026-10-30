@@ -38,6 +38,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
@@ -518,6 +520,65 @@ describe("interactive collaboration startup", () => {
 		await remote.start(RELAY_URL);
 		return { local: mode, remote, localFile };
 	}
+
+	async function captureTitles(run: (lastTitle: () => string | undefined) => Promise<void>): Promise<void> {
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		const headless = setTerminalHeadless(false);
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		const titles: string[] = [];
+		const output = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			for (const match of text.matchAll(/\x1b\]0;([^\x07]*)\x07/g)) titles.push(match[1]);
+			return true;
+		});
+		try {
+			await run(() => titles.at(-1));
+		} finally {
+			output.mockRestore();
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			setTerminalHeadless(headless);
+		}
+	}
+
+	it("keeps the host project through real guest join and TODO reload, then restores local authority", async () => {
+		await captureTitles(async lastTitle => {
+			const { local, remote } = await prepareGuestMode();
+			const guest = new CollabGuestLink(local);
+			await guest.join(remote.link);
+			local.setTodos([{ name: "Host plan", tasks: [{ content: "Host step", status: "in_progress" }] }]);
+			expect(lastTitle()).toContain("collab-controller-test · Host step");
+			await local.reloadTodos();
+			expect(lastTitle()).toContain("collab-controller-test · controller-test");
+			await guest.leave("restore local title");
+			expect(lastTitle()).toContain(path.basename(testSession.tempDir));
+			local.sessionManager.setSessionName("Local renamed");
+			await local.reloadTodos();
+			expect(lastTitle()).toContain(`${path.basename(testSession.tempDir)} · Local renamed`);
+		});
+	});
+
+	it("keeps real focused-session titles authoritative across a late main rename and unfocus", async () => {
+		const worker = await createTestSession();
+		try {
+			await captureTitles(async lastTitle => {
+				const { local } = await prepareGuestMode();
+				worker.sessionManager.setSessionName("Worker topic");
+				spyOn(AgentLifecycleManager.prototype, "ensureLive").mockResolvedValue(worker.session);
+				await local.focusAgentSession("title-worker");
+				expect(lastTitle()).toContain(`${path.basename(worker.tempDir)} · Worker topic`);
+				testSession.sessionManager.setSessionName("Late main title");
+				expect(lastTitle()).toContain(`${path.basename(worker.tempDir)} · Worker topic`);
+				local.setTodos([{ name: "Work", tasks: [{ content: "Worker step", status: "in_progress" }] }]);
+				testSession.sessionManager.setSessionName("Later main title");
+				expect(lastTitle()).toContain(`${path.basename(worker.tempDir)} · Worker step`);
+				await local.unfocusSession();
+				expect(lastTitle()).toContain(`${path.basename(testSession.tempDir)} · Later main title`);
+			});
+		} finally {
+			await worker.cleanup();
+		}
+	});
 
 	it("does not restart a stopped host when join fails before replica activation", async () => {
 		const { local, remote, localFile } = await prepareGuestMode();
