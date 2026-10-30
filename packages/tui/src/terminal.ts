@@ -895,10 +895,13 @@ interface Osc11Cycle {
  * three, four and eight retired cycles answering together all reproduce. A
  * larger cap holds more old answers back and publishes fewer stale ones, but a
  * terminal that stops answering then owes that many swallowed answers before
- * anything is published again — a hundred unanswered cycles would cost a
- * hundred dead refreshes. A stranded appearance lasts the rest of the session;
- * a stale colour is wrong for one cycle. So the price of two is that past it an
- * old answer can be published under a later request.
+ * anything is published again: measured after a hundred unanswered cycles, a
+ * cap of two publishes on the third good refresh, three on the fourth, a
+ * hundred on the hundred-and-first. That debt is finite — every arriving
+ * answer pays one off, so it is a stale colour for a run of refreshes, not an
+ * appearance that never updates again — but at a large cap the run outlasts
+ * any practical session. The price of two is that past it an old answer can be
+ * published under a later request.
  */
 const OSC11_MAX_CLAIMS = 2;
 
@@ -1091,9 +1094,9 @@ export class ProcessTerminal implements Terminal {
 	 *
 	 * One per retired cycle, not one in total: serialisation bounds how many
 	 * cycles are *live* at once, never how many answers are still in flight
-	 * behind them. Each claim carries its own deadline, so a dead spell leaves
-	 * a backlog that drains with time instead of swallowing every answer the
-	 * terminal ever sends again.
+	 * behind them. No claim carries a deadline — none of these drains with time
+	 * — so a backlog is paid off one arriving answer at a time, and
+	 * {@link OSC11_MAX_CLAIMS} is what keeps it finite.
 	 */
 	#osc11ReplyClaims = 0;
 	/** The sentinels those same cycles still owe, on the same terms. */
@@ -2212,22 +2215,30 @@ export class ProcessTerminal implements Terminal {
 	 * cycle then eating its predecessor's marker and paying a timeout of its
 	 * own, however promptly the terminal answers.
 	 *
-	 * What the cycle may still send does not expire with it. A colour report it
-	 * was owed becomes the orphan claim: still swallowed, so it cannot surface
-	 * as application text or be published under the request that replaced it,
-	 * but no longer able to name a token or hold anything up.
+	 * What the cycle may still send does not expire with it, and that is two
+	 * different things. A colour it was owed becomes a reply claim: still
+	 * swallowed, so it cannot surface as application text or be published under
+	 * the request that replaced it, but no longer able to name a token. A
+	 * sentinel becomes a claim only where the colour before it has already
+	 * arrived — then the terminal has shown it is answering this cycle and the
+	 * sentinel is demonstrably on its way, and letting the slot go without
+	 * recording it hands that arrival to the next question and ends it
+	 * unanswered. A cycle that sent nothing at all leaves no sentinel claim:
+	 * nothing says its sentinel is coming, and holding one back would make
+	 * every later cycle wait out its own deadline.
 	 */
 	#retireOsc11Marker(marker: Da1SentinelOwner & { kind: "abandoned" }): void {
 		const slot = this.#da1SentinelOwners.indexOf(marker);
-		if (slot >= 0) this.#da1SentinelOwners.splice(slot, 1);
-		if (!marker.cycle) return;
-		const owed = this.#osc11Cycles.indexOf(marker.cycle);
-		if (owed < 0) return;
+		// Gone already means the sentinel arrived and was matched here; nothing
+		// is outstanding and nothing is owed.
+		if (slot < 0) return;
+		this.#da1SentinelOwners.splice(slot, 1);
+		const owed = marker.cycle ? this.#osc11Cycles.indexOf(marker.cycle) : -1;
+		if (owed < 0) {
+			this.#addOsc11SentinelClaim();
+			return;
+		}
 		this.#osc11Cycles.splice(owed, 1);
-		// Only the colour becomes a claim. The sentinel that would follow it is
-		// claimed when that colour actually arrives, not before: a cycle that
-		// turns out to have sent nothing at all must not hold a sentinel back
-		// from the questions asked after it.
 		this.#addOsc11ReplyClaim();
 	}
 
@@ -2252,7 +2263,7 @@ export class ProcessTerminal implements Terminal {
 			// The colour arrived, so its sentinel is on its way behind it. One
 			// sentinel follows one answer: letting that go unrecorded would hand
 			// it to the next question and end that one unanswered.
-			this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
+			this.#addOsc11SentinelClaim();
 			this.#absorbLiveOsc11Turn();
 			return;
 		}
@@ -2294,6 +2305,16 @@ export class ProcessTerminal implements Terminal {
 	 */
 	#addOsc11ReplyClaim(): void {
 		this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);
+	}
+
+	/**
+	 * Record one more sentinel a cycle is still owed. Raised only on evidence —
+	 * a claim that has just taken a colour, or a marker retired after its
+	 * colour had already arrived — because a sentinel claim that is wrong costs
+	 * the next cycle its own sentinel and a wait for its deadline.
+	 */
+	#addOsc11SentinelClaim(): void {
+		this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
 	}
 
 	#clearOsc11Claims(): void {
