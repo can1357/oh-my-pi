@@ -149,7 +149,7 @@ export interface SubagentStopEvent {
 	last_assistant_message?: AgentMessage;
 	/** True once this run already had a `subagent_stop` continuation. */
 	stop_hook_active: boolean;
-	/** Cancels handler waiting when the run is aborted mid-pass. */
+	/** Cancels handler waiting when the run is aborted or an explicit user prompt cancels the pass. */
 	signal: AbortSignal;
 }
 
