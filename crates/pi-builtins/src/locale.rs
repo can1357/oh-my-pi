@@ -1154,8 +1154,12 @@ fn start_locale_utility(
 		if libc::sigfillset(every.as_mut_ptr()) != 0 {
 			return Err(std::io::Error::last_os_error());
 		}
-		if libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), held.as_mut_ptr()) != 0 {
-			return Err(std::io::Error::last_os_error());
+		// `pthread_sigmask` *returns* its error number and does not set
+		// `errno`, so reading `errno` here reported whatever the capability
+		// probe had left behind.
+		let blocked = libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), held.as_mut_ptr());
+		if blocked != 0 {
+			return Err(std::io::Error::from_raw_os_error(blocked));
 		}
 		held.assume_init()
 	};
@@ -1174,15 +1178,21 @@ fn start_locale_utility(
 			// caller, a utility that raises it and then answers succeeds
 			// under `posix_spawn` and died on signal 13 when this reset it.
 			for signal in 1..=libc::SIGRTMAX() {
-				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
+				// The two numbers the library keeps for itself sit just
+				// below the first realtime signal — 32 and 33 on glibc
+				// 2.39 — and carry nothing of this process's. A measurement
+				// of all 62 other numbers found those two the only ones
+				// whose disposition cannot be read, so every other read
+				// failure is a denial rather than a reservation, and
+				// passing over one leaves an inherited handler to run
+				// before `execve`.
+				let reserved = signal == libc::SIGRTMIN() - 1 || signal == libc::SIGRTMIN() - 2;
+				if signal == libc::SIGKILL || signal == libc::SIGSTOP || reserved {
 					continue;
 				}
 				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
-				// A number the library keeps for itself — glibc's 32 and 33 —
-				// cannot be read or set, and carries nothing of this
-				// process's to reset.
 				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) != 0 {
-					continue;
+					libc::_exit(CHILD_NO_SETUP);
 				}
 				let current = current.assume_init();
 				if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
@@ -1240,6 +1250,18 @@ fn start_locale_utility(
 			libc::_exit(CHILD_NO_PROGRAM);
 		}
 	}
+	// The handle is owned before anything else can go wrong. A child
+	// exists from the moment the clone returns, and an error path that
+	// leaves before this point abandons both it and the descriptor the
+	// kernel wrote: a denied mask restoration left five zombies and two
+	// leaked descriptors while the query process lived, and a utility
+	// sleeping past the query that started it.
+	//
+	// SAFETY: a fresh descriptor the kernel wrote for a child it made,
+	// owned from here. `clone3` fills it in whenever it succeeds with
+	// `CLONE_PIDFD`.
+	let started = (child > 0 && handle >= 0)
+		.then(|| ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(handle) }));
 	let cloned = match child < 0 {
 		true => Err(std::io::Error::last_os_error()),
 		false => Ok(()),
@@ -1248,15 +1270,28 @@ fn start_locale_utility(
 	// restoration that fails would leave the caller with nearly every
 	// signal blocked, so it is reported rather than passed over.
 	let restored = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) };
+	cloned?;
+	let Some(started) = started else {
+		// A child with no handle cannot be signalled safely, and waiting
+		// for it is this thread's business rather than anyone else's.
+		if child > 0 {
+			let mut status: libc::c_int = 0;
+			// SAFETY: `pid` names this scope's child; no signal is sent, so
+			// a competing reaper taking it only yields `ECHILD` here.
+			while unsafe { libc::waitpid(child as libc::pid_t, &raw mut status, 0) } < 0
+				&& std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+			{}
+		}
+		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+	};
 	if restored != 0 {
+		// The child is already running. Closing the descriptor is not
+		// enough: it has to be ended and reaped before this returns.
+		started.end_group();
+		let _ = started.reap();
 		return Err(std::io::Error::from_raw_os_error(restored));
 	}
-	cloned?;
-	if handle < 0 {
-		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
-	}
-	// SAFETY: a fresh descriptor the kernel just wrote, owned from here.
-	Ok(ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(handle) }))
+	Ok(started)
 }
 
 #[cfg(target_os = "linux")]

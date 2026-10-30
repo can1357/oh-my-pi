@@ -943,6 +943,47 @@ fn a_query_leaves_the_callers_signal_settings_alone() {
 	);
 }
 
+/// An inherited *handler* is reset for every signal the child can reach,
+/// not only the ones below the realtime range.
+///
+/// The reset loop has to skip the two numbers the library keeps for
+/// itself, and it used to skip any number whose disposition it could not
+/// read — so a denial narrowed to one application signal left that
+/// handler alive to run between the child's `chdir` and its `execve`. A
+/// measurement of all 62 readable numbers on glibc 2.39 found only 32 and
+/// 33 unreadable, so this pins the behaviour either side of them: a
+/// handler the caller installed must be gone, which a utility that raises
+/// the signal shows by dying on it.
+///
+/// This is a guard rather than a reproduction. Making a disposition *read*
+/// fail needs a kernel filter, so it passes on the head before the fix as
+/// well; what it would catch is the reset loop quietly ceasing to cover a
+/// range.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_inherited_handler_is_reset_for_application_and_realtime_signals() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	extern "C" fn observed(_signal: libc::c_int) {}
+
+	let dir = tempfile::tempdir().unwrap();
+	for signal in [libc::SIGUSR1, libc::SIGRTMIN() + 2, libc::SIGRTMAX()] {
+		// SAFETY: nextest gives this test its own process; the handler does
+		// nothing and the disposition is put back below.
+		let kept = unsafe { libc::signal(signal, observed as libc::sighandler_t) };
+		let program = dir.path().join(format!("locale-{signal}"));
+		fs::write(&program, format!("#!/bin/sh\nkill -{signal} $$\nprintf 'UTF-8\\n'\n")).unwrap();
+		fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+		let answer = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &|_| None);
+		// SAFETY: as above.
+		unsafe { libc::signal(signal, kept) };
+		let crate::locale::Codeset::Unasked(why) = &answer else {
+			panic!("signal {signal}: the handler survived into the child: {answer:?}");
+		};
+		assert!(why.contains(&format!("ended on signal {signal}")), "signal {signal}: {why}");
+	}
+}
+
 /// A name is the name of locale data, whatever punctuation it carries.
 ///
 /// `newlocale` splits a name containing `;` per category and `setlocale`
