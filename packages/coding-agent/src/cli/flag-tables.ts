@@ -109,6 +109,14 @@ function parseMaxTimeSeconds(value: string): number {
 	);
 }
 
+function parseCostUsd(flag: string, value: string): number {
+	const usd = Number(value.trim());
+	if (Number.isFinite(usd) && usd > 0) return usd;
+	throw new CliUsageError(
+		`Invalid ${flag} value: ${JSON.stringify(value)}. Expected a positive USD amount, e.g. 0.50.`,
+	);
+}
+
 /**
  * Setters for flags with string values. Most built-ins consume the next argv
  * token even when it starts with `-`; flags listed in
@@ -164,6 +172,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
+	},
+	"--warn-cost": (result, value) => {
+		result.warnCost = parseCostUsd("--warn-cost", value);
+	},
+	"--max-cost": (result, value) => {
+		result.maxCost = parseCostUsd("--max-cost", value);
 	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
@@ -320,6 +334,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--wait-async",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",
@@ -329,6 +344,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-extensions",
 	"--no-skills",
 	"--no-rules",
+	"--no-context-files",
 	"--no-title",
 	"--no-ui",
 	"--auto-approve",

@@ -105,7 +105,7 @@ pub fn snapshot_from_text(text: &str, raw_input: bool, finished: bool) -> ArgSna
 	};
 
 	let (lexical_has_edits, edits_start) = find_edits_array(text);
-	let closed = edits_start.map_or_else(Vec::new, |start| edit_object_closed_flags(text, start));
+	let closed = edits_start.map_or_default(|start| edit_object_closed_flags(text, start));
 	let has_edits = lexical_has_edits || object.contains_key("edits");
 	let edits = match object.remove("edits") {
 		Some(serde_json::Value::Array(entries)) => entries

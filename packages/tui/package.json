@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-tui",
-  "version": "18.12.6",
+  "version": "18.14.0",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
@@ -51,7 +51,7 @@
     "kitty-vt-wasm": "catalog:"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.4"
   },
   "files": [
     "src",
@@ -66,10 +66,6 @@
     "./theme": {
       "types": "./src/theme/index.ts",
       "import": "./src/theme/index.ts"
-    },
-    "./theme/defaults": {
-      "types": "./src/theme/defaults/index.ts",
-      "import": "./src/theme/defaults/index.ts"
     },
     "./theme/*": {
       "types": "./src/theme/*.ts",

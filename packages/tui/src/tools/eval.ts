@@ -31,7 +31,7 @@ import {
 	JSON_TREE_MAX_LINES_EXPANDED,
 	JSON_TREE_SCALAR_LEN_COLLAPSED,
 	JSON_TREE_SCALAR_LEN_EXPANDED,
-	describeJsonTree,
+	describeJsonValue,
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
@@ -820,11 +820,14 @@ function evalTableNode(view: Extract<EvalView, { kind: "table" }>, key: string):
 /**
  * One cell's outputs in order: printed text (following its tail, clamped to
  * the last `previewLines` while folded) with each view in place of its text.
+ * A json view is the host's own JSON viewer (`json`), top-level entries
+ * listed and containers folded, when it draws the kind; else a JSON tree.
  */
 function evalOutputNodes(
 	output: string,
 	views: readonly EvalViewEntry[] | undefined,
 	previewLines: number,
+	json: boolean,
 ): NativeNode[] {
 	if (output.trim().length === 0) return [];
 	return splitEvalOutput(output, views).map((part, i) => {
@@ -837,7 +840,9 @@ function evalOutputNodes(
 		}
 		const view = part.view;
 		if (view.kind === "table") return evalTableNode(view, `table-${i}`);
-		if (view.kind === "json") return keyed(describeJsonTree(view.value, { hiddenRootKeys: [] }), `json-${i}`);
+		if (view.kind === "json") {
+			return keyed(describeJsonValue(view.value, { native: json, hiddenRootKeys: [] }), `json-${i}`);
+		}
 		return keyed(md(view.text), `markdown-${i}`);
 	});
 }
@@ -1307,7 +1312,7 @@ export const evalToolRenderer = {
 						language,
 						code: formatEvalCodeForDisplay(cell.code, language),
 						title: cell.title,
-						outputs: [...evalOutputNodes(cell.output, cell.views, previewLines)],
+						outputs: [...evalOutputNodes(cell.output, cell.views, previewLines, options.json === true)],
 						status: evalStatusSection(cell, expanded),
 						foot: state && {
 							state,
@@ -1332,7 +1337,12 @@ export const evalToolRenderer = {
 		const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
 		const state: RunState = cancelled ? "cancelled" : isPartial ? "running" : result.isError ? "failed" : "done";
 		const last: Omit<EvalCellRun, "language" | "code" | "title"> = {
-			outputs: evalOutputNodes(stripOutputNotice(rawOutput, details?.meta).trimEnd(), undefined, previewLines),
+			outputs: evalOutputNodes(
+				stripOutputNotice(rawOutput, details?.meta).trimEnd(),
+				undefined,
+				previewLines,
+				options.json === true,
+			),
 			status: evalStatusSection(details ?? {}, expanded),
 			foot: { state, elapsedMs: options.elapsedMs, ...callFacts },
 		};

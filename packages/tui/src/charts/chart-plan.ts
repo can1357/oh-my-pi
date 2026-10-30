@@ -33,7 +33,6 @@ import {
 	isNumber,
 	type NumberCell,
 	parseCell,
-	plainCell,
 	type Status,
 	type TableAnalysis,
 	type TableColumn,
@@ -536,20 +535,6 @@ const NEST_SEPARATORS = [" — ", " – ", ": ", " · ", ", ", " ", "/", "-", "_
 /** Where a long row name's description starts (`Payroll (10 people…)`, `@watzon — #19, #53`). */
 const DESCRIPTION = / [—–] | - |: | \(/;
 
-/**
- * Measures that improve upward, by header: pass and success rates, retrieval
- * scores, throughput, speedups and savings.
- */
-const HIGHER_BETTER =
-	/(?:^|[^\w])(?:pass(?:ed|es|ing)?|pass ?%|pass ?rate|success(?:es|ful)?|succeeded|accuracy|acc|recall|precision|prec|f1|em|exact[_ ]?match|scores?|wins?|win ?rate|hit ?rate|throughput|qps|rps|ops\/s|req\/s|tok\/s|tokens\/s|speedup|faster|improvement|savings?|saved|gain|coverage|quality|relevance|correct|solved|ok|renders|completion ?rate|uptime|performance|profits?|roi|pnl|growth|per \$|\/\$)(?![\w])/i;
-/** Measures that improve downward, by header: cost, time, failures. */
-const LOWER_BETTER =
-	/(?:^|[^\w])(?:cost|costs|price|bill|spend|usd|latency|time|duration|wall(?: ?clock)?|elapsed|errors?|err|fail(?:s|ed|ures?)?|timeouts?|miss(?:es)?|crash(?:es)?|regressions?|bugs?|warnings?|retries|turns|p\d{2}|blockers|violations|leaks?|stalls?|load|\$\/\w+)(?![\w])/i;
-/** Resources a before/after change aims to shrink: lower is better only beside a baseline. */
-const LOWER_IN_CHANGE =
-	/(?:^|[^\w])(?:tokens?|tok|rss|memory|mem|heap|allocs?|allocations?|clones|size|bytes|cpu|gc|input|output)(?![\w])/i;
-/** Names of shares and counts that describe rather than score: no polarity whatever else they say. */
-const NEUTRAL = /(?:^|[^\w])(?:share|shares|% of|portion|fraction|distribution|breakdown)(?![\w])/i;
 /** Label headers naming rival options a table compares (models, configs, arms). */
 const RIVALS =
 	/(?:^|[^\w])(?:models?|config(?:uration)?s?|arms?|variants?|approach(?:es)?|options?|plans?|polic(?:y|ies)|providers?|modes?|strateg(?:y|ies)|candidates?|settings?|shapes?|backends?|engines?|librar(?:y|ies)|implementations?|vendors?|tools?|methods?|algorithms?|setups?|runs?)(?![\w])/i;
@@ -606,13 +591,16 @@ export function planChart(table: TableAnalysis): ChartPlan | undefined {
 
 /**
  * Whether a model should pick `table`'s chart (`tui.autoGraph: smart`):
- * multi-series tables, and tables whose rows may be named by a number the
- * `guess` plots (`Thread | State`, `Finding | Current`), where only meaning
- * tells a name from a measure.
+ * multi-series tables, tables whose rows may be named by a number the
+ * `guess` plots (`Thread | State`, `Finding | Current`), and any other chart
+ * the guess would draw — only meaning tells a measure from page references,
+ * step numbers or figures quoted in prose, which the judge charts as none.
  */
 export function shouldJudge(table: TableAnalysis, guess: ChartPlan | undefined): boolean {
 	if (!guess || table.rows.length < 3) return false;
-	return table.measures.length >= 2 || leadingMeasures(table, guess).length > 0;
+	if (table.measures.length >= 2 || leadingMeasures(table, guess).length > 0) return true;
+	const spec = buildChart(table, guess);
+	return spec !== undefined && worthCharting(spec);
 }
 
 /** Measure columns before `guess`'s text label column: numbers that may only name their rows. */
@@ -696,38 +684,33 @@ export function drawnNames(spec: ChartSpec): Set<string> {
 }
 
 /**
- * The local guess at what `plan`'s rows and measures mean: header keywords
- * for each measure's {@link Polarity} (resources like tokens or memory only
- * beside a baseline), rivals from the label's header, focus from bolded or
- * `(current)` row names, and a status column whose cells vary.
+ * The local guess at what `plan`'s rows and measures mean: each measure's
+ * {@link Polarity} as far as its unit says ({@link dimPolarity}; what a name
+ * means — `Memory` as a capacity or a cost — is the judge's call), rivals from
+ * the label's header, focus from bolded or `(current)` row names, and a status
+ * column whose cells vary.
  */
 export function guessMeaning(
 	table: TableAnalysis,
 	plan: ChartPlan,
 ): Pick<ChartPlan, "polarity" | "rowPolarity" | "rivals" | "focus" | "status"> {
 	const label = plan.label === undefined ? undefined : table.columns[plan.label];
-	// A comparison of two conditions reads resources (tokens, memory) the way a change does.
+	// A comparison of two conditions reads money and sizes the way a change does: as what it cuts.
 	const change =
 		plan.kind === "change" || plan.kind === "stat" || table.columns.some(column => BEFORE.test(column.header));
 	const polarity: Record<number, Polarity> = {};
 	for (const column of table.columns) {
-		if (column === label) continue;
 		// A signed delta's sign convention (saved vs. spent) is not in its unit.
-		const delta = DELTA.test(column.header) || column.signedShare >= 0.5;
-		const guessed =
-			headerPolarity(column.header, change) ??
-			(column.role === "measure" && !delta
-				? dimPolarity(column.dim, column.unit, change, column.scores)
-				: undefined);
+		if (column === label || column.role !== "measure" || DELTA.test(column.header) || column.signedShare >= 0.5)
+			continue;
+		const guessed = dimPolarity(column.dim, column.unit, change, column.scores);
 		if (guessed) polarity[column.index] = guessed;
 	}
 	const rowPolarity: Record<number, Polarity> = {};
 	if (label && rowsAreMetrics(table, plan))
 		for (const row of [...table.rows, ...table.totals]) {
 			const first = plan.series.map(index => table.columns[index]!.cells[row]).find(isNumber);
-			const guessed =
-				headerPolarity(label.cells[row]!.text, true) ??
-				(first ? dimPolarity(first.dim, first.unit, true, false) : undefined);
+			const guessed = first && dimPolarity(first.dim, first.unit, change, false);
 			if (guessed) rowPolarity[row] = guessed;
 		}
 	return {
@@ -745,23 +728,10 @@ export function rowsAreMetrics(table: TableAnalysis, plan: ChartPlan): boolean {
 }
 
 /**
- * A measure's {@link Polarity} from its name (`undefined` when it names
- * none); `change` admits resources a change aims to shrink.
- */
-function headerPolarity(name: string, change: boolean): Polarity | undefined {
-	// `gtTagRelevance`: camelCase words read apart.
-	const plain = plainCell(name).text.replace(/([a-z])([A-Z])/g, "$1 $2");
-	if (NEUTRAL.test(plain)) return undefined;
-	if (HIGHER_BETTER.test(plain)) return "higher";
-	if (LOWER_BETTER.test(plain)) return "lower";
-	if (change && LOWER_IN_CHANGE.test(plain)) return "lower";
-	return undefined;
-}
-
-/**
- * A measure's {@link Polarity} from its unit when its name gives none:
+ * A measure's {@link Polarity} from the unit its values are written in:
  * scores out of a total and rates per second climb, durations shrink, and
- * money and sizes shrink beside a baseline.
+ * money and sizes shrink beside a baseline (`change`). Elsewhere a size may
+ * be a capacity (`L2 cache`, `Memory`) and money a budget: no polarity.
  */
 function dimPolarity(dim: Dimension | undefined, unit: string, change: boolean, scores: boolean): Polarity | undefined {
 	if (scores) return "higher";

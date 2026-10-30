@@ -1,20 +1,19 @@
 import { describe, expect, it } from "bun:test";
-import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Api, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
-// Pins the invariant: bundled `models.json` carries every entry the runtime
+// Pins the invariant: the bundled catalog carries every entry the runtime
 // xai-oauth KDL seed (surfaced via buildXaiOAuthStaticSeed) emits. Without
-// this, editing the seed without regenerating `models.json` silently regresses
+// this, editing the seed without regenerating the catalog silently regresses
 // the boot-time default-model resolver — the registry sees the runtime seed
 // only after `refresh()`, but interactive boot resolves the persisted default
-// synchronously from `#loadModels()`, which reads only `models.json`.
+// synchronously from `#loadModels()`, which reads only the bundled catalog.
 //
 // Failure here means: run `bun run gen:models` and commit the diff.
 describe("xai-oauth bundled catalog (regression)", () => {
-	const bundled = (MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<Api>>>)["xai-oauth"] ?? {};
+	const bundled = Object.fromEntries(getBundledModels("xai-oauth").map(model => [model.id, model]));
 	const seed = buildXaiOAuthStaticSeed();
 
 	it("defaults SuperGrok selection to grok-4.6", () => {
@@ -33,7 +32,7 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	for (const seededModel of seed.filter(model => model.api === "openai-responses")) {
 		it(`matches contract for ${seededModel.id}`, () => {
 			const bundledEntry = bundled[seededModel.id];
-			expect(bundledEntry, `xai-oauth/${seededModel.id} missing from models.json`).toBeDefined();
+			expect(bundledEntry, `xai-oauth/${seededModel.id} missing from bundled catalog`).toBeDefined();
 			expect(bundledEntry.id).toBe(seededModel.id);
 			expect(bundledEntry.name).toBe(seededModel.name);
 			expect(bundledEntry.provider).toBe("xai-oauth");

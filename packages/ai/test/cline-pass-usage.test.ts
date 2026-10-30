@@ -143,4 +143,19 @@ describe("ClinePass usage provider", () => {
 		).toBe(false);
 		expect(clinePassUsageProvider.validatesCredentials).toBe(true);
 	});
+
+	it("treats an account without a ClinePass plan as nothing to meter, not a failed fetch", async () => {
+		const warnings: string[] = [];
+		const logger = { debug() {}, warn: (message: string) => warnings.push(message) };
+		const noPlan = { data: null, error: "no plan history found for user", success: false };
+		const missing = { error: "Not Found", success: false };
+
+		expect(await clinePassUsageProvider.fetchUsage(makeParams(), { ...makeContext(noPlan, 404), logger })).toBeNull();
+		expect(warnings).toEqual([]);
+
+		expect(
+			await clinePassUsageProvider.fetchUsage(makeParams(), { ...makeContext(missing, 404), logger }),
+		).toBeNull();
+		expect(warnings).toEqual(["ClinePass usage fetch failed"]);
+	});
 });

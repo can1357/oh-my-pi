@@ -42,9 +42,16 @@ import {
 	visibleWidth,
 } from "../utils";
 import {
+	countGraphemes,
+	diffInsertSession,
+	flatten,
 	lastGraphemeStart,
 	nextGraphemeStart,
+	offsetToPos,
+	prevGraphemeStart,
+	stepGraphemes,
 	type VimCommand,
+	type VimInsertRecord,
 	type VimMode,
 	type VimPosition,
 	VimState,
@@ -460,6 +467,154 @@ const DEFAULT_PAGE_SCROLL_LINES = 10;
 
 const MAX_UNDO_STACK = 100;
 
+/** Undo-stack position to fold later snapshots back to; `shifts` tracks MAX_UNDO_STACK eviction. */
+interface UndoMark {
+	depth: number;
+	shifts: number;
+}
+
+/**
+ * Tracked Insert/Replace session: `[0, leftEnd)` is surviving pre-session text on the left and
+ * `[rightStart, len)` on the right (flat-buffer offsets), so the gap is what the session typed.
+ * `delBefore`/`delAfter` count pre-session graphemes deleted around the anchor — tracked
+ * incrementally because a final-text diff cannot see a delete that was retyped identically.
+ */
+interface VimSessionState {
+	mark: UndoMark;
+	replace: boolean;
+	/** Flat text at segment start (diff fallback and arrowed-split baseline). */
+	text: string;
+	/** Flat cursor at segment start. */
+	cursor: number;
+	arrowed: boolean;
+	leftEnd: number;
+	rightStart: number;
+	delBefore: number;
+	delAfter: number;
+	/** False after an edit path we cannot classify (native host edits); falls back to a final diff. */
+	tracked: boolean;
+}
+
+/** Length of `lines.join("\n")` without building it. */
+function flatLength(lines: readonly string[]): number {
+	let length = lines.length - 1;
+	for (const line of lines) length += line.length;
+	return length;
+}
+
+/** `lines.join("\n").slice(start, end)` without joining the whole buffer. */
+function sliceFlat(lines: readonly string[], start: number, end: number): string {
+	let out = "";
+	let offset = 0;
+	for (let i = 0; i < lines.length && offset < end; i++) {
+		const line = lines[i]!;
+		const lineEnd = offset + line.length;
+		if (lineEnd >= start) {
+			out += line.slice(Math.max(0, start - offset), end - offset);
+			if (i < lines.length - 1 && lineEnd < end) out += "\n";
+		}
+		offset = lineEnd + 1;
+	}
+	return out;
+}
+
+/**
+ * Common prefix and non-overlapping common suffix of `before.join("\n")` and `after.join("\n")` —
+ * the split a flat char scan gives — without joining either buffer. Lines an edit left alone keep
+ * their string identity, so they are skipped whole and a keystroke costs O(lines), not O(chars).
+ */
+function diffFlatLines(
+	before: readonly string[],
+	after: readonly string[],
+	beforeLength: number,
+	afterLength: number,
+): { prefix: number; suffix: number } {
+	const prefixMax = Math.min(beforeLength, afterLength);
+	let prefix = 0;
+	let bl = 0;
+	let bc = 0;
+	let al = 0;
+	let ac = 0;
+	// `prefix < prefixMax` guarantees both sides still have a character; past a line's end it is "\n".
+	while (prefix < prefixMax) {
+		const bLine = before[bl]!;
+		const aLine = after[al]!;
+		if (
+			bc === 0 &&
+			ac === 0 &&
+			bl < before.length - 1 &&
+			al < after.length - 1 &&
+			prefix + bLine.length + 1 <= prefixMax &&
+			bLine === aLine
+		) {
+			prefix += bLine.length + 1;
+			bl++;
+			al++;
+			continue;
+		}
+		const b = bc < bLine.length ? bLine.charCodeAt(bc) : 10;
+		const a = ac < aLine.length ? aLine.charCodeAt(ac) : 10;
+		if (a !== b) break;
+		prefix++;
+		if (bc < bLine.length) {
+			bc++;
+		} else {
+			bl++;
+			bc = 0;
+		}
+		if (ac < aLine.length) {
+			ac++;
+		} else {
+			al++;
+			ac = 0;
+		}
+	}
+
+	const suffixMax = Math.min(beforeLength - prefix, afterLength - prefix);
+	let suffix = 0;
+	bl = before.length - 1;
+	al = after.length - 1;
+	bc = before[bl]!.length;
+	ac = after[al]!.length;
+	// Positions sit just past the next character to compare; before a line's start it is "\n".
+	while (suffix < suffixMax) {
+		const bLine = before[bl]!;
+		const aLine = after[al]!;
+		if (
+			bc === bLine.length &&
+			ac === aLine.length &&
+			bl > 0 &&
+			al > 0 &&
+			suffix + bLine.length + 1 <= suffixMax &&
+			bLine === aLine
+		) {
+			suffix += bLine.length + 1;
+			bl--;
+			al--;
+			bc = before[bl]!.length;
+			ac = after[al]!.length;
+			continue;
+		}
+		const b = bc > 0 ? bLine.charCodeAt(bc - 1) : 10;
+		const a = ac > 0 ? aLine.charCodeAt(ac - 1) : 10;
+		if (a !== b) break;
+		suffix++;
+		if (bc > 0) {
+			bc--;
+		} else {
+			bl--;
+			bc = before[bl]!.length;
+		}
+		if (ac > 0) {
+			ac--;
+		} else {
+			al--;
+			ac = after[al]!.length;
+		}
+	}
+	return { prefix, suffix };
+}
+
 /**
  * Typed characters that replace the provisional space a Tab word accept adds, so
  * they attach to the accepted word: closing punctuation, and `-` for compounds
@@ -621,6 +776,14 @@ export class Editor implements Component, Focusable {
 	describeDecorations: ((lines: readonly string[]) => readonly TspEditorDecoration[]) | undefined;
 	/** TSP code language of the buffer (`python`, `bash`): the terminal highlights it in the mono face. */
 	describeLanguage: (() => string | undefined) | undefined;
+	/** Label the TSP field to disable host-side editing while another input owner handles raw keys. */
+	nativeKeyPassthrough = false;
+	/**
+	 * Ask the TSP terminal to keep what is typed into this field and draw it at
+	 * the caret until this clears, then send it: set while startup cannot read
+	 * input yet (the prompt composer's deferred-input start).
+	 */
+	nativeTypeahead = false;
 	/**
 	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
 	 * chip, send/stop): the root role, the children with `input` placed where
@@ -676,6 +839,8 @@ export class Editor implements Component, Focusable {
 	#lastAction: "kill" | "yank" | "type-word" | "accept-word" | "replace" | null = null;
 	/** Graphemes overwritten in the current `R` session, so Backspace can restore them. */
 	#replaceLog: { line: number; col: number; removed: string; text: string }[] = [];
+	/** Insert/Replace session a Vim command opened; Escape hands its text to `.` and folds its undo steps into one. */
+	#vimSession: VimSessionState | null = null;
 
 	// Character jump mode
 	#jumpMode: "forward" | "backward" | null = null;
@@ -748,6 +913,13 @@ export class Editor implements Component, Focusable {
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
 	#suspendUndo = false;
+	/** Snapshots evicted from the front of {@link #undoStack}, so {@link UndoMark}s stay aligned. */
+	#undoShifts = 0;
+	/**
+	 * Undo mark whose first snapshot `u` must still reach: the open Insert/Replace segment, or the
+	 * Normal-mode key being applied (so a counted `.` stays one undo step past the stack cap).
+	 */
+	#pinnedUndo: UndoMark | null = null;
 
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
@@ -917,8 +1089,15 @@ export class Editor implements Component, Focusable {
 	 *  never left in a state where ordinary typing does nothing. */
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
+		this.#vimSession = null;
+		this.#pinnedUndo = null;
 		this.#vim = enabled ? new VimState() : null;
-		if (this.#vim) this.#vim.mode = "insert";
+		if (this.#vim) {
+			this.#vim.mode = "insert";
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, false);
+		}
 		this.invalidate();
 	}
 
@@ -1096,6 +1275,7 @@ export class Editor implements Component, Focusable {
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
+		this.#endVimSession();
 		this.#undoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
@@ -1111,6 +1291,11 @@ export class Editor implements Component, Focusable {
 		} else {
 			this.#state.cursorLine = this.#state.lines.length - 1;
 			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
+		}
+		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, this.#vim.mode === "replace");
 		}
 		this.#notifyChange();
 	}
@@ -1717,9 +1902,10 @@ export class Editor implements Component, Focusable {
 			decor: decor.decor,
 			ghost: ghost ? plainText(ghost) : undefined,
 			placeholder: nativePlaceholder || undefined,
-			mode: vim ? VIM_MODE_LABELS[vim.mode] : undefined,
+			mode: this.nativeKeyPassthrough ? "PTY" : vim ? VIM_MODE_LABELS[vim.mode] : undefined,
 			lang: this.describeLanguage?.(),
 			maxLines: this.#maxHeight,
+			typeahead: this.nativeTypeahead || undefined,
 		};
 		let editor = this.#nativeEditor;
 		if (!editor || !sameProps(editor.props, props)) {
@@ -1778,8 +1964,62 @@ export class Editor implements Component, Focusable {
 		// so a fragmented paste stream can never grow the call stack.
 		let next: string | undefined = data;
 		while (next !== undefined && next.length > 0) {
+			const session = this.#vimSession;
+			const revision = this.#textRevision;
+			const line = this.#state.cursorLine;
+			const col = this.#state.cursorCol;
+			// A line-array copy is pointer-sized per line; the edit diff below skips unchanged lines whole.
+			const linesBefore =
+				session !== null && session.tracked && !session.replace ? this.#state.lines.slice() : undefined;
 			next = this.#handleInputChunk(next);
+			// A bare cursor move inside one Insert/Replace session splits it, like Vim's arrow keys.
+			if (
+				session !== null &&
+				session === this.#vimSession &&
+				this.#textRevision === revision &&
+				(line !== this.#state.cursorLine || col !== this.#state.cursorCol)
+			) {
+				this.#breakVimSession();
+			} else if (
+				session !== null &&
+				session === this.#vimSession &&
+				session.tracked &&
+				!session.replace &&
+				linesBefore !== undefined &&
+				this.#textRevision !== revision
+			) {
+				this.#trackVimSessionEdit(session, linesBefore);
+			}
 		}
+	}
+
+	/**
+	 * Fold one chunk's buffer change into the session window. Counting original deletions here keeps
+	 * `deleteBefore`/`deleteAfter` exact even when typed text coincides with what was deleted
+	 * (Backspace then retyping the same grapheme), which a final-text diff cannot recover.
+	 */
+	#trackVimSessionEdit(session: VimSessionState, linesBefore: readonly string[]): void {
+		const linesAfter = this.#state.lines;
+		const beforeLength = flatLength(linesBefore);
+		const afterLength = flatLength(linesAfter);
+		const { prefix: p, suffix: q } = diffFlatLines(linesBefore, linesAfter, beforeLength, afterLength);
+		const removedEnd = beforeLength - q;
+		const insLen = afterLength - p - q;
+		const leftCut = Math.max(0, Math.min(removedEnd, session.leftEnd) - p);
+		const rightCut = Math.max(0, removedEnd - Math.max(p, session.rightStart));
+		const typedCut = removedEnd - p - leftCut - rightCut;
+		if (insLen > 0 && p < session.leftEnd - leftCut) {
+			// Insertion inside surviving original text can't be told apart from typed text; the
+			// finalize diff still produces a bounded record.
+			session.tracked = false;
+			return;
+		}
+		if (leftCut > 0) session.delBefore += countGraphemes(sliceFlat(linesBefore, p, p + leftCut));
+		if (rightCut > 0) {
+			session.delAfter += countGraphemes(sliceFlat(linesBefore, removedEnd - rightCut, removedEnd));
+		}
+		session.leftEnd -= leftCut;
+		session.rightStart = session.rightStart - leftCut - typedCut + insLen;
 	}
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
@@ -2200,10 +2440,12 @@ export class Editor implements Component, Focusable {
 			// Word left
 			this.#resetKillSequence();
 			this.#moveWordBackwards();
+			this.#dismissAutocomplete();
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorWordRight")) {
 			// Word right
 			this.#resetKillSequence();
 			this.#moveWordForwards();
+			this.#dismissAutocomplete();
 		}
 		// Arrow keys
 		else if (kb.matchesCanonical(canonical, "tui.editor.cursorUp")) {
@@ -2321,9 +2563,31 @@ export class Editor implements Component, Focusable {
 		const before = vim.mode;
 		const pendingBefore = vim.pendingText;
 		const selectedLinesBefore = this.vimSelectedLines;
+		const mark = this.#undoMark();
+		const pinHere = this.#vimSession === null;
+		if (pinHere) this.#pinnedUndo = mark;
+		const revisionBefore = this.#textRevision;
 		const commands = vim.handleKey(key, this.#state);
-		if (commands === null) return false;
+		if (commands === null) {
+			if (pinHere) this.#pinnedUndo = null;
+			return false;
+		}
+		const editing = (mode: VimMode) => mode === "insert" || mode === "replace";
+		// Before applying: Escape's commands would otherwise clear the replace log this reads.
+		if (editing(before) && !editing(vim.mode)) this.#endVimSession();
 		this.#applyVimCommands(commands);
+		if (this.#textRevision !== revisionBefore) {
+			vim.commitChange();
+		} else {
+			vim.discardChange();
+		}
+		// The session baseline follows `cw`'s delete or `o`'s new line, but its undo mark precedes them,
+		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
+		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
+		else if (this.#vimSession === null) {
+			this.#collapseUndoSince(mark);
+			this.#pinnedUndo = null;
+		}
 		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
 		// beside the mode name, and extending a selection changes neither the mode nor the pending
 		// command — so all three have to be compared or the indicator goes stale mid-selection.
@@ -2333,6 +2597,89 @@ export class Editor implements Component, Focusable {
 		if (before === "replace" && vim.mode !== "replace") this.#replaceLog.length = 0;
 		if (vim.mode === "replace" && before !== "replace") this.#replaceLog.length = 0;
 		return true;
+	}
+
+	#undoMark(): UndoMark {
+		return { depth: this.#undoStack.length, shifts: this.#undoShifts };
+	}
+
+	/** Keep only the first snapshot pushed since `mark`, folding everything after it into one undo step. */
+	#collapseUndoSince(mark: UndoMark): void {
+		const keep = Math.max(0, mark.depth - (this.#undoShifts - mark.shifts)) + 1;
+		if (this.#undoStack.length > keep) this.#undoStack.length = keep;
+	}
+
+	#startVimSession(mark: UndoMark, replace: boolean): void {
+		// A stale "type-word" would coalesce the session's first keystroke into the pre-session
+		// undo step, so `u` would swallow text the session never touched.
+		this.#resetKillSequence();
+		const { text, cursor } = flatten(this.#state);
+		this.#vimSession = {
+			mark,
+			replace,
+			text,
+			cursor,
+			arrowed: false,
+			leftEnd: cursor,
+			rightStart: cursor,
+			delBefore: 0,
+			delAfter: 0,
+			tracked: true,
+		};
+	}
+
+	/** Hand the current session segment's text to `.` and fold its undo steps. */
+	#finalizeVimSegment(): void {
+		const session = this.#vimSession;
+		const vim = this.#vim;
+		if (session === null || vim === null) return;
+		const record: VimInsertRecord = session.replace
+			? { deleteBefore: 0, deleteAfter: 0, text: this.#replaceLog.map(entry => entry.text).join("") }
+			: session.tracked
+				? {
+						deleteBefore: session.delBefore,
+						deleteAfter: session.delAfter,
+						text: this.#state.lines.join("\n").slice(session.leftEnd, session.rightStart),
+					}
+				: diffInsertSession(session.text, session.cursor, this.#state.lines.join("\n"));
+		if (!session.arrowed) vim.recordInsert(record, false);
+		// An empty segment after an arrow keeps the earlier change, as Vim does.
+		else if (record.text !== "" || record.deleteBefore > 0 || record.deleteAfter > 0) vim.recordInsert(record, true);
+		this.#collapseUndoSince(session.mark);
+	}
+
+	#endVimSession(): void {
+		this.#finalizeVimSegment();
+		this.#vimSession = null;
+		this.#pinnedUndo = null;
+		// A spent log would otherwise leak into the next Replace session's record.
+		this.#replaceLog.length = 0;
+	}
+
+	/** An arrow key inside Insert/Replace: close the segment and start a fresh one at the new cursor. */
+	#breakVimSession(): void {
+		const session = this.#vimSession;
+		if (session === null) return;
+		this.#finalizeVimSegment();
+		this.#resetKillSequence();
+		// Replace-mode Backspace cannot restore across a cursor move, and old overwrites must not leak
+		// into the next segment's record.
+		this.#replaceLog.length = 0;
+		const { text, cursor } = flatten(this.#state);
+		const mark = this.#undoMark();
+		this.#vimSession = {
+			...session,
+			mark,
+			text,
+			cursor,
+			arrowed: true,
+			leftEnd: cursor,
+			rightStart: cursor,
+			delBefore: 0,
+			delAfter: 0,
+			tracked: true,
+		};
+		this.#pinnedUndo = mark;
 	}
 
 	#applyVimCommands(commands: readonly VimCommand[]): void {
@@ -2386,6 +2733,9 @@ export class Editor implements Component, Focusable {
 				case "indent":
 					this.#indentVimLines(command.fromLine, command.toLine, command.out);
 					break;
+				case "retype":
+					this.#retypeVimInsert(command);
+					break;
 			}
 		}
 		this.#clampVimCursor();
@@ -2414,7 +2764,7 @@ export class Editor implements Component, Focusable {
 		// makes the logged columns meaningless; start a fresh undo step and a fresh log.
 		if (this.#lastAction !== "replace") {
 			this.#recordUndoState();
-			this.#replaceLog.length = 0;
+			if (!this.#vimSession?.replace) this.#replaceLog.length = 0;
 		}
 		this.#lastAction = "replace";
 		// Editing a recalled prompt makes it a draft, so Up/Down at an edge move the cursor again
@@ -2552,6 +2902,23 @@ export class Editor implements Component, Focusable {
 
 		// A range that cuts through an atomic placeholder (`[Image #1, 800x600]`) swallows the whole
 		// token instead of leaving a corrupt fragment — the same rule backspace follows.
+		const { start, end } = this.#expandVimRange(from, to);
+
+		const removed = this.#sliceRange(start, end, false);
+		if (!removed) return;
+		this.#recordUndoState();
+		this.#killRing.push(removed, { prepend: false });
+		const head = (lines[start.line] ?? "").slice(0, start.col);
+		const tail = (lines[Math.min(end.line, lines.length - 1)] ?? "").slice(end.col);
+		lines.splice(start.line, Math.min(end.line, lines.length - 1) - start.line + 1, head + tail);
+		this.#state.cursorLine = start.line;
+		this.#setCursorCol(start.col);
+		this.#afterVimEdit();
+	}
+
+	/** Widen a charwise range so it never cuts through an atomic placeholder token. */
+	#expandVimRange(from: VimPosition, to: VimPosition): { start: VimPosition; end: VimPosition } {
+		const lines = this.#state.lines;
 		let start = from;
 		let end = to;
 		if (start.line === end.line) {
@@ -2569,16 +2936,54 @@ export class Editor implements Component, Focusable {
 				if (endToken !== undefined && endToken.end > end.col) end = { line: end.line, col: endToken.end };
 			}
 		}
+		return { start, end };
+	}
 
-		const removed = this.#sliceRange(start, end, false);
-		if (!removed) return;
+	/** `.` after an Insert/Replace session: type its text again, `times` copies, then Escape's step back. */
+	#retypeVimInsert(command: Extract<VimCommand, { kind: "retype" }>): void {
+		for (let n = 0; n < command.times; n++) {
+			// `3.` after `ofoo`: one new line per copy, stacking downward (Vim's `3Ofoo` does too).
+			if (n > 0 && command.newline) this.#openVimLine(true);
+			if (command.overwrite) {
+				for (const seg of segmenter.segment(command.record.text)) {
+					if (seg.segment === "\n" || seg.segment === "\r\n") this.#addNewLine();
+					else this.#overwriteReplaceGrapheme(seg.segment);
+				}
+			} else {
+				this.#spliceVimInsert(command.record);
+			}
+		}
+		if (command.overwrite) {
+			this.#replaceLog.length = 0;
+			this.#resetKillSequence();
+		}
+		const line = this.#state.lines[this.#state.cursorLine] ?? "";
+		this.#setCursorCol(prevGraphemeStart(line, this.#state.cursorCol));
+	}
+
+	/**
+	 * Replay one Insert session at the cursor. Built directly rather than through the typing path,
+	 * which would pop autocomplete from Normal mode and feed the kill ring.
+	 */
+	#spliceVimInsert(record: VimInsertRecord): void {
+		const lines = this.#state.lines;
+		const { text: flat, cursor } = flatten(this.#state);
+		const { start, end } = this.#expandVimRange(
+			offsetToPos(lines, stepGraphemes(flat, cursor, record.deleteBefore, false)),
+			offsetToPos(lines, stepGraphemes(flat, cursor, record.deleteAfter, true)),
+		);
+		if (record.text === "" && start.line === end.line && start.col === end.col) return;
 		this.#recordUndoState();
-		this.#killRing.push(removed, { prepend: false });
 		const head = (lines[start.line] ?? "").slice(0, start.col);
-		const tail = (lines[Math.min(end.line, lines.length - 1)] ?? "").slice(end.col);
-		lines.splice(start.line, Math.min(end.line, lines.length - 1) - start.line + 1, head + tail);
-		this.#state.cursorLine = start.line;
-		this.#setCursorCol(start.col);
+		const tail = (lines[end.line] ?? "").slice(end.col);
+		const parts = record.text.split("\n");
+		const rows = parts.slice();
+		rows[0] = head + rows[0];
+		rows[rows.length - 1] += tail;
+		lines.splice(start.line, end.line - start.line + 1, ...rows);
+		this.#state.cursorLine = start.line + parts.length - 1;
+		this.#setCursorCol((parts.length === 1 ? head.length : 0) + (parts.at(-1) ?? "").length);
+		this.#lastAction = null;
 		this.#afterVimEdit();
 	}
 
@@ -3087,17 +3492,25 @@ export class Editor implements Component, Focusable {
 		if (!resolved) return;
 		this.#resetKillSequence();
 		if (resolved.changed) {
+			if (this.#vimSession) this.#vimSession.tracked = false;
 			this.#historyIndex = -1;
 			this.#recordUndoState();
 			this.#state.lines = resolved.text.split("\n");
 		}
 		const lines = this.#state.lines;
+		const priorLine = this.#state.cursorLine;
+		const priorCol = this.#state.cursorCol;
 		let line = 0;
 		let col = resolved.cursor;
 		while (line < lines.length - 1 && col > lines[line]!.length) col -= lines[line++]!.length + 1;
 		this.#state.cursorLine = line;
 		this.#setCursorCol(col);
-		if (!resolved.changed) return;
+		if (!resolved.changed) {
+			if (this.#vimSession !== null && (priorLine !== line || priorCol !== col)) {
+				this.#breakVimSession();
+			}
+			return;
+		}
 		this.#notifyChange(resolved.text);
 		this.#retriggerAutocompleteAtCursor();
 	}
@@ -3498,6 +3911,9 @@ export class Editor implements Component, Focusable {
 		const dropSpace = this.#hasProvisionalSpace();
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
+		// The cursor leaves the trigger token's line, so any open popup is stale:
+		// keeping it would float on the new line and Enter would submit past it.
+		this.#dismissAutocomplete();
 		this.#recordUndoState();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -3513,6 +3929,9 @@ export class Editor implements Component, Focusable {
 		// Move cursor to start of new line
 		this.#state.cursorLine++;
 		this.#setCursorCol(0);
+		if (this.#vimSession?.replace) {
+			this.#replaceLog.push({ line: this.#state.cursorLine - 1, col: splitCol, removed: "", text: "\n" });
+		}
 
 		this.#notifyChange();
 	}
@@ -3535,6 +3954,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	#submitValue(): void {
+		this.#endVimSession();
 		this.#resetKillSequence();
 
 		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
@@ -3545,6 +3965,11 @@ export class Editor implements Component, Focusable {
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 
+		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, this.#vim.mode === "replace");
+		}
 		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
 	}
@@ -3790,23 +4215,27 @@ export class Editor implements Component, Focusable {
 
 	#moveToLineStart(): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		this.#setCursorCol(0);
 	}
 
 	#moveToLineEnd(): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		this.#setCursorCol(currentLine.length);
 	}
 
 	#moveToMessageStart(): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		this.#state.cursorLine = 0;
 		this.#setCursorCol(0);
 	}
 
 	#moveToMessageEnd(): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		this.#state.cursorLine = this.#state.lines.length - 1;
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		this.#setCursorCol(currentLine.length);
@@ -3836,9 +4265,17 @@ export class Editor implements Component, Focusable {
 			cursorLine: this.#state.cursorLine,
 			cursorCol: this.#state.cursorCol,
 		});
-		if (this.#undoStack.length > MAX_UNDO_STACK) {
-			this.#undoStack.shift();
+		if (this.#undoStack.length <= MAX_UNDO_STACK) return;
+		const pin = this.#pinnedUndo;
+		const anchorIndex = pin === null ? -1 : pin.depth - (this.#undoShifts - pin.shifts);
+		if (anchorIndex === 0 && this.#undoStack.length > 1) {
+			// Front entry is the open change's restore point. Drop the snapshot after it, and don't
+			// bump #undoShifts: index 0 did not move, so the mark still points at it.
+			this.#undoStack.splice(1, 1);
+			return;
 		}
+		this.#undoStack.shift();
+		this.#undoShifts++;
 	}
 
 	#applyUndo(): void {
@@ -4278,6 +4715,7 @@ export class Editor implements Component, Focusable {
 
 	#moveCursor(deltaLine: number, deltaCol: number): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 
@@ -4330,6 +4768,7 @@ export class Editor implements Component, Focusable {
 
 	#pageScroll(direction: -1 | 1): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		const step = this.#getPageScrollStep(visualLines.length);
@@ -4360,6 +4799,7 @@ export class Editor implements Component, Focusable {
 	 */
 	#jumpToChar(char: string, direction: "forward" | "backward"): void {
 		this.#resetKillSequence();
+		this.#dismissAutocomplete();
 		const isForward = direction === "forward";
 		const lines = this.#state.lines;
 
@@ -4774,6 +5214,17 @@ export class Editor implements Component, Focusable {
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
+	}
+
+	/**
+	 * Close the popup when the cursor leaves the token it was opened for (newline,
+	 * pure cursor motion). Its prefix no longer matches the text before the cursor,
+	 * so it could neither accept nor refresh and would linger stale.
+	 */
+	#dismissAutocomplete(): void {
+		if (this.#autocompleteState === null) return;
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
 	}
 
 	/**

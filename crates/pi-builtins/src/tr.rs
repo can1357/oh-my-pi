@@ -613,7 +613,7 @@ impl Sequence {
 			(
 				alt((value(Err(()), peek(tag("=]"))), map(Self::parse_backslash_or_char, Ok))),
 				map(terminated(take_until("=]"), tag("=]")), |v: &[u8]| {
-					if v.is_empty() { Ok(()) } else { Err(v) }
+					v.is_empty().ok_or(v)
 				}),
 			),
 		)

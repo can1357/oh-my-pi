@@ -183,5 +183,5 @@ export interface GenerateContentResponse {
 	responseId?: string;
 	promptFeedback?: PromptFeedback;
 	/** In-band stream failure (quota, internal error) delivered as a final JSON event. */
-	error?: { code?: number; message?: string; status?: string };
+	error?: { code?: number; message?: string; status?: string; details?: unknown[] };
 }

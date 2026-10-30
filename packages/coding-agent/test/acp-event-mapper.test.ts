@@ -100,6 +100,8 @@ class ReplayTestSession {
 
 	setClientBridge(_bridge: unknown): void {}
 
+	setMcpServerInstructionsSource(_source: unknown): void {}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
@@ -1023,6 +1025,22 @@ describe("ACP event mapper", () => {
 			rawInput: "{not json",
 		});
 		expect("content" in update).toBe(false);
+	});
+
+	it("names the tool so clients can label kind-other calls such as task", () => {
+		const update = buildToolCallStartUpdate({
+			toolCallId: "toolu_task",
+			toolName: "task",
+			args: { tasks: [] },
+			intent: "Waiting for agents",
+		});
+
+		expect(update).toMatchObject({
+			sessionUpdate: "tool_call",
+			name: "task",
+			title: "Waiting for agents",
+			kind: "other",
+		});
 	});
 
 	it("keeps object replay arguments unchanged and builds command content", () => {

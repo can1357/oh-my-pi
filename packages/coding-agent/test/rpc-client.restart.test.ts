@@ -211,4 +211,26 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			message: expect.stringContaining("skill file was deleted"),
 		});
 	});
+
+	test("rejects promptAndWait when the transport closes after the prompt ack", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_EXIT_AFTER_PROMPT_ACK: "1" },
+		});
+		await client.start();
+		expect(await rejectionOf(client.promptAndWait("lost"))).toMatchObject({
+			message: expect.stringContaining("Agent process exited"),
+		});
+	}, 10_000);
+
+	test("rejects promptAndWait when the client stops after the prompt ack", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT });
+		await client.start();
+		// The fixture acks the prompt but never sends prompt_result.
+		const completion = rejectionOf(client.promptAndWait("orphaned"));
+		// Commands are answered in order, so this response proves the prompt ack was handled first.
+		await client.getState();
+		await client.stop();
+		expect(await completion).toMatchObject({ message: "Client stopped" });
+	}, 10_000);
 });

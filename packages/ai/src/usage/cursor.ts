@@ -2,6 +2,7 @@ import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { CURSOR_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/cursor";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import {
+	cursorConnectRequest,
 	cursorSessionHeaders,
 	extractCursorAccessTokenUserId,
 	fetchCursorAccountEmail,
@@ -31,7 +32,7 @@ function normalizeCursorBaseUrl(baseUrl?: string): string {
 	return baseUrl.replace(/\/+$/, "");
 }
 
-type CursorUsageSource = "auth-usage" | "usage-summary";
+type CursorUsageSource = "auth-usage" | "usage-summary" | "plan-info";
 
 async function fetchCursorJson(
 	ctx: UsageFetchContext,
@@ -58,6 +59,19 @@ async function fetchCursorJson(
 		});
 		return undefined;
 	}
+}
+
+const CURSOR_PLAN_INFO_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo";
+
+/** Next reset of the X Subscription's weekly pool (`planInfo.includedUsageResetsAt`, epoch ms). */
+async function fetchCursorWeeklyResetsAt(
+	ctx: UsageFetchContext,
+	token: string,
+	signal: AbortSignal | undefined,
+): Promise<number | undefined> {
+	const payload = await fetchCursorJson(ctx, CURSOR_PLAN_INFO_URL, cursorConnectRequest(token, signal), "plan-info");
+	if (!isRecord(payload) || !isRecord(payload.planInfo)) return undefined;
+	return parseTimestamp(payload.planInfo.includedUsageResetsAt);
 }
 
 function deriveResetsAt(payload: Record<string, unknown>): number | undefined {
@@ -204,6 +218,100 @@ function pushCursorPlanRails(limits: UsageLimit[], bucket: Record<string, unknow
 	}
 }
 
+/** Prepaid credit that is off or empty: third-party models are refused until it is topped up. */
+const NO_PREPAID_CREDIT: UsageAmount = {
+	used: 0,
+	limit: 0,
+	remaining: 0,
+	usedFraction: 1,
+	remainingFraction: 0,
+	unit: "usd",
+};
+
+/**
+ * The X Subscription (`membershipType: "unified_*"`) bills differently from legacy Cursor plans:
+ * `individualUsage.plan` is one weekly pool shared by Cursor models (Grok, Composer, Auto) and the
+ * Grok apps, and third-party models (Claude, GPT, Gemini, …) are paid from prepaid credit from the
+ * first request, which `individualUsage.onDemand` meters. Its `apiPercentUsed` therefore says nothing
+ * about whether a third-party request can run.
+ */
+function isUnifiedMembership(payload: Record<string, unknown>): boolean {
+	return typeof payload.membershipType === "string" && payload.membershipType.startsWith("unified_");
+}
+
+function parseUnifiedPool(plan: Record<string, unknown>): UsageAmount | null {
+	if (plan.enabled === false) return null;
+	const limitCents = toNumber(plan.limit);
+	const usedCents = toNumber(plan.used);
+	const percent = toNumber(plan.totalPercentUsed);
+	if (limitCents === undefined || limitCents <= 0) {
+		if (percent === undefined) return null;
+		return { used: Math.max(0, percent), usedFraction: Math.max(0, percent) / 100, unit: "percent" };
+	}
+	const usedFraction = Math.max(
+		percent !== undefined ? percent / 100 : 0,
+		usedCents !== undefined ? usedCents / limitCents : 0,
+		0,
+	);
+	const limit = limitCents / 100;
+	const used = Math.min(limit, limit * usedFraction);
+	return {
+		used,
+		limit,
+		remaining: limit - used,
+		usedFraction,
+		remainingFraction: Math.max(0, 1 - usedFraction),
+		unit: "usd",
+	};
+}
+
+function parseUnifiedUsage(individualUsage: Record<string, unknown>, weeklyResetsAt: number | undefined): UsageLimit[] {
+	const limits: UsageLimit[] = [];
+	const plan = isRecord(individualUsage.plan) ? individualUsage.plan : null;
+	const pool = plan ? parseUnifiedPool(plan) : null;
+	if (pool) {
+		const weekly: UsageWindow = {
+			id: "weekly",
+			label: "Weekly",
+			durationMs: 7 * DAY_MS,
+			...(weeklyResetsAt !== undefined ? { resetsAt: weeklyResetsAt } : {}),
+		};
+		limits.push({
+			id: "cursor:usd:individual-auto",
+			label: "Cursor Models",
+			scope: { provider: "cursor", windowId: weekly.id },
+			window: weekly,
+			amount: pool,
+			...(pool.usedFraction !== undefined ? { status: usageStatus(pool.usedFraction) } : {}),
+		});
+	}
+	const onDemand = isRecord(individualUsage.onDemand) ? individualUsage.onDemand : null;
+	const credit =
+		onDemand && (onDemand.enabled === false || toNumber(onDemand.limit) === 0)
+			? NO_PREPAID_CREDIT
+			: onDemand
+				? parseCursorCentsBucket(onDemand)
+				: null;
+	if (credit) {
+		// Prepaid credit has no calendar reset: keeping `resetsAt` off the window prevents
+		// an empty balance from pinning a `pool:api` block until `billingCycleEnd` and
+		// keeps the status line from rendering `mo 100%` for accounts with credit off.
+		const prepaid: UsageWindow = {
+			id: "prepaid",
+			label: "Prepaid credit",
+		};
+		limits.push({
+			id: "cursor:usd:individual-api",
+			label: "Other Models (prepaid credit)",
+			scope: { provider: "cursor", windowId: prepaid.id },
+			window: prepaid,
+			amount: credit,
+			...(credit.usedFraction !== undefined ? { status: usageStatus(credit.usedFraction) } : {}),
+		});
+	}
+	return limits;
+}
+
 /**
  * Cursor's `/api/usage-summary` has shipped two personal-bucket shapes:
  * - Enterprise/team dashboards historically exposed `individualUsage.overall`
@@ -213,9 +321,14 @@ function pushCursorPlanRails(limits: UsageLimit[], bucket: Record<string, unknow
  * Prefer a *usable* overall bucket; if overall is absent/disabled/malformed,
  * fall through to plan rails (`autoPercentUsed` / `apiPercentUsed`). Always
  * consider on-demand afterward so a valid on-demand meter is not dropped when
- * the included plan bucket is empty.
+ * the included plan bucket is empty. X Subscription payloads take
+ * {@link parseUnifiedUsage}; `weeklyResetsAt` is its pool's next reset.
  */
-export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
+export function parseCursorIndividualUsage(
+	payload: unknown,
+	fetchedAt = Date.now(),
+	weeklyResetsAt?: number,
+): UsageReport | null {
 	if (!isRecord(payload) || !isRecord(payload.individualUsage)) {
 		return null;
 	}
@@ -226,6 +339,16 @@ export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.no
 		label: "Monthly",
 		...(resetsAt !== undefined ? { resetsAt } : {}),
 	};
+	if (isUnifiedMembership(payload)) {
+		const limits = parseUnifiedUsage(payload.individualUsage, weeklyResetsAt);
+		if (limits.length === 0) return null;
+		return {
+			provider: "cursor",
+			fetchedAt,
+			limits,
+			raw: payload,
+		};
+	}
 	const limits: UsageLimit[] = [];
 
 	const overall = isRecord(payload.individualUsage.overall) ? payload.individualUsage.overall : null;
@@ -391,6 +514,20 @@ export const cursorRankingStrategy: CredentialRankingStrategy = {
 	blockScope(context) {
 		return context?.modelId ? `pool:${quotaTierFor("cursor", context.modelId)}` : undefined;
 	},
+	// Only the X Subscription's meters are exact: its weekly pool and prepaid credit. Legacy
+	// plans' split rails are monthly dashboard percentages that lag the 429 that set the block.
+	healableBlockScopes(report) {
+		return [
+			{
+				blockScope: "pool:auto",
+				limits: report.limits.filter(limit => limit.id === CURSOR_MODELS_LIMIT_ID && limit.window?.id === "weekly"),
+			},
+			{
+				blockScope: "pool:api",
+				limits: report.limits.filter(limit => limit.id === OTHER_MODELS_LIMIT_ID && limit.window?.id === "prepaid"),
+			},
+		].filter(scope => scope.limits.length > 0);
+	},
 	windowDefaults: {
 		primaryMs: 30 * DAY_MS,
 		secondaryMs: 30 * DAY_MS,
@@ -447,7 +584,14 @@ export const cursorUsageProvider: UsageProvider = {
 						signal: params.signal,
 					},
 					"usage-summary",
-				).then(payload => parseCursorIndividualUsage(payload, fetchedAt));
+				).then(async payload => {
+					// The X Subscription's weekly pool reset is not in the summary; GetPlanInfo carries it.
+					const weeklyResetsAt =
+						isRecord(payload) && isUnifiedMembership(payload)
+							? await fetchCursorWeeklyResetsAt(ctx, token, params.signal)
+							: undefined;
+					return parseCursorIndividualUsage(payload, fetchedAt, weeklyResetsAt);
+				});
 				profileEmailPromise = fetchCursorAccountEmail(token, ctx.fetch, params.signal).catch(error => {
 					ctx.logger?.warn("Cursor usage request error", {
 						provider: "cursor",

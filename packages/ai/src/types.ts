@@ -603,6 +603,13 @@ export interface StreamOptions {
 	 */
 	storeResponses?: boolean;
 	/**
+	 * Request the Daybreak Blue cyber access program on Codex when the account
+	 * is eligible (see `openai-codex/access-programs.ts`). `false` omits
+	 * `access_programs`. Unset falls back to the host's
+	 * `configureCodexAccessPrograms` default, else on. Ignored elsewhere.
+	 */
+	codexAccessPrograms?: boolean;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -811,7 +818,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
-	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not

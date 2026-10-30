@@ -14,7 +14,7 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 import { isValidNameSegment } from "./types";
 
@@ -57,8 +57,11 @@ export function getCachedPluginPath(
 /**
  * Copy `sourcePath` into the cache, returning the absolute cache path.
  *
- * Idempotent: if the target already exists it is removed before copying,
- * so a partial previous cache is never silently reused.
+ * Idempotent: if the target already exists it is replaced, so a partial previous cache is never
+ * silently reused. The copy is made beside the target and swapped in by two renames; the previous
+ * copy is deleted only after the new one is in place, so a running session that reads the plugin
+ * during a same-version reinstall finds it missing only between the two renames, not for the
+ * whole recursive delete.
  */
 export async function cachePlugin(
 	sourcePath: string,
@@ -72,17 +75,32 @@ export async function cachePlugin(
 	// Ensure cache directory exists before writing into it
 	await fs.mkdir(cacheDir, { recursive: true });
 
-	// Copy to a staging directory first, then atomically rename into place.
+	// Copy to a staging directory first, then rename into place.
 	// This prevents destroying an active install if fs.cp fails mid-copy.
-	const stagingPath = `${targetPath}.staging-${Date.now()}`;
+	const suffix = Date.now();
+	const stagingPath = `${targetPath}.staging-${suffix}`;
+	const previousPath = `${targetPath}.previous-${suffix}`;
+	let movedAside = false;
 	try {
 		await fs.cp(sourcePath, stagingPath, { recursive: true });
-		await fs.rm(targetPath, { recursive: true, force: true });
+		try {
+			await fs.rename(targetPath, previousPath);
+			movedAside = true;
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
 		await fs.rename(stagingPath, targetPath);
 	} catch (err) {
-		// Clean up staging dir on any failure; leave existing targetPath intact
+		// Clean up staging dir on any failure; put an existing targetPath back
+		if (movedAside) await fs.rename(previousPath, targetPath).catch(() => {});
 		await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
 		throw err;
+	}
+	if (movedAside) {
+		// The new copy is in place, so the install succeeded: a leftover old copy only takes disk space.
+		await fs.rm(previousPath, { recursive: true, force: true }).catch(error => {
+			logger.warn("Could not remove the previous plugin cache copy", { path: previousPath, error });
+		});
 	}
 
 	return targetPath;

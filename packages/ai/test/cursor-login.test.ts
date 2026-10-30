@@ -4,6 +4,7 @@ import { type AuthAccountPolicies, AuthStorage, SqliteAuthCredentialStore } from
 
 const EMAIL = "dev@example.com";
 const POLICIES = [{ provider: "cursor", account: { email: EMAIL }, priority: -1 }] satisfies AuthAccountPolicies;
+const GET_ME_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe";
 
 function cursorAccessToken(label: string): string {
 	const claims = { sub: "github|user_1", exp: Math.floor(Date.now() / 1000) + 86_400, label };
@@ -28,7 +29,7 @@ function renewCursorSession(init: RequestInit | undefined, session: string | und
 function stubCursor(access: string, session?: string): void {
 	vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request, init?: RequestInit) => {
 		const url = input instanceof Request ? input.url : String(input);
-		if (url === "https://cursor.com/api/auth/me") return Response.json({ sub: "user_1", email: EMAIL });
+		if (url === GET_ME_URL) return Response.json({ authId: "github|user_1", email: EMAIL });
 		if (url.startsWith("https://api2.cursor.sh/auth/poll?")) {
 			return Response.json({ accessToken: access, refreshToken: access });
 		}
@@ -106,7 +107,7 @@ describe("Cursor account email", () => {
 			) => {
 				const url = input instanceof Request ? input.url : String(input);
 				if (url === "https://api2.cursor.sh/oauth/token") return renewCursorSession(init, stale, fresh);
-				if (url !== "https://cursor.com/api/auth/me") throw new Error(`unexpected request: ${url}`);
+				if (url !== GET_ME_URL) throw new Error(`unexpected request: ${url}`);
 				// The profile never answers; only the lookup's own deadline ends it.
 				const { promise, reject } = Promise.withResolvers<Response>();
 				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });

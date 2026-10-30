@@ -43,9 +43,9 @@ This is not context-overflow or payload-rejection handling and does not establis
 - message is **not** context overflow
 - not a usage-preflight block, the specially handled full-replay Responses body-read timeout, or an Anthropic HTTP 400 rejecting mutation of latest-assistant thinking
 - one of:
-  - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
-  - the error is an account-scoped policy denial eligible for credential rotation
-  - the normalized `AIError` classification is retryable (including stale Responses replay, transient transport/provider failures, and usage limits)
+   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
+   - the error is an account-scoped policy denial eligible for credential rotation
+   - the normalized `AIError` classification is retryable (including stale Responses replay, transient transport/provider failures, and usage limits)
 
 Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
 
@@ -89,7 +89,7 @@ Flow (`#handleRetryableError`):
 7. If the current model's retry budget is exhausted, stop unless a model switch or confirmed credential reset permits continuation. A fallback model receives a fresh retry budget; credential recovery keeps the cumulative count. Known thinking-only stream-close routes have a one-retry cap rather than the full configured budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping, except an authoritative usage-reset wait explicitly allowed by `retry.waitForUsageReset`.
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
-10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
+10.   Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
 ### What resets retry counters
 
@@ -195,6 +195,7 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.waitForUsageReset` (default `false`)
 - `retry.modelFallback` (default `true`; gates configured retry model-fallback switching)
 - `retry.fallbackOn` (default `"any"`; `"usage-limit"` or `"except-usage-limit"` restrict which errors walk the chains)
+- `retry.rateLimitWalksChain` (default `false`; `true` walks the chain as soon as a rate limit fails the turn, including after signed thinking, instead of keeping the failing model for its whole retry budget)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
@@ -276,4 +277,5 @@ A new retry chain can still start later on a future retryable error after counte
 - Retry strips the failing assistant error from **runtime context** before re-continue, but session history still keeps that error entry. When the retry chain eventually succeeds, each persisted error entry from the chain is marked with a `retryRecovery` marker (`status: "recovered"`, plus kind/attempt/note and the superseding message; entries whose error was rendered moot carry `status: "superseded"` instead). Marked entries render as a dim, non-error one-line note instead of a red failure (live UI included, via the success event's `retryErrors`), and they are excluded when the LLM context is rebuilt — the display transcript still keeps them visible.
 - `RpcSessionState` currently exposes `autoCompactionEnabled` but not an `autoRetryEnabled` field; RPC callers must track their own toggle state or query settings through other APIs.
 - Model fallback changes append temporary `model_change` entries and may later restore the primary model when its cooldown expires, depending on `retry.fallbackRevertPolicy`.
+- A same-provider Anthropic fallback candidate is skipped while the latest assistant turn carries signed or redacted thinking from a different model and another attempt on the signing model follows; a classifier refusal, account-policy denial, non-retryable error, wait past `retry.maxDelayMs`, spent retry budget, or (only when `retry.rateLimitWalksChain` is `true`) a rate limit on the signing model moves to that candidate, and Anthropic drops the earlier thinking blocks the new model cannot read. The exception is a usage-limit wait past `retry.maxDelayMs` that the authoritative usage-reset opt-in (`retry.waitForUsageReset`) waits out: the signing model is retried after the reset, so the candidate stays skipped. While a classifier refusal's fallback credit can still be redeemed, only the credit's target models pass.
 - Usage-aware preflight runs before a provider request when `retry.usageAwareFallback` is enabled. It prefers healthy same-provider coding-plan accounts before configured model fallback; ordinary configured API keys are excluded. Unknown/unmapped usage fails open. `retry.modelFallback` gates model switching, not the preflight's account selection or `"fail-closed"` policy. At the reserve threshold, `"confirm"` asks interactive sessions and keeps the current model when declined; sessions without a confirmation UI automatically apply an eligible fallback. `"auto"` applies an eligible fallback without asking. `"fail-closed"` rejects reserve or depleted usage instead of spending it or selecting a fallback. Depleted usage under the other policies applies an eligible fallback without a reserve confirmation.

@@ -56,6 +56,12 @@ const DEPRECATION_FLAG = registryModel(DEPRECATED).policy.entitlement.deprecatio
 interface FactoryEndpoints {
 	flags?: Record<string, boolean>;
 	modelPolicy?: Record<string, unknown>;
+	/** Other managed settings (image generation) beside the model policy. */
+	settings?: Record<string, unknown>;
+	/** Managed-settings HTTP status; the flags endpoint always succeeds. */
+	settingsStatus?: number;
+	/** Raw managed-settings body, replacing the JSON one. */
+	settingsBody?: string;
 	routing?: Record<string, unknown>;
 	responseHeaders?: Record<string, string>;
 	onRequest?: (url: string, init: RequestInit | undefined) => void;
@@ -70,8 +76,17 @@ function factoryEndpoints(endpoints: FactoryEndpoints = {}): FetchImpl {
 					flags: endpoints.flags ?? ALL_FLAGS_ON,
 					...(endpoints.routing ? { configs: { provider_routing: endpoints.routing } } : {}),
 				}
-			: { settings: endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {} };
-		return Response.json(body, { headers: endpoints.responseHeaders });
+			: {
+					settings: {
+						...(endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {}),
+						...endpoints.settings,
+					},
+				};
+		const status = String(url).includes("managed-settings") ? (endpoints.settingsStatus ?? 200) : 200;
+		if (String(url).includes("managed-settings") && endpoints.settingsBody !== undefined) {
+			return new Response(endpoints.settingsBody, { status, headers: endpoints.responseHeaders });
+		}
+		return Response.json(body, { status, headers: endpoints.responseHeaders });
 	};
 }
 
@@ -114,6 +129,7 @@ function syntheticModel(policy: Partial<FactoryDroidModelPolicy>): FactoryDroidR
 			policyAliases: [],
 			entitlement: { requiresExplicitOptIn: false },
 			defaultReasoningOff: false,
+			image: false,
 			...policy,
 		},
 	};
@@ -391,6 +407,57 @@ describe("Factory Droid discovery gates", () => {
 		// Only an explicit false hides them, and it hides nothing else.
 		const denied = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, isFastModelsAllowed: false } });
 		expect(denied).toEqual(allowed.filter(id => !fastIds.includes(id)));
+	});
+
+	describe("image generation models", () => {
+		const imageIds = factoryDroidRegistry()
+			.filter(({ policy }) => policy.image)
+			.map(({ spec }) => spec.id);
+		const [firstImage, ...otherImages] = imageIds;
+
+		it("lists image models as image-kind specs while the org leaves image generation on", async () => {
+			expect(imageIds.length).toBeGreaterThan(1);
+			const models = (await discover({})) ?? [];
+			const listed = models.filter(model => imageIds.includes(model.id));
+			expect(listed.map(model => model.id).sort()).toEqual([...imageIds].sort());
+			for (const spec of listed) expect(buildModel(spec).kind).toBe("image");
+			// Chat models keep their kind.
+			expect(buildModel(models.find(model => model.id === PLAIN)!).kind).toBeUndefined();
+		});
+
+		it("hides every image model, and nothing else, when the org disables image generation", async () => {
+			const enabled = await discoverIds({ settings: { imageGenerationEnabled: true } });
+			const disabled = await discoverIds({ settings: { imageGenerationEnabled: false } });
+			expect(disabled).toEqual(enabled.filter(id => !imageIds.includes(id)));
+		});
+
+		it.each([
+			{ label: "narrows to the org image allowlist", allowed: () => [firstImage], show: () => [firstImage] },
+			{ label: "hides every image model for an empty allowlist", allowed: () => [], show: () => [] },
+		])("$label", async ({ allowed, show }) => {
+			const ids = await discoverIds({ settings: { imageGenerationAllowedModelIds: allowed() } });
+			expect(ids.filter(id => imageIds.includes(id))).toEqual(show());
+			expect(ids).toContain(PLAIN);
+		});
+
+		it("still applies the org model policy blocks to image models", async () => {
+			const ids = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: [firstImage] } });
+			expect(ids).not.toContain(firstImage);
+			for (const id of otherImages) expect(ids).toContain(id);
+		});
+
+		it("keeps image models hidden until managed settings prove them enabled", async () => {
+			const offline = (factoryDroidModelManagerOptions().staticModels ?? []).map(model => model.id);
+			const unreadable = await discoverIds({ settingsStatus: 500 });
+			const unparsable = await discoverIds({ settingsBody: "{not json" });
+			expect(unparsable).toContain(PLAIN);
+			for (const id of imageIds) expect(unparsable).not.toContain(id);
+			for (const id of imageIds) {
+				expect(offline).not.toContain(id);
+				expect(unreadable).not.toContain(id);
+			}
+			expect(unreadable).toContain(PLAIN);
+		});
 	});
 
 	it.each([

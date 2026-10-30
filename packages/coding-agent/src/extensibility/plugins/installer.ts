@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
 import { runBunCli } from "./bun-cli";
+import { linkPluginDirectory } from "./directory-link";
 import { extractPackageName } from "./parser";
 import type { InstalledPlugin } from "./types";
 
@@ -164,6 +165,5 @@ export async function linkPlugin(localPath: string): Promise<void> {
 	// Whatever is there — a stale link, or a real directory from a git install.
 	await fs.rm(linkPath, { recursive: true, force: true });
 
-	// Junction on Windows: a plain directory symlink EPERMs outside developer mode.
-	await fs.symlink(absolutePath, linkPath, process.platform === "win32" ? "junction" : "dir");
+	await linkPluginDirectory(absolutePath, linkPath);
 }

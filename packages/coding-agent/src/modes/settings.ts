@@ -35,7 +35,8 @@ export const cfgAutoResume = register({
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Auto Resume",
-		description: "Automatically resume the most recent session in the current directory",
+		description:
+			"Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history",
 	},
 });
 
@@ -468,8 +469,8 @@ export const cfgTuiRenderSvg = register({
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
-	values: ["smart", "always", "off"] as const,
-	default: "always",
+	values: ["auto", "smart", "always", "off"] as const,
+	default: "auto",
 	ui: {
 		tab: "appearance",
 		group: "Display",
@@ -477,6 +478,11 @@ export const cfgTuiAutoGraph = register({
 		description:
 			"Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics",
 		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Smart when the judge role resolves to a native TypeSafe jev model, else Always",
+			},
 			{
 				value: "smart",
 				label: "Smart",
@@ -579,7 +585,7 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
 		},
 	},
 });
@@ -705,6 +711,26 @@ export const cfgDisplayCacheMissMarker = register({
 		description: "Show a divider after an assistant turn whose request lost (missed) the prompt cache",
 	},
 });
+
+export const cfgDisplayAdvisorCollapsedLines = register({
+	id: "display.advisorCollapsedLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Advisor Collapsed Lines",
+		description:
+			"Maximum note lines a collapsed advisor card shows below its header (0 keeps the full preview; expand with the tool-output toggle)",
+		options: [
+			{ value: "0", label: "No limit", description: "Default." },
+			{ value: "1", label: "1 line" },
+			{ value: "2", label: "2 lines" },
+			{ value: "3", label: "3 lines" },
+			{ value: "5", label: "5 lines" },
+		],
+	},
+});
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
@@ -713,6 +739,7 @@ effect(
 		cacheMissMarker: cfgDisplayCacheMissMarker,
 		showTokenUsage: cfgDisplayShowTokenUsage,
 		showTurnTime: cfgDisplayShowTurnTime,
+		advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
 	}),
 	setChatTranscriptDisplayPreferences,
 );

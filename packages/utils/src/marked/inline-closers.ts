@@ -170,38 +170,30 @@ class EmphasisDelimiters {
 
 /**
  * The runs of backticks in the root source, for the code span rule. A span opened by `width` backticks closes at the
- * first `width` backticks after its opening run that no backslash escapes: the start of a later run of at least
- * `width`, or, in a run whose first backtick a backslash escapes, the backticks from its `width`th on, since the
- * search for a closer goes on `width` past an escaped one.
+ * next run of exactly `width` backticks: a run of any other length is no closer, and the one that closes is the first
+ * run of that width at or after the opener. Backslash escapes do not apply inside a code span, so a backslash just
+ * before that closing backtick is content and still closes the span.
  */
 class CodeRuns {
-	// Per run, in order: where it starts and ends, and whether a backslash escapes it.
+	// Per run, in order: where it starts and ends; the starts are the binary search `endOf` and `startsStringAt` need.
 	readonly #starts: number[] = [];
 	readonly #ends: number[] = [];
-	readonly #escaped: boolean[] = [];
-	// A segment tree over the runs of the widest closer each run holds: its length, or half of it when escaped.
-	readonly #widest: Int32Array;
-	readonly #leaves: number;
+	// Run starts by width, each list ascending: a closer must have the opener's exact width, so finding one is a
+	// binary search in the list for that width and no scan of the runs between.
+	readonly #byWidth = new Map<number, number[]>();
 
 	constructor(src: string) {
-		const widths: number[] = [];
 		for (let at = src.indexOf("`"); at !== -1;) {
 			let end = at + 1;
 			while (src.charCodeAt(end) === 0x60 /* ` */) end++;
-			const escaped = escapedAt(src, at);
 			this.#starts.push(at);
 			this.#ends.push(end);
-			this.#escaped.push(escaped);
-			widths.push(escaped ? (end - at) >> 1 : end - at);
+			const width = end - at;
+			const starts = this.#byWidth.get(width);
+			if (starts === undefined) this.#byWidth.set(width, [at]);
+			else starts.push(at);
 			at = src.indexOf("`", end);
 		}
-		let leaves = 1;
-		while (leaves < widths.length) leaves <<= 1;
-		const widest = new Int32Array(2 * leaves);
-		for (let run = 0; run < widths.length; run++) widest[leaves + run] = widths[run]!;
-		for (let node = leaves - 1; node >= 1; node--) widest[node] = Math.max(widest[2 * node]!, widest[2 * node + 1]!);
-		this.#widest = widest;
-		this.#leaves = leaves;
 	}
 
 	/** Where the run of backticks holding the backtick at `at` ends. */
@@ -209,28 +201,24 @@ class CodeRuns {
 		return this.#ends[lowerBound(this.#starts, at + 1) - 1]!;
 	}
 
-	/** Where the closer of a code span opened by `width` backticks that end at `from` starts, or -1. */
-	closerAfter(from: number, width: number): number {
-		const run = this.#firstHolding(lowerBound(this.#starts, from), width);
-		return run === -1 ? -1 : this.#starts[run]! + (this.#escaped[run] ? width : 0);
+	/**
+	 * Whether a backtick string starts at `at` for a scan that walked to `at`: a string is a whole run, so it starts at
+	 * the run's first backtick and nowhere else. A retry deeper inside a run is not a string, which keeps a run whose
+	 * opener found no closer from opening a narrower span one backtick later. A position a tokenizer's raw resumed at,
+	 * or the suffix an escape token left behind, is not a walked position — `codeOpenerWidth` admits those on its own,
+	 * because it is told the scan resumed there rather than inferring it from the source text.
+	 */
+	startsStringAt(at: number): boolean {
+		const run = lowerBound(this.#starts, at + 1) - 1;
+		return this.#starts[run] === at;
 	}
 
-	/** The first run at or after `first` that holds a closer of `width` backticks, or -1. */
-	#firstHolding(first: number, width: number): number {
-		if (first >= this.#starts.length) return -1;
-		const widest = this.#widest;
-		const leaves = this.#leaves;
-		let node = leaves + first;
-		if (widest[node]! >= width) return first;
-		// Up to the nearest subtree on the right that holds one, then down to its first run that does.
-		for (;;) {
-			if (node === 1) return -1;
-			if ((node & 1) === 0 && widest[node + 1]! >= width) break;
-			node >>= 1;
-		}
-		node++;
-		while (node < leaves) node = widest[2 * node]! >= width ? 2 * node : 2 * node + 1;
-		return node - leaves;
+	/** Where the closer of a code span opened by `width` backticks that end at `from` starts, or -1. */
+	closerAfter(from: number, width: number): number {
+		const starts = this.#byWidth.get(width);
+		if (starts === undefined) return -1;
+		const run = lowerBound(starts, from);
+		return run < starts.length ? starts[run]! : -1;
 	}
 }
 
@@ -388,10 +376,17 @@ export class InlineClosers {
 		return close === -1 ? -1 : close - pos;
 	}
 
-	/** How many backticks start `rest`, which starts with one. */
-	codeOpenerWidth(rest: string): number {
+	/**
+	 * How many backticks start `rest`, which starts with one, or 0 where no code span opens because no backtick string
+	 * starts there: the opener is a whole string, so the rest of a run whose opener found no closer is text, while the
+	 * backticks left after a backslash escaped the run's first one do open a span. `resumed` says the scan resumed at
+	 * `rest` after a tokenizer consumed a raw that ended here, where the backticks are a string wherever they sit.
+	 */
+	codeOpenerWidth(rest: string, resumed = false): number {
 		const pos = this.end - rest.length;
-		return Math.min(this.#indexes.codeRuns.endOf(pos), this.end) - pos;
+		const runs = this.#indexes.codeRuns;
+		if (!resumed && !runs.startsStringAt(pos)) return 0;
+		return Math.min(runs.endOf(pos), this.end) - pos;
 	}
 
 	/** Where the code span opened by the `width` backticks at the start of `rest` closes, or -1. */

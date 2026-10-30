@@ -153,3 +153,31 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(isError).toBe(true);
 	});
 });
+
+describe("bash replies through out://", () => {
+	it("carries each closed redirect as a reply, live and in the final result, without touching the output", async () => {
+		const frames: unknown[] = [];
+		const result = await new BashTool({ ...session, tuiTranscript: true }).execute(
+			"call",
+			{ command: "printf '**first**\\n' > out://; echo between; echo second >> out://" },
+			undefined,
+			update => frames.push(update.details),
+		);
+
+		expect(result.content.find(c => c.type === "text")?.text).toBe("between\n");
+		expect(result.details?.replies).toEqual(["**first**\n", "second\n"]);
+		// The first reply reaches the card while the command still runs.
+		expect(frames).toContainEqual({ replies: ["**first**\n"] });
+	});
+
+	it("drops an oversize reply instead of showing a truncated one, and refuses reads", async () => {
+		const big = await new BashTool({ ...session, tuiTranscript: true }).execute("call", {
+			command: "head -c 70000 /dev/zero | tr '\\0' a > out://; echo status=$?",
+		});
+		expect(big.content.find(c => c.type === "text")?.text).toContain("File too large");
+		expect(big.details?.replies).toBeUndefined();
+
+		const read = await run("cat out://; echo status=$?");
+		expect(read.text).toContain("status=1");
+	});
+});

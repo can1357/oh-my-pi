@@ -132,6 +132,7 @@ export function createSessionStub(
 		runIdleCompaction: vi.fn(async () => {}),
 		waitForIdle: async () => {},
 		hasPendingAsyncWork: () => false,
+		getAsyncJobSnapshot: () => null,
 		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
@@ -294,6 +295,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		renderInitialMessages: vi.fn(async () => {}),
 		updatePendingMessagesDisplay: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
+		syncIdleMaintenanceView: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		setWorkingMessage: vi.fn(),
 		syncRetryHintRow: vi.fn(),

@@ -17,6 +17,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -172,5 +174,203 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 
 		expect(rejectedInflatingSnapcompact).toBe(true);
 		expect(compactSpy).toHaveBeenCalled();
+	});
+
+	it("rejects non-shrinking remote/soft auto-compactions instead of committing tokensAfter >= tokensBefore", async () => {
+		const customSessionManager = SessionManager.inMemory();
+		const model = modelRegistry.find("anthropic", "claude-haiku-5-5");
+		if (!model) throw new Error("Expected anthropic/claude-haiku-5-5 model in registry");
+		expect(model.contextWindow).toBe(100_000);
+
+		// Under testEnv byteEstimate (4 chars/token), 4 chars = 1 token.
+		const seed: Message[] = [
+			{ role: "user", content: [{ type: "text", text: "abcd".repeat(28_000) }], timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "abcd".repeat(28_000) }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: {
+					input: 28_000,
+					output: 28_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 56_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 2,
+			},
+			{ role: "user", content: [{ type: "text", text: "abcd".repeat(10_000) }], timestamp: 3 },
+		];
+		for (const msg of seed) customSessionManager.appendMessage(msg);
+		const triggerAssistant: Message = {
+			role: "assistant",
+			content: [{ type: "text", text: "abcd".repeat(6_000) }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 66_000,
+				output: 6_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 72_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 4,
+		};
+
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [...seed] },
+			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+		});
+		const customSession = new AgentSession({
+			agent,
+			sessionManager: customSessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 40,
+				"compaction.thresholdTokens": -1,
+				"compaction.keepRecentTokens": 20_000,
+				"compaction.reserveTokens": 16_384,
+				"compaction.autoContinue": false,
+				"compaction.asyncEnabled": false,
+			}),
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		try {
+			// Summarize the prefix into a bloated 70,000-token summary. The kept tail is capped
+			// to land under 0.8 × the 40k trigger, so it keeps only triggerAssistant (6,000
+			// tokens), and the post-compaction context (76,000) is still larger than
+			// pre-compaction (72,000).
+			vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "abcd".repeat(70_000),
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+
+			const { promise: compactionEndPromise, resolve } = Promise.withResolvers<{
+				action: string;
+				result?: compactionModule.CompactionResult;
+				errorMessage?: string;
+			}>();
+			customSession.subscribe(event => {
+				if (event.type === "auto_compaction_end") {
+					resolve({
+						action: event.action,
+						result: event.result,
+						errorMessage: event.errorMessage,
+					});
+				}
+			});
+
+			customSession.agent.emitExternalEvent({ type: "message_end", message: triggerAssistant });
+			customSession.agent.emitExternalEvent({ type: "agent_end", messages: [triggerAssistant] });
+
+			const endEvent = await compactionEndPromise;
+			expect(endEvent.result).toBeUndefined();
+			expect(endEvent.errorMessage).toContain("would not reduce context");
+			const compactionEntries = customSessionManager
+				.getBranch()
+				.filter((e): e is CompactionEntry => e.type === "compaction");
+			expect(compactionEntries).toHaveLength(0);
+		} finally {
+			await customSession.dispose();
+		}
+	});
+
+	it("compacts a 100k-window session at its configured 40% trigger and lands the result in the recovery band", async () => {
+		const customSessionManager = SessionManager.inMemory();
+		const model = modelRegistry.find("anthropic", "claude-haiku-5-5");
+		if (!model) throw new Error("Expected anthropic/claude-haiku-5-5 model in registry");
+		expect(model.contextWindow).toBe(100_000);
+
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+		});
+		const customSession = new AgentSession({
+			agent,
+			sessionManager: customSessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 40,
+				"compaction.thresholdTokens": -1,
+				"compaction.keepRecentTokens": 20_000,
+				"compaction.reserveTokens": 16_384,
+				"compaction.autoContinue": false,
+				"compaction.asyncEnabled": false,
+			}),
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		try {
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "concise summary of earlier turns",
+				shortSummary: "concise summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+
+			// Turns grow 18k -> 36k -> 54k on a 100k window with a 40% (40k) trigger: the
+			// trigger is honored, so turn 3 compacts, and the kept tail is capped so the
+			// compacted context lands under 0.8 × 40k instead of compacting again at once.
+			const turnUsages = [18_000, 36_000, 54_000];
+			for (let idx = 0; idx < turnUsages.length; idx++) {
+				const total = turnUsages[idx];
+				const userMsg: Message = {
+					role: "user",
+					content: [{ type: "text", text: "abc".repeat(4_000) }],
+					timestamp: idx * 2 + 1,
+				};
+				const assistantMsg: Message = {
+					role: "assistant",
+					content: [{ type: "text", text: "abc".repeat(4_000) }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "stop",
+					usage: {
+						input: total - 9_000,
+						output: 9_000,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: total,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: idx * 2 + 2,
+				};
+				customSession.agent.emitExternalEvent({ type: "message_end", message: userMsg });
+				customSession.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+				customSession.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+				await customSession.waitForIdle();
+
+				if (idx < 2) {
+					expect(compactSpy).not.toHaveBeenCalled();
+				}
+			}
+
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			const compactionEntries = customSessionManager
+				.getBranch()
+				.filter((e): e is CompactionEntry => e.type === "compaction");
+			expect(compactionEntries).toHaveLength(1);
+			expect(compactionEntries[0].tokensAfter).toBeDefined();
+			expect(compactionEntries[0].tokensAfter!).toBeLessThan(compactionEntries[0].tokensBefore);
+			expect(compactionEntries[0].tokensAfter!).toBeLessThanOrEqual(Math.floor(40_000 * 0.8));
+		} finally {
+			await customSession.dispose();
+		}
 	});
 });

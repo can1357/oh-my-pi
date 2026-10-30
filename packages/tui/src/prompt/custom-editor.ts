@@ -1063,7 +1063,12 @@ export class CustomEditor extends Editor {
 	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled
 	 *  and no dictation is still writing into the draft. */
 	protected override get nativeSendable(): boolean {
-		return this.onSubmit !== undefined && !this.disableSubmit && !dictationHoldsDraft(this.composerState().dictation);
+		return (
+			!this.nativeKeyPassthrough &&
+			this.onSubmit !== undefined &&
+			!this.disableSubmit &&
+			!dictationHoldsDraft(this.composerState().dictation)
+		);
 	}
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;

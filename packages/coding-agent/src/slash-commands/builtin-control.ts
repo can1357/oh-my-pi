@@ -1,9 +1,42 @@
-import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { type PauseWorkStatus, runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
 import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
+
+/** Advisors with review work they can still run (not parked, yielded, or quota-paused). */
+function advisorUnsettledCount(session: AgentSession): number {
+	return session
+		.getAdvisorStatusOverview()
+		.advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused && !advisor.yielded).length;
+}
+
+/**
+ * Outstanding work for the `/pause` screen. A subagent counts as a turn only
+ * while its session streams and is not parked; its task job is deduplicated
+ * against that same live set, so a pre-live or stale `running` ref still
+ * counts through its job. Advisors of the root and every live subagent count.
+ */
+function pauseWorkStatus(root: AgentSession): PauseWorkStatus {
+	const registry = AgentRegistry.global();
+	const liveSubagents = registry.list().filter(ref => ref.kind === "sub" && registry.isRunning(ref));
+	const liveSubagentIds = new Set(liveSubagents.map(ref => ref.id));
+	let unsettledTurns = Number(root.isStreaming && !root.agent.isPaused) + advisorUnsettledCount(root);
+	for (const ref of liveSubagents) {
+		if (!ref.session) continue;
+		if (!ref.session.agent.isPaused) unsettledTurns++;
+		unsettledTurns += advisorUnsettledCount(ref.session);
+	}
+	const unfinishedJobs =
+		root
+			.getAsyncJobTree({ recentLimit: 0 })
+			?.running.filter(job => job.type !== "task" || job.agentId === undefined || !liveSubagentIds.has(job.agentId))
+			.length ?? 0;
+	return { unsettledTurns, unfinishedJobs };
+}
 
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
@@ -80,7 +113,8 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Freeze all agents (main, subagents, advisor) until resumed",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
-			await runPauseScreen(runtime.ctx);
+			const ctx = runtime.ctx;
+			await runPauseScreen(ctx, { getWorkStatus: () => pauseWorkStatus(ctx.session) });
 		},
 	},
 	{

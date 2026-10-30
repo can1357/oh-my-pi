@@ -12,6 +12,11 @@ import {
 // is only a sentinel that guarantees a reply even from terminals that ignore
 // `CSI ? u`. Some terminals (Superset / xterm-on-Electron) answer DA1 first;
 // the kitty reply must still be honored regardless of ordering.
+//
+// The probe also arms a 150 ms fallback timer that may fire before the fed
+// reply on a loaded host (TMUX additionally blocks startup on tmux queries).
+// Tests asserting that the modifyOtherKeys fallback ends up enabled therefore
+// inspect every write since startup instead of clearing the log first.
 
 class ModalProbe implements Component {
 	invalidate(): void {}
@@ -85,7 +90,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("enables kitty when the DA1 sentinel arrives before the kitty reply (#2042)", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		// Superset/Electron-xterm answers DA1 before `CSI ? u`. The kitty reply
 		// must override the premature modifyOtherKeys fallback.
@@ -105,7 +109,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("keeps the modifyOtherKeys fallback when only DA1 ever replies", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		// Terminals that ignore `CSI ? u` answer DA1 only — modifyOtherKeys is
 		// the right answer there.
@@ -146,7 +149,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		delete Bun.env.SSH_CLIENT;
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		await harness.feed("\x1b[?1;2c");
 
@@ -160,7 +162,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("reasserts modifyOtherKeys fallback when fullscreen overlays enter the alternate screen", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		await harness.feed("\x1b[?1;2c");
 		expect(harness.writes.join("")).toContain("\x1b[>4;2m");

@@ -8,7 +8,7 @@
  * tests to spy on.
  */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, truncate } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
@@ -20,6 +20,8 @@ const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
 const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
 /** Server-side maximum `limit` on the mental-model list endpoint; keeps typical banks to one request. */
 const MENTAL_MODEL_PAGE_SIZE = 1000;
+/** Cap on server-supplied error text copied into `HindsightError.message` (logged unconditionally). */
+const MAX_ERROR_DETAIL_CHARS = 2000;
 
 export type Budget = "low" | "mid" | "high" | string;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
@@ -589,8 +591,9 @@ export class HindsightApi {
 					: undefined) ??
 				parsed ??
 				text;
+			const detailText = typeof details === "string" ? details : JSON.stringify(details);
 			throw new HindsightError(
-				`${operation} failed: ${typeof details === "string" ? details : JSON.stringify(details)}`,
+				`${operation} failed: ${truncate(detailText, MAX_ERROR_DETAIL_CHARS)}`,
 				response.status,
 				details,
 			);

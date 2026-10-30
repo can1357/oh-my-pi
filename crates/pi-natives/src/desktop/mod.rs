@@ -31,8 +31,8 @@ use std::{
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
 use backend::{
-	Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput, KeyboardFocus,
-	MouseButton, PointerEvent, is_raise_action,
+	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
+	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
 };
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
@@ -432,7 +432,8 @@ impl Request {
 	/// Whether this mutation takes over the user's own input or foreground,
 	/// which arms the physical-Escape stop: `takeover: true` delivery, input
 	/// to a desktop or display target (it drives the user's real pointer and
-	/// keyboard), an explicit raise, and an activating launch. Held control
+	/// keyboard), an explicit raise, and an activating launch or a reveal in
+	/// Finder, which always comes to the front. Held control
 	/// armed the stop when it was granted, so every operation under it keeps
 	/// the stop.
 	fn takes_over(&self) -> bool {
@@ -449,7 +450,9 @@ impl Request {
 			Self::AxClick { options, .. } => (None, options.takeover),
 			Self::AxInput { takeover, .. } => (None, *takeover),
 			Self::RaiseWindow { .. } => return true,
-			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
+			Self::OpenApplication { options, .. } => {
+				return options.activate.unwrap_or(false) || options.reveal.unwrap_or(false);
+			},
 			Self::AxPerform { action, .. } => return is_raise_action(action),
 			// Background-only mutations and reads: listed by name so a new
 			// request variant must decide whether it arms the stop.
@@ -650,9 +653,21 @@ impl ParsedPointerOptions {
 		self.takeover.mode()
 	}
 
-	/// Sends the click `event`, choosing [`Self::menu`] in the menu it opens
-	/// when that is set. With [`Self::refuse_menu`], a background click that
-	/// would open a control's menu is refused first.
+	const fn click_options(&self) -> ClickOptions<'_> {
+		ClickOptions {
+			button:      self.button,
+			count:       self.count,
+			modifiers:   self.modifiers,
+			menu:        match &self.menu {
+				Some(path) => Some(path.as_slice()),
+				None => None,
+			},
+			refuse_menu: self.refuse_menu,
+			mode:        self.mode(),
+		}
+	}
+
+	/// Sends the click `event` as these options ask ([`ClickOptions::send`]).
 	fn click(
 		&self,
 		backend: &mut dyn Backend,
@@ -661,12 +676,9 @@ impl ParsedPointerOptions {
 		frame: &FrameGeometry,
 		token: &OperationToken,
 	) -> CoreResult<()> {
-		let mode = self.mode();
-		if let Some(path) = &self.menu {
-			return backend.pointer_menu(target, event, path, frame, mode, token);
-		}
-		refuse_menu_press(backend, self.refuse_menu, mode, target, &event)?;
-		backend.pointer(target, event, frame, mode, token)
+		self
+			.click_options()
+			.send(backend, target, event, frame, token)
 	}
 }
 
@@ -681,7 +693,7 @@ fn refuse_menu_press(
 	target: &Target,
 	event: &PointerEvent,
 ) -> CoreResult<()> {
-	if refuse && mode == DeliveryMode::Background {
+	if backend::refuses_menu_press(refuse, mode) {
 		backend.refuse_menu_press(target, event)?;
 	}
 	Ok(())
@@ -1575,40 +1587,25 @@ impl Worker {
 			},
 			Request::AxClick { reference, options, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let bounds = self.ax()?.props(&h)?.bounds.ok_or_else(|| {
-					DesktopError::ax_failed(format!("{reference} has no clickable bounds"))
-				})?;
-				let x = bounds.x + bounds.width / 2.0;
-				let y = bounds.y + bounds.height / 2.0;
-				let windows = self.backend()?.windows()?;
-				// Desktop refs and parent traversal can leave the snapshot's
-				// original window; only the live element can establish ownership.
-				let window_id = self.ax()?.window_id(&h, &windows)?;
-				let target = Target::Window(window_id);
-				options.click(
-					self.backend()?.as_mut(),
-					&target,
-					PointerEvent::Click {
-						x,
-						y,
-						button: options.button,
-						count: options.count,
-						modifiers: options.modifiers,
-					},
-					&FrameGeometry::identity_global(),
-					token,
-				)?;
+				let click = options.click_options();
+				// The backend reads the bounds, after the front app on macOS; the
+				// error names the ref here, where it is known.
+				self
+					.backend()?
+					.element_click(&h, &click, token)
+					.map_err(|error| {
+						if error.message == backend::NO_CLICKABLE_BOUNDS {
+							DesktopError::ax_failed(format!("{reference} has no clickable bounds"))
+						} else {
+							error
+						}
+					})?;
 				Ok(Response::Input(control::take_focus_return()))
 			},
 			Request::AxInput { reference, input, takeover, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let windows = self.backend()?.windows()?;
-				let target = Target::Window(self.ax()?.window_id(&h, &windows)?);
 				let mode = takeover.mode();
-				match self
-					.backend()?
-					.element_input(&target, &h, input, mode, token)?
-				{
+				match self.backend()?.element_input(&h, input, mode, token)? {
 					ElementDelivery::Delivered => Ok(Response::Input(control::take_focus_return())),
 					ElementDelivery::Unfocused(focus) => {
 						Err(self.element_focus_refusal(reference, focus, mode))
@@ -1662,9 +1659,9 @@ impl Worker {
 			},
 		};
 		let message = format!(
-			"{reference} did not take keyboard focus, so nothing was sent; its application's \
-			 keyboard focus is in {window}, on {element}. Re-read with win.ax() or win.observe() \
-			 before retrying"
+			"{reference} did not take keyboard focus when asked to, so no keys were sent; its \
+			 application's keyboard focus is in {window}, on {element}. Re-read with win.ax() or \
+			 win.observe() before retrying"
 		);
 		match mode {
 			DeliveryMode::Background => DesktopError::background_unavailable(message),
@@ -1847,11 +1844,8 @@ impl Drop for SessionCore {
 }
 
 fn response_unit(response: Response) -> CoreResult<()> {
-	if matches!(response, Response::Unit) {
-		Ok(())
-	} else {
-		Err(DesktopError::internal("unexpected desktop worker response"))
-	}
+	matches!(response, Response::Unit)
+		.ok_or_else(|| DesktopError::internal("unexpected desktop worker response"))
 }
 
 /// Physical-Escape stops counted under `key` by every desktop session created
@@ -2719,6 +2713,10 @@ mod capture_tests {
 		active_display:         Arc<Mutex<String>>,
 		captures:               Arc<Mutex<u8>>,
 		window_queries:         Arc<Mutex<u32>>,
+		/// `window_queries` as each `element_input` began.
+		queries_at_input:       Arc<Mutex<Vec<u32>>>,
+		/// Elements report no bounds.
+		no_bounds:              bool,
 		cancel_on_capabilities: Arc<Mutex<Option<CancellationSource>>>,
 		snapshot_error:         Arc<Mutex<bool>>,
 		cancel_on_snapshot:     Arc<Mutex<Option<CancellationSource>>>,
@@ -2787,6 +2785,8 @@ mod capture_tests {
 				active_display: Arc::new(Mutex::new("screen-1".to_string())),
 				captures: Arc::new(Mutex::new(0)),
 				window_queries: Arc::new(Mutex::new(0)),
+				queries_at_input: Arc::new(Mutex::new(Vec::new())),
+				no_bounds: false,
 				cancel_on_capabilities: Arc::new(Mutex::new(None)),
 				snapshot_error: Arc::new(Mutex::new(false)),
 				cancel_on_snapshot: Arc::new(Mutex::new(None)),
@@ -2851,7 +2851,12 @@ mod capture_tests {
 				description: None,
 				enabled: true,
 				focused: false,
-				bounds: Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
+				bounds: (!self.no_bounds).then_some(AxBounds {
+					x:      10.0,
+					y:      10.0,
+					width:  20.0,
+					height: 20.0,
+				}),
 				actions: Vec::new(),
 				child_count: 0,
 			})
@@ -3160,12 +3165,15 @@ mod capture_tests {
 		/// window.
 		fn element_input(
 			&mut self,
-			_: &Target,
 			h: &AxHandle,
 			_: &ElementInput,
 			_: DeliveryMode,
 			_: &OperationToken,
 		) -> CoreResult<ElementDelivery> {
+			self
+				.queries_at_input
+				.lock()
+				.push(*self.window_queries.lock());
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
 			}
@@ -3173,6 +3181,20 @@ mod capture_tests {
 				window:  Some(self.window.id.clone()),
 				element: Some(AxHandle::Test(7)),
 			}))
+		}
+
+		fn element_click(
+			&mut self,
+			element: &AxHandle,
+			click: &ClickOptions,
+			token: &OperationToken,
+		) -> CoreResult<()> {
+			self
+				.queries_at_input
+				.lock()
+				.push(*self.window_queries.lock());
+			let (target, event) = backend::locate_element_click(self, element, click)?;
+			click.send(self, &target, event, &FrameGeometry::identity_global(), token)
 		}
 
 		fn menu_items(
@@ -4004,6 +4026,75 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn element_calls_leave_the_elements_window_to_the_backend() {
+		// macOS reads the user's front app before it asks the element's
+		// application for its bounds or window, which blocks while that app is
+		// busy; a window listing or lookup here would come before that read.
+		let requests: [fn(String, Reply) -> Request; 2] = [
+			|reference, reply| Request::AxInput {
+				reference,
+				input: ElementInput::Text("4".to_owned()),
+				takeover: Takeover::new(None, None),
+				reply,
+			},
+			|reference, reply| Request::AxClick {
+				reference,
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			},
+		];
+		for make in requests {
+			let backend = FakeWaylandBackend::new();
+			let queries = Arc::clone(&backend.window_queries);
+			let seen = Arc::clone(&backend.queries_at_input);
+			let mut worker = worker_with(backend);
+			let inner: &mut Worker = &mut worker;
+			let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+			let ax = backend
+				.as_mut()
+				.ok()
+				.and_then(|backend| backend.ax())
+				.unwrap();
+			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+				.unwrap()
+				.ref_;
+			let (reply, _rx) = flume::bounded(1);
+			let request = make(reference, reply);
+			let before = *queries.lock();
+			let _ = worker.process(&request, &CancellationSource::default().token());
+			assert_eq!(*seen.lock(), [before], "the worker listed windows before the backend ran");
+		}
+	}
+
+	#[test]
+	fn element_click_without_bounds_names_its_ref() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.no_bounds = true;
+		let mut worker = worker_with(backend);
+		let inner: &mut Worker = &mut worker;
+		let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+		let ax = backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.unwrap();
+		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+			.unwrap()
+			.ref_;
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::AxClick {
+			reference: reference.clone(),
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply,
+		};
+		let Err(error) = worker.process(&request, &CancellationSource::default().token()) else {
+			panic!("a click on an element without bounds went out");
+		};
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert_eq!(error.message, format!("{reference} has no clickable bounds"));
+	}
+
+	#[test]
 	fn element_keys_refused_for_focus_name_where_focus_is_with_a_usable_ref() {
 		for (takeover, code) in
 			[(None, ErrorCode::BackgroundUnavailable), (Some(true), ErrorCode::InputFailed)]
@@ -4035,6 +4126,8 @@ mod capture_tests {
 				message.starts_with(&format!("{reference} did not take keyboard focus")),
 				"{message}"
 			);
+			// The focus request itself went to the app, so only keys are unsent.
+			assert!(message.contains("so no keys were sent"), "{message}");
 			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
 			assert!(message.contains("on - button [ref=e2]."), "{message}");
 			assert!(message.contains("win.ax()"), "{message}");
@@ -4899,7 +4992,7 @@ mod capture_tests {
 		};
 		let open = |activate| Request::OpenApplication {
 			id:      "com.apple.TextEdit".to_string(),
-			options: ApplicationOpenOptions { activate },
+			options: ApplicationOpenOptions { activate, ..Default::default() },
 			reply:   reply(),
 		};
 		// Held keys reach the fake backend only as takeover, which the test
@@ -4938,6 +5031,11 @@ mod capture_tests {
 			perform("raise"),
 			perform("AXRaise"),
 			open(Some(true)),
+			Request::OpenApplication {
+				id:      "/tmp".to_string(),
+				options: ApplicationOpenOptions { reveal: Some(true), ..Default::default() },
+				reply:   reply(),
+			},
 		];
 		for request in takeover {
 			let source = CancellationSource::default();

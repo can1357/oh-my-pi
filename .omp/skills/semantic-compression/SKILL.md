@@ -22,17 +22,17 @@ Target texts are load-bearing: tool descriptions, system prompts, skills. A mode
 
 ## Frames
 
-| frame | English | compressed |
+|frame|English|compressed|
 |---|---|---|
-| definition | "The `name` field is the stable launch identifier." | `name: stable launch id.` |
-| obligation | "You must call open before you can run code." | `MUST open before run.` |
-| default | "If no value is given, the timeout defaults to 30 seconds." | `Default 30s.` |
-| condition→consequence | "Because navigation re-renders the page, refs become stale, so you should snapshot again." | `Navigation invalidates refs → re-snapshot.` |
-| property chain | "z' is an integer because z divides x²+y², and it is positive because x²+y²>0." | `z' integer since z divides x²+y²; positive since x²+y²>0.` |
-| enumeration | "The action may be open, close, or run." | `action: open, close, run.` |
-| exclusion | "any triple that is neither (1,1,1) nor (1,1,2)" | `triple ≠ (1,1,1),(1,1,2)` |
-| verdict | "Claim A is true, and claim B is false as stated." | `A true; B false as stated.` |
-| precondition | "This requires that the branch has already been checked out." | `Requires prior checkout.` |
+|definition|"The `name` field is the stable launch identifier."|`name: stable launch id.`|
+|obligation|"You must call open before you can run code."|`MUST open before run.`|
+|default|"If no value is given, the timeout defaults to 30 seconds."|`Default 30s.`|
+|condition→consequence|"Because navigation re-renders the page, refs become stale, so you should snapshot again."|`Navigation invalidates refs → re-snapshot.`|
+|property chain|"z' is an integer because z divides x²+y², and it is positive because x²+y²>0."|`z' integer since z divides x²+y²; positive since x²+y²>0.`|
+|enumeration|"The action may be open, close, or run."|`action: open, close, run.`|
+|exclusion|"any triple that is neither (1,1,1) nor (1,1,2)"|`triple ≠ (1,1,1),(1,1,2)`|
+|verdict|"Claim A is true, and claim B is false as stated."|`A true; B false as stated.`|
+|precondition|"This requires that the branch has already been checked out."|`Requires prior checkout.`|
 
 Constructions behind them:
 

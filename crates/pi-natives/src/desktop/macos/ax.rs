@@ -56,7 +56,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 15] = [
+const NODE_ATTRIBUTES: [&str; 16] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -70,6 +70,7 @@ const NODE_ATTRIBUTES: [&str; 15] = [
 	"AXHelp",
 	"AXIdentifier",
 	"AXURL",
+	"AXPlaceholderValue",
 	"AXPosition",
 	"AXSize",
 ];
@@ -86,14 +87,15 @@ const VALUE_DESCRIPTION: usize = 9;
 const HELP: usize = 10;
 const IDENTIFIER: usize = 11;
 const URL: usize = 12;
-const POSITION: usize = 13;
-const SIZE: usize = 14;
+const PLACEHOLDER: usize = 13;
+const POSITION: usize = 14;
+const SIZE: usize = 15;
 
 /// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
-/// ([`read_identity`]). A batch that fails as a whole skips them, so a hung
-/// app costs no more lone reads, each with its own timeout, than the
-/// element's role, labels, state and children; the element then has no
-/// identity.
+/// ([`read_identity`]) or to name a field by its placeholder. A batch that
+/// fails as a whole skips them, so a hung app costs no more lone reads, each
+/// with its own timeout, than the element's role, labels, state and children;
+/// the element then has no identity, and a field without a label no name.
 const IDENTITY_ONLY: Range<usize> = SUBROLE..POSITION;
 
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
@@ -411,10 +413,13 @@ impl KeyFocus {
 	/// Whether keyboard focus sits in an overlay window, such as Finder's
 	/// inline rename field or a popover: one attached to `wid` while the
 	/// application reports `wid`, or nothing, as its focused window, or `wid`
-	/// itself while it reports the window `wid` is attached to.
+	/// itself while it reports the window `wid` is attached to, or nothing.
 	pub(super) fn in_overlay_of(&self, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
 		if self.holds_overlay_focus(wid, &parent_of) {
 			return true;
+		}
+		if self.window == FocusedWindow::Unreported && self.element_window == Some(wid) {
+			return parent_of(wid).is_some();
 		}
 		let reported = match self.window {
 			FocusedWindow::Unreported => true,
@@ -749,6 +754,19 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
+/// The window id of `element` when it is itself one of `pid`'s `AXWindows`
+/// though not an `AXWindow`, as Finder's inline rename field is: such an
+/// element has no window above it and stands for its own.
+fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
+	let app = probe_application(pid)?;
+	let windows = copy_elements(&app, "AXWindows").ok()?;
+	windows
+		.iter()
+		.any(|window| **window == *element)
+		.then(|| window_id(element))
+		.flatten()
+}
+
 /// An element that stands for its own `WindowServer` window but is absent
 /// from `AXWindows`, with what can identify that window.
 #[derive(Clone, Copy, Debug)]
@@ -953,14 +971,18 @@ impl AxBackend for MacAx {
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
 		let element = mac_handle(h)?;
 		let pid = element_pid(element)?;
-		let Some(window) = element_window(element) else {
+		let wid = if let Some(window) = element_window(element) {
+			window_id(&window).ok_or_else(|| {
+				DesktopError::ax_failed("AX element's native window id is unavailable")
+			})?
+		} else if let Some(wid) = listed_window_id(pid, element) {
+			wid
+		} else {
 			// A destroyed element has no window either: say so as the
 			// `StaleRef` every element operation gives.
 			copy_held_attribute(element, "AXRole")?;
 			return Err(DesktopError::ax_failed("AX element has no identifiable owning window"));
 		};
-		let wid = window_id(&window)
-			.ok_or_else(|| DesktopError::ax_failed("AX element's native window id is unavailable"))?;
 		windows
 			.iter()
 			.find(|candidate| {
@@ -1194,7 +1216,10 @@ fn element_props(
 	};
 	let title = nonempty(string(TITLE));
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
-	let description = nonempty(string(DESCRIPTION));
+	// A field with no label of its own is named by its placeholder ("Add
+	// Date"), as an accessible name falls back to it.
+	let description = nonempty(string(DESCRIPTION))
+		.or_else(|| nonempty(string(PLACEHOLDER)).filter(|_| title.is_none()));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
@@ -1219,8 +1244,18 @@ fn element_props(
 
 /// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
 /// window.
-const IDENTIFYING: [usize; 9] =
-	[SUBROLE, ROLE_DESCRIPTION, TITLE, DESCRIPTION, VALUE, VALUE_DESCRIPTION, HELP, IDENTIFIER, URL];
+const IDENTIFYING: [usize; 10] = [
+	SUBROLE,
+	ROLE_DESCRIPTION,
+	TITLE,
+	DESCRIPTION,
+	VALUE,
+	VALUE_DESCRIPTION,
+	HELP,
+	IDENTIFIER,
+	URL,
+	PLACEHOLDER,
+];
 
 /// The element's [`AxProps::identity`], hashed from its role and
 /// [`IDENTIFYING`] attributes, its title, value and description as
@@ -1286,10 +1321,7 @@ fn perform_choosing(
 	let native = action_name(action);
 	let actions = copy_strings_from_action_names(element)?;
 	if !actions.contains(&native) {
-		return Err(DesktopError::ax_failed(format!(
-			"AX action '{native}' is not supported by this element; available actions: {}",
-			actions.join(", "),
-		)));
+		return Err(unsupported_action(&native, &actions));
 	}
 	// AXRaise is an explicit request to change stacking, including the
 	// takeover preparation path. Other semantic actions must stay background.
@@ -1354,6 +1386,22 @@ fn perform_choosing(
 			},
 		)
 	})
+}
+
+/// The refusal of `native`, an action the element does not list among
+/// `actions`; nothing was sent. A control without a press action still takes
+/// a click, `menu` path included.
+fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
+	let instead = if native == "AXPress" {
+		"; nothing was sent: if this is the control you meant, click() it instead, passing the same \
+		 menu option if you gave one"
+	} else {
+		""
+	};
+	DesktopError::ax_failed(format!(
+		"AX action '{native}' is not supported by this element; available actions: {}{instead}",
+		actions.join(", "),
+	))
 }
 
 /// Makes the window holding `element` key within its background
@@ -1998,11 +2046,7 @@ fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
 }
 
 fn ensure_trusted() -> CoreResult<()> {
-	if is_trusted() {
-		Ok(())
-	} else {
-		Err(permission::denied("Accessibility"))
-	}
+	is_trusted().ok_or_else(|| permission::denied("Accessibility"))
 }
 
 fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
@@ -2327,11 +2371,7 @@ fn truncate_chars(value: String, max: usize) -> String {
 }
 
 fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
-	if error == AXError::Success {
-		Ok(())
-	} else {
-		Err(ax_error(error, context))
-	}
+	(error == AXError::Success).ok_or_else(|| ax_error(error, context))
 }
 
 /// `InvalidUIElement` means the element itself is gone (its view was removed
@@ -2362,9 +2402,9 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, replace_utf16_selection, replace_whole_value,
-		required_string, secure_subrole, select_attached, stringify_value, takes_inserted_text,
-		target_window, text_readback, window_records_of,
+		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
+		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
+		takes_inserted_text, target_window, text_readback, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2449,7 +2489,7 @@ mod tests {
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
 		let walk = |help: &CFType| {
-			let entries: [&CFType; 13] = [
+			let entries: [&CFType; 14] = [
 				null,
 				&role,
 				&title,
@@ -2461,6 +2501,7 @@ mod tests {
 				null,
 				null,
 				help,
+				null,
 				null,
 				null,
 			];
@@ -2499,6 +2540,52 @@ mod tests {
 		);
 		assert!(identity(&lone).is_none());
 		assert!(!answered(&lone.get(CHILDREN)));
+	}
+
+	#[test]
+	fn a_field_without_a_label_is_named_by_its_placeholder() {
+		use super::{PLACEHOLDER, WalkBounds, element_props};
+
+		let role = CFString::from_static_str("AXTextField");
+		let role: &CFType = &role;
+		let due = CFString::from_static_str("Due");
+		let due: &CFType = &due;
+		let add_date = CFString::from_static_str("Add Date");
+		let add_date: &CFType = &add_date;
+		let mut busy = AXError::CannotComplete;
+		// SAFETY: An AXError-typed AXValue copies the one AXError it points at.
+		let busy =
+			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut busy).cast()) }.unwrap();
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null: &CFType = unsafe { kCFNull }.unwrap();
+		// One walk read of a Reminders date field, with `title` and
+		// `description` as its own labels.
+		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
+			let mut entries = [null; 14];
+			entries[ROLE] = role;
+			entries[TITLE] = title;
+			entries[DESCRIPTION] = description;
+			entries[PLACEHOLDER] = placeholder;
+			let values = NodeValues::from_batch(
+				Ok(CFArray::from_objects(&entries)),
+				NodeRead::Walk.attributes(),
+				|_| unreachable!("an answered batch needs no lone reads"),
+			);
+			element_props(&create_system_wide(), &values, 0, WalkBounds::Skip).unwrap()
+		};
+		let unlabeled = field(null, null, add_date);
+		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));
+		assert!(!unlabeled.partial);
+		// A label of its own wins.
+		assert_eq!(field(null, due, add_date).description.as_deref(), Some("Due"));
+		let titled = field(due, null, add_date);
+		assert_eq!(titled.title.as_deref(), Some("Due"));
+		assert_eq!(titled.description, None);
+		// A placeholder the app was too busy to answer leaves the field
+		// unnamed and without an identity, so no ref is matched by its name.
+		let unanswered = field(null, null, &busy);
+		assert_eq!(unanswered.description, None);
+		assert!(unanswered.partial);
 	}
 
 	#[test]
@@ -2576,6 +2663,20 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn an_element_without_a_press_action_is_pointed_at_click() {
+		// The system-wide element lists no actions, as a Chrome page's button
+		// lists no AXPress.
+		let element = create_system_wide();
+		let press = perform_choosing(&element, "press", None).unwrap_err();
+		assert_eq!(press.code, ErrorCode::AxFailed);
+		assert!(press.message.contains("'AXPress' is not supported"), "{}", press.message);
+		assert!(press.message.contains("click()"), "{}", press.message);
+		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
+		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
+		assert!(!other.message.contains("click()"), "{}", other.message);
 	}
 
 	#[test]
@@ -3021,6 +3122,12 @@ mod tests {
 		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Target(7));
 		assert!(focus.holds_text_for(7, 41732, attached));
 		assert!(focus.in_overlay_of(41732, attached));
+		// Keys addressed to the overlay window itself reach the field too.
+		assert_eq!(focus.destination(7, 41743, attached), KeyDestination::Target(7));
+		assert!(focus.in_overlay_of(41743, attached));
+		// A top-level window holding the focus is no overlay.
+		let top_level = KeyFocus { element_window: Some(41732), ..focus };
+		assert!(!top_level.in_overlay_of(41732, attached));
 		// The same overlay in another Finder window is not this window's.
 		assert_eq!(focus.destination(7, 35240, attached), KeyDestination::Unreported);
 		assert!(!focus.holds_text_for(7, 35240, attached));

@@ -248,6 +248,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"extended-cache-ttl-beta": wire("extendedCacheTtlBeta", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"honors-claude-code-beta-kill-switch": wire("honorsClaudeCodeBetaKillSwitch", ["anthropic"]),
@@ -257,6 +258,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
+	"requires-thinking-presence": wire("requiresThinkingPresence", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
 	"strip-thinking-history": wire("stripThinkingHistory", ["openai", "anthropic", "ollama"]),
@@ -467,6 +469,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
@@ -494,8 +502,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
-	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps the newest user message's
-	 * and newest tool result's images past `inline-image-byte-budget` while they alone fit this limit.
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the
+	 * request's other bytes leave of it, and keeps the newest user message's and newest tool result's images past
+	 * `inline-image-byte-budget` while they fit that room.
 	 */
 	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
 	/**
@@ -544,12 +553,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
-	/** Most output tokens the host serves: a larger reported `maxTokens` is lowered to it; an unknown one stays unknown. */
+	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
 	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
-	"task-sibling-prompt-cache": {
-		key: "taskSiblingPromptCache",
+	/**
+	 * The lane rewards routing related requests — Task siblings, forks, explicit
+	 * `--prompt-cache-key` callers — under one shared prompt-cache key instead of
+	 * each conversation's own identity. Unassigned: per-conversation routing.
+	 */
+	"shared-prompt-cache": {
+		key: "sharedPromptCache",
 		set: "catalog",
 		shape: "scalar",
 		values: [true, false],

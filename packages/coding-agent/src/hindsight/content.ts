@@ -124,13 +124,22 @@ export function composeRecallQuery(
 	if (recallContextTurns <= 1 || messages.length === 0) return latest;
 
 	const contextual = sliceLastTurnsByUserBoundary(messages, recallContextTurns);
-	const contextLines: string[] = [];
+	let trailingUserIndex = -1;
+	for (let i = contextual.length - 1; i >= 0; i--) {
+		if (contextual[i].role === "user") {
+			trailingUserIndex = i;
+			break;
+		}
+	}
 
-	for (const msg of contextual) {
+	const contextLines: string[] = [];
+	for (let i = 0; i < contextual.length; i++) {
+		const msg = contextual[i];
 		const content = stripMemoryTags(msg.content).trim();
-		if (!content) continue;
-		if (msg.role === "user" && content === latest) continue;
-		contextLines.push(`${msg.role}: ${content}`);
+		if (!content || (msg.role === "assistant" && !hasSubstantiveContent(content))) continue;
+		if (i === trailingUserIndex && content === latest) continue;
+		const safeContent = content.replace(/\n(?=(?:user|assistant|system|tool): )/g, "\n  ");
+		contextLines.push(`${msg.role}: ${safeContent}`);
 	}
 
 	if (contextLines.length === 0) return latest;
@@ -161,11 +170,11 @@ export function truncateRecallQuery(query: string, latestQuery: string, maxChars
 	if (suffix.length >= maxChars) return latestOnly;
 
 	const contextBody = query.slice(markerIndex + contextMarker.length, suffixIndex);
-	const contextLines = contextBody.split("\n").filter(Boolean);
+	const contextEntries = contextBody.split(/\n(?=(?:user|assistant|system|tool): )/).filter(Boolean);
 
 	const kept: string[] = [];
-	for (let i = contextLines.length - 1; i >= 0; i--) {
-		kept.unshift(contextLines[i]);
+	for (let i = contextEntries.length - 1; i >= 0; i--) {
+		kept.unshift(contextEntries[i]);
 		const candidate = `${contextMarker}${kept.join("\n")}${suffix}`;
 		if (candidate.length > maxChars) {
 			kept.shift();

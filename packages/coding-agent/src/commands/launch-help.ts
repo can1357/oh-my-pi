@@ -16,7 +16,7 @@ export const launchHelp = {
 	},
 	flags: {
 		model: Flags.string({
-			description: 'Model to use (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")',
+			description: 'Model to use (fuzzy match: "opus", "gpt-5.2"; exact with a provider: "openai/gpt-5.2")',
 		}),
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
@@ -91,6 +91,10 @@ export const launchHelp = {
 		advisor: Flags.boolean({
 			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
+		"wait-async": Flags.boolean({
+			description:
+				"Print mode: before exiting, wait for this run's background jobs and wake the session with each result (async.printWake); no time limit unless --max-time is set",
+		}),
 		"external-thinking": Flags.boolean({
 			description:
 				"Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning (at your own risk: providers have flagged this request shape as abuse)",
@@ -107,6 +111,7 @@ export const launchHelp = {
 		"no-skills": Flags.boolean({ description: "Disable skills discovery and loading" }),
 		skills: Flags.string({ description: "Comma-separated glob patterns to filter skills (e.g., git-*,docker)" }),
 		"no-rules": Flags.boolean({ description: "Disable rules discovery and loading" }),
+		"no-context-files": Flags.boolean({ description: "Disable context files (AGENTS.md, CLAUDE.md, ...)" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"no-ui": Flags.boolean({
@@ -114,6 +119,13 @@ export const launchHelp = {
 		}),
 		"print-thoughts": Flags.boolean({ description: "Include thinking blocks in print mode text output" }),
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
+		"warn-cost": Flags.string({
+			description: "Warn once when the session's spend, subagents included, reaches this many USD",
+		}),
+		"max-cost": Flags.string({
+			description:
+				"Stop sending model requests once the session's spend reaches this many USD; requests already in flight can finish past it (print mode exits 3)",
+		}),
 		"auto-approve": Flags.boolean({
 			aliases: ["yolo"],
 			description: "Auto-approve all tool calls (skip approval prompts)",

@@ -921,6 +921,26 @@ describe("CursorExecHandlers error results", () => {
 		expect(end?.isError).toBe(true);
 	});
 
+	it("names the granted tools when a shell frame asks for an unavailable bash", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				["read", rewrittenErrorTool("read")],
+				["grep", rewrittenErrorTool("grep")],
+				["glob", rewrittenErrorTool("glob")],
+			]),
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell-missing", command: "echo hi" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+		expect(result.isError).toBe(true);
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		expect(text).toContain('Tool "bash" not available to this agent');
+		expect(text).toContain("read, grep, glob");
+	});
+
 	it("omits unset optional kwargs from shellStream start events and execute args", async () => {
 		// shellStream bypasses executeTool(), so omitUndefinedArgs must be
 		// applied here directly — otherwise absent cwd/timeout become
@@ -1737,7 +1757,12 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
 
 		expect(result.isError).toBe(true);
-		expect(result.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'Tool "delete" not available to this agent; calling it again fails the same way. Use one of: none.',
+			},
+		]);
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 

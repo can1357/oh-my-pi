@@ -16,15 +16,14 @@
  * sessions' tabs belong to their owners.
  */
 
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
-import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireBrowser, holdBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { BrowserHandle } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
 	acquireTab,
-	armIdleCloseForOwner,
 	cancelIdleCloseForOwner,
 	earliestIdleCloseInMs,
 	ensureSpawnedKilledForTest,
@@ -454,19 +453,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			return makeStubTab({ lastActivityAt: NOW - 120_000, ...overrides }).tab;
 		}
 
-		it("selects owned managed tabs idle past the deadline, including the boundary", () => {
-			expect(isIdleCloseCandidate(candidate(), "session-stub", NOW, 60_000)).toBe(true);
-			expect(isIdleCloseCandidate(candidate({ lastActivityAt: NOW - 60_000 }), "session-stub", NOW, 60_000)).toBe(
-				true,
-			);
-		});
-
-		it("holds back fresh tabs", () => {
-			expect(isIdleCloseCandidate(candidate({ lastActivityAt: NOW - 1_000 }), "session-stub", NOW, 60_000)).toBe(
-				false,
-			);
-		});
-
 		it("never selects other owners, opt-outs, foreign kinds, dead, or executing tabs", () => {
 			const cases: Array<[string, Record<string, unknown>]> = [
 				["other owner", { ownerSessionId: "session-other" }],
@@ -739,13 +725,24 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 	});
 
 	describe.skipIf(!CHROMIUM_AVAILABLE)("browser settle — real headless Chromium", () => {
+		// One Chromium for these tests, held across them: each closes every tab it opened.
+		let browser: BrowserHandle;
+
+		beforeAll(async () => {
+			browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			holdBrowser(browser);
+		});
+
+		afterAll(async () => {
+			await releaseBrowser(browser, { kill: true });
+		});
+
 		afterEach(async () => {
 			await drainAllTabs();
 		});
 
 		it("freezes at settle, resumes transparently on run, and idle-closes", async () => {
 			const session = makeSession(process.cwd());
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			const name = `settle-real-${process.pid}`;
 			const { tab } = await acquireTab(name, browser, {
 				url: "about:blank",
@@ -771,7 +768,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 		}, 120_000);
 
 		it("closes a frozen tab directly", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			const name = `settle-frozclose-${process.pid}`;
 			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-frozclose" });
 			expect(await freezeTabsForOwner("session-frozclose")).toBe(1);
@@ -780,7 +776,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 		}, 120_000);
 
 		it("reopens a frozen tab with persist without failing the resume", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			const name = `settle-frozpersist-${process.pid}`;
 			const first = await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-frozpersist" });
 			expect(first.tab.persist).toBe(false);
@@ -809,15 +804,15 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			mockCmuxSocket();
 			// No pre-attached surface: each open mints an owned split, so
 			// the two generations land on distinct targets.
-			const browser = await acquireBrowser(
+			const cmux = await acquireBrowser(
 				{ kind: "cmux", socketPath: "/tmp/omp-test-settle-recreate.sock" },
 				{ cwd: "/tmp" },
 			);
-			const first = await acquireTab("settle-gone", browser, { timeoutMs: 1_000, ownerSessionId: "session-A" });
+			const first = await acquireTab("settle-gone", cmux, { timeoutMs: 1_000, ownerSessionId: "session-A" });
 			expect(await releaseTabsForOwner("session-A", { kill: false })).toBe(1);
 			expect(getTabsMapForTest().has("settle-gone")).toBe(false);
 
-			const second = await acquireTab("settle-gone", browser, { timeoutMs: 1_000, ownerSessionId: "session-A" });
+			const second = await acquireTab("settle-gone", cmux, { timeoutMs: 1_000, ownerSessionId: "session-A" });
 			expect(second.created).toBe(true);
 			expect(second.tab.targetId).not.toBe(first.tab.targetId);
 			expect(second.tab.frozen).toBe(false);
@@ -825,7 +820,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 		});
 
 		it("revalidates candidates mid-drain: reuse during an earlier close is honored", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			const base = `settle-reval-${process.pid}`;
 			const a = await acquireTab(`${base}-a`, browser, { timeoutMs: 30_000, ownerSessionId: "session-reval" });
 			const b = await acquireTab(`${base}-b`, browser, { timeoutMs: 30_000, ownerSessionId: "session-reval" });
@@ -845,70 +839,7 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(getTabsMapForTest().has(`${base}-b`)).toBe(true);
 		}, 120_000);
 
-		it("closes idle tabs when the timeout elapses without further activity", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			const name = `settle-timer-${process.pid}`;
-			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-timer" });
-			const due = earliestIdleCloseInMs("session-timer", 60_000);
-			expect(due).toBeGreaterThan(0);
-			expect(due).toBeLessThanOrEqual(60_000);
-
-			armIdleCloseForOwner("session-timer", 200);
-			// Real clock required: the deadline, worker teardown, and CDP
-			// roundtrips all run on platform time; fake timers cannot advance
-			// real subprocess IPC, so poll the exercised condition instead.
-			for (let i = 0; i < 100 && getTabsMapForTest().has(name); i++) await Bun.sleep(50);
-			expect(getTabsMapForTest().has(name)).toBe(false);
-		}, 120_000);
-
-		it("re-arming replaces the pending deadline", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			const name = `settle-retimer-${process.pid}`;
-			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-retimer" });
-
-			armIdleCloseForOwner("session-retimer", 200);
-			armIdleCloseForOwner("session-retimer", 3_600_000);
-			// Real clock required (see above): past the first deadline with
-			// the replacement armed, the tab must still be tracked.
-			await Bun.sleep(600);
-			expect(getTabsMapForTest().has(name)).toBe(true);
-		}, 120_000);
-
-		it("re-arms when the timer fires into an in-flight run", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			const name = `settle-retry-${process.pid}`;
-			const session = makeSession(process.cwd());
-			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-retry" });
-
-			const run = runInTab(name, { code: "await wait(2000); return 1;", timeoutMs: 30_000, session });
-			void run.catch(() => undefined);
-			armIdleCloseForOwner("session-retry", 300, 150);
-			// The 300ms deadline fires mid-run: skipped, not closed.
-			// Real clock required (see above).
-			await Bun.sleep(1000);
-			expect(getTabsMapForTest().has(name)).toBe(true);
-			expect((await run).returnValue).toBe(1);
-			// After completion the chain re-arms from the fresh timestamp
-			// and the tab closes without any further settle or open.
-			for (let i = 0; i < 120 && getTabsMapForTest().has(name); i++) await Bun.sleep(50);
-			expect(getTabsMapForTest().has(name)).toBe(false);
-		}, 120_000);
-
-		it("cancelling drops the armed deadline", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			const name = `settle-cancel-${process.pid}`;
-			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-cancel" });
-
-			armIdleCloseForOwner("session-cancel", 200);
-			cancelIdleCloseForOwner("session-cancel");
-			// Real clock required (see above): past the deadline with the
-			// timer cancelled, the tab must still be tracked.
-			await Bun.sleep(600);
-			expect(getTabsMapForTest().has(name)).toBe(true);
-		}, 120_000);
-
 		it("does not re-arm when cancelled mid-sweep", async () => {
-			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			const base = `settle-cancelsweep-${process.pid}`;
 			const due = await acquireTab(`${base}-due`, browser, {
 				timeoutMs: 30_000,

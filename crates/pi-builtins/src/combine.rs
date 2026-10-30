@@ -268,7 +268,7 @@ fn input_failure(name: &OsStr, err: &std::io::Error) -> Error {
 	if pi_vfs::is_cancelled(err) {
 		Error::Cancelled
 	} else {
-		Error::Msg(format!("{}: {err}", name.to_string_lossy()))
+		Error::Msg(format!("{}: {err}", name.display()))
 	}
 }
 

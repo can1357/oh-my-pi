@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -403,5 +404,15 @@ describe("readTextFromClipboard", () => {
 		expect(await readTextFromClipboard()).toBe("from powershell\n");
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+	});
+});
+
+describe("isClipboardTerminalLocal", () => {
+	it("never trusts the system clipboard over SSH, even with a forwarded-looking display", () => {
+		const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
+		// A tmux session can keep a stale forward whose port a later SSH session now owns.
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ DISPLAY: ":0" })).toBe(true);
 	});
 });

@@ -91,7 +91,12 @@ describe("AgentSession skill prompt keyword steering", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(tempDir.path()),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"eval.py": false,
+				"eval.js": true,
+				"eval.workpool.freshAgents": true,
+			}),
 			modelRegistry,
 		});
 	});
@@ -126,7 +131,14 @@ describe("AgentSession skill prompt keyword steering", () => {
 		if (!observedTurn) throw new Error("Expected prompt context to be captured");
 		expect(observedTurn.texts).toContain(`Skill body\n\n---\n\nSkill: ${skillPath}\nUser: ${details.args}`);
 		expect(observedTurn.texts).toContain(
-			renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true }),
+			renderWorkflowNotice({
+				taskBatch: true,
+				scoutAvailable: true,
+				evalTools: true,
+				py: false,
+				js: true,
+				freshAgents: true,
+			}),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });
 	});

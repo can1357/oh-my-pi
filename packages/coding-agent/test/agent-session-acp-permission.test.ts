@@ -13,8 +13,10 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -25,6 +27,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
@@ -154,6 +157,146 @@ it("eval bridge dispatch uses the same ACP gate as a direct tool call", async ()
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("eval applies a custom-wire patch exactly once through the canonical tool's ACP gate", async () => {
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const toolSession = makeToolSession(bridge);
+	const editTool = new EditTool(toolSession);
+	const executeSpy = spyOn(editTool, "execute");
+	session = await createSession([editTool as AgentTool], bridge, {
+		"tools.approval": { edit: "prompt" },
+	});
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
+	await Bun.write(tempDir.join("eval-wire-old.txt"), "old\n");
+	const input =
+		"*** Begin Patch\n*** Add File: eval-wire.txt\n+ok\n*** Delete File: eval-wire-old.txt\n*** End Patch\n";
+
+	await callSessionTool("apply_patch", { input }, { session: toolSession });
+
+	expect(await Bun.file(tempDir.join("eval-wire.txt")).text()).toBe("ok\n");
+	expect(await Bun.file(tempDir.join("eval-wire-old.txt")).exists()).toBe(false);
+	expect(executeSpy).toHaveBeenCalledTimes(1);
+	expect(executeSpy.mock.calls[0]?.[1]).toEqual({ input });
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(session.getToolForEvalBridge("edit")?.name).toBe("edit");
+	expect(session.getEvalBridgeToolNames()).toEqual(["edit", "apply_patch"]);
+	expect(new EvalTool(toolSession).description).toContain("`edit`, `apply_patch`");
+});
+
+it("eval refuses both canonical and wire names after their tool is disabled", async () => {
+	const edit = { ...makeFakeTool("edit"), customWireName: "apply_patch" };
+	session = await createSession([edit, makeFakeTool("read")]);
+	await session.setActiveToolsByName(["read"]);
+
+	expect(session.getToolForEvalBridge("edit")).toBeUndefined();
+	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+});
+
+it("eval preserves raw patch validation when resolving a wire alias", async () => {
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	const editTool = new EditTool(toolSession);
+	session = await createSession([editTool as AgentTool]);
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+
+	const result = await callSessionTool("apply_patch", { input: "not a patch" }, { session: toolSession });
+
+	expect(result).toMatchObject({ hasError: true });
+});
+
+it("eval gives an exact custom name precedence even when that exact tool is disabled", async () => {
+	const edit = { ...makeFakeTool("edit"), customWireName: "apply_patch" };
+	const exact = makeFakeTool("apply_patch");
+	session = await createSession([edit, exact], undefined, {}, { builtInToolNames: ["edit"] });
+
+	await session.getToolForEvalBridge("apply_patch")!.execute("exact", {}, undefined);
+	expect(exact.executeCalls).toBe(1);
+	expect(edit.executeCalls).toBe(0);
+	expect(session.hasBuiltInTool("apply_patch")).toBe(false);
+	await session.setActiveToolsByName(["edit"]);
+	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["edit"]);
+});
+
+it("eval rejects ambiguous wire names rather than choosing a registry insertion order", async () => {
+	const first = { ...makeFakeTool("first"), customWireName: "shared" };
+	const second = { ...makeFakeTool("second"), customWireName: "shared" };
+	session = await createSession([first, second]);
+
+	expect(session.getToolForEvalBridge("shared")).toBeUndefined();
+	expect(session.getEvalBridgeToolNames()).toEqual(["first", "second"]);
+});
+
+it("eval does not advertise tools that require a direct tool result", async () => {
+	session = await createSession([
+		{ ...makeFakeTool("checkpoint"), customWireName: "savepoint" },
+		{ ...makeFakeTool("rewind"), customWireName: "restorepoint" },
+		makeFakeTool("read"),
+	]);
+
+	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+});
+
+it("eval applies direct-only restrictions to the resolved tool rather than its wire spelling", async () => {
+	const tool = Object.assign(makeFakeTool("savepoint"), { customWireName: "checkpoint" });
+	session = await createSession([tool]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+
+	expect(session.getEvalBridgeToolNames()).toEqual(["savepoint", "checkpoint"]);
+	await callSessionTool("checkpoint", {}, { session: toolSession });
+	expect(tool.executeCalls).toBe(1);
+});
+
+it("eval resolves xd:// and Claude Code MCP spellings over enabled tools only", async () => {
+	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(makeFakeTool);
+	const xdev: XdevState = {
+		tools: new Map(tools.map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
+	};
+	session = await createSession(tools, undefined, {}, { xdev });
+	await session.setActiveToolsByName(["read", "mcp__srv_active"]);
+	xdev.mountedNames.add("lsp");
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+
+	await callSessionTool("mcp__srv__active", {}, { session: toolSession });
+	await callSessionTool("xd://lsp", {}, { session: toolSession });
+	await callSessionTool("xd://read", {}, { session: toolSession });
+	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 0, 1, 0]);
+
+	await expect(callSessionTool("mcp__srv__idle", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("xd://ast_grep", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("nope", {}, { session: toolSession })).rejects.toThrow("Unknown tool");
+});
+
+it("eval leaves a Claude Code MCP spelling unresolved when mounted and active tools both answer it", async () => {
+	const emitted = "mcp__foo__bar__foo_bar_baz";
+	const active = makeFakeTool(createMCPToolName("foo__bar", "foo_bar_baz"));
+	const mounted = makeFakeTool(createMCPToolName("foo", "bar__foo_bar_baz"));
+	const xdev: XdevState = {
+		tools: new Map([active, mounted].map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => name === active.name,
+	};
+	session = await createSession([active, mounted], undefined, {}, { xdev });
+	await session.setActiveToolsByName([active.name]);
+	xdev.mountedNames.add(mounted.name);
+
+	expect(session.getToolForEvalBridge(emitted)).toBeUndefined();
+	xdev.mountedNames.delete(mounted.name);
+	expect(session.getToolForEvalBridge(emitted)?.name).toBe(active.name);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {

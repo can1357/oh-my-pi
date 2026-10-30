@@ -252,6 +252,19 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+	},
+});
+
 export const cfgTaskStructured = register({
 	id: "task.structured",
 	type: "boolean",

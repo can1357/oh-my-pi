@@ -78,12 +78,16 @@ provider "anthropic" {
 	// Code's `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` kill switch for gateways
 	// that reject experimental beta fields.
 	honors-claude-code-beta-kill-switch #true
-	// Messages requests cap at 32 MB. Reserve 8 MB for text, tools, and JSON
-	// framing when retaining inline base64 images in a long conversation.
-	// Applied only on the official endpoint; a custom baseUrl has its own limit.
+	// Messages requests cap at 128 MB. Reserve 8 MB for text, tools, and JSON
+	// framing when retaining inline base64 images in a long conversation; the
+	// body limit keeps images within what the other bytes leave, and lets the
+	// newest user message's and tool result's images use the reserve.
+	// Applied only on the official endpoint; a custom baseUrl has its own limit
+	// (Bedrock 20 MB; Vertex, Foundry, and Claude Platform on AWS 30-32 MB).
 	// https://platform.claude.com/docs/en/api/overview#request-size-limits
 	on-api "anthropic-messages" {
-		inline-image-byte-budget 24000000
+		inline-image-byte-budget 120000000
+		request-body-byte-limit 128000000
 	}
 	// The official endpoint carries at most 600 images and documents per
 	// request, 100 on models with a 200k-token window: every Claude line before
@@ -116,12 +120,26 @@ provider "anthropic" {
 		family "fable" {
 			server-side-fallback-models "claude-opus-5"
 			// Fallback-credit redemption targets: the refused model's permitted
-			// fallback targets. Fable 5 and 5.1 → Opus 4.8 and Opus 5
+			// fallback targets
 			// (https://platform.claude.com/docs/en/build-with-claude/fallback-credit).
+			// Fable 5 and 5.1 → Opus 4.8 and Opus 5.
 			fallback-credit-targets "claude-opus-4-8" "claude-opus-5"
 		}
 		family "mythos" {
 			server-side-fallback-models "claude-opus-5"
+		}
+		family "opus" {
+			revision "=5.5" {
+				fallback-credit-targets "claude-opus-4-8" "claude-opus-5"
+			}
+			revision "=5" {
+				fallback-credit-targets "claude-opus-4-8"
+			}
+		}
+		family "sonnet" {
+			revision "=5.5" {
+				fallback-credit-targets "claude-sonnet-5"
+			}
 		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

@@ -137,6 +137,7 @@ export const hindsightBackend: MemoryBackend = {
 		messages: AgentMessage[],
 		settings: Settings,
 		session?: AgentSession,
+		signal?: AbortSignal,
 	): Promise<string | undefined> {
 		const config = loadHindsightConfig(settings);
 		if (!isHindsightConfigured(config)) return undefined;
@@ -145,7 +146,7 @@ export const hindsightBackend: MemoryBackend = {
 		if (!state) return undefined;
 
 		const flat = flattenMessagesForRecall(messages);
-		return await state.recallForCompaction(flat);
+		return await state.recallForCompaction(flat, signal);
 	},
 
 	async applySettings(session: AgentSession): Promise<void> {

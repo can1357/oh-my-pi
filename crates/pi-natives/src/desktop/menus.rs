@@ -67,14 +67,12 @@ pub(crate) fn match_index(items: &[DesktopMenuItem], label: &str) -> CoreResult<
 }
 
 pub(crate) fn require_enabled(item: &DesktopMenuItem) -> CoreResult<()> {
-	if item.enabled {
-		Ok(())
-	} else {
-		Err(DesktopError::ax_failed(format!(
+	item.enabled.ok_or_else(|| {
+		DesktopError::ax_failed(format!(
 			"menu item '{}' is disabled; no command was dispatched",
 			item.path.join(" > ")
-		)))
-	}
+		))
+	})
 }
 
 pub(crate) fn require_command(item: &DesktopMenuItem) -> CoreResult<()> {

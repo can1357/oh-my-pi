@@ -12,6 +12,7 @@
  * line and file it processes. Path segments and placeholders share the index space:
  * `name: "Probe"` → `PLACEHOLDER_7` and `agent://Probe` → `agent://seg7`.
  */
+import { editErrorKinds } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getBundledAgentsMap } from "../task/agents";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "../tools/builtin-names";
@@ -244,6 +245,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"server",
 		"customWireName",
 		"visibility",
+		"errorKind",
 	]),
 	...fields("identity", [
 		"api",
@@ -261,6 +263,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("id", [
 		"id",
 		"parentId",
+		"continuationOf",
 		"toolCallId",
 		"call_id",
 		"responseId",
@@ -560,6 +563,7 @@ const TOOL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
 	contentType: MIME_TYPES,
 	mimeType: MIME_TYPES,
 	detail: new Set(["auto", "low", "high", "original"]),
+	errorKind: new Set(editErrorKinds()),
 };
 
 /** Built-in tool argument keys holding free-form structures (env maps, schemas, structured output). */
@@ -1402,6 +1406,8 @@ export class SessionAnonymizer {
 		for (const [key, value] of Object.entries(block)) {
 			const rule = allowed.has(key) && Object.hasOwn(FIELD_RULES, key) ? FIELD_RULES[key] : undefined;
 			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(value);
+			// The block type is already allowlisted; replay consumers use it to distinguish text from images.
+			else if (key === "type") out[key] = value;
 			// A tool call is the model's own request (its id must stay joinable with the result).
 			else out[key] = this.#field(rule, value, block, key, fromTool && block.type !== "toolCall");
 		}
@@ -1789,7 +1795,9 @@ export async function anonymizeSessionTranscripts(session: AnonymizeSessionInput
 	let subagentError: string | undefined;
 	try {
 		if (session.sessionFile) {
-			subSessions = await collectSubSessions(session.sessionFile, key => unreadable.push(memberFor(key)));
+			subSessions = await collectSubSessions(session.sessionFile, {
+				onUnreadable: key => unreadable.push(memberFor(key)),
+			});
 		}
 	} catch (error) {
 		subagentError = error instanceof Error ? error.message : String(error);

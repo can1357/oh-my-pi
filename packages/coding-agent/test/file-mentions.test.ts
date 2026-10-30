@@ -1,13 +1,31 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EditStore } from "@oh-my-pi/pi-natives";
+import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const tempDirs: string[] = [];
+let originalAgentDir: string | undefined;
+let originalOmpProfile: string | undefined;
+let originalPiProfile: string | undefined;
+
+beforeEach(async () => {
+	originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	originalOmpProfile = process.env.OMP_PROFILE;
+	originalPiProfile = process.env.PI_PROFILE;
+	const agentDir = await createTempDir();
+	setAgentDir(agentDir);
+});
 
 afterEach(async () => {
+	restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
 	for (const dir of tempDirs.splice(0, tempDirs.length)) {
 		await removeWithRetries(dir);
 	}
@@ -119,5 +137,87 @@ describe("generateFileMentionMessages path resolution", () => {
 			expect(file.content).toContain("binary file");
 			expect(file.content).not.toContain("\u0000");
 		}
+	});
+
+	test("converts convertible document mentions to Markdown without hashline headers", async () => {
+		const cwd = await createTempDir();
+		const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+		const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+		const xlsxBytes = await encodeArchive("zip", [
+			[
+				"xl/workbook.xml",
+				`<workbook xmlns="${NS}" xmlns:r="${REL_NS}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+			],
+			[
+				"xl/_rels/workbook.xml.rels",
+				`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+			],
+			["xl/sharedStrings.xml", `<sst xmlns="${NS}"><si><t>Mentioned Cell</t></si></sst>`],
+			[
+				"xl/worksheets/sheet1.xml",
+				`<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`,
+			],
+		]);
+		await Bun.write(path.join(cwd, "table.xlsx"), xlsxBytes);
+
+		const snapshotStore = new EditStore();
+		const messages = await generateFileMentionMessages(["table.xlsx"], cwd, {
+			useHashLines: true,
+			snapshotStore,
+		});
+
+		expect(messages).toHaveLength(1);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files).toHaveLength(1);
+		const file = message.files[0];
+		expect(file?.path).toBe("table.xlsx");
+		expect(file?.skippedReason).toBeUndefined();
+		expect(file?.content).toContain("Mentioned Cell");
+		// Converted markdown is not raw editable file lines: no hashline headers or snapshotStore entry
+		expect(file?.content).not.toMatch(/^\[table\.xlsx#[0-9a-fA-F]+\]/);
+		expect(snapshotStore.headHash(path.join(cwd, "table.xlsx"))).toBeNull();
+	});
+
+	test("drops earlier mentions when signal aborts before or during convertible document conversion", async () => {
+		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "first.txt"), "first file");
+		const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+		const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+		const xlsxBytes = await encodeArchive("zip", [
+			[
+				"xl/workbook.xml",
+				`<workbook xmlns="${NS}" xmlns:r="${REL_NS}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+			],
+			[
+				"xl/_rels/workbook.xml.rels",
+				`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+			],
+			["xl/sharedStrings.xml", `<sst xmlns="${NS}"><si><t>Aborted Cell</t></si></sst>`],
+			[
+				"xl/worksheets/sheet1.xml",
+				`<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`,
+			],
+		]);
+		await Bun.write(path.join(cwd, "aborted.xlsx"), xlsxBytes);
+
+		const controller = new AbortController();
+		const snapshotStore = new EditStore();
+		const origRecord = snapshotStore.recordSnapshot.bind(snapshotStore);
+		snapshotStore.recordSnapshot = (filePath: string, content: string) => {
+			const tag = origRecord(filePath, content);
+			controller.abort();
+			return tag;
+		};
+
+		const messages = await generateFileMentionMessages(["first.txt", "aborted.xlsx"], cwd, {
+			useHashLines: true,
+			snapshotStore,
+			signal: controller.signal,
+		});
+
+		expect(messages).toHaveLength(0);
 	});
 });

@@ -74,6 +74,14 @@ async function startBunHolder(responseExpr: string, options?: { hostname?: strin
 	throw new Error(`Holder failed to listen on port ${port}: ${stderr}`);
 }
 
+/** Assert that a current, same-origin-only dashboard answers on `port`. */
+async function expectCurrentDashboard(port: number): Promise<void> {
+	const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${port}/api/stats/models`);
+	expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
+	expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+	await response.body?.cancel();
+}
+
 afterEach(async () => {
 	for (const child of holderProcesses) {
 		child.kill();
@@ -174,6 +182,19 @@ describe("startServer port conflicts", () => {
 		}
 	});
 
+	it("reuses a live dashboard that answers slowly while it ingests", async () => {
+		// Regression: a dashboard stalled by ingest missed the probe deadline and
+		// `/stats` failed with "not identifiable as an omp stats dashboard". The
+		// holder is a separate process probed over real sockets, so its stall has
+		// to be a real delay; fake timers here cannot slow another process down.
+		const headers = `{ "${STATS_DASHBOARD_HEADER}": "${STATS_DASHBOARD_SECURITY_VERSION}", "${STATS_DASHBOARD_HOSTNAME_HEADER}": "${STATS_DASHBOARD_HOSTNAME}" }`;
+		const holder = await startBunHolder(`Bun.sleep(1_000).then(() => Response.json([], { headers: ${headers} }))`);
+
+		const server = await startServer(holder.port);
+		expect(server.port).toBe(holder.port);
+		expect(holder.child.exitCode).toBeNull();
+	});
+
 	for (const fixture of [
 		{
 			name: "reclaims a version 1 dashboard without command identity",
@@ -197,43 +218,43 @@ describe("startServer port conflicts", () => {
 
 			try {
 				expect(await holder.child.exited).not.toBe(0);
-				const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/models`);
-				expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
-				expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
-				await response.body?.cancel();
+				await expectCurrentDashboard(server.port);
 			} finally {
 				server.stop();
 			}
 		});
 	}
 
-	it("refuses to stop a newer dashboard without command identity", async () => {
-		const newerVersion = String(Number(STATS_DASHBOARD_SECURITY_VERSION) + 1);
-		const holder = await startBunHolder(
-			`Response.json([], { headers: { "${STATS_DASHBOARD_HEADER}": "${newerVersion}" } })`,
-		);
+	for (const fixture of [
+		{
+			name: "a newer dashboard without command identity",
+			response: `Response.json([], { headers: { "${STATS_DASHBOARD_HEADER}": "${Number(STATS_DASHBOARD_SECURITY_VERSION) + 1}" } })`,
+			statsOwned: false,
+		},
+		{ name: "a foreign 200 responder", response: 'Response.json({ app: "spa" })', statsOwned: false },
+		{
+			name: "an unrelated Bun listener that fails the probe",
+			response: 'new Response("foreign", { status: 404 })',
+			statsOwned: false,
+		},
+		// Never answering is what a dashboard stalled mid-ingest looks like; stopping it would kill a live `omp stats`.
+		{ name: "a stats listener that never answers", response: "Promise.withResolvers().promise", statsOwned: true },
+	]) {
+		it(`serves on an ephemeral port beside ${fixture.name}`, async () => {
+			const holder = await startBunHolder(fixture.response, { statsOwned: fixture.statsOwned });
+			const server = await startServer(holder.port);
 
-		await expect(startServer(holder.port)).rejects.toThrow("not identifiable as an omp stats dashboard");
-		expect(holder.child.exitCode).toBeNull();
-	});
+			try {
+				expect(server.port).not.toBe(holder.port);
+				expect(holder.child.exitCode).toBeNull();
+				await expectCurrentDashboard(server.port);
+			} finally {
+				server.stop();
+			}
+		}, 10_000);
+	}
 
-	it("refuses to stop a foreign 200 responder", async () => {
-		const holder = await startBunHolder('Response.json({ app: "spa" })');
-
-		await expect(startServer(holder.port)).rejects.toThrow("not identifiable as an omp stats dashboard");
-		expect(holder.child.exitCode).toBeNull();
-		const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${holder.port}/api/stats/models`);
-		expect(await response.json()).toEqual({ app: "spa" });
-	});
-
-	it("refuses to stop an unrelated Bun listener that fails the probe", async () => {
-		const holder = await startBunHolder('new Response("foreign", { status: 404 })');
-
-		await expect(startServer(holder.port)).rejects.toThrow("not identifiable as an omp stats dashboard");
-		expect(holder.child.exitCode).toBeNull();
-	});
-
-	it("reclaims an unresponsive confirmed stats listener", async () => {
+	it("reclaims a confirmed stats listener that fails the probe", async () => {
 		const holder = await startBunHolder('new Response("holder", { status: 404 })', { statsOwned: true });
 		const server = await startServer(holder.port);
 

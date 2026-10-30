@@ -86,6 +86,79 @@ describe("AgentSession.getAllToolInfos", () => {
 		}
 	});
 
+	it("exposes MCP server, tool name and readOnlyHint for MCP-backed tools", async () => {
+		const tempDir = TempDir.createSync("@getalltools-mcp-hint-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const model = buildModel({
+			id: "mock",
+			name: "mock",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 2048,
+		});
+		const read = createTool("read");
+		// Shaped like MCPTool: the runtime keeps these on every MCP-backed tool.
+		const search = Object.assign(createTool("mcp__mail_search_threads"), {
+			mcpServerName: "mail",
+			mcpToolName: "search_threads",
+			mcpReadOnlyHint: true,
+		});
+		const send = Object.assign(createTool("mcp__mail_send_message"), {
+			mcpServerName: "mail",
+			mcpToolName: "send_message",
+			mcpReadOnlyHint: false,
+		});
+		const unannotated = Object.assign(createTool("mcp__mail_archive"), {
+			mcpServerName: "mail",
+			mcpToolName: "archive",
+			mcpReadOnlyHint: undefined,
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [read] },
+			streamFn: createMockModel({ responses: [{ content: ["ok"] }] }).stream,
+		});
+		const toolRegistry = new Map<string, AgentTool>(
+			[read, search, send, unannotated].map(t => [t.name, t] as [string, AgentTool]),
+		);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			toolRegistry,
+			builtInToolNames: [read.name],
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [toolNames.join(",")] }),
+		});
+
+		try {
+			const byName = new Map(session.getAllToolInfos().map(t => [t.name, t]));
+			expect(byName.get("mcp__mail_search_threads")).toMatchObject({
+				mcpServerName: "mail",
+				mcpToolName: "search_threads",
+				mcpReadOnlyHint: true,
+			});
+			expect(byName.get("mcp__mail_send_message")?.mcpReadOnlyHint).toBe(false);
+			// No annotation stays absent rather than defaulting to read-only.
+			expect(byName.get("mcp__mail_archive")?.mcpToolName).toBe("archive");
+			expect("mcpReadOnlyHint" in (byName.get("mcp__mail_archive") ?? {})).toBe(false);
+			// Non-MCP tools carry none of the MCP fields.
+			expect(byName.get("read")?.mcpServerName).toBeUndefined();
+			expect(byName.get("read")?.mcpReadOnlyHint).toBeUndefined();
+		} finally {
+			await session.dispose();
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	});
+
 	it("uses stored registered provenance instead of re-deriving a relative extension path", async () => {
 		const tempDir = TempDir.createSync("@getalltools-sourcepath-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));

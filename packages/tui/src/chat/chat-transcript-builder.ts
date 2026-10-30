@@ -65,8 +65,9 @@ import {
 	routeLateDiagnostics,
 } from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
+import { isReplyWrite, ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "./reply-write";
 import { SkillMessageComponent } from "./skill-message";
-import { ToolExecutionComponent } from "./tool-execution";
+import { ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
@@ -90,7 +91,7 @@ export interface ChatTranscriptBuilderDeps {
 
 export class ChatTranscriptBuilder {
 	readonly container = new TranscriptContainer();
-	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
+	#pendingTools = new Map<string, ToolExecutionHandle>();
 	#readArgs = new Map<string, Record<string, unknown>>();
 	#readGroup: ReadToolGroupComponent | null = null;
 	#pendingUsage: Usage | undefined;
@@ -201,6 +202,15 @@ export class ChatTranscriptBuilder {
 	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
 		component.setExpanded(this.#expanded);
 		this.#expandables.push(component);
+	}
+
+	/** Append assistant prose (a reply, a post-tool segment, or an `out://` reply write) with the transcript's display preferences. */
+	#mountProse(component: AssistantMessageComponent): void {
+		component.setImagesVisible(displayPreferences.showImages);
+		component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		component.setTableChartsVisible(this.#deps.tableCharts !== false);
+		this.#trackExpandable(component);
+		this.container.addChild(component);
 	}
 
 	/** A `wait` showing all-running is displaced by the next `wait` call. */
@@ -417,12 +427,8 @@ export class ChatTranscriptBuilder {
 			this.#deps.linkTargets,
 			expandThinkingBlocks,
 		);
-		assistantComponent.setImagesVisible(displayPreferences.showImages);
-		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
-		assistantComponent.setTableChartsVisible(this.#deps.tableCharts !== false);
-		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
-		this.container.addChild(assistantComponent);
+		this.#mountProse(assistantComponent);
 		let lastAssistantComponent = assistantComponent;
 
 		if (displayPreferences.cacheMissMarker) {
@@ -456,11 +462,7 @@ export class ChatTranscriptBuilder {
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
 			);
-			component.setImagesVisible(displayPreferences.showImages);
-			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
-			component.setTableChartsVisible(this.#deps.tableCharts !== false);
-			this.#trackExpandable(component);
-			this.container.addChild(component);
+			this.#mountProse(component);
 			lastAssistantComponent = component;
 		};
 
@@ -492,22 +494,37 @@ export class ChatTranscriptBuilder {
 
 			this.#readGroup?.seal();
 			this.#readGroup = null;
-			const component = new ToolExecutionComponent(
-				content.name,
-				content.arguments,
-				{
-					useBuiltInRenderer: this.#deps.isBuiltInTool?.(content.name) ?? true,
-					// Stable ids and Kitty placeholder cells keep images anchored
-					// while the transcript viewport scrolls and reflows.
-					showImages: displayPreferences.showImages,
-				},
-				this.#deps.getTool?.(content.name),
-				this.#deps.ui,
-				this.#deps.cwd,
-				content.id,
-			);
-			this.#trackExpandable(component);
-			this.container.addChild(component);
+			const builtIn = this.#deps.isBuiltInTool?.(content.name) ?? true;
+			let component: ToolExecutionHandle;
+			if (builtIn && isReplyWrite(content.name, content.arguments) === true) {
+				const reply = new ReplyWriteComponent({
+					requestRender: () => this.#deps.requestRender(),
+					imageBudget: this.#deps.ui.imageBudget,
+					linkTargets: this.#deps.linkTargets,
+				});
+				reply.updateArgs(content.arguments);
+				reply.setArgsComplete();
+				this.#mountProse(reply);
+				component = reply;
+			} else {
+				const card = new ToolExecutionComponent(
+					content.name,
+					content.arguments,
+					{
+						useBuiltInRenderer: builtIn,
+						// Stable ids and Kitty placeholder cells keep images anchored
+						// while the transcript viewport scrolls and reflows.
+						showImages: displayPreferences.showImages,
+					},
+					this.#deps.getTool?.(content.name),
+					this.#deps.ui,
+					this.#deps.cwd,
+					content.id,
+				);
+				this.#trackExpandable(card);
+				this.container.addChild(card);
+				component = card;
+			}
 
 			if (hasErrorStop && errorMessage) {
 				component.updateResult(
@@ -548,6 +565,19 @@ export class ChatTranscriptBuilder {
 			this.#pendingTools.delete(message.toolCallId);
 			this.#readArgs.delete(message.toolCallId);
 			return;
+		}
+		for (const reply of toolResultReplies(message.details)) {
+			this.#mountProse(
+				new AssistantMessageComponent(
+					replyDisplayMessage(reply),
+					false,
+					() => this.#deps.requestRender(),
+					[],
+					this.#deps.ui.imageBudget,
+					true,
+					this.#deps.linkTargets,
+				),
+			);
 		}
 		if (!pending) return;
 		pending.updateResult(message, false, message.toolCallId);

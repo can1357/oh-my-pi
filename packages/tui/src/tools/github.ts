@@ -21,6 +21,7 @@ import {
 	type ToolUIColor,
 	type ToolUIStatus,
 	TRUNCATE_LENGTHS,
+	sanitizeDisplayWarning,
 	truncateToWidth as truncateVisualWidth,
 } from "../render/render-utils";
 
@@ -236,6 +237,11 @@ function renderRunBlock(run: GhRunWatchRunDetails, width: number, theme: Theme):
 	return lines;
 }
 
+function formatUnavailableLog(entry: GhRunWatchFailedLogDetails): string {
+	const reason = entry.unavailableReason ? sanitizeDisplayWarning(entry.unavailableReason) : "";
+	return `log tail unavailable${reason ? `: ${reason}` : ""}`;
+}
+
 function renderFailedLogs(
 	failedLogs: GhRunWatchFailedLogDetails[],
 	width: number,
@@ -254,7 +260,7 @@ function renderFailedLogs(
 		);
 
 		if (!entry.available || !entry.tail) {
-			lines.push(theme.fg("dim", "  log tail unavailable"));
+			lines.push(theme.fg("dim", truncateVisualWidth(`  ${formatUnavailableLog(entry)}`, Math.max(8, width))));
 			continue;
 		}
 
@@ -463,7 +469,9 @@ function describeWatch(watch: GhRunWatchViewDetails, isError: boolean): NativeTo
 	const failed = (watch.failedLogs ?? []).flatMap((entry): NativeChild[] => {
 		const context = entry.workflowName ? `${entry.workflowName}  #${entry.runId}` : `run #${entry.runId}`;
 		const title = text([span(plainText(entry.jobName), "error"), span(`  ${plainText(context)}`, "muted")]);
-		if (!entry.available || !entry.tail) return [title, noteText("log tail unavailable")];
+		if (!entry.available || !entry.tail) {
+			return [title, noteText(formatUnavailableLog(entry))];
+		}
 		return [title, ansi(entry.tail, { follow: true, preview: { lines: PREVIEW_LIMITS.OUTPUT_COLLAPSED } })];
 	});
 	return {
@@ -659,6 +667,7 @@ export interface GhRunWatchFailedLogDetails {
 	conclusion?: string;
 	tail?: string;
 	available: boolean;
+	unavailableReason?: string;
 }
 
 /** Live workflow watcher display snapshot. */
@@ -708,6 +717,8 @@ export interface GhFailedJobLog {
 	full?: string;
 	tail?: string;
 	available: boolean;
+	unavailableReason?: string;
+	truncated?: boolean;
 }
 
 /** Choose the terminal conclusion or current job state. */
@@ -764,12 +775,21 @@ export function renderFailedJobLogs(
 		lines.push("");
 		const logText = options.mode === "full" ? entry.full : entry.tail;
 		if (entry.available && logText) {
-			lines.push(options.mode === "full" ? "Full log:" : `Last ${options.tail} log lines:`);
+			lines.push(
+				options.mode === "full"
+					? entry.truncated
+						? "Partial log (capture truncated):"
+						: "Full log:"
+					: entry.truncated
+						? `Last ${options.tail} captured log lines (log capture truncated):`
+						: `Last ${options.tail} log lines:`,
+			);
 			lines.push("```text");
 			lines.push(logText);
 			lines.push("```");
 		} else {
 			lines.push(options.mode === "full" ? "Full log unavailable." : "Log tail unavailable.");
+			if (entry.unavailableReason) pushLine(lines, "Reason", entry.unavailableReason);
 		}
 		lines.push("");
 	}

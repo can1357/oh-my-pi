@@ -30,7 +30,7 @@ import {
 	ruleFields,
 	ruleReadsSource,
 } from "./spec";
-import type { JobTextSource } from "./types";
+import { type JobTextSource, TOOL_CALL_MARK, TOOLS_SOURCE_ID } from "./types";
 
 /** Longest line kept; longer lines are cut. */
 export const MAX_LINE_CHARS = 4096;
@@ -46,8 +46,12 @@ const SAMPLE_HEAD_LINES = 30;
 const SAMPLE_TAIL_LINES = 60;
 const MAX_STAGE_CHARS = 200;
 const MAX_TEXT_CHARS = 200;
+/** Bars a bars block draws: past it, the field it draws has keys a reader never sees. */
 const MAX_BAR_ITEMS = 16;
+/** Cells a grid draws, and the keys any field may split into before its key group reads as unrelated words. */
 const MAX_GRID_ITEMS = 48;
+/** A letter or digit: what a grid status must not follow to start a word. */
+const WORD_CHAR = /[\p{L}\p{N}]/u;
 
 // ── Reading sources ─────────────────────────────────────────────────────────
 
@@ -242,6 +246,8 @@ interface FieldState {
 
 /** One rule as the runtime applies it, with its pattern's named groups resolved to positions. */
 interface CompiledRule {
+	/** Position of the rule in the spec. */
+	index: number;
 	/** Position of the key group among the pattern's named groups; -1 without a key. */
 	key: number;
 	/** Fields fed by captures, by group position. */
@@ -259,12 +265,13 @@ interface SourceMatcher {
 	rules: CompiledRule[][];
 }
 
-function compileRule(rule: JobWidgetRule, groups: readonly string[]): CompiledRule {
+function compileRule(rule: JobWidgetRule, index: number, groups: readonly string[]): CompiledRule {
 	const captures: CompiledRule["captures"] = [];
-	groups.forEach((field, index) => {
-		if (field !== rule.key) captures.push({ index, field, text: field === rule.text });
+	groups.forEach((field, position) => {
+		if (field !== rule.key) captures.push({ index: position, field, text: field === rule.text });
 	});
 	return {
+		index,
 		key: rule.key === undefined ? -1 : groups.indexOf(rule.key),
 		captures,
 		count: rule.count,
@@ -302,12 +309,12 @@ export interface JobWidgetSourceSample {
 /** Job facts a view needs besides the derived state. */
 export interface JobWidgetViewContext {
 	label: string;
-	/** A task's stage in its own words, from its progress; the stage line unless a spec rule reads one. */
+	/** A task's stage in its own words, from its progress; the stage line whenever present. */
 	stage?: string;
 	/**
-	 * Whether the newest output line may stand for the stage when nothing
-	 * else names it: true for a command's output, not for a subagent's tool
-	 * results (file contents, search hits).
+	 * Whether output lines may stand for the stage when the context names
+	 * none (a spec's stage rule, else the newest line): true for a command's
+	 * output, not for a subagent's tool results (file contents, search hits).
 	 */
 	lineStage?: boolean;
 	/** A spec request is in flight. */
@@ -325,8 +332,12 @@ export class JobWidgetRuntime {
 	readonly #fields = new Map<string, FieldState>();
 	/** Per source id: the matcher of the rules reading it; `null` when none does. */
 	readonly #matchers = new Map<string, SourceMatcher | null>();
-	/** Fields some rule splits by key; every other field keeps a single series. */
-	readonly #keyedFields = new Set<string>();
+	/** Fields some rule splits by key, each with the most keys it may hold; every other field keeps a single series. */
+	readonly #keyLimits = new Map<string, number>();
+	/** Per rule reading `tools`, the tools in whose results it matched. */
+	readonly #ruleTools = new Map<number, Set<string>>();
+	/** The tool whose result the `tools` source is in at the end of the last read; unknown before its first marker. */
+	#toolCall: string | undefined;
 	#lastMatchAt: number | undefined;
 	#lastLineAt: number | undefined;
 	/** Non-empty lines read from the rules' sources since the last match. */
@@ -345,7 +356,10 @@ export class JobWidgetRuntime {
 	) {
 		for (const rule of spec?.rules ?? []) {
 			if (rule.key === undefined) continue;
-			for (const { field } of ruleFields(rule)) this.#keyedFields.add(field);
+			for (const { field } of ruleFields(rule)) this.#keyLimits.set(field, MAX_GRID_ITEMS);
+		}
+		for (const block of spec?.blocks ?? []) {
+			if (block.kind === "bars" && this.#keyLimits.has(block.field)) this.#keyLimits.set(block.field, MAX_BAR_ITEMS);
 		}
 	}
 
@@ -364,6 +378,52 @@ export class JobWidgetRuntime {
 		let total = 0;
 		for (const stats of this.#stats.values()) total += stats.lines;
 		return total;
+	}
+
+	/**
+	 * Why the spec draws something other than the job's progress, judged on
+	 * every line read so far; empty while it fits. A rule loose enough to match
+	 * unrelated text shows it on lines the author's samples left out, so the
+	 * registry checks a spec here before installing it and while it runs:
+	 * - a rule on `tools` matching the results of several tools reads file
+	 *   contents and search hits, not one command's progress lines;
+	 * - a keyed field with more keys than its blocks draw keys words of
+	 *   arbitrary lines (a cell per line of prose);
+	 * - a grid whose cells mostly carry no status its tones name colours words.
+	 */
+	problems(): string[] {
+		const spec = this.spec;
+		if (!spec) return [];
+		const problems: string[] = [];
+		for (const [index, tools] of this.#ruleTools) {
+			if (tools.size < 2) continue;
+			problems.push(
+				`rules[${index}]: matches lines in the results of ${[...tools].join(", ")}, which mix file contents, search hits and command output; match only the literal text of the lines one command prints about its progress`,
+			);
+		}
+		for (const [field, limit] of this.#keyLimits) {
+			const keys = this.#fields.get(field)?.keys.size ?? 0;
+			if (keys <= limit) continue;
+			problems.push(
+				`field "${field}": split into ${keys} keys, more than the ${limit} it may draw; its key group captures words of lines that carry no data, so anchor the rule on the literal text of the lines that do`,
+			);
+		}
+		spec.blocks.forEach((block, index) => {
+			if (block.kind !== "grid") return;
+			const keys = this.#fields.get(block.field)?.keys;
+			if (!keys) return;
+			const unnamed: string[] = [];
+			for (const series of keys.values()) {
+				const text = cellText(series);
+				if (gridTone(block.tones, text) === undefined) unnamed.push(text);
+			}
+			if (unnamed.length * 2 <= keys.size) return;
+			const examples = unnamed.slice(0, 3).map(text => `"${truncate(text, 24)}"`);
+			problems.push(
+				`blocks[${index}] (grid): ${unnamed.length} of ${keys.size} cells carry no status its tones name (${examples.join(", ")}); capture the status word of status lines and name each status in \`tones\``,
+			);
+		});
+		return problems;
 	}
 
 	/** Read every source's new text; `flush` ends lines in progress. Returns whether anything new arrived. */
@@ -439,13 +499,14 @@ export class JobWidgetRuntime {
 		const known = this.#matchers.get(id);
 		if (known !== undefined) return known ?? undefined;
 		// Rules sharing a pattern (one line read into several fields) run it once.
-		const byPattern = new Map<string, JobWidgetRule[]>();
-		for (const rule of this.spec?.rules ?? []) {
-			if (!ruleReadsSource(rule.from, id)) continue;
+		const specRules = this.spec?.rules ?? [];
+		const byPattern = new Map<string, number[]>();
+		specRules.forEach((rule, index) => {
+			if (!ruleReadsSource(rule.from, id)) return;
 			const rules = byPattern.get(rule.match);
-			if (rules) rules.push(rule);
-			else byPattern.set(rule.match, [rule]);
-		}
+			if (rules) rules.push(index);
+			else byPattern.set(rule.match, [index]);
+		});
 		if (byPattern.size === 0) {
 			this.#matchers.set(id, null);
 			return undefined;
@@ -457,7 +518,7 @@ export class JobWidgetRuntime {
 			matcher,
 			strides: groups.map(names => names.length * 2),
 			rules: patterns.map((pattern, index) =>
-				(byPattern.get(pattern) ?? []).map(rule => compileRule(rule, groups[index])),
+				(byPattern.get(pattern) ?? []).map(rule => compileRule(specRules[rule], rule, groups[index])),
 			),
 		};
 		this.#matchers.set(id, entry);
@@ -467,17 +528,36 @@ export class JobWidgetRuntime {
 	#matchLines(sourceId: string, lines: readonly string[], t: number): void {
 		const entry = this.#sourceMatcher(sourceId);
 		if (!entry) return;
+		const tools = sourceId === TOOLS_SOURCE_ID;
 		const hits = entry.matcher.matchLines(lines.join("\n"));
 		const { spans } = hits;
+		/** Lines some rule fed, ascending (hits come ordered by line). */
+		const matched: number[] = [];
+		/** Lines of `tools` scanned for tool-call markers so far. */
+		let scanned = 0;
 		let offset = 0;
 		for (let hit = 0; hit < hits.rules.length; hit++) {
 			const pattern = hits.rules[hit];
-			const line = lines[hits.lines[hit]];
+			const start = offset;
+			offset += entry.strides[pattern];
+			const lineIndex = hits.lines[hit];
+			const line = lines[lineIndex];
+			if (tools) {
+				for (; scanned <= lineIndex; scanned++) this.#scanToolCall(lines[scanned]);
+				// omp's marker of a tool call is not output of the subagent's work.
+				if (line.startsWith(TOOL_CALL_MARK)) continue;
+			}
+			if (matched.at(-1) !== lineIndex) matched.push(lineIndex);
 			for (const rule of entry.rules[pattern]) {
-				const keyAt = offset + rule.key * 2;
+				if (tools && this.#toolCall !== undefined) {
+					const seen = this.#ruleTools.get(rule.index);
+					if (seen) seen.add(this.#toolCall);
+					else this.#ruleTools.set(rule.index, new Set([this.#toolCall]));
+				}
+				const keyAt = start + rule.key * 2;
 				const key = rule.key < 0 || spans[keyAt] < 0 ? "" : line.slice(spans[keyAt], spans[keyAt + 1]).trim();
 				for (const capture of rule.captures) {
-					const at = offset + capture.index * 2;
+					const at = start + capture.index * 2;
 					if (spans[at] < 0) continue;
 					const captured = line.slice(spans[at], spans[at + 1]);
 					const value = capture.text ? Number.NaN : parseWidgetValue(captured) * rule.scale;
@@ -487,26 +567,33 @@ export class JobWidgetRuntime {
 				}
 				if (rule.count !== undefined) this.#push(rule.count, key, undefined, undefined, line, t);
 			}
-			offset += entry.strides[pattern];
 		}
-		const matchCount = hits.lines.length;
+		if (tools) for (; scanned < lines.length; scanned++) this.#scanToolCall(lines[scanned]);
+		const matchCount = matched.length;
 		if (matchCount > 0) this.#lastMatchAt = t;
-		const lastMatchedLine = matchCount > 0 ? hits.lines[matchCount - 1] : -1;
+		const lastMatchedLine = matchCount > 0 ? matched[matchCount - 1] : -1;
 		let unmatched = 0;
 		for (let index = lastMatchedLine + 1; index < lines.length; index++) {
 			if (lines[index].trim().length > 0) unmatched += 1;
 		}
 		this.#unmatchedLines = lastMatchedLine >= 0 ? unmatched : this.#unmatchedLines + unmatched;
-		// Hits come ordered by line: walk both backwards to the newest line no rule matched.
+		// Walk the lines and the matched ones backwards to the newest line no rule matched.
 		let next = matchCount - 1;
 		for (let index = lines.length - 1; index >= 0; index--) {
-			while (next >= 0 && hits.lines[next] > index) next -= 1;
-			if (next >= 0 && hits.lines[next] === index) continue;
+			while (next >= 0 && matched[next] > index) next -= 1;
+			if (next >= 0 && matched[next] === index) continue;
 			const line = lines[index].trim();
 			if (line.length === 0) continue;
 			this.#lastUnmatchedLine = truncate(line, MAX_STAGE_CHARS);
 			break;
 		}
+	}
+
+	/** Follow the `tools` source into the result of the tool call a marker line opens. */
+	#scanToolCall(line: string): void {
+		if (!line.startsWith(TOOL_CALL_MARK)) return;
+		const tool = line.slice(TOOL_CALL_MARK.length).split(" ", 1)[0];
+		this.#toolCall = tool || undefined;
 	}
 
 	#push(
@@ -521,7 +608,7 @@ export class JobWidgetRuntime {
 		if (!field) {
 			const all = emptySeries();
 			// Without keys the one series is the merged one: fold each match in once.
-			field = { keys: this.#keyedFields.has(name) ? new Map() : new Map([["", all]]), all };
+			field = { keys: this.#keyLimits.has(name) ? new Map() : new Map([["", all]]), all };
 			this.#fields.set(name, field);
 		}
 		let series = field.keys.get(key);
@@ -567,9 +654,8 @@ export class JobWidgetRuntime {
 		}
 		const headline = spec.headline ? this.#headline(spec.headline, now) : undefined;
 		const stage =
-			(spec.stage ? this.#specStage() : undefined) ??
 			context.stage ??
-			(lineStage ? this.#lastUnmatchedLine : undefined);
+			(lineStage ? ((spec.stage ? this.#specStage() : undefined) ?? this.#lastUnmatchedLine) : undefined);
 		return {
 			title: spec.title,
 			...(headline ? { headline } : {}),
@@ -703,11 +789,12 @@ export class JobWidgetRuntime {
 					kind: "grid",
 					label: block.label,
 					items: entries.map(([key, series], index) => {
-						const text = truncate(
-							series.text ?? (series.values > 0 ? formatWidgetNumber(series.last) : (series.line?.trim() ?? "")),
-							MAX_TEXT_CHARS,
-						);
-						return { label: labels[index] || key || block.label, text, tone: gridTone(block.tones, text) };
+						const text = cellText(series);
+						return {
+							label: labels[index] || key || block.label,
+							text,
+							tone: gridTone(block.tones, text) ?? "neutral",
+						};
 					}),
 				};
 			}
@@ -810,13 +897,28 @@ export function keyLabels(keys: readonly string[]): string[] {
 	return short.every(label => label.length > 0) && new Set(short).size === short.length ? short : keys.slice();
 }
 
-/** Tone of a grid cell: the first `tones` entry whose status is a case-insensitive substring of the text. */
-function gridTone(tones: Record<string, TspTone>, text: string): TspTone {
+/** A grid cell's text: the key's latest captured text, else its latest number, else its latest line. */
+function cellText(series: WidgetSeries): string {
+	return truncate(
+		series.text ?? (series.values > 0 ? formatWidgetNumber(series.last) : (series.line?.trim() ?? "")),
+		MAX_TEXT_CHARS,
+	);
+}
+
+/**
+ * Tone of a grid cell: the first `tones` entry whose status starts a word of
+ * the text, case-insensitively (`pass` in `PASSED`, not in `bypass`);
+ * `undefined` when no status does.
+ */
+function gridTone(tones: Record<string, TspTone>, text: string): TspTone | undefined {
 	const lower = text.toLowerCase();
 	for (const status in tones) {
-		if (lower.includes(status.toLowerCase())) return tones[status];
+		const word = status.toLowerCase();
+		for (let at = lower.indexOf(word); at !== -1; at = lower.indexOf(word, at + 1)) {
+			if (at === 0 || !WORD_CHAR.test(lower[at - 1])) return tones[status];
+		}
 	}
-	return "neutral";
+	return undefined;
 }
 
 /** Samples as plain line lists for {@link validateJobWidgetSpec}'s dry run. */

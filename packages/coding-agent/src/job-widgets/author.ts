@@ -16,6 +16,7 @@ import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-widget-user.md" with { type: "text" };
 import { CREDENTIAL_PATTERNS } from "../secrets/patterns";
+import type { CostGate } from "../session/cost-gate";
 import type { JobWidgetSourceSample } from "./runtime";
 import { JOB_WIDGET_SPEC_SCHEMA, type JobWidgetSpec } from "./spec";
 import type { JobWidgetBrief } from "./types";
@@ -167,6 +168,8 @@ export interface ModelJobWidgetAuthorOptions {
 	obfuscate?: () => ((text: string) => string) | undefined;
 	/** Each completed request's assistant message, for usage accounting (purpose `job-widget`). */
 	onUsage?: (message: AssistantMessage) => void;
+	/** The session tree's current cost gate: refuses the request at the cap and adds its cost. */
+	costGate?: () => CostGate | undefined;
 }
 
 /**
@@ -200,6 +203,8 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 		const sessionId = options.sessionId();
 		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
 		if (!model) return undefined;
+		const costGate = options.costGate?.();
+		costGate?.admit();
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
 		const message: UserMessage = {
@@ -234,6 +239,7 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 			},
 			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: "job_widget" },
 		);
+		costGate?.record(response.usage.cost.total);
 		options.onUsage?.(response);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			throw new Error(response.errorMessage ?? `widget spec request ${response.stopReason}`);

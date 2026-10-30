@@ -94,8 +94,13 @@ interface AdvisorTreeDisplay {
  */
 function sanitizeTreeField(value: string): string {
 	return sanitizeText(value)
-		.replace(/[\n\t]/g, " ")
+		.replace(/[\r\n\t\u2028\u2029]/g, " ")
 		.trim();
+}
+
+/** Strip ANSI/control characters and fold line breaks for single-line tree rows and headers. */
+function treeRowText(value: string): string {
+	return plainText(value.replace(/[\r\n\u2028\u2029]/g, " "));
 }
 
 /**
@@ -734,9 +739,7 @@ class TreeList implements Component {
 	#pickerItem(row: TreeRow<TreeSelectorNode, string>, open: boolean): TspPickerItem {
 		const item = row.item;
 		const entry = item.entry;
-		const label = this.#entryParts(item).map(part =>
-			span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s),
-		);
+		const label = this.#entryParts(item).map(part => span(treeRowText(part.t), part.s));
 		let kind: TspPickerItem["node"] = "marker";
 		let role: string | undefined;
 		if (isUserRequestEntry(entry)) {
@@ -755,7 +758,7 @@ class TreeList implements Component {
 			node: kind,
 			...(role ? { role } : {}),
 			...(open ? { open: true } : {}),
-			...(item.label ? { badges: [{ text: plainText(item.label), tone: "warning" as const }] } : {}),
+			...(item.label ? { badges: [{ text: treeRowText(item.label), tone: "warning" as const }] } : {}),
 			...(this.#activePathIds.has(row.key) ? { dot: "accent" as const } : {}),
 		};
 	}
@@ -772,7 +775,7 @@ class TreeList implements Component {
 		if (selected) {
 			const entry = selected.entry;
 			const parts = this.#entryParts(selected)
-				.map(part => (part.t.includes("\x1b") ? plainText(part.t) : part.t))
+				.map(part => treeRowText(part.t))
 				.join("");
 			if (entry.type === "message" || entry.type === "custom_message") {
 				const target: OutlineTarget = {
@@ -784,12 +787,14 @@ class TreeList implements Component {
 					entries: [entry],
 				};
 				const copy = targetCopy(target, collectBlocks(target.entries));
-				preview.push(text(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				preview.push(
+					text(treeRowText(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`), { role: "omp.picker.title" }),
+				);
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 				preview.push(turnPreview(target, copy.content || parts));
 			} else {
 				preview.push(text(parts, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 			}
 		}
 		this.#previewMemo = { node: selected, labels: this.#labelVersion, preview };
@@ -859,9 +864,9 @@ class TreeList implements Component {
 		if (cached !== undefined && cached.label === item.label && cached.branch === branch) return cached.node;
 		const label: TspSpan[] = [];
 		if (this.#activePathIds.has(row.key)) label.push(span(`${theme.md.bullet} `, "accent"));
-		if (item.label) label.push(span(`[${plainText(item.label)}] `, "warning"));
+		if (item.label) label.push(span(`[${treeRowText(item.label)}] `, "warning"));
 		for (const part of this.#entryParts(item)) {
-			label.push(span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s));
+			label.push(span(treeRowText(part.t), part.s));
 		}
 		const described = node("item", { label, icon: branch ? "branch" : undefined }, undefined, row.key);
 		this.#itemCache.set(row.key, { label: item.label, branch, node: described });
@@ -954,7 +959,7 @@ class TreeList implements Component {
 		// Active path marker - shown right before the entry text
 		const isOnActivePath = this.#activePathIds.has(node.entry.id);
 		const pathMarker = isOnActivePath ? theme.fg("accent", `${theme.md.bullet} `) : "";
-		const label = node.label ? theme.fg("warning", `[${node.label}] `) : "";
+		const label = node.label ? theme.fg("warning", `[${treeRowText(node.label)}] `) : "";
 		return `${pathMarker}${label}${this.#getEntryDisplayText(node, selected)}`;
 	}
 
@@ -1050,7 +1055,10 @@ class TreeList implements Component {
 
 	#getEntryDisplayText(node: TreeSelectorNode, isSelected: boolean): string {
 		let result = "";
-		for (const part of this.#entryParts(node)) result += part.s ? theme.fg(part.s, part.t) : part.t;
+		for (const part of this.#entryParts(node)) {
+			const value = treeRowText(part.t);
+			result += part.s ? theme.fg(part.s, value) : value;
+		}
 		return isSelected ? theme.bold(result) : result;
 	}
 

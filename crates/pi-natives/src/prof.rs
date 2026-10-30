@@ -3,7 +3,7 @@
 //! Samples are continuously collected into a fixed-size circular buffer.
 //! Call `get_work_profile()` to retrieve the last N seconds of profiling data.
 
-use std::{cmp::Reverse, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{cmp::Reverse, collections::HashMap, fmt::NumBuffer, sync::LazyLock, time::Instant};
 
 use napi_derive::napi;
 use parking_lot::Mutex;
@@ -116,10 +116,11 @@ fn generate_folded(samples: &[ProfileSample]) -> String {
 	sorted.sort_by_key(|x| Reverse(x.1));
 
 	let mut output = String::new();
+	let mut buf = NumBuffer::new();
 	for (region, count) in sorted {
 		output.push_str(region);
 		output.push(' ');
-		output.push_str(&count.to_string());
+		output.push_str(count.format_into(&mut buf));
 		output.push('\n');
 	}
 

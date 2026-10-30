@@ -7,8 +7,8 @@ provider "deepseek" {
 
 	// DeepSeek's vision guide documents 600 images per request and a 48 MiB
 	// request body. OMP reserves 8 MiB for text, tools, and the JSON envelope
-	// (48 MiB - 8 MiB = 40 MiB); Anthropic's 24,000,000-byte image budget under
-	// its 32 MB body uses an 8 MB reserve. DeepSeek documents MiB, so this uses
+	// (48 MiB - 8 MiB = 40 MiB); Anthropic's 120,000,000-byte image budget under
+	// its 128 MB body uses an 8 MB reserve. DeepSeek documents MiB, so this uses
 	// an 8 MiB reserve. The split is OMP's conservative margin, not a
 	// DeepSeek-documented figure. A custom baseUrl keeps the conservative
 	// catalog floor because the gateway's own limits are unknown.
@@ -64,7 +64,7 @@ provider "deepseek" {
 			max-tokens 384000
 		}
 	}
-	// residue: the dated price transition applies to the documented exact Pro SKU only.
+	// DeepSeek kept Pro billing unchanged after September 14 (2026-09-10 change log).
 	models "deepseek-v4-pro" {
 		cost-patch {
 			input 1.32
@@ -84,15 +84,6 @@ provider "deepseek" {
 					weekdays "1,2,3,4,5"
 					start-minute 360
 					end-minute 600
-				}
-			}
-			effective-rates {
-				flash-pricing {
-					effective-from "2026-09-14T04:00:00Z"
-					input 0.30
-					output 1.20
-					cache-read 0.006
-					cache-write 0
 				}
 			}
 		}

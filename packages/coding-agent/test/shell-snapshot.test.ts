@@ -329,6 +329,30 @@ describe("getOrCreateSnapshot", () => {
 		const content = await fs.readFile(snapshotPath!, "utf8");
 		expect(content).toContain(`export __MISE_EXE='${REAL_ECHO}'`);
 	});
+
+	it.skipIf(onWindows)("drops core-tool aliases so they resolve to real binaries (issue #17067)", async () => {
+		// Regression: the alias filter embedded the anchored `^(ls|...)$` regex
+		// inside `^alias (...)=`, which never matches, so `alias ls='eza --icons'`
+		// reached the bash tool and broke every `ls <path>`.
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-17067-"));
+		await fs.writeFile(path.join(home, ".bashrc"), [`alias ls='eza --icons'`, `alias lg='lazygit'`, ``].join("\n"));
+
+		const realBash = REAL_BASH;
+		if (!existsSync(realBash)) return;
+		const shellLink = path.join(home, "bash-omp-17067");
+		await fs.symlink(realBash, shellLink);
+
+		const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
+		expect(snapshotPath).not.toBeNull();
+
+		const replay = Bun.spawn(
+			[realBash, "--noprofile", "--norc", "-c", `source "$1"; type -t ls; type -t lg`, "_", snapshotPath!],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
+		await replay.exited;
+		expect(stdout).toBe("file\nalias\n");
+	});
 	it("cleans up the empty snapshot file when the shell exits with a non-zero code", async () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
 		const originalTmpDir = process.env.TMPDIR;

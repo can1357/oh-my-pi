@@ -10,7 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -522,6 +522,57 @@ describe("createSettingsAwareStreamFn", () => {
 			} finally {
 				release();
 				configureProviderStoreResponses(undefined);
+			}
+		});
+	});
+
+	describe("providers.openai-codex.daybreak", () => {
+		// Unique: rejection drops are process-wide per (account, model), and other suites reject theirs.
+		const accountId = "acct-daybreak-settings-stream-fn";
+		const bundled = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!bundled) throw new Error("Expected bundled openai-codex model");
+		const codexModel = {
+			...bundled,
+			preferWebsockets: false,
+			accountAccess: { [accountId]: { cyberPrograms: ["standard", "daybreak_blue"] } },
+		} as Model;
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+		).toBase64();
+		const completedSse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } },
+		})}\n\n`;
+
+		/** Run one turn through `settings`' stream fn; return the wire `access_programs`. */
+		async function wireAccessPrograms(settings: Settings): Promise<unknown> {
+			const sent: unknown[] = [];
+			const fetch = (async (_url: unknown, init?: RequestInit) => {
+				const body = init?.body;
+				const text =
+					body instanceof Uint8Array ? new TextDecoder().decode(Bun.zstdDecompressSync(body)) : String(body);
+				sent.push((JSON.parse(text) as Record<string, unknown>).access_programs);
+				return new Response(completedSse, { headers: { "content-type": "text/event-stream" } });
+			}) as FetchImpl;
+			const stream = await createSettingsAwareStreamFn(settings)(
+				codexModel,
+				{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+				{ apiKey: `aaa.${payload}.bbb`, fetch },
+			);
+			await stream.result();
+			return sent[0];
+		}
+
+		it("keeps a session's opt-out when another session drives the process default", async () => {
+			const optedOut = Settings.isolated({ "providers.openai-codex.daybreak": false });
+			const other = Settings.isolated();
+			// The newest session binds effects, so the process-wide default is on.
+			const release = bindEffects(other);
+			try {
+				expect(await wireAccessPrograms(optedOut)).toBeUndefined();
+				expect(await wireAccessPrograms(other)).toEqual({ cyber: "daybreak_blue" });
+			} finally {
+				release();
 			}
 		});
 	});

@@ -1,10 +1,10 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { complete, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import {
@@ -16,6 +16,7 @@ import {
 	ThinkingLoopDetector,
 	withThinkingLoopGuard,
 } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { isRetryableError } from "@oh-my-pi/pi-utils";
 
@@ -622,6 +623,19 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 
 describe("thinking-loop error accounting", () => {
 	const model = createMockModel({ provider: "google-vertex", id: "gemini-2.5-pro" }).model;
+	// The guard times attempts with `Date.now()`; a virtual clock keeps these assertions independent of host load.
+	let clock = 1_700_000_000_000;
+	beforeEach(() => {
+		spyOn(Date, "now").mockImplementation(() => clock);
+	});
+	afterEach(() => {
+		mock.restore();
+	});
+	/** Lets the guard drain already-pushed events at the current time, then advances the clock. */
+	const elapse = async (ms: number): Promise<void> => {
+		await scheduler.yield();
+		clock += ms;
+	};
 	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
 		input,
 		output,
@@ -650,10 +664,10 @@ describe("thinking-loop error accounting", () => {
 			const inner = new AssistantMessageEventStream();
 			void (async () => {
 				inner.push({ type: "start", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_start", contentIndex: 0, partial });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
 			})();
 			return inner;
@@ -668,8 +682,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
 		expect(result.timestamp).toBe(partial.timestamp);
 		expect(result.responseId).toBe("resp-looping");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 20);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(60);
 	});
 
 	test("reports the attempt that tripped, not the time spent on an earlier retried attempt", async () => {
@@ -681,7 +695,7 @@ describe("thinking-loop error accounting", () => {
 				inner.push({ type: "start", partial: first });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: first });
 				// A replay-safe provider retry: a fresh output after a backoff.
-				await scheduler.wait(80);
+				await elapse(80);
 				second = { ...attempt("attempt-2"), usage: usage(50_000, 100, 0.05) };
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: second });
 			})();
@@ -692,8 +706,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.responseId).toBe("attempt-2");
 		expect(result.timestamp).toBe(second?.timestamp ?? Number.NaN);
 		expect(result.usage.input).toBe(50_000);
-		expect(result.duration).toBeLessThan(60);
-		expect(result.ttft).toBeLessThan(60);
+		expect(result.duration).toBe(0);
+		expect(result.ttft).toBe(0);
 	});
 
 	test("restarts attempt timing when a provider resets its output in place for a retry", async () => {
@@ -704,11 +718,11 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(80);
+				await elapse(80);
 				output.timestamp = Date.now();
 				output.responseId = "attempt-2";
 				inner.push({ type: "start", partial: output });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
 			return inner;
@@ -716,8 +730,8 @@ describe("thinking-loop error accounting", () => {
 
 		const result = await guarded.result();
 		expect(result.responseId).toBe("attempt-2");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeLessThan(80);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(30);
 	});
 
 	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
@@ -756,7 +770,7 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(10);
+				await elapse(10);
 				output.usage = usage(116_000, 2_500, 0.17);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
@@ -1233,5 +1247,75 @@ describe("thinking-loop retry budget (result path)", () => {
 			waitSpy.mockRestore();
 			clearCustomApis();
 		}
+	});
+});
+
+describe("loopGuard on mapped provider options", () => {
+	// A built-in API, so the request goes through mapOptionsForApi before stream() guards it.
+	const model = buildModel({
+		api: "openai-responses",
+		provider: "loop-guard-test",
+		id: "loop-guard-test-model",
+		name: "Loop guard test model",
+		baseUrl: "https://unused.example.com/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 32_768,
+	} satisfies ModelSpec<"openai-responses">);
+	const text = `Healthy lead sentence. ${OBSERVED_KIRO_CYCLE.repeat(6)}`;
+	const fetch = async (): Promise<Response> => {
+		const events: unknown[] = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		];
+		for (let i = 0; i < text.length; i += 23) {
+			events.push({ type: "response.output_text.delta", delta: text.slice(i, i + 23) });
+		}
+		events.push(
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text }] },
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 1,
+						total_tokens: 2,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		);
+		return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+
+	test("trips on an exact answer-text cycle when loopGuard is unset", async () => {
+		const result = await streamSimple(model, context(), { apiKey: "test", fetch }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+	});
+
+	test.each([
+		["enabled: false", { enabled: false }],
+		["checkAssistantContent: false", { checkAssistantContent: false }],
+	] as const)("returns the full answer when %s", async (_label, loopGuard) => {
+		const result = await streamSimple(model, context(), { apiKey: "test", fetch, loopGuard }).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text })]);
 	});
 });

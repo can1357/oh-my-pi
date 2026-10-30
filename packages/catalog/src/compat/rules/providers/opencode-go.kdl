@@ -7,6 +7,34 @@ provider "opencode-go" {
 	// Replaces the provider check that disabled forced tool choice on Responses.
 	on-api "openai-responses" {
 		supports-forced-tool-choice #false
+		// Go's x-opencode-session is the gateway's cache-affinity handle; on
+		// Responses the body prompt_cache_key carries the same shared key.
+		// Opt-in criterion: a cold / different-family / same-family probe
+		// (control sent BEFORE the family repeat) must warm on the repeated
+		// key and stay cold under the different key. 2026-10-26, 3 trials,
+		// cached tokens family vs control: Spark 1.3 Contributor 2/3 vs 0/3,
+		// Spark 1.2 Contributor 3/3 vs 1/3, gpt-5.6-luna 3/3 vs 0/3,
+		// gpt-6-luna 3/3 vs 0/3, grok-4.6 3/3 vs 0/3. Off: grok-4.7 (control
+		// warmed 2/3, key-independent) and the gateway-only standard Spark
+		// 1.3/1.2 ids (never lane-verified).
+		models "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" "gpt-5.6-luna" "gpt-6-luna" "grok-4.6" {
+			shared-prompt-cache #true
+		}
+	}
+	// Chat Completions sends no prompt_cache_key body field here (the gateway
+	// leaves the compat flag unset), so the shared key rides only
+	// x-opencode-session. Same probe, 2026-10-26: deepseek-v4-pro 3/3 vs
+	// 0/3, omen-alpha 4/4 vs 0/4. Off as key-independent or inconsistent:
+	// glm-5.1 (control 3/5), glm-5.3-flash (family 2/7, control 1/7),
+	// kimi-k2.7-code (control 4/5), mimo-v2.6-flash (control 2/2, family
+	// 1/2), deepseek-v4.1-flash (control 2/2); also qwen3.6-plus and
+	// gemini-4-argon (no material warm hit) and mimo-v2.5-pro (upstream 400).
+	// Anthropic Messages: claude-haiku-5-5 warmed under any key (control
+	// 2/2), so no Messages lane opts in.
+	on-api "openai-completions" {
+		models "deepseek-v4-pro" "omen-alpha" {
+			shared-prompt-cache #true
+		}
 	}
 
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
@@ -37,9 +65,9 @@ provider "opencode-go" {
 			max-tokens 384000
 		}
 	}
-	// Live Go discovery lists Argon without capabilities; its native Gemini
-	// endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
-	models "gemini-4-argon-contributor" {
+	// Go rosters can list either Argon ID without capabilities; the native
+	// Gemini endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
+	models "gemini-4-argon" "gemini-4-argon-contributor" {
 		thinking-upgrade-neutral #true
 		thinking-mode "google-level"
 		thinking-efforts "low" "medium" "high"

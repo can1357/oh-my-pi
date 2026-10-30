@@ -16,7 +16,7 @@ import {
 	normalizeArchiveEntryPath,
 	normalizeArchiveLookupPath,
 } from "./paths";
-import { readAllBytes } from "./source";
+import type { ByteSource } from "./source";
 import type { ArchiveIndexEntry, FormatReader, FormatReadOptions, MemberSource } from "./types";
 
 const BLOCK_SIZE = 512;
@@ -53,8 +53,44 @@ interface PendingTarLink {
 	targetPath: string;
 }
 
+interface TarCursor {
+	readonly position: number;
+	read(length: number): Promise<Uint8Array>;
+	skip(length: number): Promise<boolean>;
+}
+
+/** Seek over plain tar payloads without fetching their bytes. */
+class TarSourceCursor implements TarCursor {
+	readonly #source: ByteSource;
+	#position = 0;
+
+	constructor(source: ByteSource) {
+		this.#source = source;
+	}
+
+	get position(): number {
+		return this.#position;
+	}
+
+	async read(length: number): Promise<Uint8Array> {
+		const size = Math.min(length, this.#source.size - this.#position);
+		if (size === 0) return new Uint8Array(0);
+		const end = this.#position + size;
+		const bytes = await this.#source.read(this.#position, end);
+		if (bytes.byteLength !== size) throw new ArchiveError("Invalid archive: truncated data");
+		this.#position = end;
+		return bytes;
+	}
+
+	async skip(length: number): Promise<boolean> {
+		if (length > this.#source.size - this.#position) return false;
+		this.#position += length;
+		return true;
+	}
+}
+
 /** Forward-only reader over tar bytes that arrive in chunks: one buffer, or a decompressing stream. */
-class TarByteStream {
+class TarByteStream implements TarCursor {
 	readonly #chunks: AsyncIterator<Uint8Array> | Iterator<Uint8Array>;
 	#chunk: Uint8Array = new Uint8Array(0);
 	#position = 0;
@@ -117,6 +153,27 @@ class TarByteStream {
 /** Where an indexed tar's member bytes come from, by offset into the tar stream. */
 interface TarPayload {
 	read(offset: number, size: number, memberPath: string): Promise<Uint8Array>;
+}
+
+class TarSourcePayload implements TarPayload {
+	readonly #source: ByteSource;
+
+	constructor(source: ByteSource) {
+		this.#source = source;
+	}
+
+	async read(offset: number, size: number, memberPath: string): Promise<Uint8Array> {
+		try {
+			const bytes = await this.#source.read(offset, offset + size);
+			if (bytes.byteLength !== size) {
+				throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+			}
+			return bytes;
+		} catch (error) {
+			if (error instanceof ArchiveError) throw error;
+			throw new ArchiveError(error instanceof Error ? error.message : "Failed to read tar member");
+		}
+	}
 }
 
 class TarBufferPayload implements TarPayload {
@@ -533,7 +590,7 @@ function resolvePendingLinks(
 
 /** Read one metadata record's payload, bounded by `maxIndexSize`, and step over its padding. */
 async function readTarMetadata(
-	stream: TarByteStream,
+	stream: TarCursor,
 	size: number,
 	limits: ArchiveLimits,
 	what: string,
@@ -551,7 +608,7 @@ async function readTarMetadata(
  * stepped over, never held: entries point into `payload` by stream offset.
  */
 async function readTarEntries(
-	stream: TarByteStream,
+	stream: TarCursor,
 	payload: TarPayload,
 	options: FormatReadOptions,
 ): Promise<ArchiveIndexEntry[]> {
@@ -737,18 +794,17 @@ export async function readTarEntriesFromStream(
 	}
 }
 
-/** Read and index a tar source after one bounded whole-stream read. */
+/** Index a plain tar by ranging over headers and retaining lazy member offsets. */
 export const readTar: FormatReader = async (source, options) => {
-	assertInMemorySize(source.size, options.limits);
-	let bytes: Uint8Array;
+	if (!Number.isSafeInteger(source.size) || source.size < 0) {
+		throw new ArchiveError("Archive is too large to read safely");
+	}
 	try {
-		bytes = await readAllBytes(source);
+		return await readTarEntries(new TarSourceCursor(source), new TarSourcePayload(source), options);
 	} catch (error) {
 		if (error instanceof ArchiveError) throw error;
 		throw new ArchiveError(error instanceof Error ? error.message : "Failed to read tar archive");
 	}
-	if (bytes.byteLength !== source.size) throw new ArchiveError("Invalid archive: truncated data");
-	return readTarEntriesFromBuffer(bytes, options);
 };
 
 /** Detect a tar header, including legacy pre-ustar archives, by its checksum. */

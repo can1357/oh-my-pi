@@ -4,10 +4,10 @@
  * semantic nodes/spans only, with ANSI-free, sanitized text.
  */
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
+import { tryFileUri } from "../render/hyperlink";
 import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
@@ -23,9 +23,9 @@ export function displayPath(filePath: string): string {
 	return shortenPath(filePath);
 }
 
-/** `file://` link for a head's path target, when the path is absolute. */
+/** Configured file link for a head's path target, when the path is absolute. */
 export function fileHref(filePath: string | undefined): string | undefined {
-	return filePath && path.isAbsolute(filePath) ? pathToFileURL(filePath).href : undefined;
+	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */

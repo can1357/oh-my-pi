@@ -28,7 +28,7 @@ export const TSP_DEFAULT_APC_LIMIT = 65_536;
 export const TSP_DEFAULT_CREDITS = 2;
 
 /** One-letter message verb. */
-export type TspVerb = "q" | "o" | "f" | "b" | "t" | "x" | "r" | "e";
+export type TspVerb = "q" | "o" | "f" | "b" | "x" | "r" | "e";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vocabulary
@@ -53,6 +53,7 @@ export const TSP_KINDS = [
 	"kv",
 	"table",
 	"tree",
+	"json",
 	"badge",
 	"kbd",
 	"icon",
@@ -154,8 +155,10 @@ export interface TspCommonProps {
 	 * right after another tooltip or card), anchored below it (above without
 	 * room) and clamped to the window. It stays open while the pointer is over
 	 * the node or the card, closes on leave (short grace), press, key or scroll,
-	 * and replaces the node's `title` tooltip while open. Terminals that don't
-	 * know it ignore it and keep showing `title`.
+	 * and replaces the node's `title` tooltip while open. A lone `md` card is a
+	 * wide read-only preview the pointer passes through (open only over the
+	 * node). On an `agent` it opens over the row, not the children. Terminals
+	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
 }
@@ -313,6 +316,20 @@ export interface TspTreeNode {
 export interface TspTreeProps {
 	nodes: readonly TspTreeNode[];
 }
+/**
+ * A raw JSON value the terminal draws as an interactive tree: small containers
+ * whole on one row, larger ones folded to a preview that expands on click.
+ * Folding is local to the terminal and sends no events.
+ */
+export interface TspJsonProps {
+	/** Any JSON value; absent reads as null. */
+	value: unknown;
+	/**
+	 * Levels of containers expanded below the top-level entries (default 0:
+	 * the root's entries listed, every container among them folded).
+	 */
+	open?: number;
+}
 export interface TspBadgeProps {
 	text: string;
 }
@@ -394,6 +411,9 @@ export interface TspEditorProps {
 	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
 	sendable?: boolean;
 	maxLines?: number;
+	/** The program cannot read input yet: while the field has the focus, the terminal keeps
+	 *  what is typed into it, draws it at the caret, and sends it once this clears. */
+	typeahead?: boolean;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
 export interface TspStatusProps {
@@ -863,6 +883,7 @@ export interface TspPropsByKind {
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
+	json: TspJsonProps;
 	badge: TspBadgeProps;
 	kbd: TspKbdProps;
 	icon: TspIconProps;
@@ -967,21 +988,6 @@ export interface TspClose {
 	id: string;
 	/** Keep `main` in scrollback (true) or remove the surface (false). */
 	keep: boolean;
-}
-
-/**
- * Verb `t`: the program's resolved theme for a surface, sent after `o` and
- * before its first `f`, and again whenever the theme or variant changes.
- * Each variant maps token names to `#rrggbb`; tokens left at the terminal
- * default are omitted. A program with one variant sends only that one.
- */
-export interface TspPalette {
-	/** Surface id. */
-	sf: string;
-	dark?: Readonly<Record<string, string>>;
-	light?: Readonly<Record<string, string>>;
-	/** Theme names behind each variant. */
-	name?: { dark?: string; light?: string };
 }
 
 /** Verb `q`. */

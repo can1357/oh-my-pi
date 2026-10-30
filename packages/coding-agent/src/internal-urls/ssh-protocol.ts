@@ -9,8 +9,8 @@
  * A remote path resolves to a UTF-8 text file (≤ 1 MiB) or, when it is a
  * directory, a one-level listing. Binary/non-UTF-8 or oversized files are
  * rejected with an explicit error. This handler exposes no `sourcePath`;
- * directory listings carry `isDirectory` so `search` refuses to grep the
- * listing text instead of the directory's real contents.
+ * structured directory entries let the URL filesystem traverse remote
+ * contents without ever searching the rendered listing text.
  *
  * `loadCapability` is imported from `../capability` (not the `../discovery`
  * barrel) on purpose — pulling the barrel here would route
@@ -19,6 +19,7 @@
  * SSH provider via `import "./discovery"` (sdk.ts) / `initializeWithSettings`
  * (main.ts) before any tool resolves.
  */
+import { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
 import { $which } from "@oh-my-pi/pi-utils";
 import * as capability from "../capability";
 import { type SSHHost, sshCapability } from "../capability/ssh";
@@ -27,6 +28,7 @@ import {
 	listRemoteDir,
 	type RemotePathKind,
 	readRemoteFile,
+	remoteHomeDirectory,
 	statRemotePath,
 	writeRemoteFile,
 } from "../ssh/file-transfer";
@@ -61,7 +63,7 @@ function decodeUtf8Text(bytes: Uint8Array): string | null {
  * authority (host/user/port) stays on the WHATWG fields, which preserve case for
  * the non-special `ssh` scheme.
  */
-function remotePathFromUrl(url: InternalUrl): string {
+async function remotePathFromUrl(url: InternalUrl, target: SSHConnectionTarget, signal?: AbortSignal): Promise<string> {
 	// `?`/`#` are URL delimiters, so parseInternalUrl strips them from the path
 	// (`ssh://h/tmp/a?draft` → `/tmp/a`). Reject the unsupported suffix instead of
 	// silently operating on the truncated path; a literal `?`/`#` in a filename
@@ -77,6 +79,9 @@ function remotePathFromUrl(url: InternalUrl): string {
 		);
 	}
 	const raw = url.rawPathname ?? url.pathname;
+	// Only a literal URI /~ or /~/ opts into HOME resolution. Decoding first
+	// would accidentally expand an absolute literal /%7E/ path too.
+	const homeRelative = raw === "/~" || raw.startsWith("/~/");
 	let decoded: string;
 	try {
 		decoded = decodeURIComponent(raw);
@@ -87,6 +92,15 @@ function remotePathFromUrl(url: InternalUrl): string {
 		throw new Error(
 			"ssh:// requires an absolute path, e.g. ssh://host/etc/hosts or ssh://host/ for the root directory",
 		);
+	}
+	if (homeRelative) {
+		const home = await remoteHomeDirectory(target, { signal });
+		// Concatenate rather than normalize: remote .. and symlink semantics
+		// belong to the remote filesystem, not the local path library.
+		return `${home.replace(/\/+$/, "")}${decoded.slice(2)}` || "/";
+	}
+	if (raw.startsWith("/~") && !decoded.startsWith("/~/")) {
+		throw new Error("ssh://: named-user /~user paths are unsupported; use /~/ for the connected account's HOME");
 	}
 	return decoded;
 }
@@ -269,7 +283,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 			return this.#resolveHostIndex(url, context?.cwd);
 		}
 		const target = await resolveTarget(url, context?.cwd);
-		const remotePath = remotePathFromUrl(url);
+		const remotePath = await remotePathFromUrl(url, target, context?.signal);
 		// Classify before reading. A FIFO with no writer would block `head` until the
 		// timeout, and a device (e.g. /dev/zero) would stream the whole probe, so a
 		// special file must fail fast. Only a regular file is read; a directory lists.
@@ -314,7 +328,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	/** Resolve a remote directory to a one-level listing (no `sourcePath`; `isDirectory` so search refuses it; immutable). */
+	/** Resolve a remote directory to a rendered one-level listing for read. */
 	async #resolveDirectory(
 		target: SSHConnectionTarget,
 		remotePath: string,
@@ -322,9 +336,16 @@ export class SshProtocolHandler implements ProtocolHandler {
 		signal?: AbortSignal,
 		skipListing?: boolean,
 	): Promise<InternalResource> {
-		// `search`/`find` reject an ssh:// directory outright, so they pass `skipListing`
-		// to avoid draining a full remote `ls` we would only discard.
-		const content = skipListing ? "" : formatDirectoryListing(await listRemoteDir(target, remotePath, { signal }));
+		// Metadata consumers need only the directory shape, not its rendered text.
+		const entries = skipListing ? undefined : await listRemoteDir(target, remotePath, { signal });
+		const content = entries
+			? formatDirectoryListing(
+					entries.map(entry => ({
+						name: entry.name,
+						isDirectory: entry.fileType === ShellFsFileType.Dir,
+					})),
+				)
+			: "";
 		return {
 			url: url.href,
 			content,
@@ -333,6 +354,13 @@ export class SshProtocolHandler implements ProtocolHandler {
 			immutable: true,
 			isDirectory: true,
 		};
+	}
+
+	/** Immediate remote entries for native traversal; paths and results remain ssh:// URLs. */
+	async readDirectory(url: InternalUrl, context?: ResolveContext): Promise<ShellFsDirEntry[]> {
+		const target = await resolveTarget(url, context?.cwd);
+		const remotePath = await remotePathFromUrl(url, target, context?.signal);
+		return listRemoteDir(target, remotePath, { signal: context?.signal });
 	}
 
 	/** Resolve a bare `ssh://` to a listing of configured hosts (immutable; plain virtual text, so `search` can still grep host names). */
@@ -359,7 +387,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
 		const target = await resolveTarget(url, context?.cwd);
-		const remotePath = remotePathFromUrl(url);
+		const remotePath = await remotePathFromUrl(url, target, context?.signal);
 		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), { signal: context?.signal });
 	}
 }

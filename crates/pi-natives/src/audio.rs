@@ -63,7 +63,9 @@ impl AudioPlayback {
 	/// Open the default speaker at the requested logical sample rate.
 	#[napi(constructor)]
 	pub fn new(sample_rate: u32) -> Result<Self> {
-		let stream = PlaybackStream::start(sample_rate).map_err(napi::Error::from_reason)?;
+		// Local producers queue whole chunks ahead of playback; no jitter
+		// reserve.
+		let stream = PlaybackStream::start(sample_rate, 0).map_err(napi::Error::from_reason)?;
 		let state = stream.state();
 		Ok(Self { stream: Mutex::new(Some(stream)), state })
 	}

@@ -99,7 +99,7 @@ SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial
 
 # Tool I/O
 - Prefer relative `path`-like fields.
-{{#if intentTracing}}- Most tools take `{{intentField}}`: capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}
+{{#if intentTracing}}- Most tools take `{{intentField}}`: {{#if intentGuidance}}{{intentGuidance}}{{else}}capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}{{/if}}
 {{#if secretsEnabled}}- `$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.{{/if}}
 
 # Specialized Tools

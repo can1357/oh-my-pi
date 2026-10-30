@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
-import { initTheme } from "../src/theme";
+import { getThemeByName, initTheme, type Theme } from "../src/theme";
 import { globToolRenderer } from "../src/tools/glob";
 import { grepToolRenderer } from "../src/tools/grep";
 import { lspToolRenderer } from "../src/tools/lsp";
@@ -251,6 +251,23 @@ describe("lsp native view", () => {
 		expect(collect(view?.body, n => role(n) === "omp.tool.error")).toHaveLength(1);
 	});
 
+	it("shows a file whose server sent no report as unverified, never as no issues", () => {
+		const text = [
+			"✔ src/fast.cpp: no issues",
+			"⚠ src/slow.cpp: no diagnostics report yet from clangd; query the file alone for a longer wait",
+		].join("\n");
+		const view = lspToolRenderer.describeResult(
+			{ content: [{ type: "text", text }], details: { action: "diagnostics", success: true } },
+			collapsed,
+			{ action: "diagnostics", file: "src/*.cpp" },
+		);
+		expect(view?.inline).not.toBe(true);
+		const meta = (view?.tool?.meta ?? []).map(plain).join(" ");
+		expect(meta).toContain("1 unverified file");
+		expect(meta).not.toContain("No issues");
+		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+	});
+
 	it("parses grouped diagnostics into file:line:col rows and frames them", () => {
 		const text = [
 			"2 error(s):",
@@ -271,5 +288,47 @@ describe("lsp native view", () => {
 		expect(texts[0]).toBe("src/frame.rs:12:5");
 		const badges = collect(rows[0]!.c, n => n.k === "badge").map(n => (n.k === "badge" ? n.p?.text : undefined));
 		expect(badges).toEqual(["rust-analyzer"]);
+	});
+});
+
+describe("lsp text view", () => {
+	let theme: Theme;
+	beforeAll(async () => {
+		await initTheme();
+		theme = (await getThemeByName("dark"))!;
+	});
+
+	it("lists a file whose server sent no report beside the diagnostics, never as no issues", () => {
+		const unverified = `${theme.status.warning} src/slow.cpp: no diagnostics report yet from clangd; query the file alone for a longer wait`;
+		const cases: Array<[string[], RenderResultOptions]> = [
+			[
+				[
+					`${theme.status.error} src/bad.cpp: 1 error(s)`,
+					"src/bad.cpp:3:5 [error] [clangd] use of undeclared identifier 'x'",
+					unverified,
+				],
+				collapsed,
+			],
+			[[`${theme.status.success} src/fast.cpp: no issues`, unverified], expanded],
+		];
+		for (const [lines, options] of cases) {
+			const rendered = Bun.stripANSI(
+				lspToolRenderer
+					.renderResult(
+						{
+							content: [{ type: "text", text: lines.join("\n") }],
+							details: { action: "diagnostics", success: true },
+						},
+						options,
+						theme,
+						{ action: "diagnostics", file: "src/*.cpp" },
+					)
+					.render(120)
+					.join("\n"),
+			);
+			expect(rendered).toContain("1 unverified file");
+			expect(rendered).toContain("src/slow.cpp: no diagnostics report yet from clangd");
+			expect(rendered).not.toContain("No issues");
+		}
 	});
 });

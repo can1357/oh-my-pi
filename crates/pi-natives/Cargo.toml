@@ -26,21 +26,15 @@ wayland-pipewire = ["dep:pipewire"]
 anyhow.workspace = true
 async-trait.workspace = true
 arboard.workspace = true
-ast-grep-core.workspace = true
 base64.workspace = true
 clap.workspace = true
-globset.workspace = true
 heapless.workspace = true
 fontdue.workspace = true
 grep-matcher.workspace = true
 futures.workspace = true
-grep-pcre2.workspace = true
-grep-regex.workspace = true
-grep-searcher.workspace = true
 html-escape.workspace = true
 html-to-markdown-rs.workspace = true
 icy_sixel.workspace = true
-ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
 resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
@@ -60,16 +54,16 @@ parking_lot.workspace = true
 pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
-pi-ast.workspace = true
-pi-builtins = { workspace = true, features = ["util.grep"] }
+pi-ast = { workspace = true, features = ["wasm"] }
+pi-builtins.workspace = true
 pi-diff.workspace = true
 pi-edit.workspace = true
+pi-walker.workspace = true
 pi-iso.workspace = true
 pi-predict.workspace = true
 pi-shell.workspace = true
 pi-vfs.workspace = true
 pi-voice.workspace = true
-pi-walker.workspace = true
 portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true
@@ -110,10 +104,12 @@ objc2-core-foundation = "=0.3.2"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+# Match terminfo's build-time phf_shared features.
+phf_shared = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
-windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_Packaging_Appx", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_Packaging_Appx", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 clipboard-win.workspace = true
 enigo = { version = "=0.6.1", default-features = false }
 uiautomation = "=0.25.1"
@@ -129,6 +125,24 @@ xkeysym = "=0.2.1"
 napi-build.workspace = true
 shlex.workspace = true
 syntect.workspace = true
+# Match runtime features for dependencies shared with build scripts and proc macros.
+bitflags = { version = "2", features = ["std"] }
+crc32fast = "1"
+data-encoding = "2"
+either = "1"
+fastrand = { version = "2", features = ["js"] }
+flate2 = { version = "1", features = ["zlib-rs"] }
+foldhash = "0.2"
+hashbrown = "0.17"
+indexmap = { version = "2", features = ["serde"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+peg-runtime = { version = "0.8", features = ["std"] }
+rand_core = { version = "0.6", features = ["std"] }
+serde = { workspace = true, features = ["rc", "alloc"] }
+serde_core = { version = "1", features = ["rc", "alloc"] }
+serde_json = { workspace = true, features = ["raw_value", "alloc"] }
+simd-adler32 = "0.3"
+zlib-rs = "0.6"
 
 # Transitive-only pin: see find-msvc-tools in the root workspace manifest.
 # `cfg(false)` is cargo's documented home for a version pin that no target
