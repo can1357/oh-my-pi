@@ -615,27 +615,25 @@ async function survivesRemovalOf(destination: string, destinationStat: Stats, so
 }
 
 /**
- * Set the archive tree aside, one entry at a time, each only once that entry
- * has been shown to have an independent live copy carrying its content.
+ * Prove the live tree holds every archived entry, one entry at a time.
  *
- * Set aside, not removed. Each entry is renamed into `retired`, a directory
- * beside the archive on the same filesystem, so the whole step is reversible
- * until something proves it was safe. No sample of who owns the tree can
- * establish that nobody joined it during the walk — two equal samples say
- * nothing about the time between them — and a deletion cannot be undone when
- * the sample after it disagrees. Retention is what makes the check that
- * follows worth taking: see {@link verifyRetiredIsCarried}.
+ * Nothing is deleted here, and nothing a restore does deletes an archived
+ * entry at all. Eleven review rounds found the same shape every time: the
+ * proof and the delete are two operations, nothing in this process can hold
+ * a subagent out between them, and no number of passes turns that into a
+ * guarantee. So the restore copies and leaves the archive where it is. The
+ * archive phase is the one step that gives a copy up, and an operator
+ * invokes it by name, acknowledges what it does and sees what it refuses.
  *
- * The per-entry proof stays as it was, because it is still the cheapest place
- * to catch a destination that is not a second copy at all.
+ * What this still earns: an artifact the live tree does not hold is named,
+ * so a restore that could not finish says which path is in the way instead
+ * of reporting success.
  */
-async function retireArchiveTreeOnceCarried(
-	source: string,
-	destination: string,
-	archiveRoot: string,
-	retired: string,
-): Promise<void> {
+async function assertLiveTreeHoldsArchive(source: string, destination: string, archiveRoot: string): Promise<void> {
 	const stat = await fs.lstat(source).catch(error => {
+		// Only absence. An I/O error says nothing about what is there, and
+		// reading it as "nothing" is how a file nobody could stat is passed
+		// over as already carried.
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
@@ -648,24 +646,14 @@ async function retireArchiveTreeOnceCarried(
 		if (live.dev === stat.dev && live.ino === stat.ino) {
 			throw new Error(`${destination} is the archived directory ${source} itself, not a copy of it`);
 		}
-		await fs.mkdir(retired, { recursive: true });
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await retireArchiveTreeOnceCarried(
-				path.join(source, entry),
-				path.join(destination, entry),
-				archiveRoot,
-				path.join(retired, entry),
-			);
+			await assertLiveTreeHoldsArchive(path.join(source, entry), path.join(destination, entry), archiveRoot);
 		}
-		await fs.rmdir(source);
 		return;
 	}
-	if (!stat.isFile() || SESSION_STAGING_RE.test(path.basename(source))) {
-		// A link, a device, or a killed writer's staging residue: none of them
-		// was carried home, and the name is all there is to drop.
-		await fs.rename(source, retired);
-		return;
-	}
+	// A link, a device, or a killed writer's staging residue: none of them was
+	// carried home and none of them is an artifact.
+	if (!stat.isFile() || SESSION_STAGING_RE.test(path.basename(source))) return;
 	const live = await fs.open(destination, "r").catch(error => {
 		if (isEnoent(error)) return undefined;
 		throw error;
@@ -679,66 +667,11 @@ async function retireArchiveTreeOnceCarried(
 			throw new Error(`${destination} is the archived ${source} itself, not a second copy of it`);
 		}
 		if (!(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false))) {
-			throw new Error(`${destination} no longer holds what the archived ${source} holds`);
+			throw new Error(`${destination} does not hold what the archived ${source} holds`);
 		}
 	} finally {
 		await live?.close();
 	}
-	await fs.rename(source, retired);
-}
-
-/**
- * Prove, with every archived entry already set aside and the live tree
- * complete, that the live tree still holds all of them.
- *
- * This is the step the retention exists for. The per-entry proofs were each
- * taken at their own moment, and a writer that joined the tree during the
- * walk — one holding a child session's lease, taken after the leases this
- * restore holds were counted — can have replaced a live file after its proof
- * and before the walk ended. A pass over the retained originals afterwards
- * reads the live tree as it is once nothing more will be set aside, so the
- * only thing left unproved is the gap after this pass, in which nothing is
- * deleted at all.
- *
- * Throwing here is a rollback, not a loss: the caller puts everything back.
- */
-async function verifyRetiredIsCarried(retired: string, destination: string): Promise<void> {
-	const stat = await fs.lstat(retired).catch(() => undefined);
-	if (!stat) return;
-	if (stat.isDirectory()) {
-		for (const entry of (await fs.readdir(retired)).sort()) {
-			await verifyRetiredIsCarried(path.join(retired, entry), path.join(destination, entry));
-		}
-		return;
-	}
-	if (!stat.isFile() || SESSION_STAGING_RE.test(path.basename(retired))) return;
-	const live = await fs.open(destination, "r").catch(() => undefined);
-	try {
-		if (!(await live?.stat())?.isFile()) {
-			throw new Error(`${destination} no longer holds what the archive held`);
-		}
-		if (live && !(await sourceIsPrefixOfDestination(Bun.file(retired).stream(), live, false))) {
-			throw new Error(`${destination} no longer holds what the archive held`);
-		}
-	} finally {
-		await live?.close();
-	}
-}
-
-/** Put every retired entry back where it came from, so a refused restore leaves the archive whole. */
-async function returnRetired(retired: string, source: string): Promise<void> {
-	const stat = await fs.lstat(retired).catch(() => undefined);
-	if (!stat) return;
-	if (stat.isDirectory()) {
-		await fs.mkdir(source, { recursive: true });
-		for (const entry of await fs.readdir(retired)) {
-			await returnRetired(path.join(retired, entry), path.join(source, entry));
-		}
-		await fs.rmdir(retired).catch(() => undefined);
-		return;
-	}
-	await fs.mkdir(path.dirname(source), { recursive: true });
-	await fs.rename(retired, source).catch(() => undefined);
 }
 
 /**
@@ -843,36 +776,21 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
 }
 
 /**
- * Bring an archived artifact tree home, and give up the archive's copy only
- * once the live tree has been shown to hold all of it with nothing left to
- * set aside.
+ * Bring an archived artifact tree home and leave the archive where it is.
  *
- * The archive is retired rather than deleted — renamed into a staging-named
- * directory beside it — and dropped for good only after
- * {@link verifyRetiredIsCarried} passes over the retained originals. A
- * sample of who owns the tree cannot establish that nobody joined it during
- * the walk, so the walk does not get to be the last word: anything that
- * disagrees afterwards puts the archive back exactly as it was.
- *
- * `confirm` runs before any of it, with the copy done and nothing moved yet.
- *
- * It costs one more pass over the tree on a restore. That is the price of
- * being able to change its mind, and a restore is rare.
+ * A restore publishes; it does not reclaim. Giving a copy up needs a proof
+ * that holds from the moment it is taken to the moment the bytes go, and
+ * there is no way here to hold a subagent out of the tree across those two
+ * operations — which is what every round of review found, in a different
+ * place each time. So the session ends up in two places and the archive
+ * phase, which an operator names and acknowledges, is the only thing that
+ * takes one away.
  */
-async function copyTreeDereferenced(source: string, destination: string, confirm: () => Promise<void>): Promise<void> {
+async function copyTreeDereferenced(source: string, destination: string): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
 	await copyEntryDereferenced(source, destination, archiveRoot);
-	await confirm();
-	const retired = sessionStagingPath(source);
-	try {
-		await retireArchiveTreeOnceCarried(source, destination, archiveRoot, retired);
-		await verifyRetiredIsCarried(retired, destination);
-	} catch (error) {
-		await returnRetired(retired, source);
-		throw error;
-	}
-	await fs.rm(retired, { recursive: true, force: true });
+	await assertLiveTreeHoldsArchive(source, destination, archiveRoot);
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */
@@ -1139,10 +1057,10 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 			if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
 				throw new Error(
 					`Refusing to restore over a different session file: ${sessionPath} is not this archive carried on. ` +
-						`To keep the archived one, move ${sessionPath} and its artifact directory ${liveArtifacts} aside, ` +
+						`To bring the archived one home, move ${sessionPath} and its artifact directory ${liveArtifacts} aside, ` +
 						`then run \`omp gc --restore ${target} --apply\` ` +
 						`(add \`--agent-dir <dir>\` when it is not the default one; without \`--apply\` it only reports). ` +
-						`To keep the live one, move both halves of the archive out of the archive directory and keep them ` +
+						`To keep the live one and be rid of the archived one, move both halves out of the archive directory ` +
 						`yourself — the transcript ${archiveFile} and its artifact directory ${archiveArtifacts}; ` +
 						`there is nothing for \`--restore\` to do once they are gone, and restoring by id would report ` +
 						`that no archived session matches. Nothing is removed until you choose.`,
@@ -1156,26 +1074,25 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const notRestored: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
-		// The owner set is sampled before the tree is touched, and the archive
-		// is then set aside rather than deleted until the live tree has been
-		// shown to hold all of it. Equal samples say nothing about the time
-		// between them, and no participating exclusion keeps a subagent from
-		// joining the tree while the move runs, so the move is made
-		// reversible instead: whatever disagrees afterwards puts the archive
-		// back exactly as it was.
+		// Neither copy goes. The restore publishes the session into the live
+		// tree and leaves the archive where it is, so `omp gc --archive`,
+		// which an operator invokes by name and acknowledges, stays the only
+		// step that takes a copy away. Re-archiving the session recognises
+		// its own archive and finishes the move; until someone asks, the
+		// space is not reclaimed, which is the cost this feature can afford.
 		if (!(await leases.refresh())) throw noOwners();
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, async () => {
-					if (!(await leases.refresh())) throw noOwners();
-					if ((await ownerSignature(owners)) !== leasedOwners) {
-						throw new Error(
-							`the subagent sessions below ${archiveArtifacts} changed while it was being restored, ` +
-								`so the archive was left as it is; run \`omp gc --restore ${target} --apply\` again`,
-						);
-					}
-				});
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
+				if (!(await leases.refresh())) throw noOwners();
+				if ((await ownerSignature(owners)) !== leasedOwners) {
+					throw new Error(
+						`the subagent sessions below ${archiveArtifacts} changed while it was being restored; ` +
+							`everything carried home is there and the archive is untouched — ` +
+							`run \`omp gc --restore ${target} --apply\` again`,
+					);
+				}
 				artifactsRestored = true;
 			} catch (error) {
 				notRestored.push(
@@ -1184,24 +1101,6 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 					}`,
 				);
 			}
-		}
-		// Keep the archive when its artifacts did not come with it, so the next
-		// attempt still has both halves to work from. The transcript goes the
-		// same way as the tree: set aside, proved, then dropped.
-		if (artifactsRestored || !hasArtifacts) {
-			const retired = sessionStagingPath(archiveFile);
-			await fs.rm(retired, { force: true });
-			await fs.rename(archiveFile, retired).catch(error => {
-				if (!isEnoent(error)) throw error;
-			});
-			if ((await statIfPresent(retired)) && !(await archiveIsPrefixOfLive(retired, sessionPath))) {
-				await fs.rename(retired, archiveFile);
-				throw new Error(
-					`${sessionPath} no longer holds what the archive held, so the archive was left as it is; ` +
-						`run \`omp gc --restore ${target} --apply\` again`,
-				);
-			}
-			await fs.rm(retired, { force: true });
 		}
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {

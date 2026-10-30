@@ -102,8 +102,9 @@ test("a session archived by gc resumes by id and comes back byte for byte", asyn
 	try {
 		expect(manager.getSessionFile()).toBe(sessionFile);
 		expect(await fs.readFile(sessionFile)).toEqual(original);
-		// One copy only: a session left in both places is archived again next run.
-		expect(await Bun.file(archiveFile).exists()).toBe(false);
+		// The archive stays: a restore publishes, it does not reclaim. Only
+		// `gc --archive`, which someone invokes by name, takes a copy away.
+		expect(await Bun.file(archiveFile).exists()).toBe(true);
 		const texts = manager
 			.getEntries()
 			.filter(entry => entry.type === "message")
@@ -140,7 +141,7 @@ test("gc --restore brings an archived session back and names what it cannot rest
 	expect(result.restore?.bytes).toBeGreaterThan(0);
 	expect(result.restore?.notRestored.join("\n")).toContain("prompt history");
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 	// A restore runs alone, so nothing else in this agent dir was swept.
 	expect(result.archive).toBeUndefined();
 });
@@ -388,7 +389,7 @@ test("a restore whose artifact tree did not come back can be finished by a retry
 
 	expect(second.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toContain("sub-1");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a restore refuses an archive that is not the session already at that path", async () => {
@@ -415,7 +416,7 @@ test("a half-restored session that has since been resumed still gets its artifac
 
 	expect(restored.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toContain("sub-1");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 	// The turn taken after the restore is still there.
 	expect(await Bun.file(sessionFile).text()).toContain("later");
 });
@@ -480,7 +481,7 @@ test("a restore finishes when the archive's copy of an artifact is the truncated
 	expect(restored.notRestored).toEqual([]);
 	expect(restored.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("COMPLETE-SUBAGENT-TRANSCRIPT\n");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a restore interrupted mid-copy leaves no partial file for the retry to mistake for a finished one", async () => {
@@ -604,7 +605,7 @@ test("a plain-file command resolves an archived id to a live transcript with its
 
 	expect(resolved).toBe(sessionFile);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toContain("nested subagent prompt");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a restore keeps the permissions of an artifact directory it merges into", async () => {
@@ -802,7 +803,7 @@ test("a half-restored session still restores after it has been renamed", async (
 
 	expect(restored.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 	// The rename is kept: the restore matched the session, it did not undo it.
 	expect(await Bun.file(sessionFile).text()).toContain("Renamed after the restore");
 });
@@ -914,7 +915,7 @@ test("a legacy transcript that gains a title slot after a half restore still res
 
 	expect(restored.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a nested transcript renamed after a half restore keeps both copies", async () => {
@@ -1111,7 +1112,7 @@ test("a legacy transcript the writer renames in its header still restores", asyn
 
 	expect(restored.notRestored).toEqual([]);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 	expect(await Bun.file(sessionFile).text()).toContain("Renamed");
 });
 test("a conflict that appears after an earlier artifact copied still keeps its archived bytes", async () => {
@@ -1578,7 +1579,7 @@ test("a genuine version 1 transcript the writer migrates still restores", async 
 
 	expect(restored.notRestored).toEqual([]);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe("UNRESTORED-CHILD\n");
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a staging name left linked to an archived file does not damage it", async () => {
@@ -1951,64 +1952,48 @@ test("archiving over a different archived session names both halves to move", as
 	expect(errors).toContain("Moving the transcript alone is not enough");
 });
 
-test("work written over a restored artifact after its proof puts the archive back", async () => {
+test("a restore leaves the archive whole, however the live tree changes while it runs", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE ORIGINAL");
 	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
 	await archiveEverything();
 
-	// Past every sample a restore can take: the live file is replaced after
-	// its own proof, while the archive is being set aside. Nothing can be
-	// asked about the owners that would catch this — only the pass over the
-	// retained originals, which is why they are retained.
+	// Past every sample a restore can take: a live file is replaced after its
+	// own proof, while the rest of the tree is still being carried home. No
+	// sample catches that, which is why the restore gives nothing up — the
+	// archive is whole afterwards whatever happened.
 	let replaced = false;
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
-		await realRename(source, destination);
-		if (replaced || !String(source).startsWith(`${archivedArtifacts}${path.sep}`)) return;
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		await realLink(source, destination);
+		if (replaced || !String(destination).endsWith("a.log")) return;
 		replaced = true;
 		await Bun.write(path.join(liveArtifacts, "a.log"), "NEW CHILD OWNER WORK");
 	});
-	let restored: RestoredSession | undefined;
 	try {
-		restored = await restoreArchivedSession(archiveFile, root);
+		await restoreArchivedSession(archiveFile, root);
 	} finally {
-		rename.mockRestore();
+		link.mockRestore();
 	}
 
-	expect(restored?.artifactsRestored).toBe(false);
-	// Put back exactly as it was, both halves of the archive and all of it.
+	expect(replaced).toBe(true);
 	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("UNIQUE ORIGINAL");
 	expect(await Bun.file(path.join(archivedArtifacts, "z.log")).text()).toBe("SECOND");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
-test("a transcript that diverges after its artifacts came home puts the archive back", async () => {
+test("a restore leaves nothing a maintenance sweep would collect as scratch", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "ARTIFACT");
 	await archiveEverything();
-	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
 
-	// The live transcript is replaced once the artifact tree has been proved
-	// and its retained copy dropped, which is the last moment the archived
-	// transcript could go.
-	let diverged = false;
-	const realRm = fs.rm;
-	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
-		const done = String(target).startsWith(path.dirname(archiveFile)) && String(target).endsWith(".tmp");
-		if (done && !diverged) {
-			diverged = true;
-			await Bun.write(sessionFile, sessionBody(other, "ANOTHER SESSION", root));
-		}
-		return await realRm(target, options);
-	});
-	try {
-		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("no longer holds");
-	} finally {
-		rm.mockRestore();
-	}
+	await restoreArchivedSession(archiveFile, root);
 
+	// Retained state under a staging name is state no sweep counts and no
+	// command finds. The archive stays at the name `gc --restore` and blob
+	// collection already know.
+	const bucket = path.dirname(archiveFile);
+	for (const name of await fs.readdir(bucket)) expect(name.endsWith(".tmp")).toBe(false);
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
