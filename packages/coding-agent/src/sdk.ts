@@ -2637,7 +2637,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.localProtocolOptions = localProtocolOptions;
 		toolSession.agentOutputManager = new AgentOutputManager(getArtifactsDir, {
 			...(options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : {}),
-			artifactsSettled: () => sessionManager.whenArtifactsSettled(),
+			artifactsSettled: signal => sessionManager.whenArtifactsSettled(signal),
 			reservedNames: () => sessionManager.reservedOutputNames(),
 		});
 

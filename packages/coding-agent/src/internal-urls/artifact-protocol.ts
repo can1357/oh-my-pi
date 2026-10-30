@@ -108,7 +108,7 @@ function callerInMemoryArtifact(id: string, context?: ResolveContext): string | 
  */
 async function awaitArtifactsSettled(dirs: readonly string[], context?: ResolveContext): Promise<void> {
 	const signal = context?.signal;
-	await context?.session?.sessionManager?.whenArtifactsSettled?.();
+	await context?.session?.sessionManager?.whenArtifactsSettled?.(signal);
 	// Most readers hold no session object — an export, a subagent's own
 	// options, a bare protocol call — so the wait is also keyed by directory,
 	// and only by the directories this read could be answered from: waiting on

@@ -12,7 +12,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { RESERVED_CLAIMS_FILE, whenArtifactCopiesSettle } from "../session/session-manager";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { abortRejection, RESERVED_CLAIMS_FILE, whenArtifactCopiesSettle } from "../session/session-manager";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
@@ -31,14 +32,16 @@ export class AgentOutputManager {
 	readonly #taken = new Set<string>();
 	readonly #getArtifactsDir: () => string | null;
 	readonly #parentPrefix: string | undefined;
-	readonly #artifactsSettled: (() => Promise<void>) | undefined;
+	readonly #artifactsSettled: ((signal?: AbortSignal) => Promise<void>) | undefined;
 	readonly #reservedNames: (() => readonly string[]) | undefined;
+	/** Set when the claims beside the artifacts exist but could not be read. */
+	#claimsUnreadable = false;
 
 	constructor(
 		getArtifactsDir: () => string | null,
 		options?: {
 			parentPrefix?: string;
-			artifactsSettled?: () => Promise<void>;
+			artifactsSettled?: (signal?: AbortSignal) => Promise<void>;
 			/** Names the session's transcript already refers to and has no file for. */
 			reservedNames?: () => readonly string[];
 		},
@@ -62,12 +65,19 @@ export class AgentOutputManager {
 	 */
 	async #ensureInitialized(signal?: AbortSignal): Promise<void> {
 		if (this.#initialized) return;
-		this.#initializing ??= this.#seedFromDisk(signal);
-		await this.#initializing;
+		// The seeding is shared; the waiting is not. One caller's cancellation
+		// is its own: it must not finish another caller's wait, and it must not
+		// be remembered as the answer for every allocation that follows.
+		const seeding = (this.#initializing ??= this.#seedFromDisk().catch(error => {
+			this.#initializing = undefined;
+			throw error;
+		}));
+		if (signal) await Promise.race([seeding, abortRejection(signal)]);
+		else await seeding;
 		this.#initialized = true;
 	}
 
-	async #seedFromDisk(signal?: AbortSignal): Promise<void> {
+	async #seedFromDisk(): Promise<void> {
 		// A fork's inherited output arrives in the background. Seeding before it
 		// lands reads an empty directory, and the first subagent then takes a
 		// name the inherited transcript already refers to — and keeps it, since
@@ -80,15 +90,25 @@ export class AgentOutputManager {
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
 		// Also by directory, for a caller that was handed one without a session.
-		await whenArtifactCopiesSettle(dir, signal);
+		await whenArtifactCopiesSettle(dir);
 		// The names a session has spent are recorded beside its artifacts,
 		// because a name whose file never arrived is invisible to the scan
 		// below and a caller handed only a directory has no header to read.
 		try {
 			const claims = JSON.parse(await fs.readFile(path.join(dir, RESERVED_CLAIMS_FILE), "utf8"));
 			if (Array.isArray(claims?.names)) for (const name of claims.names) this.#taken.add(String(name));
-		} catch {
-			// No claims recorded beside these artifacts.
+		} catch (error) {
+			if (!isEnoent(error)) {
+				// A record that cannot be read is not a record that says
+				// nothing: the one name that must not be handed out wrongly is
+				// the one being asked for, so it is treated as spoken for and
+				// the caller gets a disambiguated one instead.
+				logger.warn("Could not read a session's reserved artifact claims; names will be disambiguated", {
+					dir,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.#claimsUnreadable = true;
+			}
 		}
 
 		let files: string[];
@@ -117,6 +137,7 @@ export class AgentOutputManager {
 
 	/** Pick the first free name (base, then `base-2`, `base-3`, …) and reserve it. */
 	#allocateUnique(id: string): string {
+		if (this.#claimsUnreadable) this.#taken.add(id);
 		let candidate = id;
 		for (let n = 2; this.#taken.has(candidate); n++) {
 			candidate = `${id}-${n}`;
