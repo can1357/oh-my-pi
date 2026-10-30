@@ -24,7 +24,7 @@
  * do nothing once it has gone, and carry that scope (`rendererScope`) for the host that mounts or
  * drives what they return.
  */
-import type { Api, ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";

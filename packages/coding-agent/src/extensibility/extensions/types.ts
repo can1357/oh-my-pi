@@ -78,7 +78,6 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -95,7 +94,7 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
-import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { SessionManager } from "../../session/session-manager";
 import type { ExtensionModelRegistry, ExtensionSessionManager } from "./context-surfaces";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
