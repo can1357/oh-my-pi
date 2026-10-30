@@ -367,14 +367,16 @@ describe("automatic fallback shake", () => {
 			options?.signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
 			return shake(mode, options);
 		});
-		testSetExtensionHandlerTimeoutMs(10);
+		testSetExtensionHandlerTimeoutMs(1000);
 		const prompt = session.prompt("continue after a delayed shake");
 		try {
 			await started.promise;
 			await cancelled.promise;
-			// Let the timeout race and all continuation microtasks unwind before
-			// observing the barrier; the abort notification itself fires too early.
+			// Flush the race's zero-delay abort-cleanup turn, not a wall-clock delay.
+			// The abort event itself precedes that race settling.
 			await scheduler.yield();
+			await scheduler.wait(0);
+			expect(runtimeErrors).toEqual([]);
 			expect(requests.map(request => request.model)).toEqual([`${primary.provider}/${primary.id}`]);
 		} finally {
 			gate.resolve();
@@ -399,23 +401,30 @@ describe("automatic fallback shake", () => {
 		const gate = Promise.withResolvers<void>();
 		const started = Promise.withResolvers<void>();
 		const cancelled = Promise.withResolvers<void>();
+		let shaking = false;
 		const rewrite = manager.rewriteEntries.bind(manager);
 		vi.spyOn(manager, "rewriteEntries").mockImplementation(async () => {
+			if (!shaking) return rewrite();
 			started.resolve();
 			await gate.promise;
 			return rewrite();
 		});
 		const shake = session.shake.bind(session);
 		vi.spyOn(session, "shake").mockImplementation((mode, options) => {
+			shaking = true;
 			options?.signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
-			return shake(mode, options);
+			return shake(mode, options).finally(() => {
+				shaking = false;
+			});
 		});
-		testSetExtensionHandlerTimeoutMs(10);
+		testSetExtensionHandlerTimeoutMs(1000);
 		const prompt = session.prompt("continue after persistence completes");
 		try {
 			await started.promise;
 			await cancelled.promise;
 			await scheduler.yield();
+			await scheduler.wait(0);
+			expect(runtimeErrors).toEqual([]);
 			expect(requests.map(request => request.model)).toEqual([`${primary.provider}/${primary.id}`]);
 		} finally {
 			gate.resolve();
