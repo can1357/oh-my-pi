@@ -252,7 +252,10 @@ async function reproduceArtifactEntry(
 	try {
 		if (entry.isDirectory()) {
 			await fs.promises.mkdir(destination);
-			const child = await pinDirectory(destination);
+			// What `mkdir` made and what the next step opens are two
+			// resolutions of one name; a mount landing between them is how a
+			// copy comes to write into somebody else's filesystem.
+			const child = await pinVerifiedChild(into, entry.name, "nothing was copied into it");
 			if (!child) return 0;
 			try {
 				progress.created.set(staged, child.identity);
@@ -472,6 +475,43 @@ async function pinDirectory(
 		identity,
 		close: () => handle.close(),
 	};
+}
+
+/**
+ * Hold a child of a directory this copy already holds, and refuse one that is
+ * not on the parent's own filesystem or has anything mounted in it.
+ *
+ * A directory is reached through its parent's descriptor, so no pathname above
+ * it can redirect the walk; what the descriptor cannot answer is whether the
+ * thing it reached is a doorway somewhere else. A mount installed on the name
+ * between its creation and its use gives a directory on another device, and a
+ * bind of a directory on the *same* device shows itself in the mount table —
+ * which is read against where the directory is, never against the descriptor
+ * path, because `/proc/self/fd` answers no question about mounts.
+ */
+async function pinVerifiedChild(
+	parent: PinnedDirectory,
+	name: string,
+	what: string,
+): Promise<PinnedDirectory | undefined> {
+	const where = `${parent.path}/${name}`;
+	const child = await pinDirectory(`${parent.at}/${name}`, undefined, where);
+	if (!child) return undefined;
+	if (child.identity.device !== parent.identity.device) {
+		logger.warn(`A session artifact directory is on another filesystem than its parent; ${what}`, { dir: where });
+		await child.close();
+		return undefined;
+	}
+	const mounts = await mountsUnder(where);
+	if (mounts === undefined || mounts.length > 0) {
+		logger.warn(`A session artifact directory is mounted or unverifiable; ${what}`, {
+			dir: where,
+			mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
+		});
+		await child.close();
+		return undefined;
+	}
+	return child;
 }
 
 /** Where a session leaves the artifact claims its transcript has already spent. */
@@ -773,11 +813,23 @@ async function removeArtifactStaging(staging: ArtifactStaging, created?: Map<str
 	} finally {
 		await root.close();
 	}
-	// The root itself: still only if it is the directory that was created.
-	const stillOurs = await pinDirectory(staging.path, stagingIdentity(staging));
-	if (!stillOurs) return;
-	await stillOurs.close();
-	await fs.promises.rmdir(staging.path).catch(() => {});
+	// The root itself, through a descriptor on the directory that holds its
+	// name: a `rmdir` of the pathname would resolve every component again, and
+	// the last component is checked here against the identity the staging
+	// directory was created with. `rmdir` removes nothing that is not empty,
+	// so the name it resolves is either this copy's emptied tree or nothing
+	// this copy can take down.
+	const parent = await pinDirectory(path.dirname(staging.path));
+	if (!parent) return;
+	try {
+		const base = path.basename(staging.path);
+		const stillOurs = await pinDirectory(`${parent.at}/${base}`, stagingIdentity(staging), staging.path);
+		if (!stillOurs) return;
+		await stillOurs.close();
+		await fs.promises.rmdir(`${parent.at}/${base}`).catch(() => {});
+	} finally {
+		await parent.close();
+	}
 }
 
 /** Remove the contents of a directory this copy owns, through the descriptor that holds it. */
@@ -1105,6 +1157,16 @@ async function firstUnexpectedObject(
  * stops meaning its directory can take a move somewhere else; a name the
  * destination already has is left to the destination, which is the rule a
  * colliding artifact has always had.
+ *
+ * Unlike the single rename this falls back from, it is **not atomic**: the
+ * entries appear one at a time, so a reader can see some of the inherited
+ * artifacts and not the rest. Readers in this process do not — they wait on
+ * the copy ({@link whenArtifactCopiesSettle}), which is every consumer the
+ * session has: the `artifact://` handler, a subagent's output allocator and an
+ * export. A reader in another process can, and the condition for it is narrow:
+ * this path runs only when the destination already holds artifacts, which
+ * means the session is writing there itself, and a reader of a directory being
+ * written to sees partial state whoever is writing it.
  */
 async function mergeIntoDestination(
 	staging: ArtifactStaging,
@@ -1177,8 +1239,13 @@ async function moveIntoHeldDirectory(
 			if (!isEexist(error)) throw error;
 			created = false;
 		}
-		const sourceDir = await pinDirectory(source);
-		const targetDir = await pinDirectory(target);
+		// Both sides are opened through the descriptor that holds them and
+		// checked for a mount: the destination's own subdirectory is not this
+		// copy's work and can be anything by the time the merge reaches it,
+		// and the check at the destination root was answered before any of
+		// these names was touched.
+		const sourceDir = await pinVerifiedChild(from, name, "it was left in the staging tree");
+		const targetDir = await pinVerifiedChild(into, name, "nothing was published into it");
 		if (!sourceDir || !targetDir) {
 			await sourceDir?.close();
 			await targetDir?.close();

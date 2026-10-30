@@ -5,6 +5,7 @@ import {
 	ARTIFACT_STAGING_SUFFIX as STAGING_SUFFIX,
 	type ArtifactCopyOutcome,
 	copySessionArtifacts,
+	whenArtifactCopiesSettle,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -495,6 +496,42 @@ describe("copying a session's artifacts to another session", () => {
 		}
 
 		expect(fs.readFileSync(path.join(moved, "building.log"), "utf8")).toBe("still being written");
+	});
+
+	it("holds this process's readers until a merge into an occupied destination has finished", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.mkdirSync(destinationArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(destinationArtifacts, "9.read.log"), "the session's own");
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "INHERITED 0");
+		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "INHERITED 1");
+
+		// The destination already has an artifact, so the copy is merged in
+		// entry by entry rather than handed over whole — and a merge is not
+		// atomic. Every consumer in this process waits for the copy instead of
+		// reading a half-arrived inheritance.
+		const { promise: held, resolve: release } = Promise.withResolvers<void>();
+		const copying = copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				await held;
+				return true;
+			},
+		});
+		const reader = whenArtifactCopiesSettle(destinationArtifacts).then(() =>
+			fs.readdirSync(destinationArtifacts).sort(),
+		);
+		let settled: string[] | undefined;
+		void reader.then(names => {
+			settled = names;
+		});
+		await Promise.resolve();
+		expect(settled).toBeUndefined();
+
+		release();
+		await copying;
+		expect(await reader).toEqual(["0.bash.log", "1.bash.log", "9.read.log"]);
 	});
 
 	it("keeps a discarded copy unreadable even when something links into it mid-copy", async () => {
