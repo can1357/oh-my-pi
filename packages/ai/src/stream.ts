@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKey,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -55,6 +61,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
+import { admitProviderRequest, holdAfterKeyResolution, inRequestHoldScope, isRequestHeld } from "./request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -718,6 +725,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 }
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
+	// model-request: transport stream, streamSimple — Vertex AI's authenticated transport.
 	const baseFetch = options?.fetch ?? fetch;
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
@@ -825,13 +833,54 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/**
+ * `run`, once the provider-request hold admits it. Outside a hold scope `run` is called at once; in a
+ * scope, a resolver key is wrapped so a hold that begins while it resolves still stops the request,
+ * and while the scope is held the request waits (see {@link admitProviderRequest}).
+ */
+function withRequestHold<O extends { apiKey?: ApiKey; signal?: AbortSignal }>(
+	options: O | undefined,
+	run: (options: O | undefined) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	if (!inRequestHoldScope()) return run(options);
+	const held = options?.apiKey
+		? { ...options, apiKey: holdAfterKeyResolution(options.apiKey, options.signal) }
+		: options;
+	if (!isRequestHeld()) return run(held);
+	const outer = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			await admitProviderRequest(options?.signal);
+			const inner = run(held);
+			for await (const event of inner) {
+				outer.push(event);
+				if (outer.done) return;
+			}
+			if (!outer.done) outer.end(await inner.result());
+		} catch (error) {
+			outer.fail(error);
+		}
+	})();
+	return outer;
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	return withRequestHold(options, held => streamAdmitted(model, context, held));
+}
+
+function streamAdmitted<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: OptionsForApi<TApi>,
+): AssistantMessageEventStream {
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+		return withResolvedModelHeaders(model, options?.signal, resolvedModel =>
+			streamAdmitted(resolvedModel, context, options),
+		);
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
@@ -1167,6 +1216,14 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 }
 
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	return withRequestHold(options, held => streamSimpleAdmitted(model, context, held));
+}
+
+function streamSimpleAdmitted<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,

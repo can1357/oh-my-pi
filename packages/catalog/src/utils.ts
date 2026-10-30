@@ -7,6 +7,7 @@ export { isRecord } from "@oh-my-pi/pi-utils";
  * when given, otherwise global fetch wrapped for `NODE_EXTRA_CA_CERTS`.
  */
 export function discoveryFetch(override?: FetchImpl): FetchImpl {
+	// model-request: none — model discovery (listing a provider's models), not inference.
 	return override ?? wrapFetchForExtraCa(fetch);
 }
 

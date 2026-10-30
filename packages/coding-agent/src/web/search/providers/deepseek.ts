@@ -83,6 +83,7 @@ async function callDeepSeekSearch(
 	count: number,
 	params: SearchParamsWithFetch,
 ): Promise<DeepSeekSearchResponse> {
+	// model-request: turn — DeepSeek's web search, a model request made by the web_search tool call with its signal.
 	const fetchImpl = params.fetch ?? fetch;
 	const response = await fetchImpl(DEEPSEEK_SEARCH_URL, {
 		method: "POST",

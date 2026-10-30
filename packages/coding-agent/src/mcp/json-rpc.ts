@@ -178,6 +178,7 @@ export async function callMCP(
 	};
 	const signal = options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS);
 
+	// model-request: none — an MCP server's JSON-RPC endpoint, not a model request.
 	const response = await (options?.fetch ?? fetch)(url, {
 		method: "POST",
 		headers: {

@@ -19,6 +19,12 @@ export type { ExecOptions, ExecResult, HookCommandContext };
 /** Interactive capabilities available to user-invoked commands, not hooks. */
 export interface CustomCommandContext extends HookCommandContext {
 	ui: ExtensionUIContext;
+	/**
+	 * The lifetime of the session running the command: aborted when that session begins disposing.
+	 * Pass it to any model request the command makes, so none outlives the session. Optional only for
+	 * contexts built by hand outside a session.
+	 */
+	signal?: AbortSignal;
 }
 
 /**

@@ -958,6 +958,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
+							// model-request: transport stream — the chat-completions stream's requests.
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),

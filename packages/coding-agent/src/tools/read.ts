@@ -1082,7 +1082,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	constructor(
 		private readonly session: ToolSession,
-		// model-request: turn — the read tool's image questions, which `askImageQuestion` sends with the tool call's signal.
+		// model-request: caller completeImageRequest — the read tool's image completion; each use hands it to `askImageQuestion`, which sends it with the tool call's signal.
 		private readonly completeImageRequest: typeof completeSimple = completeSimple,
 	) {}
 

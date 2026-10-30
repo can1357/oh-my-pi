@@ -133,6 +133,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 		}
 
 		try {
+			// model-request: transport streamProxy — the proxy stream's request.
 			response = await (options.fetch ?? fetch)(`${options.proxyUrl}/api/stream`, {
 				method: "POST",
 				headers: {

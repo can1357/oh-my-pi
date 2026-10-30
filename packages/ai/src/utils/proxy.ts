@@ -267,6 +267,7 @@ export function installGlobalProxyFetch(): void {
 		return;
 	}
 	globalProxyFetchInstalled = true;
+	// model-request: none — wraps the global fetch in the proxy; a request through it is declared where it is made.
 	globalThis.fetch = wrapFetchWithProxyUrl(globalThis.fetch, proxyUrl) as typeof globalThis.fetch;
 	logger.debug("global proxy fetch installed", {
 		proxy: proxyLogTarget(proxyUrl),

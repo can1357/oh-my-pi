@@ -2001,6 +2001,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
+				// model-request: transport stream — the Codex stream's HTTP requests.
 				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 			),
 		);
@@ -3963,6 +3964,7 @@ class CodexWebSocketConnection {
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
+		// model-request: transport stream, prewarmOpenAICodexResponses — the Codex WebSocket stream and its prewarm.
 		const socket = new (WebSocket as unknown as new (url: string, opts: Bun.WebSocketOptions) => Bun.WebSocket)(
 			this.#url,
 			{ headers: this.#headers, proxy: this.#proxy },
@@ -4666,6 +4668,7 @@ async function openCodexSseEventStream(
 	const fetchAttempt: FetchImpl = async (input, init) => {
 		let response: Response | undefined;
 		try {
+			// model-request: transport stream — the Codex stream's HTTP requests.
 			response = await (fetchOverride ?? fetch)(input, init);
 			return response;
 		} finally {

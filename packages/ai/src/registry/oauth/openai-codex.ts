@@ -155,6 +155,7 @@ async function exchangeCodeForToken(
 	code: string,
 	verifier: string,
 	redirectUri: string,
+	// model-request: none — an OAuth token exchange, not a model request.
 	fetchImpl: FetchImpl = fetch,
 ): Promise<OAuthCredentials> {
 	const tokenResponse = await fetchImpl(TOKEN_URL, {
@@ -213,6 +214,7 @@ async function exchangeCodeForToken(
 export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAuthCredentials> {
 	ctrl.onProgress?.("Initiating device authorization…");
 
+	// model-request: none — an OAuth device login, not a model request.
 	const initResponse = await fetch(DEVICE_USERCODE_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -259,6 +261,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 			throw new AIError.LoginCancelledError("Device authorization cancelled");
 		}
 
+		// model-request: none — an OAuth device login poll, not a model request.
 		const pollResponse = await fetch(DEVICE_TOKEN_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },

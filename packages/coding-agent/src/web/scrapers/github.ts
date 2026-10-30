@@ -130,6 +130,7 @@ export async function fetchGitHubApi(
 			headers.Authorization = `Bearer ${token}`;
 		}
 
+		// model-request: none — the GitHub API, not a model request.
 		const response = await fetch(`https://api.github.com${endpoint}`, {
 			signal: requestSignal,
 			headers,

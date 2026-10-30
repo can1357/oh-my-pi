@@ -2704,7 +2704,7 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
-			// model-request: transport — the advisors' side-request transport: it is called inside requests whose owners
+			// model-request: transport streamSimple — the advisors' side-request transport: it is called inside requests whose owners
 			// are declared where they are made (advisor compaction carries the advisor runtime's signal).
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
@@ -2854,7 +2854,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
-			// model-request: transport — the handoff's transport: called from `generateHandoffFromContext`, whose
+			// model-request: transport streamSimple — the handoff's transport: called from `generateHandoffFromContext`, whose
 			// request carries the handoff's signal (declared there).
 			sideStreamFn: this.#sideStreamFn,
 			obfuscator: () => this.#obfuscator,
@@ -9330,6 +9330,8 @@ export class AgentSession implements SettingsScope {
 		const ctx = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
+			// The session runs the command, so the command lives no longer than the session.
+			signal: this.#disposeAbortController.signal,
 		} as unknown as CustomCommandContext;
 
 		try {
@@ -14069,7 +14071,7 @@ export class AgentSession implements SettingsScope {
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).
 				completeImpl: async (requestModel, requestContext, requestOptions) => {
-					// model-request: transport — the branch summary's completion, called with its request options (and signal).
+					// model-request: transport streamSimple — the branch summary's completion, called with its request options (and signal).
 					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
 					return stream.result();
 				},

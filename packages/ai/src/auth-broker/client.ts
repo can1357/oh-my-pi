@@ -128,6 +128,7 @@ export class AuthBrokerClient {
 		this.#token = opts.token;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+		// model-request: none — the credential broker, not a model request.
 		this.#fetch = opts.fetchImpl ?? fetch;
 	}
 

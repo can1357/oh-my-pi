@@ -1424,7 +1424,7 @@ export class SessionAdvisors {
 				// not the same permission as calling one of its tools.
 				mcpResources: this.#advisorMcpResources,
 			});
-			// model-request: transport — the advisor agent's stream function; its requests are the advisor's turns, owned by the
+			// model-request: transport streamSimple — the advisor agent's stream function; its requests are the advisor's turns, owned by the
 			// advisor runtime, which the session stops when it begins disposing (`stopRuntime`).
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {

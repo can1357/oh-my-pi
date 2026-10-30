@@ -25,6 +25,7 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
+	// model-request: transport stream, streamSimple — the fetch provider streams send their requests through.
 	const base =
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);

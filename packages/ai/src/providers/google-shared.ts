@@ -1063,6 +1063,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 
 			const bodyJson = JSON.stringify(paramsToWireBody(params));
+			// model-request: transport stream — the Google stream's request.
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers

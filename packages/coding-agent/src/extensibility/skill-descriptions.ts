@@ -49,15 +49,16 @@ class SkillDescriptionLengthError extends Error {}
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
  * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
- * request's chat span. `ownerSignal` returns the owning session's disposal signal once the session
- * exists: each request stops when it aborts, as well as after its own 30-second deadline.
+ * request's chat span. `ownerSignal` is the owner's lifetime, which must exist before the first
+ * request: once it aborts no request starts, and one in flight stops. Each request also has its own
+ * 30-second deadline.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
 	getTelemetry?: () => AgentTelemetry | undefined,
-	ownerSignal?: () => AbortSignal | undefined,
+	ownerSignal?: AbortSignal,
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		// The first exact provider/id match wins before every other matching phase.
@@ -94,9 +95,9 @@ export function createSkillDescriptionCompressor(
 		async compress(_name, _description, request) {
 			const model = select();
 			if (!model) throw new Error("No smol or tiny model available");
-			const owner = ownerSignal?.();
 			const timeout = AbortSignal.timeout(30_000);
-			const requestSignal = owner ? AbortSignal.any([owner, timeout]) : timeout;
+			const requestSignal = ownerSignal ? AbortSignal.any([ownerSignal, timeout]) : timeout;
+			requestSignal.throwIfAborted();
 			const apiKey = await registry.getApiKey(model, sessionId, { signal: requestSignal });
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
 			// model-request: caller createSkillDescriptionCompressor — the owner signal its caller supplies, with a deadline.

@@ -110,6 +110,7 @@ async function callKimiSearch(
 		fetch?: FetchImpl;
 	},
 ): Promise<{ response: KimiSearchResponse; requestId?: string }> {
+	// model-request: turn — Kimi's web search, a model request made by the web_search tool call with its signal.
 	const fetchImpl = params.fetch ?? fetch;
 	const response = await fetchImpl(resolveBaseUrl(), {
 		method: "POST",

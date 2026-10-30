@@ -554,6 +554,7 @@ export class ModelRegistry {
 	) {
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
 		this.#settings = options?.settings;
+		// model-request: none — model discovery (listing a provider's models), not inference.
 		this.#fetch =
 			options?.fetch ??
 			(isBunTestRuntime()

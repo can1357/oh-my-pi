@@ -55,6 +55,7 @@ export interface RenderCallbackHost {
 }
 
 async function fetchUnix<T>(socket: string, input: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+	// model-request: none — the local blob-broker daemon's socket.
 	const response = await fetch(`http://blob-broker.local${input}`, {
 		...init,
 		unix: socket,
@@ -336,6 +337,7 @@ export async function smokeTestBlobBroker(): Promise<void> {
 		if (publication.destination !== "direct" || publication.bytes !== 10) {
 			throw new Error("blob broker smoke failed: ensure returned incomplete publication metadata");
 		}
+		// model-request: none — the blob broker's smoke test.
 		const served = await fetch(publication.url);
 		if (!served.ok || (await served.text()) !== "smoke-test") {
 			throw new Error(`blob broker smoke failed: blob roundtrip returned ${served.status}`);

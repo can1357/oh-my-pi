@@ -195,6 +195,7 @@ async function fetchCursorUnary(
 	const signal = AbortSignal.timeout(timeoutMs);
 	let response: Response;
 	try {
+		// model-request: none — model discovery (listing a provider's models), not inference.
 		response = await fetch(new URL(path, baseUrl), {
 			method: "POST",
 			headers: {

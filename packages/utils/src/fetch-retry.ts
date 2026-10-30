@@ -339,6 +339,7 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		// model-request: caller fetchWithRetry(options.signal) — every attempt and wait stops on the caller's `signal`.
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit

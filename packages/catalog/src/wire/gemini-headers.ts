@@ -76,6 +76,7 @@ export function parseAntigravityManifestVersion(yamlText: string): string | null
  * The lookup is shared by concurrent callers, so it is bounded only by its own
  * timeout; `signal` ends this caller's wait without cancelling the lookup.
  */
+// model-request: none — fetches the client version Antigravity requires, not a model request.
 export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
 	if (process.env.PI_AI_ANTIGRAVITY_VERSION || discoveredAntigravityVersion) return Promise.resolve();
 	if (!antigravityVersionFetch) {

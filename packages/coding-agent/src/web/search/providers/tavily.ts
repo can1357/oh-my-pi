@@ -107,6 +107,7 @@ export function buildRequestBody(params: TavilySearchParams): Record<string, unk
 }
 
 async function callTavilySearch(apiKey: string, params: TavilySearchParams): Promise<TavilySearchResponse> {
+	// model-request: none — the Tavily search API, not a model request.
 	const response = await (params.fetch ?? fetch)(TAVILY_SEARCH_URL, {
 		method: "POST",
 		headers: {

@@ -534,6 +534,30 @@ describe("/annotate contracts", () => {
 		expect(notify).not.toHaveBeenCalled();
 	});
 
+	it("sends the summary request with the command's lifetime", async () => {
+		const sourceText = `older source ${"x".repeat(1200)}`;
+		const { ctx } = createContext({
+			branch: [
+				makeUserEntry("older-user", "older request"),
+				makeAssistantEntry("older", sourceText, "older-user"),
+				makeUserEntry("latest-user", "latest request"),
+				makeAssistantEntry("latest", "newer reply", "latest-user"),
+			],
+			customKeys: [UP, UP, ENTER],
+		});
+		const lifetime = new AbortController();
+		const commandCtx = { ...ctx, signal: lifetime.signal } as typeof ctx & { signal: AbortSignal };
+		const generateTextReviewContextSummary = vi.fn(async () => "summary");
+		const annotations: TextReviewAnnotation[] = [{ scope: "line", line: 3, quote: "older", note: "note" }];
+
+		await runAnnotateCommand(API, "session", commandCtx, {
+			showTextReviewOverlay: vi.fn(async () => ({ action: "paste" as const, annotations })),
+			generateTextReviewContextSummary,
+		});
+
+		expect(generateTextReviewContextSummary).toHaveBeenCalledWith(commandCtx, expect.any(String), lifetime.signal);
+	});
+
 	it("omits the latest whole reply source while including a latest-reply label", async () => {
 		const latestText = "The latest assistant reply body";
 		const source: TextReviewSource = {

@@ -181,6 +181,7 @@ export function streamPiNative<TApi extends Api>(
 
 		try {
 			const url = resolveStreamUrl(model as Model<Api>);
+			// model-request: transport stream — the pi-native gateway stream's requests.
 			const fetchImpl = options?.fetch ?? globalThis.fetch;
 			const headers = buildHeaders(
 				model as Model<Api>,

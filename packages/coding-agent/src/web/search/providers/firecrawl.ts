@@ -90,6 +90,7 @@ async function callFirecrawlSearch(
 	if (apiKey) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
+	// model-request: none — the Firecrawl search API, not a model request.
 	const response = await (params.fetch ?? fetch)(resolveFirecrawlUrl("/search"), {
 		method: "POST",
 		headers,

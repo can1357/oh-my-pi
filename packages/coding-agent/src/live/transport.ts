@@ -228,6 +228,9 @@ export class CodexLiveTransport {
 			Accept: "*/*",
 			"Content-Type": "application/json",
 		});
+		// model-request: outlives-disposal — the live voice call's signaling. The call belongs to the live controller, not the
+		// session: interactive and RPC shutdown stop it before they dispose the session (as they do dictation), and the
+		// transport closes on its own signal.
 		const fetchImpl = wrapFetchForProxy(fetch, LIVE_PROVIDER);
 		const response = await fetchImpl(SIGNALING_URL, {
 			method: "POST",
@@ -274,6 +277,8 @@ export class CodexLiveTransport {
 			headers: liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			proxy: getProxyForUrl(LIVE_PROVIDER, new URL(url)),
 		} satisfies Bun.WebSocketOptions;
+		// model-request: outlives-disposal — the live voice call's sideband socket, owned by the live controller like its
+		// signaling; it closes when the transport's signal aborts or the call stops.
 		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [url, options]);
 		socket.binaryType = "nodebuffer";
 		const { promise, resolve, reject } = Promise.withResolvers<void>();

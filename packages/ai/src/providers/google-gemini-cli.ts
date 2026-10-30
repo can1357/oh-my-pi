@@ -605,6 +605,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			}
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
+			// model-request: none — fetches the client version Antigravity requires, not a model request.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
@@ -1021,6 +1022,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
+							// model-request: transport stream — the Gemini CLI stream's request.
 							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,

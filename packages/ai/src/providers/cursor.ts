@@ -876,6 +876,7 @@ function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): CursorRunTransport {
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
+	// model-request: transport stream — the Cursor agent stream's requests.
 	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];

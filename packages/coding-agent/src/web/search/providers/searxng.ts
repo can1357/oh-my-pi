@@ -175,6 +175,7 @@ async function fetchEngineNameMap(
 	timeoutMs?: number,
 ): Promise<Map<string, string> | null> {
 	try {
+		// model-request: none — a SearXNG instance's configuration, not a model request.
 		const response = await (fetchImpl ?? fetch)(`${base}/config`, {
 			headers: buildHeaders(auth),
 			signal: withHardTimeout(signal, timeoutMs),
@@ -370,6 +371,7 @@ async function callSearXNGSearch(
 ): Promise<SearXNGResponse> {
 	const { url, headers } = buildRequest(endpoint, params, auth);
 
+	// model-request: none — a SearXNG search, not a model request.
 	const response = await (params.fetch ?? fetch)(url, {
 		headers,
 		signal: withHardTimeout(params.signal, params.timeoutMs),

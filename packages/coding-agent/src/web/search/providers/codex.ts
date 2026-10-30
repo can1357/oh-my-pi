@@ -387,6 +387,7 @@ async function callCodexSearch(
 		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
 	};
 
+	// model-request: turn — Codex's web search, a model request made by the web_search tool call with its signal.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(options.transport.url, {
 		method: "POST",

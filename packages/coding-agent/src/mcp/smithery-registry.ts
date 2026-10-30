@@ -318,6 +318,7 @@ async function fetchServerDetails(
 	if (options?.apiKey) {
 		headers.set("Authorization", `Bearer ${options.apiKey}`);
 	}
+	// model-request: none — the Smithery MCP registry, not a model request.
 	const response = await fetch(`${SMITHERY_REGISTRY_BASE_URL}/servers/${path}`, {
 		headers,
 		signal: withTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal),
@@ -421,6 +422,7 @@ export async function searchSmitheryRegistry(
 		if (page > 1) url.searchParams.set("page", String(page));
 		let response: Response;
 		try {
+			// model-request: none — the Smithery MCP registry, not a model request.
 			response = await fetch(url.toString(), {
 				headers,
 				signal: withTimeoutSignal(SMITHERY_REGISTRY_TIMEOUT_MS, options?.signal),

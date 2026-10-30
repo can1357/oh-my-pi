@@ -45,6 +45,7 @@ type RequestBody = string | Uint8Array;
 const directAgent = new https.Agent({ keepAlive: true });
 
 /** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
+// model-request: transport stream — the fallback the Anthropic stream's fetch uses.
 const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
 
 function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {

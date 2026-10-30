@@ -296,7 +296,9 @@ export const mnemopiBackend: MemoryBackend = {
 			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
 		}
 		const limit = clampLimit(options?.limit);
-		const results = (await primary.recallResultsScoped(query)).slice(0, limit);
+		// model-request: extension — memory search for an extension through the memory-backend runtime; it carries the
+		// `options.signal` the extension passes.
+		const results = (await primary.recallResultsScoped(query, options?.signal)).slice(0, limit);
 		if (options?.signal?.aborted) {
 			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
 		}

@@ -139,6 +139,7 @@ export async function generateAntigravityImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	for (const image of request.inputImages ?? []) validateImageInput(image);
+	// model-request: transport generateImage — the image request.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await withAuth(
 		options.apiKey,

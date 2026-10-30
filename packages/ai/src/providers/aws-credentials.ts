@@ -104,6 +104,7 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	const existing = inflight.get(cacheKey);
 	if (existing) return raceWithSignal(existing, opts.signal);
 
+	// model-request: none — resolves AWS credentials (instance metadata, STS), not a model request.
 	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
 	const promise = (async () => {
 		try {
@@ -129,6 +130,7 @@ async function resolveFresh(
 	region: string,
 	loadSharedConfig: boolean,
 	signal?: AbortSignal,
+	// model-request: none — resolves AWS credentials (web identity, SSO, STS, instance metadata), not a model request.
 	fetchImpl: FetchImpl = globalThis.fetch as FetchImpl,
 ): Promise<ResolvedCredentials> {
 	// 1. Environment first — matches the AWS SDK chain order.

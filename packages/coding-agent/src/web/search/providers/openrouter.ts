@@ -178,6 +178,7 @@ export async function searchOpenRouterGrounded(params: SearchParams): Promise<Se
 		keyOrResolver,
 		async apiKey => {
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			// model-request: turn — OpenRouter's web search, a model request made by the web_search tool call with its signal.
 			const httpResponse = await (params.fetch ?? fetch)(
 				`${params.model.baseUrl.replace(/\/+$/, "")}/chat/completions`,
 				{

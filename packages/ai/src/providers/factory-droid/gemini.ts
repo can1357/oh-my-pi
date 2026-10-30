@@ -351,6 +351,7 @@ export function streamFactoryDroidGemini(
 				firstEventTimer.unref?.();
 			}
 
+			// model-request: transport stream — the Factory Droid Gemini stream's request.
 			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
 				method: "POST",
 				headers: {

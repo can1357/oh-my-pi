@@ -200,6 +200,7 @@ export async function generateHostedImage(
 		store: false,
 		...(stream ? { instructions: IMAGE_SYSTEM_INSTRUCTION, stream: true } : {}),
 	};
+	// model-request: transport generateImage — the image request.
 	const fetchImpl = options.fetch ?? fetch;
 	return withAuth(
 		options.apiKey,

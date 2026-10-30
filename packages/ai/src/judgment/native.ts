@@ -343,6 +343,7 @@ export class NativeJudge implements Judge {
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
+		// model-request: transport createNativeJudge, NativeJudge — the native judge's endpoint.
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		if (options.maxQuestions !== undefined && !(Number.isInteger(options.maxQuestions) && options.maxQuestions > 0)) {

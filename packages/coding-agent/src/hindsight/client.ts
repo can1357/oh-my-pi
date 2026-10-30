@@ -576,6 +576,7 @@ export class HindsightApi {
 
 		let response: Response;
 		try {
+			// model-request: transport HindsightApi — the Hindsight client's request; each call of one of its methods is a site.
 			response = await fetch(url, init);
 		} catch (err) {
 			const message = isTimeoutError(err)

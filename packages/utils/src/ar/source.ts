@@ -125,6 +125,7 @@ const HTTP_FALLBACK_CAP = 256 * 1024 * 1024;
  * the many small header reads format parsers issue.
  */
 export async function httpByteSource(url: string | URL, options: HttpByteSourceOptions = {}): Promise<ByteSource> {
+	// model-request: none — reads an archive over HTTP ranges.
 	const doFetch = options.fetch ?? fetch;
 	const headers = { ...options.headers, range: "bytes=0-0" };
 	const probe = await doFetch(url, { headers });

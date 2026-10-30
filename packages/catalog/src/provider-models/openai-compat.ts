@@ -4379,6 +4379,7 @@ function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number 
  */
 export async function fetchLmStudioNativeModelMetadata(
 	baseUrl: string,
+	// model-request: none — model discovery (LM Studio's model metadata), not inference.
 	fetchImpl: FetchImpl = fetch,
 	options?: LmStudioNativeModelMetadataOptions,
 ): Promise<Map<string, LmStudioNativeModelMetadata> | null> {

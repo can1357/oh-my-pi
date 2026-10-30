@@ -108,6 +108,7 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 			provider: "perplexity",
 		});
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+	// model-request: none — a Perplexity login, not a model request.
 	const fetchImpl = ctrl.fetch ?? fetch;
 	const cookies = new CookieMap();
 	const request = async (url: string, init: RequestInit = {}): Promise<Response> => {
@@ -295,6 +296,7 @@ async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials>
 	}
 
 	ctrl.onProgress?.("Validating Perplexity session...");
+	// model-request: none — validates a Perplexity session at login, not a model request.
 	const response = await (ctrl.fetch ?? fetch)(`${PERPLEXITY_BASE_URL}/api/auth/session`, {
 		headers: {
 			Cookie: `${SESSION_COOKIE_NAME}=${token}`,

@@ -147,6 +147,7 @@ async function authenticatedFetch(
 	options: VideoOptions,
 	init?: Omit<RequestInit, "signal">,
 ): Promise<Response> {
+	// model-request: transport submitVideo, pollVideo, downloadVideo — the video job requests.
 	const fetchImpl = options.fetch ?? fetch;
 	return withAuth(
 		options.apiKey,

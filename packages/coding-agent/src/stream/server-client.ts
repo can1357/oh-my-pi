@@ -101,6 +101,7 @@ export class StreamServerClient {
 		}
 		let socket: WebSocket;
 		try {
+			// model-request: none — the stream server's socket, not a model request.
 			socket = new WebSocket(this.#options.url, { headers: { Authorization: `Bearer ${token}` } });
 		} catch {
 			this.#scheduleReconnect();

@@ -94,6 +94,7 @@ export async function generateFactoryDroidImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	// model-request: transport generateImage — the image request.
 	const fetchImpl = options.fetch ?? fetch;
 	const inputImages = request.inputImages ?? [];
 	const auth = trackIdentities(options.apiKey);

@@ -20,6 +20,7 @@ export async function postSpeechRequest(
 ): Promise<SpeechResult> {
 	const timeoutSignal = AbortSignal.timeout(SPEECH_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	// model-request: transport synthesizeSpeech — the speech request.
 	const fetchImpl = options.fetch ?? fetch;
 	const label = `${model.provider}/${model.id}`;
 	const audio = await withAuth(

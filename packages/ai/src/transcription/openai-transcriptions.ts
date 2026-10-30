@@ -96,6 +96,7 @@ export async function transcribeOpenAI(
 		form.append("timestamp_granularities[]", granularity);
 	}
 
+	// model-request: transport transcribeAudio — the transcription request.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await withAuth(
 		options.apiKey,

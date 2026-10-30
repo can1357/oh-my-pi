@@ -1041,6 +1041,7 @@ async function runGitLabDuoWorkflow(
 	const apiKey = options.apiKey;
 	if (!apiKey) throw new AIError.MissingApiKeyError("gitlab-duo-agent");
 	const baseUrl = normalizeGitLabBaseUrl(model.baseUrl || DEFAULT_GITLAB_BASE_URL);
+	// model-request: transport stream — the GitLab Duo workflow stream's requests.
 	const fetchImpl = options.fetch ?? fetch;
 	const providerSessionState = getGitLabDuoWorkflowProviderSessionState(
 		options.providerSessionState,
@@ -1903,6 +1904,7 @@ function defaultGitLabDuoWorkflowWebSocketFactory(
 	url: string,
 	options: GitLabDuoWorkflowWebSocketFactoryOptions,
 ): GitLabDuoWorkflowWebSocketLike {
+	// model-request: transport stream — the GitLab Duo workflow stream's socket.
 	return new (WebSocket as unknown as new (
 		url: string,
 		options: Bun.WebSocketOptions,

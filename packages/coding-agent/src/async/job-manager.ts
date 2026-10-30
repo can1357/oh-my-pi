@@ -1,4 +1,4 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { type ImageContent, runInRequestHoldScope } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -53,8 +53,9 @@ export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdow
  * process shutdown (the {@link ASYNC_JOB_MANAGER_SHUTDOWN_REASON} it is cancelled with), detached by
  * a vibe suspension, which marks its workers suspended before it cancels them. Cancelled when the
  * owner merely began disposing, the job would end before that choice, and a suspended vibe worker
- * would be tombstoned. So the subagent keeps running, and reaching the provider, until that teardown
- * cancels it.
+ * would be tombstoned. So the job stays alive until that teardown cancels it, but idle: from the
+ * moment its owner begins disposing, every provider request it makes is held (see
+ * {@link AsyncJob.requestHold}), so it reaches no provider while the owner decides.
  */
 export const SUBAGENT_TEARDOWN_DECIDES =
 	"runs a lifecycle-tracked subagent, which its owner's dispose() and the agent lifecycle end";
@@ -164,6 +165,13 @@ export interface AsyncJob {
 	retainedArtifactsCleanup?: () => Promise<void>;
 	/** Why the job keeps running once its owner begins disposing; see {@link AsyncJobRegisterOptions.survivesBeginDispose}. */
 	survivesBeginDispose?: string;
+	/**
+	 * Aborted when the job's owner begins disposing while the job runs in the background (a job that
+	 * survives that is held, the others are cancelled). From then on every provider request the job
+	 * makes waits instead of being sent (`runInRequestHoldScope`), until the job is cancelled; work
+	 * about the job done elsewhere (its widget) stops on it too. Set by {@link AsyncJobManager.register}.
+	 */
+	requestHold?: AbortSignal;
 }
 
 /**
@@ -284,7 +292,8 @@ export interface AsyncJobRegisterOptions {
 	 * jobs, a background job stops then (see {@link AsyncJobManager.bindOwnerDisposal}): no turn
 	 * awaits it any more, so whatever model work it does would otherwise reach the provider from a
 	 * closing session. Set it only for work whose end the owner's own teardown decides, and say why
-	 * (e.g. {@link SUBAGENT_TEARDOWN_DECIDES}).
+	 * (e.g. {@link SUBAGENT_TEARDOWN_DECIDES}). Such a job is kept alive but held: none of its
+	 * provider requests is sent until the teardown cancels it.
 	 */
 	survivesBeginDispose?: string;
 }
@@ -329,6 +338,8 @@ export class AsyncJobManager {
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	/** Each owner's disposal signal, bound by its session; see {@link bindOwnerDisposal}. */
 	readonly #ownerDisposals = new Map<string, AbortSignal>();
+	/** Each running job's provider-request hold; see {@link AsyncJob.requestHold}. */
+	readonly #requestHolds = new Map<string, AbortController>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
 	readonly #retentionMs: number;
@@ -434,6 +445,7 @@ export class AsyncJobManager {
 		const id = this.#claimJobId(options?.id);
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
+		const requestHold = new AbortController();
 		const startTime = Date.now();
 
 		const job: AsyncJob = {
@@ -451,13 +463,13 @@ export class AsyncJobManager {
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 			...(options?.survivesBeginDispose === undefined ? {} : { survivesBeginDispose: options.survivesBeginDispose }),
+			requestHold: requestHold.signal,
 		};
+		this.#requestHolds.set(id, requestHold);
 		// An owner that has begun disposing starts no background work: the job runs already
-		// cancelled, so its body sees an aborted signal from its first line.
-		if (this.#detachedFromDisposingOwner(job)) {
-			job.status = "cancelled";
-			abortController.abort();
-		}
+		// cancelled, so its body sees an aborted signal from its first line, or, if it survives the
+		// owner's disposal, already held.
+		this.#stopForDisposingOwner(job);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -474,14 +486,18 @@ export class AsyncJobManager {
 		};
 		job.promise = (async () => {
 			try {
-				const outcome = await run({
-					jobId: id,
-					signal: abortController.signal,
-					reportProgress,
-					markRunning: () => {
-						job.queued = false;
-					},
-				});
+				// Everything the body does runs in the job's hold scope: once the hold engages, its provider
+				// requests (a subagent's turns, nested subagents' included) wait until the job is cancelled.
+				const outcome = await runInRequestHoldScope(requestHold.signal, abortController.signal, () =>
+					run({
+						jobId: id,
+						signal: abortController.signal,
+						reportProgress,
+						markRunning: () => {
+							job.queued = false;
+						},
+					}),
+				);
 				job.endTime = Date.now();
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
@@ -508,6 +524,7 @@ export class AsyncJobManager {
 					this.#enqueueDelivery(id, errorText);
 				}
 			}
+			this.#requestHolds.delete(id);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
@@ -617,8 +634,8 @@ export class AsyncJobManager {
 		if (!job) return false;
 		if (!job.foreground) return true;
 		job.foreground = undefined;
-		// No call awaits it any more; for an owner that has begun disposing, it stops here.
-		if (this.#detachedFromDisposingOwner(job)) this.cancel(jobId);
+		// No call awaits it any more; for an owner that has begun disposing, it stops (or is held) here.
+		this.#stopForDisposingOwner(job);
 		this.#suppressedDeliveries.delete(jobId);
 		if (job.status === "completed" || job.status === "failed") {
 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
@@ -733,8 +750,9 @@ export class AsyncJobManager {
 	 * Tie `ownerId`'s background jobs to `signal`, the disposal of the session that owns them. When
 	 * it aborts, every background job of the owner is cancelled, and so is one the owner backgrounds
 	 * or registers afterwards, except those registered with
-	 * {@link AsyncJobRegisterOptions.survivesBeginDispose}. A foreground-backed job belongs to the
-	 * call (and so the turn) awaiting it, and stops only if it is backgrounded.
+	 * {@link AsyncJobRegisterOptions.survivesBeginDispose}: those stay alive but held, so none of their
+	 * provider requests is sent ({@link AsyncJob.requestHold}). A foreground-backed job belongs to the
+	 * call (and so the turn) awaiting it, and is stopped only if it is backgrounded.
 	 *
 	 * Last binding wins for an owner id; the returned unbind clears it only while it is still
 	 * `signal`'s, so a revived session's binding survives its predecessor's late cleanup.
@@ -744,7 +762,7 @@ export class AsyncJobManager {
 		const onAbort = (): void => {
 			if (this.#ownerDisposals.get(ownerId) !== signal) return;
 			for (const job of this.#jobs.values()) {
-				if (job.ownerId === ownerId && this.#detachedFromDisposingOwner(job)) this.cancel(job.id);
+				if (job.ownerId === ownerId) this.#stopForDisposingOwner(job);
 			}
 		};
 		if (signal.aborted) onAbort();
@@ -755,15 +773,23 @@ export class AsyncJobManager {
 		};
 	}
 
-	/** Whether `job` is running background work of an owner whose session has begun disposing. */
-	#detachedFromDisposingOwner(job: AsyncJob): boolean {
-		return (
-			job.status === "running" &&
-			!job.foreground &&
-			job.survivesBeginDispose === undefined &&
-			job.ownerId !== undefined &&
-			this.#ownerDisposals.get(job.ownerId)?.aborted === true
-		);
+	/**
+	 * Stop `job` if it runs in the background for an owner whose session has begun disposing: hold it
+	 * when it survives that disposal, cancel it otherwise.
+	 */
+	#stopForDisposingOwner(job: AsyncJob): void {
+		if (
+			job.status !== "running" ||
+			job.foreground ||
+			job.ownerId === undefined ||
+			this.#ownerDisposals.get(job.ownerId)?.aborted !== true
+		) {
+			return;
+		}
+		this.#requestHolds.get(job.id)?.abort();
+		if (job.survivesBeginDispose !== undefined) return;
+		job.status = "cancelled";
+		job.abortController.abort();
 	}
 
 	/**

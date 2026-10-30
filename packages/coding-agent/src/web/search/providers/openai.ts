@@ -234,6 +234,7 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 			headers.set("Authorization", `Bearer ${apiKey}`);
 			headers.set("Content-Type", "application/json");
 			applySessionHeader(headers, params.model.compat, params.sessionId);
+			// model-request: turn — OpenAI's web search, a model request made by the web_search tool call with its signal.
 			const response = await (params.fetch ?? fetch)(responsesEndpoint(params.model.baseUrl), {
 				method: "POST",
 				headers,

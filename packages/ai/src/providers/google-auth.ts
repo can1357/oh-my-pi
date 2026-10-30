@@ -293,6 +293,7 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 	// override var; `GOOGLE_CLOUD_ACCESS_TOKEN` is the omp-facing alias.
 	const explicitToken = Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN || Bun.env.CLOUDSDK_AUTH_ACCESS_TOKEN;
 	if (explicitToken) return explicitToken;
+	// model-request: none — fetches a Google access token, not a model request.
 	const fetchImpl = options?.fetch ?? globalThis.fetch.bind(globalThis);
 	const skew = getRefreshSkewMs();
 	const now = Date.now();

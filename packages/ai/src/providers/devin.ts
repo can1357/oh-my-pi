@@ -238,6 +238,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		};
 
 		try {
+			// model-request: transport stream — the Devin stream's requests.
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);

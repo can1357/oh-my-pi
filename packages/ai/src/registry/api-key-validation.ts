@@ -88,6 +88,7 @@ async function createApiKeyValidationError(
 export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleValidationOptions): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	// model-request: none — validates a key at login, not a model request a session makes.
 	const fetchImpl = options.fetch ?? fetch;
 
 	const response = await fetchImpl(`${options.baseUrl}/chat/completions`, {
@@ -124,6 +125,7 @@ export async function validateAnthropicCompatibleApiKey(options: AnthropicCompat
 	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 	const baseUrl = normalizeAnthropicCompatibleBaseUrl(options.baseUrl);
+	// model-request: none — validates a key at login, not a model request a session makes.
 	const fetchImpl = options.fetch ?? fetch;
 
 	const response = await fetchImpl(`${baseUrl}/v1/messages`, {
@@ -157,6 +159,7 @@ export async function validateAnthropicCompatibleApiKey(options: AnthropicCompat
 export async function validateApiKeyAgainstModelsEndpoint(options: ModelListValidationOptions): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	// model-request: none — validates a key at login, not a model request a session makes.
 	const fetchImpl = options.fetch ?? fetch;
 
 	const response = await fetchImpl(options.modelsUrl, {

@@ -64,6 +64,7 @@ async function fetchJson<T>(endpoint: string, options?: RequestInit, previous?: 
 		headers.set("If-None-Match", etag);
 		init = { ...options, headers };
 	}
+	// model-request: none — the stats dashboard's own API, in the browser.
 	const res = await fetch(endpoint, init);
 	if (res.status === 304 && etag) return previous as T;
 	if (!res.ok) {

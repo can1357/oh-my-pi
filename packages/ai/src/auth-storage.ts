@@ -210,6 +210,7 @@ export class AuthStorage {
 			affinity,
 			strategies,
 			usageProviders,
+			// model-request: none — the provider usage endpoint (account limits), not a model request.
 			fetch: options.usageFetch ?? fetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
 			logger:

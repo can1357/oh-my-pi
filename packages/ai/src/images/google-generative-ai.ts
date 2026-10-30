@@ -62,6 +62,7 @@ export async function generateGoogleImage(
 		request.aspectRatio || request.imageSize
 			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
 			: undefined;
+	// model-request: transport generateImage — the image request.
 	const fetchImpl = options.fetch ?? fetch;
 	const body = {
 		contents: geminiImageContents(request),

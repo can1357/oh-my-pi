@@ -362,7 +362,7 @@ export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boo
 
 /** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
-	// model-request: transport — the judge factory itself; every call of `resolveJudge` is a creation site with its own owner.
+	// model-request: transport resolveJudge — the judge factory itself; every call of `resolveJudge` is a creation site with its own owner.
 	return new ChainJudge(deps);
 }
 
@@ -570,13 +570,13 @@ export class ChainJudge implements Judge {
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
-			// model-request: transport — a candidate of this chain: each judgment through it carries the judge's owner signal (`JudgeDeps.signal`) joined to the call's.
+			// model-request: transport ChainJudge — a candidate of this chain: each judgment through it carries the judge's owner signal (`JudgeDeps.signal`) joined to the call's.
 			const judge = createNativeJudge(model, { apiKey, headers });
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 		const metadata = this.#deps.metadataResolver?.(model.provider);
-		// model-request: transport — a candidate of this chain: each judgment through it carries the judge's owner signal (`JudgeDeps.signal`) joined to the call's.
+		// model-request: transport ChainJudge — a candidate of this chain: each judgment through it carries the judge's owner signal (`JudgeDeps.signal`) joined to the call's.
 		const backend = chatTextBackend(model, {
 			apiKey,
 			sessionId: this.#deps.sessionId,

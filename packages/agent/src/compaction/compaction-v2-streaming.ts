@@ -277,6 +277,7 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
+	// model-request: transport requestCompactionV2Streaming — the compaction request.
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({

@@ -279,10 +279,12 @@ export class BeamMemory implements BeamMemoryState {
 	}
 
 	recall(query: string, topK = 40, options: RecallOptions = {}): Promise<RecallResult[]> {
+		// model-request: caller recall(options.signal) — the reader's `signal` reaches the query embedding.
 		return recall(this, query, topK, options);
 	}
 
 	recallEnhanced(query: string, topK = 40, options: RecallEnhancedOptions = {}): Promise<RecallResult[]> {
+		// model-request: caller recallEnhanced(options.signal) — the reader's `signal` reaches the query embedding.
 		return recallEnhanced(this, query, topK, options);
 	}
 

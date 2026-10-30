@@ -23,6 +23,7 @@ export async function generateOpenAIImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	// model-request: transport generateImage — the image request.
 	const fetchImpl = options.fetch ?? fetch;
 	const size = resolveOpenAIImageSize(request.aspectRatio, request.imageSize);
 	const count = request.count ?? 1;

@@ -338,6 +338,7 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
 	// auto-embed without being forced into it.
 	if ("queryEmbedding" in options) beamOptions.queryEmbedding = options.queryEmbedding;
+	if (options.signal) beamOptions.signal = options.signal;
 	return beamOptions;
 }
 
@@ -477,6 +478,7 @@ export class Mnemopi {
 	}
 
 	recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
+		// model-request: caller recall(options.signal) — the reader's `signal` reaches the query embedding.
 		return this.#withRuntimeOptions("mnemopi.recall", () => this.beam.recall(query, topK, toRecallOptions(options)));
 	}
 
@@ -485,6 +487,7 @@ export class Mnemopi {
 		topK = 5,
 		options: RecallFacadeOptions & RecallEnhancedOptions = {},
 	): Promise<RecallResult[]> {
+		// model-request: caller recallEnhanced(options.signal) — the reader's `signal` reaches the query embedding.
 		return this.#withRuntimeOptions("mnemopi.recall", () =>
 			this.beam.recallEnhanced(query, topK, {
 				...toRecallOptions(options),
@@ -582,10 +585,14 @@ export class Mnemopi {
 	}
 
 	search(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
+		// model-request: no-session — `search`, an alias of `recall` for library users; the coding agent calls
+		// `recallEnhanced` (with its signal) and never this alias.
 		return this.recall(query, topK, options);
 	}
 
 	query(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
+		// model-request: no-session — `query`, an alias of `recall` for library users; the coding agent calls
+		// `recallEnhanced` (with its signal) and never this alias.
 		return this.recall(query, topK, options);
 	}
 
@@ -616,6 +623,7 @@ export function remember(content: string | RememberInput, options: ModuleRemembe
 }
 
 export function recall(query: string, topK = 5, options: ModuleRecallOptions = {}): Promise<RecallResult[]> {
+	// model-request: caller recall(options.signal) — the module-level recall: the reader's `signal` reaches the embedding.
 	return defaultFor(options.bank).recall(query, topK, options);
 }
 
@@ -624,6 +632,7 @@ export function recallEnhanced(
 	topK = 5,
 	options: ModuleRecallEnhancedOptions = {},
 ): Promise<RecallResult[]> {
+	// model-request: caller recallEnhanced(options.signal) — the module-level recall: the reader's `signal` reaches the embedding.
 	return defaultFor(options.bank).recallEnhanced(query, topK, options);
 }
 
@@ -688,10 +697,12 @@ export function storeMemory(memory: string | RememberInput, options: ModuleRemem
 }
 
 export function search(query: string, topK = 5, options: ModuleRecallOptions = {}): Promise<RecallResult[]> {
+	// model-request: no-session — the module-level `search` alias for library users; the coding agent never calls it.
 	return recall(query, topK, options);
 }
 
 export function query(query: string, topK = 5, options: ModuleRecallOptions = {}): Promise<RecallResult[]> {
+	// model-request: no-session — the module-level `query` alias for library users; the coding agent never calls it.
 	return recall(query, topK, options);
 }
 

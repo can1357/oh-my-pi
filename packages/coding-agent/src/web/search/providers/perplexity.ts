@@ -742,9 +742,11 @@ async function callPerplexityAsk(
 	// never retried, so a real 401/429 is never papered over by a second attempt.
 	let response: Response;
 	try {
+		// model-request: turn — Perplexity's answer, a model request made by the web_search tool call with its signal.
 		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
 	} catch (error) {
 		if (params.signal?.aborted) throw error;
+		// model-request: turn — Perplexity's answer, retried once, with the web_search tool call's signal.
 		response = await (params.fetch ?? fetch)(PERPLEXITY_OAUTH_ASK_URL, requestInit);
 	}
 

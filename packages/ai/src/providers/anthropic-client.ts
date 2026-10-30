@@ -256,6 +256,7 @@ export class AnthropicHttpClient {
 		options?: AnthropicRequestOptions,
 	): Promise<Response> {
 		const opts = this.#options;
+		// model-request: transport stream — the Anthropic client's requests.
 		const fetchFn: FetchImpl = opts.fetch ?? fetch;
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;

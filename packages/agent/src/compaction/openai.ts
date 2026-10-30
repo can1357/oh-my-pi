@@ -875,6 +875,7 @@ export async function requestOpenAiRemoteCompaction(
 		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
+	// model-request: transport requestOpenAiRemoteCompaction — the remote compaction request.
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
@@ -1091,6 +1092,7 @@ export async function requestRemoteCompaction(
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 
+	// model-request: transport requestRemoteCompaction — the remote compaction request.
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,

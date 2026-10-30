@@ -200,6 +200,7 @@ export function wrapFetchForCopilotFallback(
 	 */
 	cacheSnapshot?: string | null,
 ): FetchImpl {
+	// model-request: transport stream — Copilot stream requests with their identity headers.
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
 	const cliIntegrationId = COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"];

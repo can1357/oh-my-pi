@@ -196,6 +196,7 @@ export const cmdRecall: CommandHandler = async (args, context) => {
 	const topK = args[1] === undefined ? 5 : parseIntArg(args[1], "top_k");
 	const { memory, owned } = getMemory(context);
 	try {
+		// model-request: no-session — the `mnemopi` command line's recall; no session exists.
 		const results = await memory.recall(query, topK);
 		out(context, `\nResults for: ${query}\n`);
 		for (const result of results) {

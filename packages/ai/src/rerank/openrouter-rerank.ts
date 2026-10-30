@@ -93,6 +93,7 @@ export async function rerankOpenRouter(
 		...(request.topN !== undefined && { top_n: request.topN }),
 		...(request.returnDocuments !== undefined && { return_documents: request.returnDocuments }),
 	});
+	// model-request: transport rerank — the rerank request.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await withAuth(
 		options.apiKey,

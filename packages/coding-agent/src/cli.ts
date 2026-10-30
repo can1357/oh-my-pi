@@ -160,6 +160,7 @@ async function runSmokeTest(): Promise<void> {
 
 	const statsServer = await startServer(0);
 	try {
+		// model-request: none — a smoke check of the local stats dashboard.
 		const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
 		if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
 		const html = await response.text();

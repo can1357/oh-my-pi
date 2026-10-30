@@ -4007,6 +4007,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		// The lifetime of every skill-description compression this session starts. The first ones run
+		// while the system prompt is first built, before the session exists, so the lifetime is made
+		// here: the session aborts it when it begins disposing, and a failed startup aborts it too.
+		const skillCompressionAbort = new AbortController();
+		startupCleanup.defer(() => skillCompressionAbort.abort());
 		// The process agent dir uses the process-wide store; a session rooted in
 		// another agent dir keeps its own, closed when the session is disposed.
 		const ownedSkillDescriptionStore =
@@ -4019,8 +4024,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// its own telemetry handle, so its usage stays out of the run summary.
 			// The first requests can start before `agent` is constructed; they use
 			// the telemetry config and session id the agent is constructed with.
-			// model-request: session — the session's disposal signal once it exists (none exists while the first
-			// compressions run during setup), joined to each request's 30-second deadline.
+			// model-request: session — `skillCompressionAbort`, which exists before the first compression and which
+			// the session aborts in `beginDispose()` (a failed startup aborts it too), joined to a 30-second deadline.
 			compress: createSkillDescriptionCompressor(
 				modelRegistry,
 				settings,
@@ -4029,7 +4034,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					agent
 						? resolveTelemetry(agent.telemetry, agent.sessionId)
 						: resolveTelemetry(options.telemetry, providerSessionId),
-				() => session?.disposeSignal,
+				skillCompressionAbort.signal,
 			),
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
@@ -5046,6 +5051,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// after a reset (#13370). The tools snapshot into THIS store, not the
 		// AgentSession's own lazy field.
 		session.registerSessionChangeCallback(() => toolSession.editStore?.clear());
+		session.addDisposer(() => skillCompressionAbort.abort());
 		if (ownedSkillDescriptionStore) {
 			// Let in-flight compressions land before releasing the file.
 			session.addDisposer(

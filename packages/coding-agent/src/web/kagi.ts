@@ -288,6 +288,7 @@ export async function searchWithKagi(
 	options: KagiSearchOptions = {},
 	authStorage: AuthStorage,
 ): Promise<KagiSearchResult> {
+	// model-request: none — the Kagi search API, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	const body = JSON.stringify(buildRequestBody(query, options));
 

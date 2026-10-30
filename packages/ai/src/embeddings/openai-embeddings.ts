@@ -102,6 +102,7 @@ export async function embedOpenAI(
 	request: EmbeddingRequest,
 	options: EmbeddingOptions,
 ): Promise<EmbeddingResult> {
+	// model-request: transport embed — the embedding request.
 	const fetchImpl = options.fetch ?? fetch;
 	const body = {
 		model: model.id,

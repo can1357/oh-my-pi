@@ -192,6 +192,8 @@ export class CodexSecurityCloudClient {
 		this.#authStorage = options.authStorage;
 		this.#account = options.account;
 		this.#baseUrl = (options.baseUrl ?? DEFAULT_CLOUD_BASE_URL).replace(/\/$/, "");
+		// model-request: turn — Codex Security's cloud scans; every method passes its caller's signal (the security_scan
+		// tool call's, or the /security command's).
 		this.#fetch = options.fetch ?? fetch;
 	}
 

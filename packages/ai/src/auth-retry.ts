@@ -4,6 +4,7 @@ import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { admitProviderRequest } from "./request-hold";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -321,10 +322,11 @@ async function runOAuthAttempt<T>(
  * - A resolver that throws on the initial resolve surfaces its cause (a
  *   broker/OAuth/network failure) instead of reading as a missing key; only a
  *   resolver that resolves without a credential is a "No API key" case.
- *
  * Used by non-streaming consumers (image generation, web search, completion
  * helpers). The streaming driver in `stream.ts` implements the same policy with
- * its replay-safe buffering machinery.
+ * its replay-safe buffering machinery. Each attempt first passes the provider
+ * request hold ({@link admitProviderRequest}): inside a held scope it waits, then
+ * is refused, instead of being sent.
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
@@ -336,6 +338,7 @@ export async function withAuth<T>(
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
+		await admitProviderRequest(opts?.signal);
 		return attempt(key);
 	}
 
@@ -359,6 +362,7 @@ export async function withAuth<T>(
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
 	try {
+		await admitProviderRequest(signal);
 		return await attempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
@@ -369,6 +373,7 @@ export async function withAuth<T>(
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
 		try {
+			await admitProviderRequest(signal);
 			return await attempt(nextKey);
 		} catch (error) {
 			if (!isAuthError(error)) throw error;

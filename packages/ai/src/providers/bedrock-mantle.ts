@@ -24,6 +24,7 @@ async function requestBody(input: string | URL | Request, init?: RequestInit): P
 }
 
 function createSignedFetch(options: BedrockMantleOptions, region: string): FetchImpl {
+	// model-request: transport stream — Bedrock Mantle's signed requests.
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
 	const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -74,6 +75,7 @@ export function createBedrockMantleAuthenticatedFetch(options: BedrockMantleOpti
 	const bearerToken = resolveBearerToken(options);
 	if (!bearerToken) return createSignedFetch(options, region);
 
+	// model-request: transport stream — Bedrock Mantle's bearer-authenticated requests.
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
 	const authenticatedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
