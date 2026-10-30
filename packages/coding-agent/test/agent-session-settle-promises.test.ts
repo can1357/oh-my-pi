@@ -4,6 +4,7 @@ import { setImmediate } from "node:timers/promises";
 import { Agent, type AgentEvent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { type OAuthAccountPools, SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -226,6 +227,8 @@ describe("AgentSession settles what it promised", () => {
 		onBeforeAgentStart?: (event: { prompt: string }) => Promise<void>,
 		/** Registers anything else on the same extension, e.g. two handlers for one event. */
 		register?: ExtensionFactory,
+		/** Installed so a test can watch when disposal lifts its credential restrictions. */
+		accountPoolScope?: SessionAccountPoolScope,
 	): Promise<{
 		settles: Array<boolean | undefined>;
 		modelRegistry: ModelRegistry;
@@ -279,6 +282,7 @@ describe("AgentSession settles what it promised", () => {
 			modelRegistry,
 			toolRegistry: new Map(),
 			extensionRunner,
+			accountPoolScope,
 		});
 		const settles: Array<boolean | undefined> = [];
 		session.subscribe(event => {
@@ -1239,6 +1243,175 @@ describe("AgentSession settles what it promised", () => {
 			release.resolve();
 			await dispatched;
 			offQueueChange?.();
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns every emit entry point, not only the generic broadcast", () => {
+		// The enumeration that matters is structural, not a list in a comment: every public entry
+		// point that can run handlers is named `emit*`, and each one must be wrapped with dispatch
+		// ownership when the runner is constructed. A new emitter cannot opt out by forgetting.
+		const runtime = new ExtensionRuntime();
+		const runner = new ExtensionRunner(
+			[],
+			runtime,
+			tempDir.path(),
+			SessionManager.inMemory(tempDir.path()),
+			new ModelRegistry(authStorage),
+		);
+		const emitters = Object.getOwnPropertyNames(ExtensionRunner.prototype).filter(
+			name =>
+				name.startsWith("emit") &&
+				typeof Object.getOwnPropertyDescriptor(ExtensionRunner.prototype, name)?.value === "function",
+		);
+		expect(emitters.length).toBeGreaterThan(10);
+		const unowned = emitters.filter(name => !Object.hasOwn(runner, name));
+		expect(unowned).toEqual([]);
+	});
+
+	it("keeps ownership between the handlers of a specialised emitter", async () => {
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		let armed = false;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			// `user_bash` runs its own sequential handler loop, outside the generic broadcast.
+			pi.on("user_bash", async () => {
+				if (!armed) return;
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			});
+			pi.on("user_bash", async () => {
+				if (!armed) return;
+				secondEntered.resolve();
+				await releaseSecond.promise;
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let bash: Promise<unknown> | undefined;
+		try {
+			armed = true;
+			bash = session?.executeBash("true");
+			await withTimeout(firstEntered.promise, 5_000, "first user_bash handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			releaseFirst.resolve();
+			await withTimeout(secondEntered.promise, 5_000, "second user_bash handler never entered");
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			releaseSecond.resolve();
+			await bash?.catch(() => undefined);
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			releaseFirst.resolve();
+			releaseSecond.resolve();
+			await bash?.catch(() => undefined);
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("does not lift credential restrictions over work its own deferred reset started", async () => {
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		let armed = false;
+		let handled = 0;
+		const poolScope = new SessionAccountPoolScope(authStorage, {} as unknown as OAuthAccountPools, "r9-pool-probe");
+		await startPooledRunWithStrandedAside(
+			undefined,
+			undefined,
+			undefined,
+			pi => {
+				pi.on("agent_start", async () => {
+					if (!armed) return;
+					if (++handled === 1) {
+						firstEntered.resolve();
+						await releaseFirst.promise;
+						return;
+					}
+					secondEntered.resolve();
+					await releaseSecond.promise;
+				});
+			},
+			poolScope,
+		);
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		const releaseSpy = spyOn(poolScope, "release");
+		const broadcasts: Promise<unknown>[] = [];
+		// The deferred pass's own reset notifies queue observers synchronously. This one dispatches
+		// only from that second reset, so the staleness is squarely in the deferred path: it asked
+		// once before resetting, and used to release without asking again.
+		const offQueueChange = session?.agent.onQueueChange(() => {
+			if (session?.isDisposed !== true || resetSpy.mock.calls.length !== 2) return;
+			const dispatch = session?.extensionRunner?.emit({ type: "agent_start" });
+			if (dispatch) broadcasts.push(dispatch);
+		});
+		try {
+			// Held extension work before disposal, so the main drain defers to the deferred pass.
+			armed = true;
+			const first = session?.extensionRunner?.emit({ type: "agent_start" });
+			if (first) broadcasts.push(first);
+			await withTimeout(firstEntered.promise, 5_000, "first handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(releaseSpy.mock.calls).toHaveLength(0);
+
+			releaseFirst.resolve();
+			await withTimeout(secondEntered.promise, 5_000, "deferred reset never dispatched");
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(releaseSpy.mock.calls).toHaveLength(0);
+
+			offQueueChange?.();
+			releaseSecond.resolve();
+			await Promise.all(broadcasts);
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(releaseSpy.mock.calls).toHaveLength(1);
+		} finally {
+			offQueueChange?.();
+			releaseFirst.resolve();
+			releaseSecond.resolve();
+			await Promise.all(broadcasts);
+			releaseSpy.mockRestore();
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns an admitted extension command that outlives disposal", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.registerCommand("r9-held", {
+				description: "held command",
+				handler: async () => {
+					entered.resolve();
+					await release.promise;
+				},
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let command: Promise<unknown> | undefined;
+		try {
+			// An extension command runs through `runScoped`, not the tracked handler path; the
+			// session owns it only as an admitted submission.
+			command = session?.prompt("/r9-held");
+			await withTimeout(entered.promise, 5_000, "extension command never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			await command?.catch(() => undefined);
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			await command?.catch(() => undefined);
 			resetSpy.mockRestore();
 		}
 	}, 20_000);

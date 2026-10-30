@@ -6710,26 +6710,43 @@ export class AgentSession implements SettingsScope {
 		// two. One pass that finds nothing new is the only honest stopping point.
 		if (!drained) {
 			void (async () => {
-				do {
-					await this.agent.waitForIdle();
-					await this.#drainQueuedPreparations();
-					await this.#drainInFlightEventHandlers();
-					await this.#drainExtensionNotifications();
-					await this.#extensionRunner?.waitForPendingHandlerWork();
-				} while (this.#hasLiveSessionWork());
+				await this.#waitForLiveSessionWork();
 				this.#releaseRetainedSessionMemory();
+				// The reset is itself a producer — it notifies queue-change observers synchronously —
+				// so the main path's lesson applies here too: ask again before releasing. Wait out
+				// what it started, but do NOT reset again: an observer that produces on every reset
+				// would never let this converge, and the transcript is already clear.
+				await this.#waitForLiveSessionWork();
 				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
 	}
 
+	/** Resolves once nothing {@link #hasLiveSessionWork} names is outstanding. The waits run in a
+	 *  loop because each one can start the next producer: a handler can queue another notification,
+	 *  a notification can run another handler, an admitted command can dispatch one, and a handler
+	 *  that resolves a credential does so between the two. One pass that finds nothing new is the
+	 *  only honest stopping point. There is no deadline here on purpose — see the caller. */
+	async #waitForLiveSessionWork(): Promise<void> {
+		do {
+			await this.agent.waitForIdle();
+			await this.waitForAdmittedSubmissions();
+			await this.#drainQueuedPreparations();
+			await this.#drainInFlightEventHandlers();
+			await this.#drainExtensionNotifications();
+			await this.#extensionRunner?.waitForPendingHandlerWork();
+		} while (this.#hasLiveSessionWork());
+	}
+
 	/** Whether any work that could still touch this session, its transcript or its credentials is
-	 *  outstanding: a run, a queued-message preparation, an event handler, a queued extension
-	 *  notification, or an extension callback — including one whose dispatch has already given up
-	 *  waiting for it. */
+	 *  outstanding: a run, an admitted submission (an extension command suspended inside
+	 *  `runScoped` is one), a queued-message preparation, an event handler, a queued extension
+	 *  notification, or an extension dispatch — including a callback whose dispatch has already
+	 *  given up waiting for it, and the gap between two handlers of one dispatch. */
 	#hasLiveSessionWork(): boolean {
 		return (
 			this.agent.state.isStreaming ||
+			this.hasAdmittedSubmission ||
 			this.#queuedPreparations.size > 0 ||
 			this.#inFlightEventHandlers.size > 0 ||
 			this.#drainingExtensionEvents ||

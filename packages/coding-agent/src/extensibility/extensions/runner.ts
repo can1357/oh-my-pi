@@ -776,6 +776,35 @@ export class ExtensionRunner {
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#ownEveryDispatch();
+	}
+
+	/** Dispatch ownership, installed once over the whole public `emit*` surface rather than inside
+	 *  each emitter. Several emitters (`emitInput`, `emitBeforeAgentStart`, `emitUserBash`,
+	 *  `emitResourcesDiscover`, `emitToolResult`, …) run their own sequential handler loops, and
+	 *  between two handlers of such a loop no callback is executing while work that was registered
+	 *  all along has not started — a caller asking "is extension work outstanding?" in that gap gets
+	 *  the wrong answer. Hooking the one surface they all share, instead of hand-listing the loops,
+	 *  is what stops the next emitter from reopening the hole by forgetting to opt in. */
+	#ownEveryDispatch(): void {
+		const prototype = ExtensionRunner.prototype as unknown as Record<string, unknown>;
+		for (const name of Object.getOwnPropertyNames(prototype)) {
+			if (!name.startsWith("emit")) continue;
+			if (typeof Object.getOwnPropertyDescriptor(prototype, name)?.value !== "function") continue;
+			Object.defineProperty(this, name, {
+				configurable: true,
+				writable: true,
+				value: (...args: unknown[]): unknown => {
+					// Resolved at call time, not captured here: a spy or patch installed on the
+					// prototype after construction must still be the thing that runs.
+					const emitter = prototype[name] as (...rest: unknown[]) => unknown;
+					const result = emitter.apply(this, args);
+					// Synchronous emitters finish inside this call and own no gap.
+					if (result instanceof Promise) this.#trackDispatch(result);
+					return result;
+				},
+			});
+		}
 	}
 
 	/**
