@@ -528,10 +528,32 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		// Focus back: the call is still owed an answer, and says so again.
 		controller.resetTranscriptAnchors(other);
-		controller.adoptApprovalRecords(mine);
+		controller.adoptApprovalRecords(mine, () => true);
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("drops a parked record for a call that finished while the view was away", async () => {
+		// The view saw none of the events while it was elsewhere: the call it
+		// parked may have been answered, aborted or disposed with it. The
+		// session is the one that knows, and a call it has settled must not come
+		// back as an approval nobody can answer.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const mine = {} as object;
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+
+		controller.resetTranscriptAnchors(mine);
+		// Answered and ended while away, so the session reports it settled: the
+		// run goes on, and nobody is owed an answer.
+		controller.adoptApprovalRecords(mine, toolCallId => toolCallId !== "bash-1");
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 

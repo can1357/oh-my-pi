@@ -17,9 +17,11 @@ export interface ToolExecution {
 
 interface MutableToolExecution extends ToolExecution {
 	finished: boolean;
+	/** Whether this run was ever entered: an unstarted one can only be abandoned. */
+	started?: boolean;
 	/** The execution this one runs inside, when a tool invoked another. */
-	readonly parent: MutableToolExecution | undefined;
-	/** Called once this run returns, so a holder of the run learns at that moment, not later. */
+	parent: MutableToolExecution | undefined;
+	/** Called once this run is over, so a holder of the run learns at that moment, not later. */
 	readonly onFinish: Set<() => void>;
 }
 
@@ -66,8 +68,9 @@ export function createToolExecution(owner: object | undefined, toolCallId: strin
 
 /** Run `execution`, which {@link createToolExecution} prepared, on the current async chain. */
 export async function runToolExecution<T>(execution: ToolExecution, run: () => Promise<T>): Promise<T> {
-	const scope = execution as MutableToolExecution & { parent: MutableToolExecution | undefined };
+	const scope = execution as MutableToolExecution;
 	scope.parent = executingToolCall.getStore();
+	scope.started = true;
 	const owner = scope.owner;
 	const live = owner ? (liveExecutions.get(owner) ?? new Map<string, number>()) : undefined;
 	if (owner && live) {
@@ -77,13 +80,43 @@ export async function runToolExecution<T>(execution: ToolExecution, run: () => P
 	try {
 		return await executingToolCall.run(scope, run);
 	} finally {
-		scope.finished = true;
-		for (const listener of scope.onFinish) listener();
-		scope.onFinish.clear();
-		if (live) {
-			const remaining = (live.get(scope.toolCallId) ?? 1) - 1;
-			if (remaining > 0) live.set(scope.toolCallId, remaining);
-			else live.delete(scope.toolCallId);
+		retireToolExecution(scope, live);
+	}
+}
+
+/**
+ * Retire a run that never started: its preparation was abandoned — the context it was prepared
+ * for threw, or the call was cancelled before `execute`. Without this the handle a context
+ * captured stays live for ever, and a later run reusing the id answers for a dialog this one
+ * raised. Running it afterwards is not possible; retiring it twice does nothing.
+ */
+export function abandonToolExecution(execution: ToolExecution): void {
+	const scope = execution as MutableToolExecution;
+	if (scope.started || scope.finished) return;
+	retireToolExecution(scope, undefined);
+}
+
+/**
+ * Mark a run over and tell its holders, whatever they do with the news. The bookkeeping lands
+ * before any listener runs and no listener can stop another: one holder throwing must not leave
+ * the run counted as live, which would keep a stale claim answerable.
+ */
+function retireToolExecution(scope: MutableToolExecution, live: Map<string, number> | undefined): void {
+	if (scope.finished) return;
+	scope.finished = true;
+	if (live) {
+		const remaining = (live.get(scope.toolCallId) ?? 1) - 1;
+		if (remaining > 0) live.set(scope.toolCallId, remaining);
+		else live.delete(scope.toolCallId);
+	}
+	const listeners = [...scope.onFinish];
+	scope.onFinish.clear();
+	for (const listener of listeners) {
+		try {
+			listener();
+		} catch (error) {
+			// A holder that fails is its own problem; the run is over for everyone.
+			console.error("tool execution completion listener threw", error);
 		}
 	}
 }

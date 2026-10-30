@@ -1110,11 +1110,23 @@ export class EventController {
 	/**
 	 * Take back what {@link resetTranscriptAnchors} parked for `session`, if anything, and report
 	 * from it. Called by the focus controller once the transcript is pointed at that session.
+	 *
+	 * A parked record is a claim about a call that was running when the view looked away, and the
+	 * view saw nothing while it was gone: the call may have been answered, aborted, or the whole
+	 * session disposed. `stillOpen` answers that from the session itself, and a call it has since
+	 * settled is dropped rather than restored — keeping a session's own unresolved record is the
+	 * point, resurrecting a finished one is not.
 	 */
-	adoptApprovalRecords(session: object): void {
+	adoptApprovalRecords(session: object, stillOpen?: (toolCallId: string) => boolean): void {
 		const parked = this.#parkedApprovalRecords.get(session);
 		if (!parked) return;
 		this.#parkedApprovalRecords.delete(session);
+		for (const toolCallId of [...parked.prompts.keys()]) {
+			if (stillOpen && !stillOpen(toolCallId)) parked.prompts.delete(toolCallId);
+		}
+		for (const toolCallId of [...parked.waiting]) {
+			if (!parked.prompts.has(toolCallId)) parked.waiting.delete(toolCallId);
+		}
 		this.#blockingPrompts = parked.prompts;
 		this.#waitingToolCalls = parked.waiting;
 		this.#answeredBeforeStart = parked.answered;

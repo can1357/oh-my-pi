@@ -242,10 +242,13 @@ export class SessionFocusController {
 				await this.ctx.eventController.handleEvent(event);
 				if (generation !== this.#attachGeneration) return false;
 			}
+			// What this session was owed before the view looked away, minus whatever
+			// finished while it was gone: the view saw none of those ends, so the
+			// session is asked which of those calls it has since settled.
+			this.ctx.eventController.adoptApprovalRecords(target, id => !target.hasSettledToolCall(id));
 			// `user_wait_start` was published when the dialog opened, which may be
 			// before this attach subscribed: replay it so a session still owing a
 			// person an answer reports blocked rather than working or idle.
-			this.ctx.eventController.adoptApprovalRecords(target);
 			const openWait = target.activeUserWait();
 			if (openWait) {
 				await this.ctx.eventController.handleEvent(openWait);

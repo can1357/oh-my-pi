@@ -80,6 +80,7 @@ import {
 	createAdditionalContextMessage,
 	isNonBlankContext,
 	joinAdditionalContext,
+	abandonToolExecution,
 	createToolExecution,
 	runToolExecution,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
@@ -104,6 +105,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolSpeculationStreamSession,
 } from "./types";
 import {
 	ASIDE_MESSAGE_COMMIT,
@@ -3644,26 +3646,27 @@ async function executeToolCalls(
 					// host builds for it is bound to this run and not to a later one that
 					// reuses the id.
 					const execution = createToolExecution(config.owner, toolCall.id);
-					const toolContext = getToolContext?.({
-						execution,
-						batchId,
-						index,
-						total: toolCalls.length,
-						toolCalls: toolCallInfos,
-						steeringSignal: steeringSoftController.signal,
-						providerMetadata: toolCall.providerMetadata,
-						addAdditionalContext: context => {
-							if (isNonBlankContext(context)) record.reportedContext.push(context);
-						},
-					});
-					const streamSession = speculationCoordinator?.takeStreamSession(toolCall.id);
-					if (streamSession && toolContext) {
-						toolContext[SPECULATIVE_STREAM_SESSION] = streamSession;
-					} else if (streamSession && !streamSession.contextIndependent) {
-						await streamSession.discard("outer tool context cannot carry stream speculation");
-					}
+					let streamSession: ToolSpeculationStreamSession | undefined;
 					let rawResult: unknown;
 					try {
+						const toolContext = getToolContext?.({
+							execution,
+							batchId,
+							index,
+							total: toolCalls.length,
+							toolCalls: toolCallInfos,
+							steeringSignal: steeringSoftController.signal,
+							providerMetadata: toolCall.providerMetadata,
+							addAdditionalContext: context => {
+								if (isNonBlankContext(context)) record.reportedContext.push(context);
+							},
+						});
+						streamSession = speculationCoordinator?.takeStreamSession(toolCall.id);
+						if (streamSession && toolContext) {
+							toolContext[SPECULATIVE_STREAM_SESSION] = streamSession;
+						} else if (streamSession && !streamSession.contextIndependent) {
+							await streamSession.discard("outer tool context cannot carry stream speculation");
+						}
 						// Context construction and stream cleanup can also cancel;
 						// nothing may await or call host code after this final check.
 						if (abortBeforeToolExecution()) return;
@@ -3692,6 +3695,10 @@ async function executeToolCalls(
 							),
 						);
 					} finally {
+						// A preparation that threw or was cancelled never ran: the run it
+						// promised is over before it began, and a context that captured it
+						// must not keep answering for a later run of the same call.
+						abandonToolExecution(execution);
 						await streamSession?.discard("outer tool completed without committing stream speculation");
 					}
 					completedToolExecution = true;

@@ -992,6 +992,16 @@ export class AgentSession implements SettingsScope {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	/**
+	 * Calls this session has finished, from the events it publishes, and every call once it is
+	 * disposed. A surface that was looking elsewhere saw none of those ends: this is what it asks
+	 * on the way back, so a record it kept for a call answered, aborted or disposed while it was
+	 * gone is dropped instead of resurrected. One string per completed call, cleared with the rest
+	 * of the session-scoped tool state.
+	 */
+	#settledToolCalls = new Set<string>();
+	/** True once {@link dispose} begins: nothing this session was asking will ever be answered. */
+	#settledEverything = false;
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
@@ -3999,13 +4009,18 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
-		if (event.type === "tool_execution_update") {
+		if (event.type === "tool_execution_start") {
+			// A call that runs again under the same id is a new run: what the last
+			// one did is no longer what this session has settled.
+			this.#settledToolCalls.delete(event.toolCallId);
+		} else if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
 			// logical session transitions clear the cache.
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			this.#settledToolCalls.add(event.toolCallId);
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -6013,6 +6028,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Whether this session has finished `toolCallId`, or will never finish anything because it is
+	 * disposed. A surface that was looking elsewhere saw none of the ends in between: this is how
+	 * it tells a call still owed an answer from one answered, aborted or disposed while it was
+	 * away. A call this session never ran is not settled by it — nobody else's bookkeeping is its
+	 * to overrule.
+	 */
+	hasSettledToolCall(toolCallId: string): boolean {
+		return this.#settledEverything || this.#settledToolCalls.has(toolCallId);
+	}
+
+	/**
 	 * The `user_wait_start` frame for a dialog still waiting on a person, or
 	 * undefined when none is open. `user_wait_start` is published once, when the
 	 * dialog opens, so a surface that attaches later (a focus rebuild) replays
@@ -6383,6 +6409,9 @@ export class AgentSession implements SettingsScope {
 	 */
 	#disposeCall?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		// A disposed session finishes nothing: whatever it was asking about will
+		// never be answered, so no surface may report it as still owed.
+		this.#settledEverything = true;
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
 	}
@@ -7851,6 +7880,7 @@ export class AgentSession implements SettingsScope {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		this.#settledToolCalls.clear();
 	}
 
 	/**
