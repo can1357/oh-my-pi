@@ -2,8 +2,13 @@ import { afterEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	type SessionStorageWriter,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -265,6 +270,554 @@ describe("session persistence on a full volume", () => {
 		} finally {
 			lease?.release();
 		}
+	});
+
+	for (const operation of ["setSessionFile", "newSession", "fork", "createBranchedSession"] as const) {
+		it(`keeps the old session and queued entries when ${operation} cannot drain a full disk`, async () => {
+			const { manager, sessionFile } = newSession(`@pi-full-volume-${operation}-`);
+			const sessionId = manager.getSessionId();
+			const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+				throw fsError("ENOSPC");
+			});
+			try {
+				const queuedId = manager.appendCustomEntry("must-survive", { text: "queued" });
+				const changeSession = () => {
+					switch (operation) {
+						case "setSessionFile":
+							return manager.setSessionFile(sessionFile);
+						case "newSession":
+							return manager.newSession();
+						case "fork":
+							return manager.fork();
+						case "createBranchedSession":
+							return manager.createBranchedSession(queuedId);
+					}
+				};
+				if (operation === "createBranchedSession") {
+					expect(changeSession).toThrow("ENOSPC");
+				} else {
+					await expect(changeSession()).rejects.toThrow("ENOSPC");
+				}
+				expect(manager.getSessionId()).toBe(sessionId);
+				expect(manager.getSessionFile()).toBe(sessionFile);
+				expect(manager.getEntry(queuedId)).toBeDefined();
+				const competingLease = tryAcquireSessionLease(sessionId);
+				try {
+					expect(competingLease).toBeNull();
+				} finally {
+					competingLease?.release();
+				}
+				diskFull.mockRestore();
+				manager.flushSync();
+				expect(fs.readFileSync(sessionFile, "utf8")).toContain("must-survive");
+				await changeSession();
+			} finally {
+				diskFull.mockRestore();
+				await manager.close();
+			}
+		});
+	}
+
+	it("retains its lease and transcript after a failed close until a successful retry", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-close-retry-");
+		const queuedId = manager.appendCustomEntry("before-full");
+		appendWhileFull(manager, "must-survive-close");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			await expect(manager.close()).rejects.toThrow("ENOSPC");
+			const competingLease = tryAcquireSessionLease(manager.getSessionId());
+			try {
+				expect(competingLease).toBeNull();
+			} finally {
+				competingLease?.release();
+			}
+			manager.releaseRetainedEntries();
+			expect(manager.getEntry(queuedId)).toBeDefined();
+			diskFull.mockRestore();
+			await manager.close();
+			expect(usersOnDisk(sessionFile)).toEqual(["must-survive-close"]);
+			const lease = tryAcquireSessionLease(manager.getSessionId());
+			try {
+				expect(lease).not.toBeNull();
+			} finally {
+				lease?.release();
+			}
+			manager.releaseRetainedEntries();
+			expect(manager.getEntries()).toEqual([]);
+		} finally {
+			diskFull.mockRestore();
+		}
+	});
+
+	for (const phase of ["writer close", "storage drain"] as const) {
+		it(`keeps ownership and retries a failed ${phase}`, async () => {
+			const { manager } = newSession("@pi-full-volume-close-failure-");
+			const opening = spyOn(FileSessionStorage.prototype, "openWriter");
+			manager.appendMessage(userMessage("retained"));
+			const writer = opening.mock.results.at(-1)?.value as SessionStorageWriter | undefined;
+			opening.mockRestore();
+			if (!writer) throw new Error("Expected an open session writer");
+			const failure =
+				phase === "writer close"
+					? spyOn(writer, "close").mockRejectedValueOnce(fsError("ENOSPC"))
+					: spyOn(FileSessionStorage.prototype, "drain").mockRejectedValueOnce(fsError("ENOSPC"));
+			try {
+				await expect(manager.close()).rejects.toThrow("ENOSPC");
+				const competingLease = tryAcquireSessionLease(manager.getSessionId());
+				try {
+					expect(competingLease).toBeNull();
+				} finally {
+					competingLease?.release();
+				}
+				manager.releaseRetainedEntries();
+				expect(manager.getEntries().length).toBeGreaterThan(0);
+				failure.mockRestore();
+				await manager.close();
+				const lease = tryAcquireSessionLease(manager.getSessionId());
+				try {
+					expect(lease).not.toBeNull();
+				} finally {
+					lease?.release();
+				}
+			} finally {
+				failure.mockRestore();
+			}
+		});
+	}
+
+	it("updates a queued title slot before flushSync returns", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-sync-");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			await expect(manager.setSessionName("Synchronous title", "user")).rejects.toThrow("ENOSPC");
+		} finally {
+			diskFull.mockRestore();
+		}
+		manager.flushSync();
+		expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Synchronous title");
+		await manager.close();
+	});
+
+	it("guards a large fork before serializing a fresh destination", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-fork-guard-");
+		let serializationReads = 0;
+		manager.appendCustomEntry("large-fork", {
+			chunks: Array(16).fill("x".repeat(400 * 1024)),
+			get marker() {
+				serializationReads++;
+				return true;
+			},
+		});
+		serializationReads = 0;
+		expect(fs.statSync(sessionFile).size).toBeGreaterThan(6 * 1024 * 1024);
+		const sessionId = manager.getSessionId();
+		const rewrites = spyOnWholeFileRewrites();
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			await expect(manager.fork()).rejects.toThrow("ENOSPC");
+			expect(volumeFull).toHaveBeenCalled();
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+			expect(manager.getSessionFile()).toBe(sessionFile);
+			expect(serializationReads).toBe(0);
+			expect(manager.getSessionId()).toBe(sessionId);
+			volumeFull.mockRestore();
+			const fork = await manager.fork();
+			expect(fork?.oldSessionFile).toBe(sessionFile);
+			expect(fs.statSync(fork!.newSessionFile).size).toBeGreaterThan(6 * 1024 * 1024);
+		} finally {
+			volumeFull.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("guards a clone rewrite using queued bytes beyond the small durable file", () => {
+		let serializationReads = 0;
+		const { manager, sessionFile } = newSession("@pi-full-volume-queued-size-");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			manager.appendCustomEntry("large-queued", {
+				chunks: Array(16).fill("x".repeat(400 * 1024)),
+				get marker() {
+					serializationReads++;
+					return true;
+				},
+			});
+		} finally {
+			diskFull.mockRestore();
+		}
+		expect(fs.statSync(sessionFile).size).toBeLessThan(4 * 1024 * 1024);
+		const clone = manager.cloneCurrentSession({ persist: true });
+		serializationReads = 0;
+		const rewrites = spyOnWholeFileRewrites();
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			clone.appendMessage(userMessage("after-clone"));
+			expect(() => clone.flushSync()).toThrow("ENOSPC");
+			expect(volumeFull).toHaveBeenCalled();
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+			expect(serializationReads).toBe(0);
+			volumeFull.mockRestore();
+			clone.appendMessage(userMessage("room-again"));
+			clone.flushSync();
+			expect(fs.readFileSync(sessionFile, "utf8")).toContain("large-queued");
+			expect(usersOnDisk(sessionFile)).toEqual(["after-clone", "room-again"]);
+		} finally {
+			volumeFull.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+		}
+	});
+
+	it("retries only the pending title slot after the queued title line landed", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-slot-retry-");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			await expect(manager.setSessionName("Retry slot directly", "user")).rejects.toThrow("ENOSPC");
+		} finally {
+			diskFull.mockRestore();
+		}
+		const writeSync = fs.writeSync;
+		const slotFull = spyOn(fs, "writeSync").mockImplementation(((...args: unknown[]) => {
+			if (args[4] === 0) throw fsError("EDQUOT");
+			return Reflect.apply(writeSync, fs, args);
+		}) as typeof fs.writeSync);
+		const rewrites = spyOnWholeFileRewrites();
+		try {
+			manager.appendMessage(userMessage("after-title"));
+			await expect(manager.flush()).rejects.toThrow();
+			slotFull.mockRestore();
+			await manager.flush();
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+			expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Retry slot directly");
+			expect(usersOnDisk(sessionFile)).toEqual(["after-title"]);
+			expect(
+				fs
+					.readFileSync(sessionFile, "utf8")
+					.split("\n")
+					.filter(line => line.includes('"type":"title_change"')),
+			).toHaveLength(1);
+		} finally {
+			slotFull.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("probes the symlink referent filesystem before a large rewrite", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-symlink-guard-");
+		manager.appendCustomEntry("large-referent", Array(16).fill("x".repeat(400 * 1024)));
+		expect(fs.statSync(sessionFile).size).toBeGreaterThan(6 * 1024 * 1024);
+		await manager.close();
+		const targetDir = path.join(path.dirname(sessionFile), "referent");
+		fs.mkdirSync(targetDir);
+		const publishDir = fs.realpathSync(targetDir);
+		const target = path.join(targetDir, "session.jsonl");
+		fs.renameSync(sessionFile, target);
+		fs.symlinkSync(target, sessionFile);
+		const reopened = await SessionManager.open(sessionFile);
+		const ioError = spyOn(fs, "writeSync").mockImplementationOnce(() => {
+			throw fsError("EIO");
+		});
+		reopened.appendMessage(userMessage("io-failed"));
+		ioError.mockRestore();
+		const rewrites = spyOnWholeFileRewrites();
+		const volumeFull = spyOn(fs, "statfsSync").mockImplementation(((probe: fs.PathLike) => {
+			return probe === publishDir ? nearlyFullVolume : { ...nearlyFullVolume, bavail: 1e9, bfree: 1e9 };
+		}) as typeof fs.statfsSync);
+		try {
+			reopened.appendMessage(userMessage("while-full"));
+			expect(() => reopened.flushSync()).toThrow();
+			expect(volumeFull).toHaveBeenCalledWith(publishDir);
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+			volumeFull.mockRestore();
+			reopened.appendMessage(userMessage("room-again"));
+			reopened.flushSync();
+			expect(fs.lstatSync(sessionFile).isSymbolicLink()).toBe(true);
+			expect(usersOnDisk(target)).toEqual(["io-failed", "while-full", "room-again"]);
+		} finally {
+			volumeFull.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+			await reopened.close();
+		}
+	});
+
+	it("keeps a title scheduled before a synchronous append fills the disk", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-race-");
+		const naming = manager.setSessionName("Scheduled before full", "user");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			manager.appendMessage(userMessage("fills-disk"));
+			await expect(naming).rejects.toThrow("ENOSPC");
+		} finally {
+			diskFull.mockRestore();
+		}
+		await manager.flush();
+		await manager.close();
+		const reopened = await SessionManager.open(sessionFile);
+		expect(reopened.getSessionName()).toBe("Scheduled before full");
+		expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Scheduled before full");
+		expect(usersOnDisk(sessionFile)).toEqual(["fills-disk"]);
+		await reopened.close();
+	});
+
+	it("rolls back queued entries without writing them or throwing on a full disk", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-rollback-");
+		appendWhileFull(manager, "before-snapshot");
+		const snapshot = manager.captureState();
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			manager.appendMessage(userMessage("rolled-back"));
+			await expect(manager.setSessionName("Rolled-back title", "user")).rejects.toThrow("ENOSPC");
+			expect(() => manager.restoreState(snapshot)).not.toThrow();
+			expect(usersOnDisk(sessionFile)).toEqual([]);
+		} finally {
+			diskFull.mockRestore();
+		}
+		manager.appendMessage(userMessage("after-rollback"));
+		manager.flushSync();
+		expect(usersOnDisk(sessionFile)).toEqual(["before-snapshot", "after-rollback"]);
+		expect(manager.getSessionName()).toBeUndefined();
+		expect(fs.readFileSync(sessionFile, "utf8")).not.toContain("rolled-back");
+		await manager.close();
+	});
+
+	it("releases a discarded target session's claim when restoring a different session", async () => {
+		const { manager } = newSession("@pi-full-volume-rollback-source-");
+		const snapshot = manager.captureState();
+		const { manager: target, sessionFile } = newSession("@pi-full-volume-rollback-target-");
+		const targetId = target.getSessionId();
+		await target.close();
+		await manager.setSessionFile(sessionFile);
+		appendWhileFull(manager, "discarded-target-entry");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			expect(() => manager.restoreState(snapshot)).not.toThrow();
+		} finally {
+			diskFull.mockRestore();
+		}
+		const lease = tryAcquireSessionLease(targetId);
+		try {
+			expect(lease).not.toBeNull();
+		} finally {
+			lease?.release();
+		}
+		expect(manager.getSessionId()).toBe(snapshot.sessionId);
+		expect(usersOnDisk(sessionFile)).toEqual([]);
+		await manager.close();
+	});
+
+	it("persists a queued title and required metadata rewrite after seal", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-sealed-title-");
+		const naming = manager.setSessionName("Title at shutdown", "user");
+		const metadata = manager.setTaskPromptCacheKey("shutdown-key");
+		manager.seal();
+		await Promise.all([naming, metadata]);
+		await manager.close();
+		manager.releaseRetainedEntries();
+		const reopened = await SessionManager.open(sessionFile);
+		expect(reopened.getSessionName()).toBe("Title at shutdown");
+		expect(reopened.getHeader()?.taskPromptCacheKey).toBe("shutdown-key");
+		await reopened.close();
+	});
+
+	it("retries a required rewrite with an empty tail after seal and a full disk", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-sealed-rewrite-");
+		const rewrites = spyOnWholeFileRewrites();
+		for (const rewrite of rewrites)
+			rewrite.mockImplementation(() => {
+				throw fsError("ENOSPC");
+			});
+		try {
+			await expect(manager.setTaskPromptCacheKey("retry-shutdown")).rejects.toThrow("ENOSPC");
+			manager.seal();
+			await expect(manager.close()).rejects.toThrow("ENOSPC");
+		} finally {
+			for (const rewrite of rewrites) rewrite.mockRestore();
+		}
+		await manager.close();
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("retry-shutdown");
+		const lease = tryAcquireSessionLease(manager.getSessionId());
+		try {
+			expect(lease).not.toBeNull();
+		} finally {
+			lease?.release();
+		}
+	});
+
+	it("queues an image whose blob write fills the disk and later appends without rewriting", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-blob-tail-");
+		const blobDir = TempDir.createSync("@pi-full-volume-test-blobs-");
+		tempDirs.push(blobDir);
+		const blobStore = new BlobStore(blobDir.path());
+		const putSync = BlobStore.prototype.putSync;
+		let full = true;
+		const blobWrite = spyOn(BlobStore.prototype, "putSync").mockImplementation((data, options) => {
+			if (full) throw fsError("ENOSPC");
+			return putSync.call(blobStore, data, options);
+		});
+		const rewrites = spyOnWholeFileRewrites();
+		try {
+			manager.appendMessage({
+				role: "user",
+				content: [{ type: "image", data: "a".repeat(2048), mimeType: "image/png" }],
+				timestamp: 1,
+			});
+			expect(blobWrite).toHaveBeenCalledTimes(1);
+			manager.appendMessage(userMessage("behind-image"));
+			expect(blobWrite).toHaveBeenCalledTimes(2);
+			full = false;
+			manager.flushSync();
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+			const users = userEntriesOnDisk(sessionFile);
+			expect(users).toHaveLength(2);
+			expect(users[0]?.message?.content).toEqual([
+				expect.objectContaining({ type: "image", data: expect.stringContaining("blob:") }),
+			]);
+			expect(users[1]?.message?.content).toBe("behind-image");
+		} finally {
+			blobWrite.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("does not externalize images in lazy sessions or rolled-back atomic batches", async () => {
+		const dir = TempDir.createSync("@pi-full-volume-deferred-blobs-");
+		tempDirs.push(dir);
+		const lazy = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"));
+		const { manager } = newSession("@pi-full-volume-atomic-blobs-");
+		const blobWrite = spyOn(BlobStore.prototype, "putSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		const image = {
+			role: "user" as const,
+			content: [{ type: "image" as const, data: "a".repeat(2048), mimeType: "image/png" }],
+			timestamp: 1,
+		};
+		try {
+			lazy.appendMessage(image);
+			expect(blobWrite).not.toHaveBeenCalled();
+			await expect(
+				manager.appendEntriesAtomically(() => {
+					manager.appendMessage(image);
+					throw new Error("cancel batch");
+				}),
+			).rejects.toThrow("cancel batch");
+			expect(blobWrite).not.toHaveBeenCalled();
+		} finally {
+			blobWrite.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("recreates the complete session when a pending title slot write returns ENOENT", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-slot-enoent-");
+		const missingSlot = spyOn(FileSessionStorage.prototype, "updateSessionTitleSync").mockImplementation(() => {
+			throw fsError("ENOENT");
+		});
+		try {
+			await expect(manager.setSessionName("Recreated title", "user")).rejects.toThrow("ENOENT");
+			manager.appendMessage(userMessage("after-slot-error"));
+			manager.flushSync();
+			expect(usersOnDisk(sessionFile)).toEqual(["after-slot-error"]);
+			expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Recreated title");
+		} finally {
+			missingSlot.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("releases the internal rename manager's lease when a full disk refuses the rename", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-rename-lease-");
+		const sessionId = manager.getSessionId();
+		await manager.close();
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			await expect(SessionManager.renameSessionTitle(sessionFile, "Refused rename")).rejects.toThrow("ENOSPC");
+		} finally {
+			diskFull.mockRestore();
+		}
+		const lease = tryAcquireSessionLease(sessionId);
+		try {
+			expect(lease).not.toBeNull();
+		} finally {
+			lease?.release();
+		}
+	});
+
+	it("releases the internal relocated manager's lease when its rewrite and close fail", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-relocate-lease-");
+		const recordedCwd = manager.getCwd();
+		const sessionId = manager.getSessionId();
+		await manager.close();
+		const destination = TempDir.createSync("@pi-full-volume-relocate-destination-");
+		tempDirs.push(destination);
+		const rewrites = spyOnWholeFileRewrites();
+		for (const rewrite of rewrites)
+			rewrite.mockImplementation(() => {
+				throw fsError("ENOSPC");
+			});
+		try {
+			await expect(
+				SessionManager.openRelocated(sessionFile, recordedCwd, destination.path(), destination.path()),
+			).rejects.toThrow("ENOSPC");
+		} finally {
+			for (const rewrite of rewrites) rewrite.mockRestore();
+		}
+		const lease = tryAcquireSessionLease(sessionId);
+		try {
+			expect(lease).not.toBeNull();
+		} finally {
+			lease?.release();
+		}
+	});
+
+	it("retries a close whose storage drain rejected with a non-Error value", async () => {
+		const { manager } = newSession("@pi-full-volume-close-non-error-");
+		const drain = spyOn(FileSessionStorage.prototype, "drain").mockRejectedValueOnce("ENOSPC: rejected string");
+		try {
+			await expect(manager.close()).rejects.toThrow("ENOSPC");
+			await manager.close();
+		} finally {
+			drain.mockRestore();
+		}
+	});
+
+	it("guards copies of large in-memory transcripts", async () => {
+		const dir = TempDir.createSync("@pi-full-volume-memory-copy-");
+		tempDirs.push(dir);
+		const manager = SessionManager.inMemory(dir.path());
+		manager.appendCustomEntry("large-memory", Array(16).fill("x".repeat(400 * 1024)));
+		const clone = manager.cloneCurrentSession({ persist: true });
+		const rewrites = spyOnWholeFileRewrites();
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			await expect(manager.persistCopy({ sessionDir: dir.path() })).rejects.toThrow("ENOSPC");
+			expect(clone.captureState().prospectiveDiskSize).toBeGreaterThan(6 * 1024 * 1024);
+			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
+		} finally {
+			volumeFull.mockRestore();
+			for (const rewrite of rewrites) rewrite.mockRestore();
+		}
+		const copy = await manager.persistCopy({ sessionDir: dir.path() });
+		expect(fs.statSync(copy.getSessionFile()!).size).toBeGreaterThan(6 * 1024 * 1024);
+		await copy.close();
 	});
 
 	it("does not refuse a small session's whole-file write on a nearly full volume", () => {

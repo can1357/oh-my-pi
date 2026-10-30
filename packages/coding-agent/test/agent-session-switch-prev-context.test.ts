@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import * as fs from "node:fs";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -9,6 +10,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { BuildSessionContextOptions, SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -277,6 +279,56 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 		expect(session.isDisposed).toBe(true);
 	});
+	it("completes switch rollback when an extension queues a target entry on a full disk", async () => {
+		const dir = TempDir.createSync("@pi-switch-full-volume-rollback-");
+		tempDirs.push(dir);
+		let diskFull: Mock<typeof fs.writeSync> | undefined;
+		const extensionRunner = {
+			hasHandlers: () => false,
+			emit: async (event: { type: string }) => {
+				if (event.type !== "session_switch") return;
+				diskFull = vi.spyOn(fs, "writeSync").mockImplementation(() => {
+					throw Object.assign(new Error("ENOSPC: target append"), { code: "ENOSPC" });
+				});
+				manager.appendCustomEntry("discarded-target-entry");
+				throw new Error("extension switch failed");
+			},
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager: manager } = buildSession(dir, extensionRunner);
+		await manager.ensureOnDisk();
+		const previousId = manager.getSessionId();
+		const previousFile = manager.getSessionFile();
+		const previousMessages = [{ role: "user" as const, content: "previous UI state", timestamp: 1 }];
+		session.agent.replaceMessages(previousMessages);
+		session.agent.setSystemPrompt(["previous prompt"]);
+		const target = SessionManager.create(dir.path(), dir.path());
+		await target.ensureOnDisk();
+		const targetId = target.getSessionId();
+		const targetFile = target.getSessionFile()!;
+		await target.close();
+		const reconcile = vi.fn(async () => {
+			expect(manager.getSessionId()).toBe(previousId);
+			expect(session.messages).toEqual(previousMessages);
+			expect(session.systemPrompt).toEqual(["previous prompt"]);
+		});
+		session.setSessionSwitchReconciler(reconcile);
+		try {
+			await expect(session.switchSession(targetFile)).rejects.toThrow("extension switch failed");
+			expect(reconcile).toHaveBeenCalledTimes(1);
+			expect(manager.getSessionFile()).toBe(previousFile);
+			expect(session.messages).toEqual(previousMessages);
+			expect(fs.readFileSync(targetFile, "utf8")).not.toContain("discarded-target-entry");
+		} finally {
+			diskFull?.mockRestore();
+		}
+		const lease = tryAcquireSessionLease(targetId);
+		try {
+			expect(lease).not.toBeNull();
+		} finally {
+			lease?.release();
+		}
+	});
+
 	it("rejects reload when the session-before-switch hook cancels", async () => {
 		const tempDir = TempDir.createSync("@pi-switch-reload-cancel-");
 		tempDirs.push(tempDir);
