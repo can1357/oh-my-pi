@@ -293,17 +293,17 @@ describe("automatic fallback shake", () => {
 		expectUnchanged(manager.getBranch(), before);
 	});
 
-	it.each([
-		{ attribution: "agent" as const, steering: true },
-		{ synthetic: true },
-	])("does not count injected role:user messages as human exchanges: %j", async injection => {
-		seed(8);
-		const before = entryBytes(manager.getBranch().slice(2 * 4));
-		manager.appendMessage({ role: "user", content: "injected continuation", timestamp: 100, ...injection });
-		const result = await runner.createContext().shake({ protectTurns: 6 });
-		expect(result.toolResultsDropped).toBe(2);
-		expectUnchanged(manager.getBranch(), before);
-	});
+	it.each([{ attribution: "agent" as const, steering: true }, { synthetic: true }])(
+		"does not count injected role:user messages as human exchanges: %j",
+		async injection => {
+			seed(8);
+			const before = entryBytes(manager.getBranch().slice(2 * 4));
+			manager.appendMessage({ role: "user", content: "injected continuation", timestamp: 100, ...injection });
+			const result = await runner.createContext().shake({ protectTurns: 6 });
+			expect(result.toolResultsDropped).toBe(2);
+			expectUnchanged(manager.getBranch(), before);
+		},
+	);
 
 	it("evicts a Codex provider session that cached the rewritten history", async () => {
 		seed(8);

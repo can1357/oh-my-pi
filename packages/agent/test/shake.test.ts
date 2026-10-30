@@ -133,6 +133,20 @@ describe("collectShakeRegions — tool results", () => {
 		expect(regions[0].entry).toBe(older);
 	});
 
+	test("hard suffix protects useless tool results and fenced blocks without a token window", () => {
+		const older = messageEntry(toolResultMessage("read", "older output ".repeat(100), { useless: true }));
+		const boundary = messageEntry({ role: "user", content: fencedBlock(120), timestamp: 0 });
+		const recent = messageEntry(toolResultMessage("read", "recent output ".repeat(100), { useless: true }));
+		const entries = [older, boundary, recent];
+		const regions = collectShakeRegions(entries, tokenizer, cfg({ protectFromEntryId: boundary.id }));
+		expect(regions.map(region => region.entry)).toEqual([older]);
+	});
+
+	test("an absent hard suffix boundary fails closed instead of eliding history", () => {
+		const entry = messageEntry(toolResultMessage("read", "output ".repeat(100), { useless: true }));
+		expect(collectShakeRegions([entry], tokenizer, cfg({ protectFromEntryId: "missing" }))).toEqual([]);
+	});
+
 	test("minSavings gates the whole batch", () => {
 		const entry = messageEntry(toolResultMessage("bash", "q".repeat(800)));
 		const tokens = tokenizer.countMessage(entry.message);
