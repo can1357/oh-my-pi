@@ -51,7 +51,7 @@ import {
 	holdsCopied,
 	mintStagingGround,
 	publishedIsStaged,
-	reclaimRecordedStagingGrounds,
+	surveyRecordedStagingGrounds,
 	removeStagingGround,
 	stagingLedgerDir,
 	restoreRecordPath,
@@ -164,10 +164,17 @@ export interface ArchiveGcResult {
 	keptNewestPerCwd: number;
 	wouldArchive: number;
 	archived: number;
-	/** Staging left by a killed writer: the session writer's aged transcript temps, and recorded staging directories of gc runs. */
+	/** The session writer's transcript rewrite temps a killed or crashed writer left, past the write grace. */
 	wouldDeleteTemps: number;
 	deletedTemps: number;
 	tempBytes: number;
+	/**
+	 * Staging directories killed `gc` runs recorded and left. Reported, never
+	 * removed: a record is not proof a run made the directory, so it stays
+	 * until someone removes it by hand, and restore leaves it out of the live
+	 * tree meanwhile.
+	 */
+	stagingResidue?: string[];
 	/** Links inside an artifact tree whose target was already gone, so the archive could not hold their bytes. */
 	brokenLinks: number;
 	errors: string[];
@@ -1391,7 +1398,16 @@ async function publishArtifactIntoArchive(
 			// exactly these bytes, or it holds different ones and nothing
 			// here may write over them.
 			if (archivedBytes.size === copied.size) {
-				if (archivedBytes.hash === copied.hash) return;
+				if (archivedBytes.hash === copied.hash) {
+					// The bytes are already archived; the mode is the live
+					// file's now, set through the descriptor held on that very
+					// inode, so a file tightened since it was archived is not
+					// kept in the archive readable by more than it is.
+					if ((verified.mode & 0o7777) !== (sourceStat.mode & 0o7777)) {
+						await archived.chmod(sourceStat.mode & 0o7777);
+					}
+					return;
+				}
 				throw conflict();
 			}
 			// A shorter archived copy is only superseded when it is how the
@@ -1701,6 +1717,42 @@ async function proveTranscriptStillGoes(
 }
 
 /**
+ * Why `live` must not be given up for `archived`, when the archived copy
+ * grants a permission the live file does not; undefined otherwise. Reclaim
+ * compares against the archive rather than its own earlier look at the live
+ * file: restoring a copy more readable than the file it replaced hands the
+ * bytes to whoever the live file kept them from.
+ */
+async function archivedModeWider(live: string, liveStat: Stats, archived: string): Promise<string | undefined> {
+	const archivedStat = await fs.stat(archived).catch(() => undefined);
+	if (!archivedStat) return undefined;
+	const liveMode = liveStat.mode & 0o7777;
+	const archivedMode = archivedStat.mode & 0o7777;
+	if ((archivedMode & ~liveMode) === 0) return undefined;
+	return (
+		`${archived} is archived with mode ${archivedMode.toString(8)}, which grants more than the live ${live}'s ` +
+		`${liveMode.toString(8)}; archive the session again, which gives the archived copy the live mode, ` +
+		`and reclaim after that`
+	);
+}
+
+/**
+ * Give an already-archived transcript the live transcript's mode, through a
+ * descriptor on the archived inode, so a transcript tightened since it was
+ * archived is not kept in the archive readable by more than it is.
+ */
+async function carryLiveModeToArchive(live: string, archived: string): Promise<void> {
+	const liveMode = (await fs.stat(live)).mode & 0o7777;
+	const handle = await openRegularFile(archived);
+	if (!handle) return;
+	try {
+		if (((await handle.stat()).mode & 0o7777) !== liveMode) await handle.chmod(liveMode);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/**
  * Prove the archive holds every file of a live tree, collecting the files in
  * the order they would be removed.
  *
@@ -1769,6 +1821,11 @@ async function proveLiveTreeIsArchived(
 	}
 	// The descriptor follows a link; the name has to be the file just read.
 	const proved = identityFrom(liveStat);
+	// A reclaim never gives up a file for an archived copy more readable
+	// than it: restoring that copy would hand the bytes to whoever the live
+	// file kept them from.
+	const wider = await archivedModeWider(source, liveStat, destination);
+	if (wider) throw new Error(wider);
 	if ((await standsAsProved(source, proved)) !== true) {
 		throw new Error(`${source} is no longer the file this run proved; it was kept`);
 	}
@@ -1936,6 +1993,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	const notes: string[] = [];
 	try {
 		if (!alreadyArchived) await gzipSessionFile(sourceSession, destSession, candidate.ledger, notes, supersedes);
+		else await carryLiveModeToArchive(sourceSession, destSession);
 		if (await pathExists(sourceArtifacts)) {
 			const copied = await copyArtifactsTree(sourceArtifacts, destArtifacts, candidate.recovery, candidate.ledger);
 			brokenLinks = copied.brokenLinks;
@@ -2002,20 +2060,20 @@ async function collectSessionStagingFiles(sessionsRoot: string, exactSessionFile
 }
 
 /**
- * Count, and with `--apply` delete, what killed writers left behind.
+ * Count, and with `--apply` delete, the session writer's abandoned rewrite
+ * temps, and report the staging directories killed gc runs left.
  *
- * Two kinds, reclaimed two different ways. The session writer stages a
- * transcript rewrite as a flat `.<transcript>.<id>.tmp` beside it and
- * renames it away within milliseconds, so one older than the write grace
- * was left by a killed or crashed writer. That writer keeps no record of
- * its temps, so these go by name and age — the sweep this phase has always
- * run, and only where that writer stages: transcripts in the sessions tree
- * and the files recorded beside it, never the archive.
+ * The session writer stages a transcript rewrite as a flat
+ * `.<transcript>.<id>.tmp` beside it and renames it away within
+ * milliseconds, so one older than the write grace was left by a killed or
+ * crashed writer. That writer keeps no record of its temps, so these go by
+ * name and age — the sweep this phase has always run, and only where that
+ * writer stages: transcripts in the sessions tree and the files recorded
+ * beside it, never the archive.
  *
- * The staging directories `gc --archive` and `gc --restore` mint are
- * recorded as they are made, and go by their record — see
- * {@link reclaimRecordedStagingGrounds}. Nothing in the archive is taken by
- * the shape of its name.
+ * The staging directories `gc --archive` and `gc --restore` mint are found
+ * by their record and reported in `stagingResidue`, never removed: only the
+ * run that made one removes it — see {@link surveyRecordedStagingGrounds}.
  */
 async function sweepSessionStagingFiles(
 	options: ResolvedGcOptions,
@@ -2041,10 +2099,8 @@ async function sweepSessionStagingFiles(
 			if (codeOf(error) !== "ENOENT") result.errors.push(`${file}: ${errorMessage(error)}`);
 		}
 	}
-	const grounds = await reclaimRecordedStagingGrounds(options.agentDir, options.apply);
-	result.wouldDeleteTemps += grounds.found;
-	result.deletedTemps += grounds.removed;
-	result.tempBytes += grounds.bytes;
+	const grounds = await surveyRecordedStagingGrounds(options.agentDir, options.apply);
+	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
 	result.errors.push(...grounds.notes);
 }
 
@@ -2427,6 +2483,9 @@ export function renderText(result: GcResult): string {
 			);
 		}
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
+		for (const residue of result.archive.stagingResidue ?? []) {
+			lines.push(`staging left by a killed gc run, not removed (remove it by hand): ${residue}`);
+		}
 		if (result.archive.wouldDeleteTemps > 0) {
 			lines.push(
 				`session staging temps: ${result.archive.deletedTemps}/${result.archive.wouldDeleteTemps} files, ${formatBytes(result.archive.tempBytes)}`,
@@ -2601,6 +2660,14 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		result.artifactsRestored = restored.artifactsRestored;
 		// An artifact tree left behind is a half-restored session, not a note.
 		result.errors.push(...restored.notRestored.map(note => `could not restore ${note}`));
+		// Facts, not failures: a killed run's staging directory is not part
+		// of the session, and it is left where it is.
+		result.notRestored.push(
+			...restored.stagingResidue.map(
+				residue =>
+					`staging a killed gc run left at ${residue}: not carried home, and not removed (remove it by hand)`,
+			),
+		);
 	} catch (error) {
 		result.errors.push(errorMessage(error));
 		return result;
@@ -2751,6 +2818,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			);
 			await keepTree();
 		}
+		const transcriptWider = await archivedModeWider(sessionPath, await fs.stat(sessionPath), archiveFile);
+		if (transcriptWider) {
+			await keepTree();
+			result.errors.push(transcriptWider);
+		}
 		if (!(await holdsLive())) {
 			await keepTree();
 			result.errors.push(notACopy());
@@ -2804,6 +2876,12 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	try {
 		// Proved under the leases, so what was read is what no writer holding
 		// one can change while this runs.
+		const transcriptWider = await archivedModeWider(sessionPath, await fs.stat(sessionPath), archiveFile);
+		if (transcriptWider) {
+			await keepTree();
+			result.errors.push(transcriptWider);
+			return result;
+		}
 		if (!(await holdsLive())) {
 			await keepTree();
 			result.errors.push(notACopy());

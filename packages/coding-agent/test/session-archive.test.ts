@@ -646,17 +646,19 @@ test("a restore reports a live directory standing where an archived artifact fil
 	expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toBe("ARCHIVED\n");
 });
 
-test("the staging directory a killed restore left is reclaimed by the next archive run", async () => {
+test("the staging directory a killed restore left stays where it is, reported, and is not carried home", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE PARTIAL STAGE");
 	await archiveEverything();
 
 	const stall = stallLinkOnto(path.join(liveArtifacts, "a.log"));
 	const restoring = restoreArchivedSession(archiveFile, root).catch(() => undefined);
-	let ground: Stats | undefined;
+	let ground: string | undefined;
+	let standing: Stats | undefined;
 	let result: GcResult;
 	try {
 		const stage = await stall.reached;
+		ground = path.dirname(stage);
 		stall.stop();
 		// The dead run's lock is broken the way a dead owner's always is.
 		await fs.rm(path.join(root, "gc.lock"));
@@ -664,21 +666,22 @@ test("the staging directory a killed restore left is reclaimed by the next archi
 			flags: { agentDir: root, archive: true, apply: true, json: true, forwardOnly: true, retainNewestGlobal: 99 },
 		});
 		// Looked at before the stalled run is let go, since its own cleanup
-		// would otherwise do the reclaiming this is about.
-		ground = await fs.stat(path.dirname(stage)).catch(() => undefined);
+		// would otherwise take it away.
+		standing = await fs.stat(ground).catch(() => undefined);
 	} finally {
 		stall.stop();
 		stall.kill();
 		await restoring;
 	}
 
-	// A directory nobody reclaims holds a staged copy for good, and for a
-	// large transcript that is a leak of the transcript's size.
-	expect(ground).toBeUndefined();
-	expect(result.archive?.deletedTemps).toBe(1);
+	// Only the run that made a staging directory removes it; a later run has
+	// a record, which anybody running as this user could have written.
+	expect(standing?.isDirectory()).toBe(true);
+	expect(result.archive?.deletedTemps).toBe(0);
+	expect(result.archive?.stagingResidue).toEqual([ground]);
 });
 
-test("a restore does not carry home a staging directory a killed run recorded in the archive", async () => {
+test("a restore does not carry home, and does not remove, a staging directory a killed run recorded in the archive", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
@@ -694,7 +697,7 @@ test("a restore does not carry home a staging directory a killed run recorded in
 
 	expect(restored.notRestored).toEqual([]);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
-	expect(await fs.stat(ground.dir).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.file(ground.file).text()).toBe("HALF A COPY");
 });
 
 test("resuming an archived id opens the live file its conversation went on in", async () => {
@@ -3411,7 +3414,7 @@ test("a recorded staging directory that could not be cleared is not carried home
 	expect(await Bun.file(path.join(ground.dir, "planted")).text()).toBe("PLANTED");
 });
 
-test("a staging directory a run recorded only its intent for is reclaimed and not carried home", async () => {
+test("a staging directory a run recorded only its intent for is left and not carried home", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
@@ -3428,9 +3431,56 @@ test("a staging directory a run recorded only its intent for is reclaimed and no
 
 	expect(restored.notRestored).toEqual([]);
 	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
-	expect(await fs.stat(dir).catch(() => undefined)).toBeUndefined();
-	expect(await fs.readdir(stagingLedgerDir(root))).toEqual([]);
+	expect(await Bun.file(file).exists()).toBe(true);
 });
+
+test("a record with a hand-made directory's real identity deletes nothing anywhere", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// Every check a record can be put to passes — the name, the place, the
+	// inode — and nothing about it says a run made this directory.
+	const dir = path.join(archivedArtifacts, ".work.0123456789abcdef.tmp");
+	await Bun.write(path.join(dir, "work"), "CUSTOMER WORK");
+	await Bun.write(path.join(dir, "other"), "CUSTOMER OTHER");
+	await plantStagingRecord(dir, path.join(dir, "work"));
+
+	await restoreArchivedSession(archiveFile, root);
+	await archiveOnly();
+
+	expect(await Bun.file(path.join(dir, "work")).text()).toBe("CUSTOMER WORK");
+	expect(await Bun.file(path.join(dir, "other")).text()).toBe("CUSTOMER OTHER");
+});
+
+for (const which of ["an artifact", "the transcript"] as const) {
+	test(`a reclaim does not give up ${which} for an archived copy more readable than it`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await fs.chmod(sessionFile, 0o644);
+		await fs.chmod(path.join(liveArtifacts, "a.log"), 0o644);
+		await archiveOnly();
+		const live = which === "an artifact" ? path.join(liveArtifacts, "a.log") : sessionFile;
+		const archived =
+			which === "an artifact" ? path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log") : archiveFile;
+		// Tightened after it was archived: the archive's copy would come back
+		// readable by more than the file it replaced.
+		await fs.chmod(live, 0o600);
+		const reclaim = { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true };
+
+		const refused = await runGcCommand({ flags: reclaim });
+		expect(refused.reclaim?.reclaimed).toBe(0);
+		expect(refused.reclaim?.errors.join("\n")).toContain("more than");
+		expect((await fs.stat(live)).mode & 0o777).toBe(0o600);
+
+		// Archiving again carries the tighter mode into the archive.
+		await archiveOnly();
+		expect((await fs.stat(archived)).mode & 0o777).toBe(0o600);
+		const reclaimed = await runGcCommand({ flags: reclaim });
+		expect(reclaimed.reclaim?.errors).toEqual([]);
+		expect(reclaimed.reclaim?.reclaimed).toBe(1);
+	});
+}
 
 test("artifacts whose names only look like staging survive archive, reclaim and restore", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
