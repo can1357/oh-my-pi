@@ -30,6 +30,7 @@ import { type FSWatcher, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { readdirLookup } from "./isolation-lookup";
 import {
 	withSandboxLock,
 	isProcessStillLive,
@@ -52,6 +53,17 @@ import {
  * writer when it finishes — a record nobody ever clears is a workspace nobody
  * ever reclaims.
  */
+/**
+ * Where a party announces that it is *about to* take a stake, before it
+ * queues for the sandbox lock.
+ *
+ * A writer blocked on the lock is invisible to the holder's listing, so an
+ * owner saw "only my own records", stopped waiting, and exited while a real
+ * foreign write was queued one position behind it. An intent is written
+ * without the lock, so it is already on disk when the holder looks.
+ */
+export const ISOLATION_INTENT_DIR = ".omp-isolation-intent";
+
 export const ISOLATION_UNFINISHED_DIR = ".omp-isolation-unfinished";
 
 /** Directory of lease files inside a sandbox's base dir. */
@@ -110,7 +122,8 @@ export function forgetIsolationWorkspace(mergedDir: string, generation?: string)
 
 /** What a cwd walk found above it. */
 type FoundSandbox =
-	| { kind: "sandbox" | "retiring"; baseDir: string }
+	| { kind: "sandbox"; baseDir: string; generation: string }
+	| { kind: "retiring"; baseDir: string }
 	| { kind: "unknown"; baseDir: string; reason: string };
 
 /** Mount directory names a sandbox's merged view uses (`merged` is the legacy name). */
@@ -133,7 +146,9 @@ async function findSandboxBase(cwd: string): Promise<FoundSandbox | undefined> {
 		if (parent === dir) return undefined;
 		if (ISOLATION_MOUNT_DIRS.includes(path.basename(dir))) {
 			const claim = await readIsolationClaim(parent);
-			if (claim.kind === "claimed") return { kind: "sandbox", baseDir: parent };
+			if (claim.kind === "claimed") {
+				return { kind: "sandbox", baseDir: parent, generation: claim.generation };
+			}
 			// A sandbox whose teardown is still running is not a sandbox a new
 			// user may join, and it is not "no sandbox" either.
 			if (claim.kind === "retiring") return { kind: "retiring", baseDir: parent };
@@ -177,17 +192,16 @@ async function readLeaseAgentId(file: string): Promise<unknown> {
  */
 export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: string): Promise<boolean> {
 	const leaseDir = path.join(baseDir, ISOLATION_LEASE_DIR);
-	let entries: string[];
-	try {
-		entries = await fs.readdir(leaseDir);
-	} catch (error) {
-		if (isEnoent(error)) return false;
+	const listing = await readdirLookup(leaseDir);
+	if (listing.kind === "absent") return false;
+	if (listing.kind === "unknown") {
 		logger.warn("isolation lease directory could not be listed; treating the sandbox as in use", {
 			baseDir,
-			error: error instanceof Error ? error.message : String(error),
+			error: listing.reason,
 		});
 		return true;
 	}
+	const entries = listing.value;
 	let live = false;
 	for (const entry of entries) {
 		const file = path.join(leaseDir, entry);
@@ -243,15 +257,22 @@ export async function leaseIsolationWorkspace(
 	}
 	const sandbox = found.baseDir;
 	const leaseFile = path.join(sandbox, ISOLATION_LEASE_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	// Through the one entry point every acquisition uses, so a caller that
-	// already holds this lock is served rather than queued behind itself.
-	await withSandboxLock(sandbox, "lease", async () => {
-		const claim = await readIsolationClaim(sandbox);
-		if (claim.kind !== "claimed") {
-			throw new Error(`Isolation workspace ${sandbox} is being torn down and cannot be leased.`);
-		}
-		await writeProcessIdentity(leaseFile, options.agentId === undefined ? {} : { agentId: options.agentId });
-	});
+	// Announced before queueing for the lock, so the current holder's listing
+	// already shows this party.
+	const intent = await announceIntent(sandbox);
+	try {
+		// Through the one entry point every acquisition uses, so a caller that
+		// already holds this lock is served rather than queued behind itself.
+		await withSandboxLock(sandbox, "lease", async () => {
+			const claim = await readIsolationClaim(sandbox);
+			if (claim.kind !== "claimed") {
+				throw new Error(`Isolation workspace ${sandbox} is being torn down and cannot be leased.`);
+			}
+			await writeProcessIdentity(leaseFile, options.agentId === undefined ? {} : { agentId: options.agentId });
+		});
+	} finally {
+		await intent();
+	}
 	let released = false;
 	return async () => {
 		if (!released) {
@@ -285,24 +306,62 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
 		);
 	}
 	const record = path.join(found.baseDir, ISOLATION_UNFINISHED_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	// Under the sandbox lock, like lease admission: a retention that has
-	// decided nobody is here must not then rename the directory out from under
-	// a record published a moment later.
-	await withSandboxLock(found.baseDir, "record a writer in", async () => {
-		// A fact established before a lock is not a fact after it: the sandbox
-		// found above may have been retired, renamed or reclaimed while this
-		// call waited. Re-read the claim under the lock and refuse rather than
-		// publishing a record into a path that is no longer there.
-		const claim = await readIsolationClaim(found.baseDir);
-		if (claim.kind !== "claimed") {
-			throw new Error(
-				`Isolation workspace ${found.baseDir} is no longer claimable (${claim.kind}); cannot record a writer.`,
-			);
-		}
-		await writeProcessIdentity(record);
-	});
+	// The generation this caller believes it is writing into, read before the
+	// wait. A successor claimed at the same path is a different workspace.
+	const intended = found.kind === "sandbox" ? found.generation : undefined;
+	// Announced before queueing for the lock: an owner that lists while this
+	// call is waiting must see that somebody is on the way in.
+	const intent = await announceIntent(found.baseDir);
+	try {
+		// Under the sandbox lock, like lease admission: a retention that has
+		// decided nobody is here must not then rename the directory out from
+		// under a record published a moment later.
+		await withSandboxLock(found.baseDir, "record a writer in", async () => {
+			// A fact established before a lock is not a fact after it: the
+			// sandbox found above may have been retired, renamed or reclaimed
+			// while this call waited.
+			const claim = await readIsolationClaim(found.baseDir);
+			if (claim.kind !== "claimed") {
+				throw new Error(
+					`Isolation workspace ${found.baseDir} is no longer claimable (${claim.kind}); cannot record a writer.`,
+				);
+			}
+			// And the same path is not the same workspace: a record published
+			// into a successor's generation says a stranger's run is writing
+			// here, and keeps that run's workspace for work that is not in it.
+			if (intended !== undefined && claim.generation !== intended) {
+				throw new Error(
+					`Isolation workspace ${found.baseDir} is now generation ${claim.generation}, not ${intended}; ` +
+						"cannot record a writer against a workspace that has been replaced.",
+				);
+			}
+			await writeProcessIdentity(record);
+		});
+	} finally {
+		await intent();
+	}
 	return async () => {
 		await fs.rm(record, { force: true });
+	};
+}
+
+/**
+ * Record that this process is about to claim a stake in `baseDir`, and return
+ * the clear for when it has finished trying.
+ *
+ * Best-effort by design: a sandbox that cannot take the note is one whose
+ * lock attempt will fail anyway, and refusing here would turn a readable
+ * failure into an unreadable one.
+ */
+async function announceIntent(baseDir: string): Promise<() => Promise<void>> {
+	const file = path.join(baseDir, ISOLATION_INTENT_DIR, `${process.pid}-${Snowflake.next()}.json`);
+	const written = await writeProcessIdentity(file).then(
+		() => true,
+		() => false,
+	);
+	if (!written) return async () => {};
+	return async () => {
+		await fs.rm(file, { force: true }).catch(() => undefined);
 	};
 }
 
@@ -312,30 +371,37 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
  * past; a record that cannot be read counts as live, as everywhere else here.
  */
 export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
-	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
-	let entries: string[];
-	try {
-		entries = await fs.readdir(dir);
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		return true;
+	// Both directories: a party queued for the lock has announced its intent
+	// and is as much a user of this workspace as one whose record has landed.
+	for (const dir of [ISOLATION_UNFINISHED_DIR, ISOLATION_INTENT_DIR]) {
+		if (await hasLiveRecordIn(path.join(baseDir, dir))) return true;
 	}
-	let unfinished = false;
-	for (const entry of entries) {
+	return false;
+}
+
+/** Whether a live process has a record in `dir`, clearing dead ones on the way past. */
+async function hasLiveRecordIn(dir: string): Promise<boolean> {
+	const listing = await readdirLookup(dir);
+	if (listing.kind === "absent") return false;
+	// A directory that cannot be listed is not an empty one, and the caller is
+	// about to delete or rename what is in it.
+	if (listing.kind === "unknown") return true;
+	let live = false;
+	for (const entry of listing.value) {
 		const file = path.join(dir, entry);
 		const holder = await readProcessIdentity(file);
 		if (holder === "unreadable") {
-			unfinished = true;
+			live = true;
 			continue;
 		}
 		if (holder === undefined) continue;
 		if (await isProcessStillLive(holder)) {
-			unfinished = true;
+			live = true;
 			continue;
 		}
 		await fs.rm(file, { force: true }).catch(() => undefined);
 	}
-	return unfinished;
+	return live;
 }
 
 /** One reading of a record or lease directory: what is live, and whether it is all ours. */
@@ -357,14 +423,10 @@ interface HolderReading {
  * transition as a state.
  */
 async function readHolders(dir: string): Promise<HolderReading> {
-	let entries: string[];
-	try {
-		entries = await fs.readdir(dir);
-	} catch (error) {
-		if (isEnoent(error)) return { anyLive: false, allOurs: true, unknown: false };
-		// A failure to look is not an absence.
-		return { anyLive: true, allOurs: false, unknown: true };
-	}
+	const listing = await readdirLookup(dir);
+	if (listing.kind === "absent") return { anyLive: false, allOurs: true, unknown: false };
+	if (listing.kind === "unknown") return { anyLive: true, allOurs: false, unknown: true };
+	const entries = listing.value;
 	let anyLive = false;
 	let allOurs = true;
 	for (const entry of entries) {
@@ -385,15 +447,12 @@ async function readHolders(dir: string): Promise<HolderReading> {
 /** Whether every unfinished-writer record at `baseDir` belongs to this process. */
 async function ownsEveryUnfinishedWriter(baseDir: string): Promise<boolean> {
 	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
-	let entries: string[];
-	try {
-		entries = await fs.readdir(dir);
-	} catch (error) {
-		// A failure to look is not an absence. Not knowing whose records these
-		// are means they may be a foreign writer's, and this process stays.
-		if (isEnoent(error)) return true;
-		return false;
-	}
+	const listing = await readdirLookup(dir);
+	// A failure to look is not an absence. Not knowing whose records these are
+	// means they may be a foreign writer's, and this process stays.
+	if (listing.kind === "absent") return true;
+	if (listing.kind === "unknown") return false;
+	const entries = listing.value;
 	for (const entry of entries) {
 		const holder = await readProcessIdentity(path.join(dir, entry));
 		if (holder === undefined) continue;
@@ -496,6 +555,11 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// in; the run's result no longer depends on that exclusion, because the
 		// capture at release has already happened by the time this runs.
 		const leases = await readHolders(path.join(baseDir, ISOLATION_LEASE_DIR));
+		// Somebody queued for this very lock has already said so. Counting it
+		// is the only way a holder can see a party that is one position behind
+		// it; the owner used to list, see only itself, and exit while a real
+		// foreign write was waiting to be published.
+		const intents = await readHolders(path.join(baseDir, ISOLATION_INTENT_DIR));
 		if (leases.anyLive) {
 			// Somebody else arrived after a writer record let this process
 			// unreference its wait: the work is this process's to do, so the
@@ -507,7 +571,14 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			// used to land just after it and the owner exited without capturing
 			// it. Under the lock there is no "just after".
 			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
-			if (leases.allOurs && !leases.unknown && writersNow.allOurs && !writersNow.unknown) {
+			if (
+				leases.allOurs &&
+				!leases.unknown &&
+				writersNow.allOurs &&
+				!writersNow.unknown &&
+				intents.allOurs &&
+				!intents.unknown
+			) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();
 			} else {
@@ -520,13 +591,15 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.
 		const writers = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
-		if (writers.anyLive) {
+		if (writers.anyLive || intents.anyLive) {
 			// Our own record is kept until this process exits, so waiting for it
 			// must not keep this process alive: the record is on disk and
 			// reclamation takes the workspace afterwards. A *foreign* writer's
 			// record is different — it will go while this process can still do
 			// the final capture, and exiting early leaves that work uncaptured.
-			if (writers.allOurs && !writers.unknown) {
+			// The arrival branch needs the same answer: a foreign party on its
+			// way in is a reason to stay, whether or not its record has landed.
+			if (writers.allOurs && !writers.unknown && intents.allOurs && !intents.unknown) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();
 			} else {
@@ -535,6 +608,7 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			}
 			return undefined;
 		}
+		// Nothing is here and nothing is on its way: the teardown may run.
 		const owed = workspace.pendingTeardown;
 		workspace.pendingTeardown = undefined;
 		disarmTeardownWatch(workspace);

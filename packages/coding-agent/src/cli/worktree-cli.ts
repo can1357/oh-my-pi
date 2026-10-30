@@ -23,8 +23,10 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
+import { lstatLookup, readdirLookup, statLookup } from "../task/isolation-lookup";
 import {
 	decideIsolationReclaim,
+	requireSandboxLockHeld,
 	withSandboxLock,
 	ISOLATION_OWNER_FILE,
 	readRetainedMountBackend,
@@ -50,6 +52,11 @@ export interface WorktreeEntry {
 	branch?: string;
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
+	/**
+	 * Set when this process could not read the entry. It is listed so the user
+	 * sees it, and never removed: a failure to look is not a licence to delete.
+	 */
+	keep?: boolean;
 }
 
 export interface AddWorktreeOptions {
@@ -90,17 +97,26 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 	if (backend === undefined) return false;
 	for (const name of TASK_ISOLATION_MOUNT_DIRS) {
 		const candidate = path.join(dir, name);
-		if (
-			await fs
-				.stat(candidate)
-				.then(stat => stat.isDirectory())
-				.catch(() => false)
-		) {
-			await natives.isoStop(backend, candidate);
-			return true;
+		// A stat that failed is not a mount directory that is absent. Reading
+		// it as absent skipped the native stop and left the next step — a
+		// recursive removal — pointed at what may still be a mount.
+		const found = await statLookup(candidate);
+		if (found.kind === "unknown") {
+			throw new Error(
+				`Isolation workspace ${dir} records a ${backend} mount, and ${candidate} could not be read ` +
+					`(${found.reason}); refusing to remove it without stopping the mount.`,
+			);
 		}
+		if (found.kind === "absent" || !found.value.isDirectory()) continue;
+		await natives.isoStop(backend, candidate);
+		return true;
 	}
-	return false;
+	// The sidecar names a mount backend and no mount directory is here: the
+	// workspace is not in the shape this guard knows, so it is not removed.
+	throw new Error(
+		`Isolation workspace ${dir} records a ${backend} mount, but none of ${TASK_ISOLATION_MOUNT_DIRS.join(", ")} ` +
+			"is there; refusing to remove it.",
+	);
 }
 
 export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
@@ -226,6 +242,10 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
 		try {
+			if (target.keep) {
+				results.push({ path: target.path, ok: true, skipped: true });
+				continue;
+			}
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
 				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
@@ -251,6 +271,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					const removed = await withSandboxLock(sandbox, "remove", async () => {
 						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) return false;
 						await stopRetainedMount(sandbox);
+						requireSandboxLockHeld(sandbox, "remove");
 						await fs.rm(sandbox, { recursive: true, force: true });
 						return true;
 					});
@@ -304,19 +325,26 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 
 async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const root = getWorktreesDir();
-	let topLevel: string[];
-	try {
-		topLevel = await fs.readdir(root);
-	} catch (err) {
-		if (isEnoent(err)) return [];
-		throw err;
+	const rootListing = await readdirLookup(root);
+	if (rootListing.kind === "absent") return [];
+	// A listing that failed is not an empty worktree directory: saying "no
+	// worktrees" would tell the user everything is clean when nothing was read.
+	if (rootListing.kind === "unknown") {
+		throw new Error(`Worktree directory ${root} could not be listed: ${rootListing.reason}`);
 	}
+	const topLevel = rootListing.value;
 
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
-		const stat = await fs.stat(dir).catch(() => null);
-		if (!stat?.isDirectory()) continue;
+		const stat = await statLookup(dir);
+		if (stat.kind === "unknown") {
+			// Named, not dropped: an entry nobody can look at is exactly the
+			// one a user needs to hear about, and it is never removed.
+			entries.push({ path: dir, kind: "stray", orphanReason: `could not be read (${stat.reason})`, keep: true });
+			continue;
+		}
+		if (stat.kind === "absent" || !stat.value.isDirectory()) continue;
 
 		const direct = await classifyDir(dir);
 		if (direct) {
@@ -325,17 +353,32 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 		}
 
 		// Legacy nesting: ~/.omp/wt/<encoded-project>/<branch-or-id>
-		let children: string[];
-		try {
-			children = await fs.readdir(dir);
-		} catch {
+		const childListing = await readdirLookup(dir);
+		if (childListing.kind === "unknown") {
+			entries.push({
+				path: dir,
+				kind: "stray",
+				orphanReason: `could not be listed (${childListing.reason})`,
+				keep: true,
+			});
 			continue;
 		}
+		if (childListing.kind === "absent") continue;
+		const children = childListing.value;
 		let nested = 0;
 		for (const child of children) {
 			const childDir = path.join(dir, child);
-			const childStat = await fs.stat(childDir).catch(() => null);
-			if (!childStat?.isDirectory()) continue;
+			const childStat = await statLookup(childDir);
+			if (childStat.kind === "unknown") {
+				entries.push({
+					path: childDir,
+					kind: "stray",
+					orphanReason: `could not be read (${childStat.reason})`,
+					keep: true,
+				});
+				continue;
+			}
+			if (childStat.kind === "absent" || !childStat.value.isDirectory()) continue;
 			const childClassified = await classifyDir(childDir);
 			if (childClassified) {
 				entries.push(childClassified);
@@ -364,11 +407,15 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	// dir itself (legacy dirs and crashed pre-marker runs). Recognizing the
 	// marker alone keeps an in-progress sandbox from being mistaken for a stray
 	// during the window between marker creation and mount materialisation.
-	let isIsolation = await Bun.file(path.join(dir, ISOLATION_OWNER_FILE)).exists();
+	// `exists()` is false for a marker that is there and unreadable, and a
+	// sandbox misread as a stray is removed with a plain recursive delete.
+	// Unknown counts as a sandbox: the reclaim decision below then refuses it.
+	const marker = await lstatLookup(path.join(dir, ISOLATION_OWNER_FILE));
+	let isIsolation = marker.kind !== "absent";
 	if (!isIsolation) {
 		for (const mountDir of TASK_ISOLATION_MOUNT_DIRS) {
-			const mountStat = await fs.stat(path.join(dir, mountDir)).catch(() => null);
-			if (mountStat?.isDirectory()) {
+			const mountStat = await statLookup(path.join(dir, mountDir));
+			if (mountStat.kind === "unknown" || (mountStat.kind === "found" && mountStat.value.isDirectory())) {
 				isIsolation = true;
 				break;
 			}

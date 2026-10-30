@@ -1427,6 +1427,48 @@ describe("captureIsolationBaseline", () => {
 	});
 });
 
+describe("a capture that could not read everything", () => {
+	it("raises instead of reporting an empty patch", async () => {
+		// The native diff of a file this process cannot read throws. Smoothed
+		// into an empty patch, it told the teardown there was nothing to save
+		// and the file went with the workspace: `{patchEmpty:true,
+		// present:false}`. A capture that could not read something has not
+		// captured it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+
+		const unreadable = path.join(repo, "must-preserve.txt");
+		await fs.writeFile(unreadable, "work nobody else has\n");
+		await fs.chmod(unreadable, 0o000);
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/Could not read 1 untracked file/);
+		} finally {
+			// Restored so the fixture can be removed.
+			await fs.chmod(unreadable, 0o600);
+		}
+	});
+
+	it("captures a readable untracked file in the same shape", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+
+		expect(delta.rootPatch).toContain("must-preserve.txt");
+	});
+});
+
 describe("applyNestedPatches", () => {
 	const nestedRel = "sub";
 	let fixtureParent: string;

@@ -23,6 +23,7 @@ import {
 	clearClaimedWorkspace,
 	acquireSandboxLockWithNotice,
 	holdsSandboxLock,
+	requireSandboxLockHeld,
 	runHoldingSandboxLock,
 	withSandboxLock,
 	ISOLATION_OWNER_FILE,
@@ -48,11 +49,43 @@ const SANDBOX_STOP_MAX_WAIT_MS = 10_000;
 const SANDBOX_CAPTURE_MAX_WAIT_MS = 120_000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
-async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
+/**
+ * A capture that could not read part of the working tree.
+ *
+ * It is thrown rather than smoothed into an empty patch, because an empty
+ * patch is a statement that there is nothing to save — and the teardown
+ * deletes the workspace on the strength of it. A real `chmod 000` untracked
+ * file took that path: the diff failed, the capture reported no changes, and
+ * the workspace with the unread file in it was removed.
+ */
+export class IsolationCaptureIncompleteError extends Error {
+	/** Paths this capture could not read, when it knows them. */
+	readonly unread: readonly string[];
+	constructor(message: string, unread: readonly string[] = [], cause?: unknown) {
+		super(message, cause === undefined ? undefined : { cause });
+		this.name = "IsolationCaptureIncompleteError";
+		this.unread = unread;
+	}
+}
+
+/**
+ * Diff two trees, failing when git cannot.
+ *
+ * There is no "or empty" here: a diff that could not be taken is not a diff
+ * showing no changes, and every caller below builds either the patch a run is
+ * kept for or the commit that carries its work.
+ */
+async function diffTree(repo: VcsGitRepo, base: string, head: string): Promise<string> {
 	try {
 		return await repo.diffTree(base, head, true);
 	} catch (error) {
-		if (vcs.isVcsError(error)) return "";
+		if (vcs.isVcsError(error)) {
+			throw new IsolationCaptureIncompleteError(
+				`Could not diff ${base}..${head}: ${error.stderr.trim() || error.message}`,
+				[],
+				error,
+			);
+		}
 		throw error;
 	}
 }
@@ -65,6 +98,11 @@ export interface RepoBaseline {
 	unstaged: string;
 	untracked: string[];
 	untrackedPatch: string;
+	/**
+	 * Untracked entries the baseline could not read. Absent on hand-built
+	 * baselines, which have nothing to say about it.
+	 */
+	unreadUntracked?: string[];
 }
 
 /** Baseline state for the project, including any nested git repos. */
@@ -222,24 +260,44 @@ async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[])
 	return results.reduce((total: number, size) => total + (size ?? 0), 0);
 }
 
+/** An untracked-file capture, with the entries it could not read named. */
+interface UntrackedCapture {
+	patch: string;
+	/** Entries whose diff failed: read neither as present nor as absent. */
+	unread: string[];
+}
+
 async function captureUntrackedPatch(
 	repoRoot: string,
 	untracked: readonly string[],
 	repo: VcsGitRepo = vcs.requireGit(repoRoot),
-): Promise<string> {
-	if (untracked.length === 0) return "";
+): Promise<UntrackedCapture> {
+	if (untracked.length === 0) return { patch: "", unread: [] };
 	const nullPath = getGitNoIndexNullPath();
 	// Bound concurrent native encodes so large untracked sets do not hold every
 	// file and binary patch in memory at once.
 	const { results: untrackedDiffs } = await mapWithConcurrencyLimit([...untracked], 8, async entry => {
 		try {
-			return await repo.diffNoIndex(nullPath, entry, true);
+			return { entry, diff: await repo.diffNoIndex(nullPath, entry, true) };
 		} catch (error) {
-			if (vcs.isVcsError(error)) return "";
+			// Named, not dropped. A file whose permissions deny this process is
+			// still the user's work, and it is the one file nobody can
+			// reconstruct from the patch.
+			if (vcs.isVcsError(error)) return { entry, diff: undefined };
 			throw error;
 		}
 	});
-	return untrackedDiffs.filter((diff): diff is string => !!diff?.trim()).join("\n");
+	const unread: string[] = [];
+	const patches: string[] = [];
+	for (const result of untrackedDiffs) {
+		if (result === undefined) continue;
+		if (result.diff === undefined) {
+			unread.push(result.entry);
+			continue;
+		}
+		if (result.diff.trim()) patches.push(result.diff);
+	}
+	return { patch: patches.join("\n"), unread };
 }
 
 /**
@@ -277,8 +335,26 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 	if (contentBytes > budgetBytes) {
 		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
-	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked, repo);
-	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
+	const untrackedCapture = await captureUntrackedPatch(repoRoot, untracked, repo);
+	if (untrackedCapture.unread.length > 0) {
+		// Recorded rather than raised: a baseline that missed a file costs
+		// precision in the delta, not a user's work. The delta capture, which
+		// is what a deletion rests on, refuses instead.
+		logger.warn("isolation baseline could not read some untracked files", {
+			repoRoot,
+			unread: untrackedCapture.unread.slice(0, 20),
+			unreadCount: untrackedCapture.unread.length,
+		});
+	}
+	return {
+		repoRoot,
+		headCommit,
+		staged,
+		unstaged,
+		untracked,
+		untrackedPatch: untrackedCapture.patch,
+		unreadUntracked: untrackedCapture.unread,
+	};
 }
 
 interface SyntheticTreeOptions {
@@ -368,9 +444,21 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
 	const currentUntracked = await repo.lsFiles(true, true);
-	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	const currentUntracked_ = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	if (currentUntracked_.unread.length > 0) {
+		// The whole point of the capture is to decide whether the workspace may
+		// go. Returning a patch that silently omits a file this process could
+		// not read tells the teardown there is nothing to save, and the file is
+		// deleted with the directory.
+		throw new IsolationCaptureIncompleteError(
+			`Could not read ${currentUntracked_.unread.length} untracked file(s) in ${repoDir}: ` +
+				`${currentUntracked_.unread.slice(0, 10).join(", ")}`,
+			currentUntracked_.unread,
+		);
+	}
+	const currentUntrackedPatch = currentUntracked_.patch;
 	const committedPatch =
-		currentHead && currentHead !== rb.headCommit ? await diffTreeOrEmpty(repo, rb.headCommit, currentHead) : "";
+		currentHead && currentHead !== rb.headCommit ? await diffTree(repo, rb.headCommit, currentHead) : "";
 
 	const baselineTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
 		rb.staged,
@@ -384,7 +472,7 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 		currentUntrackedPatch,
 	]);
 
-	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
+	return diffTree(objectRepo, baselineTree, currentTree);
 }
 
 function unquoteGitDiffPath(rawPath: string): string {
@@ -1016,6 +1104,9 @@ export async function cleanupIsolation(
 			}
 			const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 			try {
+				// At the act: the capture above may have run long enough for
+				// this teardown's hold to have ended under it.
+				requireSandboxLockHeld(baseDir, "retire");
 				await fs.rename(baseDir, candidate);
 				retiredDir = candidate;
 				// The copy left behind is nobody's sandbox now. Saying so keeps a
@@ -1213,9 +1304,7 @@ async function patchTree(
 		// WIP-only files are untouched by the delta, so their post-delta state
 		// is the WIP state; diffing it back to the parent rewinds them.
 		const rewind =
-			wipOnly.size > 0
-				? filterPatchFiles(await diffTreeOrEmpty(vcs.requireGit(repoDir), withWip, parentSha), wipOnly)
-				: "";
+			wipOnly.size > 0 ? filterPatchFiles(await diffTree(vcs.requireGit(repoDir), withWip, parentSha), wipOnly) : "";
 		return await writeSyntheticTree(repoDir, parentSha, [...wipPatches, patchText, rewind]);
 	} catch (wipErr) {
 		if (!vcs.isVcsError(wipErr)) throw wipErr;
@@ -1270,7 +1359,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	let previousFilteredTree = baselineSha;
 
 	for (const commitSha of agentCommits) {
-		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
+		const taskStatePatch = await diffTree(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
 		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
 		// filtered tree through `patchTree` with that WIP context: hunks that
 		// touch WIP paths — including deletions of untracked WIP the agent never
@@ -1284,7 +1373,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 			taskStatePatch,
 			opts.baseline.root,
 		);
-		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
+		const commitPatchText = await diffTree(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
 			tip = await commitPatch(
@@ -1321,7 +1410,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		opts.rootPatch,
 		opts.baseline.root,
 	);
-	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
+	const leftoverPatch = await diffTree(repo, previousFilteredTree, finalFilteredTree);
 	if (!leftoverPatch.trim()) return tip;
 	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;
 	return commitPatch(opts.repoRoot, tip, opts.taskId, leftoverPatch, msg);

@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
+import { lstatLookup, readdirLookup, readJsonLookup, statLookup } from "./isolation-lookup";
 
 /**
  * How long a materialisation, teardown, lease or reclamation waits for the
@@ -137,13 +138,10 @@ async function writeFileAtomically(file: string, contents: string): Promise<void
 
 /** The identity recorded in `file`, `undefined` when there is none, `"unreadable"` when it cannot be read. */
 export async function readProcessIdentity(file: string): Promise<ProcessIdentity | "unreadable" | undefined> {
-	let decoded: unknown;
-	try {
-		decoded = await Bun.file(file).json();
-	} catch (error) {
-		if (isEnoent(error)) return undefined;
-		return "unreadable";
-	}
+	const found = await readJsonLookup(file);
+	if (found.kind === "absent") return undefined;
+	if (found.kind === "unknown") return "unreadable";
+	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return "unreadable";
 	const pid = decoded.pid;
 	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return "unreadable";
@@ -230,31 +228,13 @@ export type IsolationClaim =
 
 /** Read the claim recorded for the sandbox at `baseDir`. */
 export async function readIsolationClaim(baseDir: string): Promise<IsolationClaim> {
-	let decoded: unknown;
-	try {
-		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
-	} catch (error) {
-		if (isEnoent(error)) {
-			// `ENOENT` from opening says the *target* is missing, which a dangling
-			// symlink also gives. `lstat` answers the question that was meant: is
-			// there an entry here at all? An entry whose target is gone is a
-			// marker nobody can read, which is unknown, not absent.
-			// A failure to look is not an absence here either: only `ENOENT`
-			// from `lstat` says there is no entry, and anything else — `EACCES`,
-			// `EIO` — is a marker this caller cannot read.
-			try {
-				await fs.lstat(path.join(baseDir, ISOLATION_OWNER_FILE));
-				return { kind: "unknown", reason: "owner marker entry exists but its target is missing" };
-			} catch (lstatError) {
-				if (isEnoent(lstatError)) return { kind: "absent" };
-				return {
-					kind: "unknown",
-					reason: lstatError instanceof Error ? lstatError.message : String(lstatError),
-				};
-			}
-		}
-		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
-	}
+	// `readJsonLookup` asks `lstat` first, so a dangling marker symlink — whose
+	// open gives `ENOENT` just as a missing one does — is an entry that exists
+	// and cannot be read, which is unknown.
+	const found = await readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
+	if (found.kind === "absent") return { kind: "absent" };
+	if (found.kind === "unknown") return { kind: "unknown", reason: found.reason };
+	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null) {
 		return { kind: "unknown", reason: "marker is not an object" };
 	}
@@ -277,16 +257,16 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
  * owner's teardown finds a generation that is not its own.
  */
 export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
+	requireSandboxLockHeld(baseDir, "empty");
 	// A listing that fails is not an empty sandbox: reading it as one leaves
 	// the previous owner's data in place under this run's claim, and the run
 	// then works in a workspace it believes is clean.
-	let entries: string[];
-	try {
-		entries = await fs.readdir(baseDir);
-	} catch (error) {
-		if (isEnoent(error)) return;
-		throw error;
+	const listing = await readdirLookup(baseDir);
+	if (listing.kind === "absent") return;
+	if (listing.kind === "unknown") {
+		throw new Error(`Isolation workspace ${baseDir} could not be listed (${listing.reason}); refusing to clear it.`);
 	}
+	const entries = listing.value;
 	for (const entry of entries) {
 		if (entry === ISOLATION_OWNER_FILE) continue;
 		await fs.rm(path.join(baseDir, entry), { recursive: true, force: true });
@@ -314,20 +294,19 @@ export interface IsolationReclaimDecision {
  */
 export async function decideIsolationReclaim(baseDir: string): Promise<IsolationReclaimDecision> {
 	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
-	let decoded: unknown;
-	try {
-		decoded = await Bun.file(markerFile).json();
-	} catch (error) {
-		if (isEnoent(error)) {
-			// A sandbox with no marker at all: a pre-marker leftover, or one whose
-			// marker something removed. Neither is proof that no task is working
-			// in there, and the marker is written before the backend materialises
-			// anything, so a crashed run leaves one naming its dead process.
-			// `--all` is the way to remove what cannot prove itself.
-			return { reclaimable: false, reason: "no owner marker (use --all to remove)" };
-		}
-		return { reclaimable: false, reason: `owner marker unreadable (${errorText(error)})` };
+	const marker = await readJsonLookup(markerFile);
+	if (marker.kind === "absent") {
+		// A sandbox with no marker at all: a pre-marker leftover, or one whose
+		// marker something removed. Neither is proof that no task is working
+		// in there, and the marker is written before the backend materialises
+		// anything, so a crashed run leaves one naming its dead process.
+		// `--all` is the way to remove what cannot prove itself.
+		return { reclaimable: false, reason: "no owner marker (use --all to remove)" };
 	}
+	if (marker.kind === "unknown") {
+		return { reclaimable: false, reason: `owner marker unreadable (${marker.reason})` };
+	}
+	const decoded = marker.value;
 	if (typeof decoded !== "object" || decoded === null) {
 		return { reclaimable: false, reason: "owner marker unreadable (not an object)" };
 	}
@@ -415,15 +394,16 @@ export async function writeRetainedBackend(baseDir: string, backend: number): Pr
  */
 export async function readRetainedMountBackend(dir: string): Promise<number | undefined> {
 	const sidecar = path.join(dir, RETAINED_BACKEND_FILE);
-	// `exists()` answers false for a sidecar that is there but unreadable,
-	// which is the guard bypass this function's contract exists to prevent.
-	try {
-		await fs.stat(sidecar);
-	} catch (error) {
-		if (isEnoent(error)) return undefined;
-		throw error;
+	// Three-valued throughout: `absent` is the only answer that means "no
+	// sidecar". A dangling entry — which `stat` reports as `ENOENT` while
+	// `lstat` sees it — and an unreadable one are both `unknown`, and the
+	// caller is about to remove a possible mount, so unknown raises.
+	const found = await readJsonLookup(sidecar);
+	if (found.kind === "absent") return undefined;
+	if (found.kind === "unknown") {
+		throw new Error(`retained-mount metadata at ${sidecar} could not be read: ${found.reason}`);
 	}
-	const decoded: unknown = await Bun.file(sidecar).json();
+	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null || !("backend" in decoded)) {
 		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
 	}
@@ -431,8 +411,19 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	if (typeof backend !== "number" || !Number.isInteger(backend)) {
 		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
 	}
+	// A backend this build does not know is not a backend that needs no
+	// teardown: answering "no" would route a possible mount to recursive
+	// removal. It is unknown, and unknown raises.
+	if (!isKnownBackend(backend)) {
+		throw new Error(`retained-mount metadata at ${sidecar} names backend ${backend}, which this build does not know`);
+	}
 	if (!needsNativeTeardown(backend)) return undefined;
 	return backend;
+}
+
+/** Whether `backend` is a backend value this build understands. */
+function isKnownBackend(backend: number): boolean {
+	return Object.values(IsoBackendKind).includes(backend as natives.IsoBackendKind);
 }
 
 /** One-line text for an error recorded in a reclaim decision. */
@@ -512,6 +503,8 @@ const heldSandboxLocks = new AsyncLocalStorage<Map<string, SandboxLockHandle>>()
  * it true long enough to move a workspace a different process was holding.
  */
 export interface SandboxLockHandle {
+	/** The sandbox this lock is for. A handle for another one is not this hold. */
+	readonly baseDir: string;
 	release(): void;
 	/** Whether this lock is still held, asked of the lock rather than of a note. */
 	isHeld(): boolean;
@@ -529,6 +522,11 @@ export async function runHoldingSandboxLock<T>(
 	lock: SandboxLockHandle,
 	body: () => Promise<T>,
 ): Promise<T> {
+	// A real handle for a different sandbox is not a hold on this one: it was
+	// accepted once, and retention moved a workspace a second process held.
+	if (lock.baseDir !== baseDir) {
+		throw new Error(`Sandbox lock for ${lock.baseDir} cannot stand for a hold on ${baseDir}.`);
+	}
 	const held = new Map(heldSandboxLocks.getStore() ?? []);
 	held.set(baseDir, lock);
 	return await heldSandboxLocks.run(held, body);
@@ -544,6 +542,19 @@ export async function runHoldingSandboxLock<T>(
  */
 export function holdsSandboxLock(baseDir: string): boolean {
 	return heldSandboxLocks.getStore()?.get(baseDir)?.isHeld() === true;
+}
+
+/**
+ * Raise unless this call's hold on `baseDir` is live *now*.
+ *
+ * Asked immediately before an act that cannot be undone. A body that entered
+ * under the lock is not a body that still holds it: one resumed after its
+ * wrapper had released and renamed a workspace while another process held the
+ * native lock. Entering under a hold authorises nothing by itself.
+ */
+export function requireSandboxLockHeld(baseDir: string, act: string): void {
+	if (holdsSandboxLock(baseDir)) return;
+	throw new Error(`Refusing to ${act} ${baseDir}: this call no longer holds that workspace's lock.`);
 }
 
 /**
@@ -563,6 +574,36 @@ export async function withSandboxLock<T>(baseDir: string, purpose: string, body:
 /** How long a lock wait runs before the caller is told it is waiting, and how often after. */
 const SANDBOX_LOCK_NOTICE_MS = 1_000;
 const SANDBOX_LOCK_REMINDER_MS = 30_000;
+
+/** Set once: stderr keeps a no-op error listener so a late stream failure cannot kill the run. */
+let stderrGuarded = false;
+
+/**
+ * Write a diagnostic to stderr, and never fail because of it.
+ *
+ * A closed descriptor throws here; a broken pipe fails *later*, as a stream
+ * error with no listener, which terminates the process. Both killed children
+ * that were a moment away from being granted the lock they were waiting for.
+ * A diagnostic is not worth a run, so the synchronous throw, the write
+ * callback's error and the stream's own error event are all swallowed.
+ */
+function writeNoticeSafely(text: string): void {
+	try {
+		const stream = process.stderr;
+		if (!stderrGuarded) {
+			stderrGuarded = true;
+			stream.on?.("error", () => {
+				// Nothing to do: the caller cannot be told. That is not a failure
+				// of the work it is doing.
+			});
+		}
+		stream.write(text, () => {
+			// Swallows the asynchronous failure the callback reports.
+		});
+	} catch {
+		// Swallows the synchronous one.
+	}
+}
 
 /**
  * Take a sandbox lock, telling the caller at the *start* of a wait rather than
@@ -596,20 +637,14 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 				`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — it has not been granted yet. ` +
 				`If another run holds it, the holder is not identifiable, and ${recorded}. ` +
 				"`omp worktree list` shows what owns it.";
-			// A diagnostic must never be fatal: a closed stderr or a broken pipe
-			// killed the run it was meant to inform.
-			try {
-				process.stderr.write(`${message}\n`);
-			} catch {
-				// Nothing to do: the caller cannot be told, and that is not a reason
-				// to fail the work.
-			}
+			writeNoticeSafely(`${message}\n`);
 			logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
 				waitedMs: Date.now() - startedAt,
 				detail:
-					`Another run holds it; the holder is not identifiable, and ${recorded}. A workspace is held while ` +
-					"its task's patch is being saved, while it is being built, and while it is being removed. " +
-					"`omp worktree list` shows what owns it.",
+					`It has not been granted yet. If another run holds it, the holder is not identifiable, and ` +
+					`${recorded}. A workspace is held while its task's patch is being saved, while it is being ` +
+					"built, and while it is being removed. `omp worktree list` shows what owns it. Whether this " +
+					"wait ends in a grant or in a lock that could not be opened is said by the final error.",
 			});
 		} catch {
 			// An announcement that fails is still only an announcement.
@@ -626,6 +661,7 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 		// being a hold the moment it is released.
 		let released = false;
 		return {
+			baseDir,
 			release: () => {
 				// Idempotent: a caller that hands this handle to a continuation
 				// and a `finally` that also releases must not unlock twice.

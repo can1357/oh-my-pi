@@ -6,6 +6,8 @@ import { scheduler } from "node:timers/promises";
 import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
+	hasUnfinishedWriter,
+	ISOLATION_INTENT_DIR,
 	ISOLATION_LEASE_DIR,
 	ISOLATION_UNFINISHED_DIR,
 	leaseIsolationWorkspace,
@@ -14,7 +16,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	acquireSandboxLockWithNotice,
+	clearClaimedWorkspace,
 	holdsSandboxLock,
+	readRetainedMountBackend,
+	RETAINED_BACKEND_FILE,
+	runHoldingSandboxLock,
 	markIsolationRetiring,
 	readIsolationClaim,
 	resolveSandboxIdentity,
@@ -159,38 +165,144 @@ describe("the sandbox lock", () => {
 		expect(claim.kind === "unknown" ? claim.reason : "").toContain("EIO");
 	});
 
-	it("keeps working when the notice cannot be written", async () => {
+	it("keeps working when the notice throws on write", async () => {
+		// A closed descriptor throws synchronously from `write`.
+		const { baseDir } = await makeSandbox();
+		const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
+		const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+			throw Object.assign(new Error("EBADF: bad file descriptor"), { code: "EBADF" });
+		});
+		const waiting = withSandboxLock(baseDir, "wait through a closed descriptor", async () => "granted");
+
+		await scheduler.wait(1_300);
+		// Restored before the grant: everything else in this process writes to
+		// stderr too, and the notice is the only writer under test.
+		spy.mockRestore();
+		lock.release();
+
+		expect(await waiting).toBe("granted");
+	});
+
+	it("keeps working when the notice fails after the write returns", async () => {
 		// A diagnostic must never be fatal. A closed stderr and a broken pipe
 		// both made children exit 1 while waiting for a lock that was about to
 		// be granted.
 		const { baseDir } = await makeSandbox();
 		const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
-		vi.spyOn(process.stderr, "write").mockImplementation(() => {
-			throw Object.assign(new Error("EPIPE: broken pipe"), { code: "EPIPE" });
-		});
+		// The shape the guard missed: a broken pipe does not throw from
+		// `write`, it reports later through the callback and the stream's
+		// error event, and with nothing listening that terminates the process.
+		const spy = vi.spyOn(process.stderr, "write").mockImplementation(((
+			_chunk: unknown,
+			callback?: (error?: Error | null) => void,
+		) => {
+			const failure = Object.assign(new Error("EPIPE: broken pipe"), { code: "EPIPE" });
+			callback?.(failure);
+			process.stderr.emit("error", failure);
+			return false;
+		}) as unknown as typeof process.stderr.write);
 		const waiting = withSandboxLock(baseDir, "wait through a broken pipe", async () => "granted");
 
 		// Past the notice deadline, so the write is certainly attempted.
 		await scheduler.wait(1_300);
+		spy.mockRestore();
 		lock.release();
 
 		expect(await waiting).toBe("granted");
 	});
 });
 
+it("refuses a handle that belongs to another sandbox", async () => {
+	// A real handle, honestly acquired — for a different directory. It was
+	// accepted as a hold on this one, and retention moved a workspace a
+	// second process was holding.
+	const mine = await makeSandbox();
+	const other = await makeSandbox("other");
+	const lock = await acquireSandboxLockWithNotice(other.baseDir, "hold for the test");
+	try {
+		await expect(runHoldingSandboxLock(mine.baseDir, lock, async () => "acted")).rejects.toThrow(
+			/cannot stand for a hold/,
+		);
+	} finally {
+		lock.release();
+	}
+});
+
+it("refuses to empty a sandbox when the caller holds no lock on it", async () => {
+	// Entering under a hold authorises nothing by itself: the act asks
+	// again, because a body that resumed after its wrapper had released
+	// renamed a workspace another process held.
+	const { baseDir } = await makeSandbox();
+
+	await expect(clearClaimedWorkspace(baseDir)).rejects.toThrow(/no longer holds/);
+});
+
+it("keeps waiting while another party is on its way in", async () => {
+	// A writer queued for this very lock is invisible to a listing taken
+	// under it. The owner saw only itself, stopped waiting and exited
+	// while a real foreign write was one position behind.
+	const { baseDir, mergedDir } = await makeSandbox();
+	registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+	registered.push(mergedDir);
+	await Bun.write(
+		path.join(baseDir, ISOLATION_INTENT_DIR, "foreign.json"),
+		JSON.stringify({ pid: process.pid, startedAt: 0 }),
+	);
+
+	// The intent alone keeps the sandbox occupied, for every caller that
+	// asks whether somebody is working in here.
+	expect(await hasUnfinishedWriter(baseDir)).toBe(true);
+});
+
+it("will not record a writer against a workspace that has been replaced", async () => {
+	// Same path, new claim: a record published into the successor says a
+	// stranger's run is writing in it.
+	const { baseDir, mergedDir } = await makeSandbox();
+	const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
+	const publishing = markUnfinishedWriter(mergedDir).then(
+		() => "published" as const,
+		() => "refused" as const,
+	);
+
+	await scheduler.wait(60);
+	// The sandbox is re-claimed at the same path while the writer waits.
+	await writeIsolationOwner(baseDir, "successor");
+	lock.release();
+
+	expect(await publishing).toBe("refused");
+});
+
+it("refuses a mount sidecar it cannot read, and a backend it does not know", async () => {
+	const { baseDir } = await makeSandbox();
+	// A dangling entry: `stat` says ENOENT, `lstat` says it is there.
+	await fs.symlink(path.join(baseDir, "nowhere.json"), path.join(baseDir, RETAINED_BACKEND_FILE));
+
+	await expect(readRetainedMountBackend(baseDir)).rejects.toThrow(/could not be read/);
+
+	await fs.rm(path.join(baseDir, RETAINED_BACKEND_FILE));
+	await Bun.write(path.join(baseDir, RETAINED_BACKEND_FILE), JSON.stringify({ backend: 999 }));
+
+	// An unrecognised backend is not "needs no teardown": answering that
+	// would route a possible mount to recursive removal.
+	await expect(readRetainedMountBackend(baseDir)).rejects.toThrow(/does not know/);
+});
+
 describe("retaining a workspace another party has already moved", () => {
-	it("reports the newest sibling that really holds a workspace", async () => {
+	it("reports the sibling this sandbox retained last, not the one touched last", async () => {
 		const { baseDir, mergedDir } = await makeSandbox();
 		const parent = path.dirname(baseDir);
-		// A decoy: the name matches, but there is no workspace inside it.
-		await fs.mkdir(path.join(parent, `${path.basename(baseDir)}.retained-decoy`), { recursive: true });
-		const older = path.join(parent, `${path.basename(baseDir)}.retained-older`);
+		const name = path.basename(baseDir);
+		// A decoy whose name matches but which holds no workspace.
+		const decoy = path.join(parent, `${name}.retained-${(1).toString(36)}-decoy`);
+		await fs.mkdir(decoy, { recursive: true });
+		// An older retention whose workspace is modified a moment ago: by
+		// modification time it wins, and it is a different run's.
+		const older = path.join(parent, `${name}.retained-${(1).toString(36)}-older`);
 		await fs.mkdir(path.join(older, "m"), { recursive: true });
-		temporary.push(path.join(parent, `${path.basename(baseDir)}.retained-decoy`), older);
-		await scheduler.wait(20);
-		const newer = path.join(parent, `${path.basename(baseDir)}.retained-newer`);
+		const newer = path.join(parent, `${name}.retained-${Date.now().toString(36)}-newer`);
 		await fs.mkdir(path.join(newer, "m"), { recursive: true });
-		temporary.push(newer);
+		temporary.push(decoy, older, newer);
+		await Bun.write(path.join(older, "m", "touched"), "old different run");
 		const keep = `${baseDir}-moved`;
 		temporary.push(keep);
 		await fs.rename(baseDir, keep);
@@ -198,8 +310,21 @@ describe("retaining a workspace another party has already moved", () => {
 		const retained = await retainIsolationWorkspace(mergedDir, natives.IsoBackendKind.Rcopy);
 
 		expect(retained.dir).toBe(path.join(newer, "m"));
-		expect(retained.present).toBe(true);
-		expect(await fs.stat(retained.dir).then(entry => entry.isDirectory())).toBe(true);
+		expect(retained.location).toBe("here");
+	});
+
+	it("says it does not know where the workspace went when it cannot look", async () => {
+		const { baseDir, mergedDir } = await makeSandbox();
+		const keep = `${baseDir}-moved`;
+		temporary.push(keep);
+		await fs.rename(baseDir, keep);
+		vi.spyOn(fs, "readdir").mockRejectedValue(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+
+		const retained = await retainIsolationWorkspace(mergedDir, natives.IsoBackendKind.Rcopy);
+
+		// Not "gone": nothing was found out, and the message must not send the
+		// user to a path that may not exist.
+		expect(retained.location).toBe("unknown");
 	});
 
 	it("says a workspace is gone rather than naming a path that is not there", async () => {
@@ -210,7 +335,7 @@ describe("retaining a workspace another party has already moved", () => {
 
 		const retained = await retainIsolationWorkspace(mergedDir, natives.IsoBackendKind.Rcopy);
 
-		expect(retained.present).toBe(false);
+		expect(retained.location).toBe("gone");
 		expect(retained.sidecarOk).toBe(false);
 	});
 
