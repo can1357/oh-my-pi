@@ -17,6 +17,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgTaskDisabledAgents } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 
 const mockTaskTool: AgentTool = {
 	name: "task",
@@ -123,6 +124,74 @@ describe("AgentSession magic keyword settings", () => {
 			"orchestrate-notice",
 			"workflow-notice",
 		]);
+	});
+
+	it("applies magic keyword notices to user-attributed Collab prompts", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.promptCustomMessage({
+			customType: COLLAB_PROMPT_MESSAGE_TYPE,
+			content: "orchestrate workflowz review this",
+			display: true,
+			details: { sender: "guest-1" },
+			attribution: "user",
+		});
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{
+			content?: string;
+			customType?: string;
+			role?: string;
+		}>;
+		const orchestrateIdx = promptMessages.findIndex(message => message.customType === "orchestrate-notice");
+		const noticeIdx = promptMessages.findIndex(message => message.customType === "workflow-notice");
+		const collabIdx = promptMessages.findIndex(message => message.customType === COLLAB_PROMPT_MESSAGE_TYPE);
+		expect(orchestrateIdx).toBeGreaterThanOrEqual(0);
+		expect(noticeIdx).toBeGreaterThan(orchestrateIdx);
+		expect(collabIdx).toBeGreaterThan(noticeIdx);
+		expect(promptMessages[collabIdx]).toMatchObject({
+			content: "orchestrate workflowz review this",
+			attribution: "user",
+			display: true,
+		});
+	});
+
+	it("queues keyword notices with user-attributed Collab steer prompts", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		session.agent.state.isStreaming = true;
+
+		await session.promptCustomMessage(
+			{
+				customType: COLLAB_PROMPT_MESSAGE_TYPE,
+				content: "orchestrate finish this",
+				display: true,
+				attribution: "user",
+			},
+			{ streamingBehavior: "steer" },
+		);
+
+		const queued = session.agent
+			.peekSteeringQueue()
+			.map(message => (message.role === "custom" ? message.customType : message.role));
+		expect(queued).toEqual(["orchestrate-notice", COLLAB_PROMPT_MESSAGE_TYPE]);
+	});
+
+	it("applies auto thinking to user-attributed Collab prompts", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		session.setThinkingLevel(AUTO_THINKING);
+
+		await session.promptCustomMessage({
+			customType: COLLAB_PROMPT_MESSAGE_TYPE,
+			content: "ultrathink through the unsafe refactor",
+			display: true,
+			attribution: "user",
+		});
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.XHigh);
+		expect(session.thinkingLevel).toBe(Effort.XHigh);
 	});
 
 	it("updates the workflowz notice when scout is disabled during the session", async () => {

@@ -11,6 +11,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Collab guest prompts now apply the configured magic keywords (for example `orchestrate`) and their auto-thinking behavior, matching prompts typed in the TUI ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.15.0] - 2026-11-01
 
