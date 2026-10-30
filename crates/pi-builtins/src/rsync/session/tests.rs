@@ -312,6 +312,92 @@ fn a_working_directory_the_child_cannot_enter_is_reported() {
 	}
 }
 
+/// A working directory the child cannot be put into does not stop an answer
+/// that never needed one.
+///
+/// libc takes the first search-path directory whose data loads
+/// (`_nl_find_locale`), so a locale found before the first relative entry is
+/// the one the reference finds too. Measured in a mode-0600 directory and
+/// in a removed one, where the reference reports the same: cutting the list
+/// at its first relative entry is order-preserving, unlike dropping those
+/// entries, which also emptied `LOCPATH` and brought glibc's archive back.
+/// `PATH_LOCALE` is the BSDs' variable and asks for no directory here at
+/// all.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_answer_that_needs_no_working_directory_is_still_given() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let Some(utf8) = generated_locale(&dir.path().join("utf8"), SHELL_ONLY_LOCALE, "UTF-8") else { return };
+	let latin_first = format!("{}:missing", locales.display());
+	let utf8_first = format!("{}:missing", utf8.display());
+	let absolute = locales.display().to_string();
+	let cases: [(&str, &str, Option<&str>, &str); 4] = [
+		("unsearchable-latin", &latin_first, None, "ISO-8859-1"),
+		("unsearchable-utf8", &utf8_first, None, "UTF-8"),
+		("unsearchable-bsd-variable", &absolute, Some("relative-locales"), "ISO-8859-1"),
+		("removed-latin", &latin_first, None, "ISO-8859-1"),
+	];
+	for (at, path, bsd, expected) in cases {
+		let cwd = dir.path().join(at);
+		fs::create_dir_all(&cwd).unwrap();
+		let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+		let child = host.child_env();
+		match at.starts_with("removed") {
+			true => fs::remove_dir_all(&cwd).unwrap(),
+			false => fs::set_permissions(&cwd, fs::Permissions::from_mode(0o600)).unwrap(),
+		}
+		let env = |key: &str| match key {
+			"LOCPATH" => Some(path.to_owned()),
+			"PATH_LOCALE" => bsd.map(str::to_owned),
+			_ => None,
+		};
+		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+		if !at.starts_with("removed") {
+			fs::set_permissions(&cwd, fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		assert!(
+			matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == expected),
+			"{at}: {answer:?}"
+		);
+	}
+}
+
+/// Every caller of [`crate::locale::locale_loadable`] models
+/// `setlocale(CATEGORY, "")`, which takes a name whole where `newlocale`
+/// splits one carrying a `;` per category.
+///
+/// Measured: with no data named `LC_CTYPE=C;LC_TIME=C.UTF-8` the reference
+/// reports `ANSI_X3.4-1968` and `fold -w1` splits the two bytes of `é`,
+/// while `newlocale` loads that name and its `.UTF-8` tail reads as a UTF-8
+/// locale; and data literally named `astra;latin` loads as Latin-1 for the
+/// reference while `newlocale` refuses it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_composite_looking_name_is_loadable_only_as_the_reference_loads_it() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let mut copy = Command::new("cp");
+	copy.arg("-a").arg(locales.join(SHELL_ONLY_LOCALE)).arg(locales.join("astra;latin"));
+	assert!(copy.output().unwrap().status.success());
+	// SAFETY: nextest gives this test its own process, and nothing else in
+	// it reads `LOCPATH` concurrently.
+	unsafe { std::env::set_var("LOCPATH", &locales) };
+	let absent = crate::locale::locale_loadable("LC_CTYPE=C;LC_TIME=C.UTF-8", libc::LC_CTYPE_MASK);
+	let present = crate::locale::locale_loadable("astra;latin", libc::LC_CTYPE_MASK);
+	let (utf8, _) = crate::host::Host::for_test("rsync", "", dir.path());
+	let mut utf8 = utf8;
+	utf8.set_test_var("LC_CTYPE", "LC_CTYPE=C;LC_TIME=C.UTF-8");
+	let reads_as_utf8 = crate::locale::ctype_is_utf8(&utf8);
+	// SAFETY: as above.
+	unsafe { std::env::remove_var("LOCPATH") };
+	assert!(!absent, "a name with no data of its own is not loadable");
+	assert!(present, "data literally named with a semicolon is loadable");
+	assert!(!reads_as_utf8, "a name that loads nothing is not a UTF-8 locale");
+}
+
 /// A lock another thread of this process holds must not reach the lookup.
 ///
 /// glibc takes one lock for every locale load, and a lookup that forks
@@ -504,10 +590,11 @@ fn a_locale_utility_that_misbehaves_is_reported() {
 	}
 }
 
-/// Nothing the utility leaves behind outlives the query, whether it answered
-/// or not: a descendant that closes the answer pipe and sleeps used to
-/// survive, because the normal-exit path returned without sweeping the
-/// process group.
+/// Nothing the utility leaves in its process group outlives the query,
+/// whether it answered or not: a descendant that closes the answer pipe and
+/// sleeps used to survive, because the normal-exit path returned without
+/// sweeping the group. One that calls `setsid` leaves the group and is
+/// beyond this.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_descendant_of_the_utility_does_not_outlive_the_query() {

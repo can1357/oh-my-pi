@@ -36,14 +36,25 @@ pub(crate) fn codeset_is_utf8(name: &str) -> bool {
 
 /// Whether the shell's `LC_CTYPE` is a UTF-8 locale the system can load: the
 /// multibyte character rules GNU utilities switch on after `setlocale`.
+///
+/// On Unix this is the codeset of the loaded locale, not the one its name
+/// spells. The two differ for an alias carrying no codeset, and they differ
+/// for a name `newlocale` reads as a composite: `LC_CTYPE=C;LC_TIME=C.UTF-8`
+/// ends in `.UTF-8` and loads nothing at all through `setlocale`, which is
+/// what the reference calls (measured: `ANSI_X3.4-1968`, and `fold -w1`
+/// splitting the two bytes of `é`).
 pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 	let Some(name) = shell_locale(host, "LC_CTYPE") else {
 		return false;
 	};
 	#[cfg(unix)]
-	if !locale_loadable(name, libc::LC_CTYPE_MASK) {
-		return false;
-	}
+	return match loaded_codeset_here(name) {
+		Codeset::Loaded(codeset) => {
+			codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
+		},
+		Codeset::Unloadable | Codeset::Unasked(_) => false,
+	};
+	#[cfg(not(unix))]
 	codeset_is_utf8(name)
 }
 
@@ -67,11 +78,24 @@ pub(crate) fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
 /// of the whole host process.
 ///
 /// `newlocale` splits a name carrying a `;` per category where `setlocale`
-/// would take it whole ([`reads_as_a_composite`]). Nothing here refuses such
-/// a name: the reference loads locale data literally so named, and a filter
-/// on the punctuation would turn those into the C locale.
+/// — which is what every caller models — takes it whole
+/// ([`reads_as_a_composite`]). Such a name is therefore put to the utility,
+/// which uses `setlocale`: `LC_CTYPE=C;LC_TIME=C.UTF-8` with no data of that
+/// name is not loadable (`newlocale` says it is), and data literally named
+/// `astra;latin` is (`newlocale` says it is not). What the utility cannot
+/// separate is data of that name whose charset is the C locale's from a name
+/// that did not load at all — `charmap` prints `ANSI_X3.4-1968` for both,
+/// and so does the reference — so such a locale is read as not loadable, and
+/// only its collation or numeric rules could have differed from C's.
 #[cfg(unix)]
 pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
+	if reads_as_a_composite(locale) {
+		let ours: LocaleEnv = LOCALE_ENV_VARS.map(|name| std::env::var_os(name).filter(|v| !v.is_empty()));
+		return match codeset_from_locale_utility(locale, &ours, None) {
+			Codeset::Loaded(codeset) => !is_c_charset(&codeset),
+			Codeset::Unloadable | Codeset::Unasked(_) => false,
+		};
+	}
 	let Ok(locale) = std::ffi::CString::new(locale) else {
 		return false;
 	};
@@ -197,7 +221,7 @@ pub(crate) fn loaded_codeset(
 	// reference binary.
 	let shell_cwd = child.and_then(|child| child.native_cwd().ok());
 	let ours_cwd = std::env::current_dir().ok();
-	let relative = relative_entry_in(&shell) || relative_entry_in(&ours);
+	let relative = needs_working_directory(&shell) || needs_working_directory(&ours);
 	let same_cwd = !relative || (shell_cwd.is_some() && shell_cwd == ours_cwd.as_deref());
 	// A name `newlocale` would split per category has to go to the utility
 	// even when nothing else would send it there, because only `setlocale`
@@ -205,19 +229,82 @@ pub(crate) fn loaded_codeset(
 	if shell == ours && same_cwd && !reads_as_a_composite(locale) {
 		return loaded_codeset_here(locale);
 	}
-	let cwd = match relative_entry_in(&shell) {
+	let cwd = match needs_working_directory(&shell) {
 		false => None,
 		true => match shell_cwd {
 			Some(cwd) => Some(cwd),
+			// No working directory to put the child in. An entry that does
+			// not need one may still answer (see [`cwd_independent_codeset`]).
 			None => {
-				return Codeset::Unasked(
-					"the shell's locale environment is relative to a working directory no process can enter"
-						.to_owned(),
+				return cwd_independent_codeset(locale, &shell).map_or_else(
+					|| {
+						Codeset::Unasked(
+							"the shell's locale environment is relative to a working directory no process can name"
+								.to_owned(),
+						)
+					},
+					Codeset::Loaded,
 				);
 			},
 		},
 	};
-	codeset_from_locale_utility(locale, &shell, cwd)
+	match locale_utility_charmap(locale, &shell, cwd) {
+		Ok(codeset) => Codeset::Loaded(codeset),
+		Err(Unanswered(why)) => match cwd.is_some() {
+			true => cwd_independent_codeset(locale, &shell).map_or(Codeset::Unasked(why), Codeset::Loaded),
+			false => Codeset::Unasked(why),
+		},
+	}
+}
+
+/// The codeset of the first search-path entry that resolves without a
+/// working directory, when there is one and it answers.
+///
+/// This is not the dropped-entry retry that earlier revisions got wrong. It
+/// asks the *prefix* of `LOCPATH` up to its first relative entry, so the
+/// order libc searches is kept: `_nl_find_locale` takes the first directory
+/// whose data loads, so a locale found in that prefix is the one the
+/// reference finds too, before it ever reaches an entry the working
+/// directory would have resolved. The answer is taken only when data really
+/// loaded — the C locale's charset is what `charmap` prints both for data
+/// that is ASCII and for a name that loaded nothing, and only the first of
+/// those would be an answer. An empty prefix answers nothing, which also
+/// keeps `LOCPATH` from being emptied and glibc's locale archive from
+/// coming back (`findlocale.c` consults it only when `locale_path ==
+/// NULL`). Any other variable needing the working directory stops this
+/// too, because cutting those would change the question.
+#[cfg(unix)]
+fn cwd_independent_codeset(locale: &str, env: &LocaleEnv) -> Option<String> {
+	use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+	let mut asked = env.clone();
+	for (name, value) in LOCALE_ENV_VARS.iter().zip(&mut asked) {
+		let Some(entries) = value else { continue };
+		if !entry_resolves_against_cwd(name, entries) {
+			continue;
+		}
+		if *name != "LOCPATH" {
+			return None;
+		}
+		let bytes = entries.as_bytes();
+		let cut = bytes
+			.split(|&byte| byte == b':')
+			.take_while(|entry| entry.is_empty() || entry[0] == b'/')
+			.fold(0, |taken, entry| taken + entry.len() + 1)
+			.checked_sub(1)?;
+		if cut == 0 {
+			return None;
+		}
+		*value = Some(std::ffi::OsString::from_vec(bytes[..cut].to_vec()));
+	}
+	let codeset = locale_utility_charmap(locale, &asked, None).ok()?;
+	(!is_c_charset(&codeset)).then_some(codeset)
+}
+
+/// What `nl_langinfo(CODESET)` reports for the C locale, in libc's spellings.
+#[cfg(unix)]
+fn is_c_charset(codeset: &str) -> bool {
+	["ANSI_X3.4-1968", "US-ASCII", "ASCII"].iter().any(|name| codeset.eq_ignore_ascii_case(name))
 }
 
 /// [`loaded_codeset`] through this process's own locale data.
@@ -244,8 +331,8 @@ fn loaded_codeset_here(locale: &str) -> Codeset {
 	}
 }
 
-/// Whether any entry of the shell's locale environment is relative, and so
-/// resolves against the working directory of whichever process libc runs in.
+/// Whether an entry of `value` makes `name` resolve against the working
+/// directory of whichever process libc runs in.
 ///
 /// An empty entry is not one of those: glibc builds a search path with
 /// `argz_create_sep`, which drops a leading or repeated separator and keeps a
@@ -256,13 +343,29 @@ fn loaded_codeset_here(locale: &str) -> Codeset {
 /// too: no value is ever rewritten, so the only cost of reading a colon in
 /// one as a separator is asking for a working directory that is then the
 /// right one anyway.
+///
+/// `PATH_LOCALE` is the BSDs' variable and no libc that runs on Linux reads
+/// it, so a relative value in it cannot send a lookup there to the working
+/// directory. It is still passed to the child; it just does not decide
+/// whether the child needs a directory to be put in.
 #[cfg(unix)]
-fn relative_entry_in(env: &LocaleEnv) -> bool {
+fn entry_resolves_against_cwd(name: &str, value: &std::ffi::OsStr) -> bool {
 	use std::os::unix::ffi::OsStrExt as _;
 
-	env.iter().flatten().any(|value| {
-		value.as_bytes().split(|&byte| byte == b':').any(|entry| !entry.is_empty() && entry[0] != b'/')
-	})
+	if cfg!(target_os = "linux") && name == "PATH_LOCALE" {
+		return false;
+	}
+	value.as_bytes().split(|&byte| byte == b':').any(|entry| !entry.is_empty() && entry[0] != b'/')
+}
+
+/// Whether a locale environment needs the working directory of the process
+/// libc runs in ([`entry_resolves_against_cwd`]).
+#[cfg(unix)]
+fn needs_working_directory(env: &LocaleEnv) -> bool {
+	LOCALE_ENV_VARS
+		.iter()
+		.zip(env)
+		.any(|(name, value)| value.as_ref().is_some_and(|value| entry_resolves_against_cwd(name, value)))
 }
 
 /// Where the system's `locale` utility lives. Absolute and fixed: neither the
@@ -296,8 +399,10 @@ struct Unanswered(String);
 /// async-signal-safe calls. It inherits this thread's signal mask, as any
 /// exec'd program does; that cannot strand the query, because the deadline is
 /// the parent's and the child has no part in enforcing it. It is named by an
-/// absolute path, put in its own process group so neither it nor a
-/// descendant outlives the query, and handed an environment built here —
+/// absolute path, put in its own process group so that neither it nor a
+/// descendant it leaves *in that group* outlives the query — one that calls
+/// `setsid` leaves the group and is beyond this, as process-group semantics
+/// imply — and handed an environment built here —
 /// [`LOCALE_ENV_VARS`] as the shell set them, and `LC_CTYPE` — so no `PATH`
 /// or `LD_*` of anyone else's reaches it.
 ///
@@ -644,46 +749,82 @@ enum Completion {
 	Ended(String),
 }
 
-/// Reaps the locale utility, bounded by the deadline the answer had: a child
-/// that stops writing without exiting is killed rather than waited for, and
-/// so is any descendant it left in its process group.
+/// Ends the locale utility and everything left in its process group, within
+/// the deadline the answer had, and reaps it.
+///
+/// The leader is watched with `WNOWAIT`, so it stays unreaped while the
+/// group is swept. Reaping first would be a race, not a tidy-up: once the
+/// last member of a group is reaped the kernel may hand that number to
+/// anyone, and `kill(-pid, SIGKILL)` would then end a process group of
+/// somebody else's — reproduced three times out of three in a private PID
+/// namespace, where an unrelated process took the number and was killed.
 #[cfg(unix)]
 fn reap_locale_utility(pid: libc::pid_t, deadline: std::time::Instant, kill_now: bool) -> Completion {
 	let interrupted = || std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
-	let mut killed = kill_now;
-	let mut status: libc::c_int = 0;
-	loop {
-		if killed {
-			// SAFETY: `pid` leads a process group of this scope's making,
-			// which nothing else reaps, so the number cannot have been reused.
-			unsafe { libc::kill(-pid, libc::SIGKILL) };
-			loop {
-				// SAFETY: as above, and a killed child is reapable at once.
-				if unsafe { libc::waitpid(pid, &raw mut status, 0) } >= 0 || !interrupted() {
-					break;
-				}
-			}
-			return Completion::Ended("was ended before it finished".to_owned());
-		}
-		// SAFETY: as above.
-		let reaped = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
-		if reaped == pid {
-			let completion = completion_of(status);
-			// The leader is gone; anything it left in the group is not an
-			// answer and must not outlive the query. The group number is the
-			// leader's, and the kernel keeps it while the group has members.
-			// SAFETY: as above.
-			unsafe { libc::kill(-pid, libc::SIGKILL) };
-			return completion;
-		}
-		if reaped < 0 && !interrupted() {
-			return Completion::Ended(format!("could not be waited for: {}", std::io::Error::last_os_error()));
-		}
-		killed = std::time::Instant::now() >= deadline;
-		if !killed {
-			std::thread::sleep(std::time::Duration::from_millis(1));
+	let mut finished = false;
+	let mut watch_failed = None;
+	while !kill_now && !finished {
+		match exited_but_not_reaped(pid) {
+			Ok(true) => finished = true,
+			Ok(false) if std::time::Instant::now() < deadline => {
+				std::thread::sleep(std::time::Duration::from_millis(1));
+			},
+			Ok(false) => break,
+			Err(err) => {
+				watch_failed = Some(err);
+				break;
+			},
 		}
 	}
+	// Nothing has reaped the leader, so its number is still its own and
+	// still names its process group.
+	// SAFETY: `pid` leads a process group of this scope's making, and no
+	// wait has released the number.
+	unsafe { libc::kill(-pid, libc::SIGKILL) };
+	let mut status: libc::c_int = 0;
+	let reaped = loop {
+		// SAFETY: as above; the leader is dead or dying, so this returns.
+		let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+		if reaped >= 0 || !interrupted() {
+			break reaped;
+		}
+	};
+	if let Some(err) = watch_failed {
+		return Completion::Ended(format!("could not be waited for: {err}"));
+	}
+	if !finished {
+		return Completion::Ended("was ended before it finished".to_owned());
+	}
+	if reaped < 0 {
+		return Completion::Ended(format!("could not be waited for: {}", std::io::Error::last_os_error()));
+	}
+	completion_of(status)
+}
+
+/// Whether the utility has ended, leaving it reapable: `WNOWAIT` reports the
+/// end without consuming it, which is what keeps the process number — and
+/// so the process group number — from being handed to anybody else.
+#[cfg(unix)]
+fn exited_but_not_reaped(pid: libc::pid_t) -> std::io::Result<bool> {
+	// SAFETY: an all-zero `siginfo_t` is a valid out-parameter here, and
+	// `WNOWAIT` leaves the child for the `waitpid` that follows.
+	let mut ended: libc::siginfo_t = unsafe { std::mem::zeroed() };
+	let watched = unsafe {
+		libc::waitid(
+			libc::P_PID,
+			libc::id_t::try_from(pid).unwrap_or_default(),
+			&raw mut ended,
+			libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+		)
+	};
+	if watched < 0 {
+		let err = std::io::Error::last_os_error();
+		return match err.kind() == std::io::ErrorKind::Interrupted {
+			true => Ok(false),
+			false => Err(err),
+		};
+	}
+	Ok(ended.si_signo != 0)
 }
 
 /// A reaped `wait` status, read the way [`Completion`] puts it.
