@@ -56,6 +56,7 @@
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
+- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Cursor runs served through `omp auth-gateway` are limited to the client's own tools, all advertised as MCP; Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are no longer offered on that path ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 
