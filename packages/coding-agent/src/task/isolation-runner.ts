@@ -425,10 +425,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	/**
 	 * Write this run's patch, and its branch, from the sandbox as it stands.
 	 *
-	 * Raises on failure, always. An earlier successful capture used to make a
-	 * later failure a warning, and the caller that reads this as "captured"
-	 * then deletes the source of a patch that was left half-written. The
-	 * teardown keeps the workspace when this throws; nothing else is safe.
+	 * Raises on failure, always, and its two callers answer that differently on
+	 * purpose. The capture the teardown runs under the sandbox lock *authorises
+	 * a deletion*, so a failure there must stop it: an earlier successful
+	 * capture used to make a later failure a warning, and the caller reading
+	 * that as "captured" deleted the source of a half-written patch. The
+	 * capture at release authorises nothing — it only fills in the parent's
+	 * result — so a failure there is logged and the release goes on, because
+	 * throwing out of it abandons the caller's hold and replaces a child's real
+	 * output with a blank failure.
 	 */
 	const capture = async (): Promise<void> => {
 		if (!handle || !taskBaseline || retainWorkspace) {

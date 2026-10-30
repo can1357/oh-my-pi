@@ -309,7 +309,18 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 		return { reclaimable: false, reason: "owner marker unreadable (no usable owner identity)" };
 	}
 	if (await isProcessStillLive(identity)) {
-		return { reclaimable: false, reason: "a live task owns it" };
+		// Precise about what is known: the process that built this sandbox is
+		// still running. That is not the same as a task still working in it —
+		// a user who has just cleared the last lease and the last writer record
+		// has no way to tell the two apart from "a live task owns it".
+		const inUse = (await hasLiveIsolationLease(baseDir)) || (await hasUnfinishedWriter(baseDir));
+		return {
+			reclaimable: false,
+			reason: inUse
+				? `a live task is working in it (pid ${identity.pid})`
+				: `the omp process that built it is still running (pid ${identity.pid}); it goes when that run ` +
+					"finishes with it, or now with --all",
+		};
 	}
 	if (await hasLiveIsolationLease(baseDir)) {
 		return { reclaimable: false, reason: "a live session is working in it" };

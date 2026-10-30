@@ -281,7 +281,10 @@ describe("worktree isolation helpers", () => {
 
 				expect(mergedLeaf).toBe("m");
 				expect(isolationSegment).not.toContain(longTaskId);
-				expect(isolationSegment.length).toBeLessThanOrEqual(12);
+				// Compact, and unique per materialisation: the digest names the
+				// repository and task, the mint after it names this one, so no
+				// path is ever handed out twice.
+				expect(isolationSegment.length).toBeLessThanOrEqual(32);
 			} finally {
 				if (originalWorktreeDir === undefined) {
 					delete process.env.OMP_WORKTREE_DIR;
@@ -1329,9 +1332,12 @@ describe("detachGitDir", () => {
 		}
 	}, 120_000);
 
-	it("refuses to materialise over a sandbox a live session is leasing", async () => {
-		// Taking the slot destroys what is in it. A live lease belongs to a
-		// session whose cwd and whose files would go with the directory.
+	it("never hands the same sandbox path to two materialisations of one task", async () => {
+		// A descendant that outlives its owner — a git hook child still running
+		// after the owner died — writes into the path it was given. If that
+		// path can be handed out again, it reads and overwrites a successor's
+		// workspace; if it cannot, the worst case is a directory the sweeper
+		// takes.
 		const { wt } = await makeLinkedWorktree();
 		vi.spyOn(natives, "isoResolve").mockResolvedValue({
 			kind: natives.IsoBackendKind.Rcopy,
@@ -1339,25 +1345,25 @@ describe("detachGitDir", () => {
 			fellBack: false,
 			reason: undefined,
 		});
-		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-leased-slot-"));
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unique-slot-"));
 		tempDirs.push(worktreeBase);
 		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
 		try {
-			const handle = await ensureIsolation(wt, "leased-slot");
-			const childFile = path.join(handle.mergedDir, "child.txt");
+			const first = await ensureIsolation(wt, "same-task");
+			const childFile = path.join(first.mergedDir, "child.txt");
 			await fs.writeFile(childFile, "written by a live child\n");
-			const user = await leaseIsolationWorkspace(handle.mergedDir, { agentId: "Nested-Child" });
+			const user = await leaseIsolationWorkspace(first.mergedDir, { agentId: "Nested-Child" });
 
-			await expect(ensureIsolation(wt, "leased-slot")).rejects.toThrow("still in use by a live session");
+			const second = await ensureIsolation(wt, "same-task");
+
+			expect(second.mergedDir).not.toBe(first.mergedDir);
+			expect(second.generation).not.toBe(first.generation);
+			// The first materialisation's workspace — and the session working in
+			// it — are untouched by the second.
 			expect(await Bun.file(childFile).exists()).toBe(true);
-
-			// Once the user leaves, the slot is reusable.
 			await user();
-			const successor = await ensureIsolation(wt, "leased-slot");
-			expect(successor.generation).not.toBe(handle.generation);
-			expect(await Bun.file(childFile).exists()).toBe(false);
 		} finally {
 			setWorktreesDir(undefined);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;

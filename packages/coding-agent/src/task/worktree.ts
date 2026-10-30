@@ -630,10 +630,21 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * The directory name for one materialisation of a task's sandbox.
+ *
+ * The digest still says which repository and task it belongs to, and the mint
+ * after it says *which materialisation*, so a path is never handed out twice.
+ * That is what makes a descendant which outlives its owner harmless: a git
+ * hook child still running after the owner died writes into a path nobody can
+ * take, instead of into the workspace a successor has since built at the same
+ * name — which is how a successor's data was read and overwritten. The cost is
+ * a directory left for the sweeper; the cost of reuse was a user's work.
+ */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${Snowflake.next()}`;
 }
 
 /**
@@ -844,6 +855,15 @@ async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ r
 	try {
 		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	} catch (error) {
+		const code = (error as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "EMFILE" || code === "ENFILE") {
+			throw new Error(
+				`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code}). ` +
+					"Nothing is holding the workspace; raise the open-file limit (`ulimit -n`) or reduce how many " +
+					"sessions run at once.",
+				{ cause: error },
+			);
+		}
 		const claim = await readIsolationClaim(baseDir).catch(() => undefined);
 		const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
 		const held =
