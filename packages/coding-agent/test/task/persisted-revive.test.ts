@@ -1389,8 +1389,9 @@ describe("persisted subagent revival", () => {
 		} as unknown as ModelRegistry;
 		const disposed: boolean[] = [];
 		let options: CreateAgentSessionOptions | undefined;
+		let rootModel = saved;
 		let landedOn = saved;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
 			options = created;
 			const session = Object.assign(createRevivedSession([]).session, {
 				model: landedOn,
@@ -1400,7 +1401,7 @@ describe("persisted subagent revival", () => {
 			});
 			return { session } as CreateAgentSessionResult;
 		});
-		const revive = async (perCallModel: boolean, rootModel = saved) => {
+		const revive = async (perCallModel: boolean) => {
 			const cwd = makeTempDir("@pi-revive-seance-per-call-");
 			const sourceFile = path.join(cwd, "source.jsonl");
 			const source = SessionManager.create(cwd, path.join(cwd, "sources"));
@@ -1440,7 +1441,9 @@ describe("persisted subagent revival", () => {
 					sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 					getSessionAgents: () => [],
-					model: rootModel,
+					get model() {
+						return rootModel;
+					},
 				} as unknown as AgentSession,
 				authStorage: {} as never,
 				modelRegistry,
@@ -1467,9 +1470,14 @@ describe("persisted subagent revival", () => {
 		if (!check) throw new Error("Expected a per-call dispatch check on a model-facing seance");
 		expect(check(saved)).toBeUndefined();
 		expect(() => check(neighbour)).toThrow(/not approved/);
-		// The grant is the live parent's model, re-read at revival: a different parent model approves nothing saved.
-		await revive(true, neighbour);
-		expect(() => options?.assertDispatchModel?.(saved)).toThrow(/not approved/);
+		// The live parent's current model grants at dispatch and before session creation.
+		rootModel = neighbour;
+		expect(() => check(saved)).toThrow(/not approved/);
+		const callsBeforeDenial = create.mock.calls.length;
+		await expect(revive(true)).rejects.toThrow(/not approved/);
+		expect(create).toHaveBeenCalledTimes(callsBeforeDenial);
+		rootModel = saved;
+		expect(check(saved)).toBeUndefined();
 		// Even an SDK result on a similarly named model fails the exact-identity check.
 		landedOn = neighbour;
 		await expect(revive(true)).rejects.toThrow(
@@ -1477,11 +1485,13 @@ describe("persisted subagent revival", () => {
 		);
 		expect(disposed).toEqual([true]);
 
-		// Host `/seance` selection: none of the per-call guards.
+		// Host `/seance` selection needs no per-call grant, even with a different parent model.
+		rootModel = neighbour;
 		await revive(false);
 		expect(options?.modelPattern).toBe("mock/seance-model:high");
 		expect(options?.assertDispatchModel).toBeUndefined();
 		expect(options?.disableModelFallback).toBeUndefined();
+		expect(options?.disableServerSideFallback).toBeUndefined();
 		expect(options?.thinkingLevelCeiling).toBeUndefined();
 	});
 

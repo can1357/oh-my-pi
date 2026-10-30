@@ -408,7 +408,6 @@ describe("per-call model advertisement", () => {
 			allowlist: [],
 			parentModelWithheld: false,
 		});
-
 	});
 
 	it("keeps a configured default model granted without advertising @default", () => {
@@ -458,20 +457,17 @@ describe("per-call model advertisement", () => {
 		{ allowlist: ["@review"] },
 		{ allowlist: ["mock/*"] },
 		{ allowlist: ["tar?et"] },
-	])(
-		"advertises a bare role as an exact selector with allowlist $allowlist",
-		({ allowlist }) => {
-			const settings = Settings.isolated({
-				modelRoles: { review: "target" },
-				"task.perCallModelAllow": allowlist,
-			});
-			expect(approved(target, { settings, agentName: "worker" })).toBe(true);
-			expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
-				{ role: "review", patterns: ["mock/target"] },
-			]);
-			expect(getPerCallModelAdvertisement(settings, target, registry).parentModelWithheld).toBe(false);
-		},
-	);
+	])("advertises a bare role as an exact selector with allowlist $allowlist", ({ allowlist }) => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "target" },
+			"task.perCallModelAllow": allowlist,
+		});
+		expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
+			{ role: "review", patterns: ["mock/target"] },
+		]);
+		expect(getPerCallModelAdvertisement(settings, target, registry).parentModelWithheld).toBe(false);
+	});
 
 	it("advertises equivalent role grants through an allowlisted role", () => {
 		const settings = Settings.isolated({
