@@ -40,6 +40,16 @@ import {
 	writeProcessIdentity,
 } from "./isolation-ownership";
 
+/**
+ * Marker a departing user leaves when it had to give up its lease while its
+ * own work might still be running — a session whose shutdown handlers outran
+ * the grace. Dropping the lease is how a stalled disposal stops holding a
+ * kernel for ever; deleting the workspace underneath a handler that is still
+ * writing is not, so the owner keeps the directory instead of removing it and
+ * reclamation takes it once both processes are gone.
+ */
+export const ISOLATION_UNFINISHED_FILE = ".omp-isolation-unfinished.json";
+
 /** Directory of lease files inside a sandbox's base dir. */
 export const ISOLATION_LEASE_DIR = ".omp-isolation-leases";
 
@@ -59,8 +69,8 @@ interface LeasedWorkspace {
 	poll?: NodeJS.Timeout;
 	/** Watch on the lease directory, so a departure is acted on as it happens. */
 	watcher?: FSWatcher;
-	/** The teardown running now, so every party that notices the departure awaits one completion. */
-	running?: Promise<void>;
+	/** Serialises departure handling, so every party that notices awaits the same work. */
+	gate?: Promise<void>;
 }
 
 /** Sandboxes materialised by this process, by merged directory. */
@@ -198,9 +208,13 @@ export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: stri
  * back for a retiring sandbox is a promise of protection nothing is keeping.
  * Returns a no-op release only when `cwd` is in no sandbox at all.
  *
- * Awaiting the release is a completion barrier: when it resolves, this lease
- * is gone from disk and any teardown its departure started — the owner's
- * capture and removal, whoever noticed first — has finished.
+ * Awaiting the release is a completion barrier *for a holder in the owner's
+ * process*: when it resolves, this lease is gone from disk and any teardown
+ * its departure started — the owner's capture and removal, whoever noticed it
+ * first — has finished. A holder in another process can only report that its
+ * own lease is gone: the owner's teardown runs in the owner, which this one
+ * cannot await, and claiming otherwise would be the same false promise as the
+ * no-op grant. {@link isLocalIsolationOwner} tells the two apart.
  */
 export async function leaseIsolationWorkspace(
 	cwd: string,
@@ -236,6 +250,29 @@ export async function leaseIsolationWorkspace(
 	};
 }
 
+/** Record that a user of the sandbox `cwd` sits in may still be writing to it. */
+export async function markUnfinishedWriter(cwd: string): Promise<void> {
+	const found = await findSandboxBase(cwd);
+	if (found === undefined) return;
+	await writeProcessIdentity(path.join(found.baseDir, ISOLATION_UNFINISHED_FILE));
+}
+
+/** Whether a live process said it might still be writing into the sandbox at `baseDir`. */
+export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
+	const holder = await readProcessIdentity(path.join(baseDir, ISOLATION_UNFINISHED_FILE));
+	if (holder === undefined) return false;
+	if (holder === "unreadable") return true;
+	return await isProcessStillLive(holder);
+}
+
+/** Whether the sandbox at `baseDir` was materialised by this process, so its teardown runs here. */
+export function isLocalIsolationOwner(baseDir: string): boolean {
+	for (const workspace of workspaces.values()) {
+		if (workspace.baseDir === baseDir) return true;
+	}
+	return false;
+}
+
 /** Remove a lease under the lock. Raises when the file is still there, so the caller can retry. */
 async function dropLease(sandbox: string, leaseFile: string): Promise<void> {
 	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT);
@@ -263,51 +300,63 @@ function watchLeaseDirectory(baseDir: string): FSWatcher | undefined {
 
 /**
  * Run the deferred teardown of any sandbox of this process at `baseDir` whose
- * last user has gone, and wait for it. Every caller — the watch, the poll, a
- * release — gets the same completion, so awaiting any one of them means the
- * work is finished rather than merely started.
+ * last user has gone, and wait for it.
+ *
+ * Serialised per sandbox: two parties noticing the same departure — the watch
+ * and a release, the poll and a release — would otherwise both pass an
+ * "is one running?" test before either had read the leases, and the second
+ * would return while the first was still capturing. Chaining them means every
+ * caller awaits the work, not merely its start.
  */
 async function runPendingTeardownIfIdle(baseDir: string): Promise<void> {
 	for (const [mergedDir, workspace] of workspaces) {
 		if (workspace.baseDir !== baseDir) continue;
-		if (workspace.running) {
-			await workspace.running;
-			continue;
-		}
-		if (workspace.pendingTeardown === undefined) continue;
-		if (await hasLiveIsolationLease(baseDir, workspace.agentId)) continue;
-		// Read and cleared with nothing awaited in between: the watch and the
-		// poll can both arrive while the other is still deciding, and a teardown
-		// that runs twice captures and deletes twice.
-		const pending = workspace.pendingTeardown;
-		workspace.pendingTeardown = undefined;
-		if (pending === undefined) continue;
-		clearInterval(workspace.poll);
-		workspace.poll = undefined;
-		workspace.watcher?.close();
-		workspace.watcher = undefined;
-		const running = pending().catch(error => {
-			logger.warn("deferred isolation teardown failed", { mergedDir, error: String(error) });
-		});
-		workspace.running = running;
-		try {
-			await running;
-		} finally {
-			workspace.running = undefined;
-		}
+		const previous = workspace.gate ?? Promise.resolve();
+		const gated = previous.then(async () => await settleIfIdle(mergedDir, workspace, baseDir));
+		workspace.gate = gated.catch(() => undefined);
+		await gated;
 	}
 }
 
+/** One serialised attempt: if nobody holds the sandbox, run what its owner left to do. */
+async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseDir: string): Promise<void> {
+	if (workspace.pendingTeardown === undefined) return;
+	if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return;
+	const pending = workspace.pendingTeardown;
+	workspace.pendingTeardown = undefined;
+	disarmTeardownWatch(workspace);
+	await pending().catch(error => {
+		logger.warn("deferred isolation teardown failed", { mergedDir, error: String(error) });
+	});
+}
+
+/** Stop watching and polling a sandbox whose teardown is no longer owed. */
+function disarmTeardownWatch(workspace: LeasedWorkspace): void {
+	clearInterval(workspace.poll);
+	workspace.poll = undefined;
+	workspace.watcher?.close();
+	workspace.watcher = undefined;
+}
+
 /**
- * Record `teardown` against a sandbox someone is still working in, and report
- * whether it was deferred.
+ * Record what this sandbox's owner still owes — capture and removal — *before*
+ * asking whether anybody is using it.
  *
- * The caller holds the sandbox lock, so the answer and the record are taken
- * together: a lease that arrives afterwards waits for the same lock and is
- * seen by the teardown this defers to. The last user to leave runs it — and
- * because that user may be in another process, whose departure this process
- * never hears about, the wait is also polled. A sandbox nobody holds returns
- * false and its owner proceeds immediately.
+ * The order is the point. A check that finds no users and registers nothing
+ * leaves a user admitted a moment later with no teardown to run on its way
+ * out: it is protected from deletion and its work is never captured, which
+ * loses it just as surely. Registering first means every admission window is
+ * covered by something that captures; the caller takes the registration back
+ * only once it has established, under the sandbox lock, that it may do the
+ * work itself.
+ *
+ * The caller holds that lock, so the record and the answer are taken together:
+ * a lease arriving afterwards waits for it and is then seen by whoever departs
+ * last. Because that party may be in another process, whose departure this one
+ * never hears about, the wait is watched and polled too.
+ *
+ * Returns true when somebody is using the sandbox and the teardown stays
+ * registered for them; false when the caller may run it now.
  */
 export async function deferTeardownWhileLeased(
 	mergedDir: string,
@@ -320,24 +369,24 @@ export async function deferTeardownWhileLeased(
 		return false;
 	}
 	const baseDir = workspace?.baseDir ?? (await resolveSandboxIdentity(path.dirname(mergedDir)));
-	if (!(await hasLiveIsolationLease(baseDir, workspace?.agentId))) return false;
 	if (!workspace) {
 		// Not this process's sandbox: nothing here will run the teardown later,
 		// so the caller must decide. Reporting the use is still right.
-		return true;
+		return await hasLiveIsolationLease(baseDir);
 	}
 	// Never downgraded: the owner registers capture-and-cleanup first and its
 	// plain cleanup follows, and replacing the first with the second is how a
 	// late user's work ends up deleted without ever being captured.
 	workspace.pendingTeardown ??= teardown;
-	// Watched so a departure is acted on as it happens, and polled as well
-	// because a holder killed outright leaves its lease file behind: only its
-	// liveness, re-asked, tells that apart from a live one.
 	workspace.watcher ??= watchLeaseDirectory(baseDir);
+	// Deliberately referenced: a teardown is owed, so this process has work
+	// left; exiting now leaves the sandbox and the work written in it behind.
 	workspace.poll ??= setInterval(() => {
 		void runPendingTeardownIfIdle(baseDir);
 	}, LEASE_POLL_MS);
-	// Deliberately referenced: a teardown is owed, so this process has work
-	// left; exiting now leaves the sandbox and the work written in it behind.
-	return true;
+	if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return true;
+	// Nobody is here after all, and the caller is about to do the work itself.
+	workspace.pendingTeardown = undefined;
+	disarmTeardownWatch(workspace);
+	return false;
 }

@@ -7,8 +7,10 @@ import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
 	hasLiveIsolationLease,
+	hasUnfinishedWriter,
 	ISOLATION_LEASE_DIR,
 	leaseIsolationWorkspace,
+	markUnfinishedWriter,
 	registerIsolationWorkspace,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
@@ -110,6 +112,55 @@ describe("isolation workspace leases", () => {
 		);
 
 		await expect(leaseIsolationWorkspace(mergedDir)).rejects.toThrow("ENOSPC");
+	});
+
+	it("registers the owner's teardown before it asks whether anybody is here", async () => {
+		// A check that finds no users and registers nothing leaves a user
+		// admitted a moment later with no teardown to run on its way out: it is
+		// protected from deletion and its work is never captured.
+		const { baseDir, mergedDir } = await makeSandbox();
+		registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+		let torndown = 0;
+		const teardown = async (): Promise<void> => void (torndown += 1);
+
+		// Nobody here: the caller is told to proceed, and nothing is left armed.
+		expect(await deferTeardownWhileLeased(mergedDir, teardown)).toBe(false);
+
+		// A user admitted after that answer still finds a teardown when it goes,
+		// because the next decision registers before it asks.
+		const late = await leaseIsolationWorkspace(path.join(mergedDir, "late"));
+		expect(await deferTeardownWhileLeased(mergedDir, teardown)).toBe(true);
+		expect(torndown).toBe(0);
+		await late();
+		expect(torndown).toBe(1);
+	});
+
+	it("awaits the work when two parties notice the same departure", async () => {
+		const { baseDir, mergedDir } = await makeSandbox();
+		registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+		let started = 0;
+		let finished = 0;
+		const user = await leaseIsolationWorkspace(mergedDir);
+		expect(
+			await deferTeardownWhileLeased(mergedDir, async () => {
+				started += 1;
+				await scheduler.wait(50);
+				finished += 1;
+			}),
+		).toBe(true);
+
+		// The watch fires on the removal while the release is still deciding;
+		// both must come back with the work done, not merely started.
+		await user();
+		expect(started).toBe(1);
+		expect(finished).toBe(1);
+	});
+
+	it("keeps a workspace whose user may still be writing, and says who said so", async () => {
+		const { baseDir, mergedDir } = await makeSandbox();
+		expect(await hasUnfinishedWriter(baseDir)).toBe(false);
+		await markUnfinishedWriter(path.join(mergedDir, "deep"));
+		expect(await hasUnfinishedWriter(baseDir)).toBe(true);
 	});
 
 	it("counts a lease taken by another process, and drops one whose holder is gone", async () => {

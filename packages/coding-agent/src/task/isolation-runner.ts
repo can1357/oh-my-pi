@@ -20,6 +20,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -28,6 +29,13 @@ import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" wit
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
+/**
+ * How long a finished, successful isolated run waits for deferred owner jobs
+ * before capturing anyway. Long enough for a flush to land, short enough that
+ * a job which never settles cannot hold the result.
+ */
+const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
+
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { deferTeardownWhileLeased } from "./isolation-lease";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
@@ -551,7 +559,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		// shutdown hooks may still write the worktree. Failed runs skip capture,
 		// so their cleanup remains asynchronous.
 		if (deferredCleanup && result.exitCode === 0) {
-			await deferredCleanup;
+			// Bounded. A deferred owner job that never settles would otherwise
+			// hold a finished, successful run for ever — the capture below is
+			// worth waiting for, but not without end.
+			const settled = await Promise.race([
+				deferredCleanup.then(() => true),
+				scheduler.wait(DEFERRED_CLEANUP_MAX_WAIT_MS).then(() => false),
+			]);
+			if (!settled) {
+				logger.warn("deferred owner jobs outran the capture wait; capturing the workspace as it stands", {
+					agentId: opts.agentId,
+					waitedMs: DEFERRED_CLEANUP_MAX_WAIT_MS,
+				});
+			}
 		}
 		if (releasePromise) {
 			// The child's own teardown already ran the release — a refused

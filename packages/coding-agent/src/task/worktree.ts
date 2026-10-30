@@ -16,6 +16,7 @@ import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
 	hasLiveIsolationLease,
+	hasUnfinishedWriter,
 	registerIsolationWorkspace,
 } from "./isolation-lease";
 import {
@@ -842,6 +843,16 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 		) {
 			return;
 		}
+		// A user had to give up its lease while its own shutdown might still be
+		// writing here. Removing the directory under that write loses the work
+		// just as surely as deleting it with the lease held would have, so the
+		// workspace stays and reclamation takes it once that process is gone.
+		if (await hasUnfinishedWriter(baseDir)) {
+			logger.warn("isolation workspace kept: a user may still be writing into it", {
+				mergedDir: handle.mergedDir,
+			});
+			return;
+		}
 		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 		try {
 			await fs.rename(baseDir, candidate);
@@ -869,6 +880,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 	// left to `omp worktree clear`, which can tell a retired sandbox from a
 	// live one.
 	let abandoned = false;
+	let lockHandedOver = false;
 	try {
 		try {
 			const stop = natives.isoStop(handle.backend, teardownMerged);
@@ -901,6 +913,10 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 					// The stop is still this teardown's: when it ends, the slot
 					// goes back into service rather than staying refused for the
 					// life of the owner.
+					// Handed to the continuation when the marker could not be
+					// written: it, and not the `finally` below, gives the lock
+					// back once the stop settles.
+					lockHandedOver = !marked;
 					trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
 						id: path.basename(teardownBase),
 						resource: "isolation",
@@ -930,7 +946,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			// teardown finishing cannot drop the record — and the pending
 			// teardown — of the materialisation that replaced it.
 			forgetIsolationWorkspace(handle.mergedDir, handle.generation);
-			if (retiredDir === undefined) lock.release();
+			if (retiredDir === undefined && !lockHandedOver) lock.release();
 		}
 	}
 }

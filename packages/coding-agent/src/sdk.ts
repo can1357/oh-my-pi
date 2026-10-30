@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	Agent,
 	type AgentEvent,
@@ -174,7 +175,7 @@ import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with
  */
 const SESSION_LEASE_DISPOSE_GRACE_MS = 30_000;
 
-import { leaseIsolationWorkspace } from "./task/isolation-lease";
+import { leaseIsolationWorkspace, markUnfinishedWriter } from "./task/isolation-lease";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -4497,11 +4498,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let workspaceLeaseDropped = false;
 		const dropWorkspaceLease = (): void => {
 			if (workspaceLeaseDropped) return;
-			workspaceLeaseDropped = true;
-			clearTimeout(workspaceLeaseTimer);
-			void workspaceLease().catch(error => {
-				logger.warn("isolation workspace lease could not be dropped", { error: String(error) });
-			});
+			// Marked dropped only once the lease is really gone: a removal that
+			// failed transiently must leave this retryable, not report a lease
+			// still on disk as released.
+			void (async () => {
+				for (let attempt = 0; attempt < 5 && !workspaceLeaseDropped; attempt += 1) {
+					try {
+						await workspaceLease();
+						workspaceLeaseDropped = true;
+						clearTimeout(workspaceLeaseTimer);
+						return;
+					} catch (error) {
+						logger.warn("isolation workspace lease could not be dropped; retrying", {
+							attempt,
+							error: String(error),
+						});
+						await scheduler.wait(200);
+					}
+				}
+			})();
 		};
 		// Held until disposal *finishes*: a shutdown writer still saving into
 		// the workspace is a user of it, and dropping the lease when disposal
@@ -4516,7 +4531,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					id: resolvedAgentId,
 					graceMs: SESSION_LEASE_DISPOSE_GRACE_MS,
 				});
-				dropWorkspaceLease();
+				// Giving the lease up is how a stalled disposal stops holding a
+				// kernel; it is not a statement that this session has stopped
+				// writing. Saying so keeps the owner from deleting the directory
+				// under a handler that is still running.
+				void markUnfinishedWriter(sessionManager.getCwd())
+					.catch(error => {
+						logger.warn("could not record an unfinished writer on the workspace", {
+							error: String(error),
+						});
+					})
+					.finally(dropWorkspaceLease);
 			}, SESSION_LEASE_DISPOSE_GRACE_MS);
 			workspaceLeaseTimer.unref?.();
 		});
