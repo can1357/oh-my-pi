@@ -104,6 +104,7 @@ import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
+import type { AdmittedWorkKind } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import type { QueuedProviderRegistration } from "./callback-ownership";
 import type {
 	AgentEndEvent,
@@ -2329,8 +2330,10 @@ export interface ExtensionRuntimeState {
 	 *  initialization. Each record carries the session that queued it: the same configuration
 	 *  object may be registered by two sessions, so ownership belongs to the occurrence rather
 	 *  than to the author's object. A host that drains this queue and passes only the first
-	 *  three fields still registers under the right owner — the registry recovers it from the
-	 *  record — but passing `owner` on is cheaper and exact. */
+	 *  three fields still registers under the right owner when it takes the records out of the
+	 *  queue or registers each one from a `for…of` over it — the registry recovers the owner from
+	 *  that drain, and refuses rather than guesses when it cannot — but passing `owner` on is
+	 *  cheaper and exact. */
 	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[];
 	/** Queue a provider registration until initialization, then apply it immediately. */
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
@@ -2409,9 +2412,11 @@ export interface ExtensionCallbackOwner {
 	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
 	/** Runs one call into extension code this session accepted — a provider's `fetchUsage`, an
 	 *  `oauth.login`, a registered stream function — as this session's work: attributed to it,
-	 *  counted while it runs, and refused once the session is gone. The caller holds the
-	 *  extension's own object and calls its method on it; nothing of the author's is wrapped. */
-	runOwned<R>(call: () => R): R;
+	 *  held open until the work of the declared kind finishes, and refused once the session is
+	 *  gone. The caller holds the extension's own object and calls its method on it; nothing of
+	 *  the author's is wrapped, and the KIND is declared here rather than guessed from what
+	 *  comes back. */
+	runOwned<R>(call: () => R, kind?: AdmittedWorkKind): R;
 	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
 	 *  more — a cold thenable must not be run twice. */
 	trackCallback<T>(result: T): T;

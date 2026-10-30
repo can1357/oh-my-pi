@@ -195,9 +195,9 @@ describe("runtime usage provider selection", () => {
 		storage.usage.setProvider("ext-x", c, undefined, first.gate);
 		// `first` re-registered in place: `second` is still the newest.
 		expect(storage.usage.providerFor("ext-x")).toBe(b);
-		storage.usage.removeProvider("ext-x", second.gate);
+		storage.usage.removeRegistration("ext-x", second.gate);
 		expect(storage.usage.providerFor("ext-x")).toBe(c);
-		storage.usage.removeProvider("ext-x", first.gate);
+		storage.usage.removeRegistration("ext-x", first.gate);
 		expect(storage.usage.providerFor("ext-x")).toBeUndefined();
 
 		storage.usage.setProvider("ext-x", a, undefined, first.gate);
@@ -477,7 +477,7 @@ describe("a departing usage registration's failure", () => {
 			const { storage, child, calls, entered, finish } = await departing(async () => null);
 			const pending = storage.usage.reports({ provider: "ext-depart" });
 			await entered;
-			if (action === "withdraw") storage.usage.removeProvider("ext-depart", child.gate);
+			if (action === "withdraw") storage.usage.removeRegistration("ext-depart", child.gate);
 			child.retire();
 			finish();
 

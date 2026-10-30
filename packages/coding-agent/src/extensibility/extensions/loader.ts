@@ -32,8 +32,10 @@ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
+import type { AdmittedWorkKind } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import * as TypeBox from "../legacy-typebox";
 import {
+	createProviderRegistrationQueue,
 	forgetQueuedProviderRegistrations,
 	type QueuedProviderRegistration,
 	rememberQueuedProviderRegistration,
@@ -146,6 +148,31 @@ export function ownAcceptedCallbacks(value: unknown, owner: ExtensionCallbackOwn
 	return value;
 }
 
+/** Whether `value` reports completion by settling. Objects AND functions: a thenable may be
+ *  either, and treating only objects as awaitable let a callable terminal promise through. */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+	return "then" in value && typeof (value as PromiseLike<unknown>).then === "function";
+}
+
+/** The terminal a producer admitted as a stream reports through `result()`.
+ *
+ *  Throws when there is none: a call site declared this a stream, so a value that cannot say
+ *  when it is finished is one this session cannot own, and the refusal belongs at the boundary
+ *  rather than as a silent "already complete". */
+function streamCompletion(produced: unknown): PromiseLike<unknown> {
+	const reports =
+		produced !== null &&
+		(typeof produced === "object" || typeof produced === "function") &&
+		"result" in produced &&
+		typeof (produced as { result?: unknown }).result === "function";
+	const completion = reports ? (produced as { result: () => unknown }).result() : undefined;
+	if (!isThenable(completion)) {
+		throw new Error("Extension stream reported no completion; this session cannot own it");
+	}
+	return completion;
+}
+
 /** One session's hold on an extension surface, counted so that concurrent sessions sharing a
  *  runtime release it together. Retirement belongs here rather than on the runtime because a
  *  runtime outlives the session that used it: the next session gets a new lease, and the
@@ -173,9 +200,11 @@ class ExtensionCallbackLease {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	/** Each record carries the session that queued it, so a drain can pass `owner` straight to
-	 *  `ModelRegistry.registerProvider`. One that passes only the other three fields still gets
-	 *  it: see `QueuedProviderRegistration`. */
-	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[] = [];
+	 *  `ModelRegistry.registerProvider`. One that passes only the other three fields gets it from
+	 *  the drain — the records it took out of this queue, or the one its `for…of` is on: see
+	 *  `QueuedProviderRegistration`. */
+	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[] =
+		createProviderRegistrationQueue<ProviderConfig>();
 
 	/**
 	 * Extension-authored callbacks, owned from the moment this session ACCEPTS them.
@@ -260,54 +289,25 @@ export class ExtensionRuntime implements IExtensionRuntime {
 
 	/**
 	 * Counts what an admitted call produced as this session's live work, until that work is
-	 * finished.
+	 * finished. This is the `value` kind — see {@link runOwned} for the kind a call site
+	 * declares.
 	 *
-	 * Completion is per KIND, not per thenable. A thenable says when it is done by settling, and
-	 * a cold one runs its body on each `then`, so observing it by calling `then` and handing the
-	 * original back would run it twice — the adopted promise is returned in its place. Thenable
-	 * duck-typing, not `instanceof`: a callback compiled in another realm (`node:vm`, an
-	 * `--import` loader) returns a Promise that fails the brand check while being every bit as
-	 * live.
+	 * A thenable says when it is done by settling, and a cold one runs its body on each `then`,
+	 * so observing it by calling `then` and handing the original back would run it twice; the
+	 * adopted promise is returned in its place. Thenable duck-typing, not `instanceof`: a
+	 * callback compiled in another realm (`node:vm`, an `--import` loader) returns a Promise
+	 * that fails the brand check while being every bit as live, and a thenable may be a
+	 * function as readily as an object.
 	 *
-	 * An `AssistantMessageEventStream` is the kind that cost us a round: it is returned at once
-	 * and keeps producing, and it says when it is done through `result()`, not by being
-	 * awaitable. A real parent prompt served by a child's registered stream therefore read the
-	 * restricted credential before disposal and the unrestricted one after, while the producer
-	 * was still running.
-	 *
-	 * Structural rather than by class, but narrow on purpose: a producer that both ITERATES and
-	 * reports a terminal `result()` is a stream, and `result` on its own is too common a method
-	 * name to treat as a completion signal — watching every object that has one made a
-	 * deferred-load exit guard wait for work that was never going to settle. The value is handed
-	 * back untouched, because the caller consumes the stream, not a copy.
-	 *
-	 * Anything else is already complete when it is returned: a value carries no outstanding work.
+	 * Anything else is already complete when it is returned: a value carries no outstanding
+	 * work. Nothing here inspects a value for a completion method. That was tried twice and is
+	 * wrong in both directions — see {@link AdmittedWorkKind}.
 	 */
 	trackCallback<T>(result: T): T {
-		if (result === null || (typeof result !== "object" && typeof result !== "function")) return result;
-		if ("then" in result && typeof result.then === "function") {
-			// `then` is callable, so this is awaitable; the compiler cannot express that for `unknown`.
-			const adopted = Promise.resolve(result as PromiseLike<unknown>);
-			this.#watch(adopted);
-			return adopted as T;
-		}
-		const streaming =
-			"result" in result &&
-			typeof result.result === "function" &&
-			Symbol.asyncIterator in result &&
-			typeof (result as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
-		if (streaming) {
-			const completion: unknown = (result as { result: () => unknown }).result();
-			if (
-				completion !== null &&
-				typeof completion === "object" &&
-				"then" in completion &&
-				typeof completion.then === "function"
-			) {
-				this.#watch(completion as PromiseLike<unknown>);
-			}
-		}
-		return result;
+		if (!isThenable(result)) return result;
+		const adopted = Promise.resolve(result as PromiseLike<unknown>);
+		this.#watch(adopted);
+		return adopted as T;
 	}
 
 	/** Holds this session open until `work` settles, however it settles. */
@@ -324,9 +324,33 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		});
 	}
 
-	runOwned<R>(call: () => R): R {
+	/**
+	 * Runs one call into extension code this session accepted, and holds the session open until
+	 * the work of the declared kind is finished.
+	 *
+	 * `stream` is the kind a producer has when it is handed back at once and keeps working — an
+	 * `AssistantMessageEventStream` and anything else that reports its terminal through
+	 * `result()`. The call site says so; nothing here inspects the value to find out. A stream
+	 * that reports no completion is REFUSED rather than assumed finished: a producer this
+	 * session cannot be held open for is one it cannot own, and silently treating it as done is
+	 * how a child's stream outlived its credential restriction. A call that returns a PROMISE of
+	 * a producer is held open until the producer it resolves has finished, not merely until the
+	 * promise settles.
+	 */
+	runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value"): R {
 		if (this.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
-		return extensionCallbackScope.run(this, () => this.trackCallback(call()));
+		return extensionCallbackScope.run(this, () => {
+			const produced = call();
+			if (kind !== "stream") return this.trackCallback(produced);
+			if (isThenable(produced)) {
+				const adopted = Promise.resolve(produced);
+				this.#watch(adopted.then(value => streamCompletion(value)));
+				return adopted as R;
+			}
+			this.#watch(streamCompletion(produced));
+			// The producer itself is handed back untouched: the caller consumes the stream.
+			return produced;
+		});
 	}
 
 	/** Whether any extension callback is executing. */
@@ -359,9 +383,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		// every session that loads the extension, and each session's registration of it is its
 		// own. main.ts, sdk.ts and models-cli.ts drain this queue into ModelRegistry with the
 		// owner; a host that drains it itself and passes only name, config and source still has
-		// its owner found, from the record indexed here.
+		// its owner found, from the record indexed here and the queue it waits in.
 		const registration: QueuedProviderRegistration<ProviderConfig> = { name, config, sourceId, owner: this };
-		rememberQueuedProviderRegistration(registration);
+		rememberQueuedProviderRegistration(registration, () => this.pendingProviderRegistrations);
 		this.pendingProviderRegistrations.push(registration);
 	}
 

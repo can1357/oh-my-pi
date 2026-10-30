@@ -17,12 +17,30 @@
  * selects a live registration and runs the call as that session's work; the author's object is
  * never touched.
  */
+/**
+ * What an admitted call produces, declared by the call site that admits it.
+ *
+ * `value` is the ordinary case: whatever comes back is finished, unless it is a thenable, in
+ * which case settling is what finishing means. `stream` says the call returns a producer that
+ * keeps working after it is handed back and reports completion through `result()`.
+ *
+ * The kind is declared rather than guessed. Inspecting the returned value was tried twice and is
+ * wrong in both directions, because the author chooses the shape: a terminal `result()` that is
+ * a CALLABLE thenable was missed, and an ordinary async-iterable data collection that happens to
+ * carry an unrelated lazy `result()` was claimed as outstanding work and its method invoked for
+ * nothing. We own every site that admits a call — that was the ruling — and the site knows
+ * whether it is starting a stream.
+ */
+export type AdmittedWorkKind = "value" | "stream";
+
 export interface ProviderCallGate {
 	/** True once the session that registered this provider has gone. */
 	readonly retired: boolean;
 	/** Runs one call into the provider as that session's work: attributed to it, and awaited by
-	 *  its disposal. Throws if the session retired between selection and the call. */
-	run<R>(call: () => R): R;
+	 *  its disposal until the work of the declared {@link AdmittedWorkKind} is finished. Throws
+	 *  if the session retired between selection and the call, and refuses a `stream` whose
+	 *  producer reports no completion. */
+	run<R>(call: () => R, kind?: AdmittedWorkKind): R;
 }
 
 /** A runtime registration and the session lifetime it belongs to. A host registration has no
@@ -48,7 +66,11 @@ export function selectLiveRegistration<T extends GatedRegistration>(entries: rea
 }
 
 /** Runs a call into a registered provider as its owning session's work, or directly when the
- *  registration is the host's own. */
-export function callThroughGate<R>(gate: ProviderCallGate | undefined, call: () => R): R {
-	return gate ? gate.run(call) : call();
+ *  registration is the host's own. `kind` is what this call site knows it is starting. */
+export function callThroughGate<R>(
+	gate: ProviderCallGate | undefined,
+	call: () => R,
+	kind: AdmittedWorkKind = "value",
+): R {
+	return gate ? gate.run(call, kind) : call();
 }

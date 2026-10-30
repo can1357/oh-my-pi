@@ -110,10 +110,13 @@ export function registerCustomApi(
 		// when the registry handed out `registered` itself.
 		view: gate
 			? {
+					// The kind is declared here, where it is known: a registered API returns a
+					// producer that keeps working after it is handed back, so the session stays
+					// open until that producer reports its terminal result.
 					stream: (model, context, options) =>
-						callThroughGate(gate, () => registered.stream(model, context, options)),
+						callThroughGate(gate, () => registered.stream(model, context, options), "stream"),
 					streamSimple: (model, context, options) =>
-						callThroughGate(gate, () => registered.streamSimple(model, context, options)),
+						callThroughGate(gate, () => registered.streamSimple(model, context, options), "stream"),
 					sourceId,
 				}
 			: registered,

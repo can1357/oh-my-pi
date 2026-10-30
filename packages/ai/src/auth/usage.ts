@@ -215,24 +215,38 @@ export class UsageService implements UsageApi {
 	}
 
 	/**
-	 * Remove runtime usage provider overrides: with `gate`, that owner's registration only;
-	 * without, every runtime registration for `provider`, restoring configured/default resolution.
+	 * Remove runtime usage registrations for `provider`: the one `gate` owns when a gate is
+	 * given, every one of them otherwise — what a host teardown means.
+	 *
+	 * The gate argument keeps the meaning it has always had. Making it the whole-teardown call
+	 * regardless would silently widen every existing gated caller, which is the shape of defect
+	 * this round exists to remove. {@link removeRegistration} is the separate case: the HOST's
+	 * own ungated registration, which `undefined` cannot express here.
 	 */
 	removeProvider(provider: Provider, gate?: ProviderCallGate): void {
-		if (!this.#runtimeUsageProviderOverrides.has(provider)) return;
-		if (gate === undefined) {
-			this.#deps.cache.invalidateForProvider(provider);
-			this.#runtimeUsageProviderOverrides.delete(provider);
+		if (gate) {
+			this.removeRegistration(provider, gate);
 			return;
 		}
+		if (!this.#runtimeUsageProviderOverrides.has(provider)) return;
+		this.#deps.cache.invalidateForProvider(provider);
+		this.#runtimeUsageProviderOverrides.delete(provider);
+	}
+
+	/**
+	 * Remove exactly one runtime registration for `provider`: the one `gate` owns, or the host's
+	 * own — the ungated one — when `gate` is undefined. Every other registration for the name stays
+	 * to be selected, so one party handing off or withdrawing takes away only its own.
+	 */
+	removeRegistration(provider: Provider, gate: ProviderCallGate | undefined): void {
 		// Selecting first drops retired owners' registrations, so what is left is live.
 		const selected = this.#liveRuntimeEntry(provider);
 		const entries = this.#runtimeUsageProviderOverrides.get(provider);
 		const index = entries ? entries.findIndex(entry => entry.gate === gate) : -1;
 		if (!entries || index < 0) return;
-		// Invalidate while the departing registration still answers, as the gateless removal does,
-		// so its rows go and the next answerer's survive. Removing one that does not answer
-		// changes nothing a reader sees.
+		// Invalidate while the departing registration still answers, as the teardown does, so its
+		// rows go and the next answerer's survive. Removing one that does not answer changes nothing
+		// a reader sees.
 		if (entries[index] === selected) this.#deps.cache.invalidateForProvider(provider);
 		entries.splice(index, 1);
 		if (entries.length === 0) this.#runtimeUsageProviderOverrides.delete(provider);

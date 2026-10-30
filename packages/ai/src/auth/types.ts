@@ -1308,11 +1308,16 @@ export interface UsageApi {
 	 */
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string, gate?: ProviderCallGate): void;
 	/**
-	 * Remove runtime usage provider overrides: with `gate`, only that owner's
-	 * registration; without, every runtime registration for `provider`, restoring
-	 * configured/default resolution.
+	 * Remove runtime usage registrations for `provider`: the one `gate` owns when a gate is
+	 * given, every one of them otherwise — what a host teardown means.
 	 */
 	removeProvider(provider: Provider, gate?: ProviderCallGate): void;
+	/**
+	 * Remove exactly one runtime registration for `provider`: the one `gate` owns,
+	 * or the host's own (ungated) one when `gate` is undefined. Every other
+	 * registration stays to be selected.
+	 */
+	removeRegistration(provider: Provider, gate: ProviderCallGate | undefined): void;
 }
 
 /**
