@@ -63,20 +63,21 @@ Done by a vmon cluster admin (dashboard `/ci` pages, or `vmon admin ci …`):
    - `max_disk_mb` ≥ 65536: a template build's disk is the team's `max_disk_mb` at build time, and Bazel jobs need tens of GiB on top of the baked caches;
    - maximum sandbox length ≥ 6 h 10 min (vmon's CI sandbox timeout).
 6. **Template.** Build `omp-ci` with the CI team's API key ([02-omp-ci-template.md](02-omp-ci-template.md)).
-7. **Repository secrets** `BAZEL_REMOTE_URL`, `BAZEL_REMOTE_USER`, `BAZEL_REMOTE_PASSWORD` ([04-caching.md](04-caching.md#4-secrets-and-the-bazel-cache-action)).
+
+CI needs no repository secrets for caching: the vmon node serves both the Actions cache and the Bazel cache ([03-caching.md](03-caching.md)).
 
 ## 4. Trust split
 
-PR code must never reach vmon or the shared caches:
+PR code must never reach vmon or write shared caches:
 
-- In `ci.yml` every job that can run on a PR resolves `runs-on` to `ubuntu-22.04` for `pull_request` events, and the Bazel jobs that need vmon are skipped on PRs. PR jobs build nothing with Bazel and never receive the bazel-remote secrets.
+- In `ci.yml` every job that can run on a PR resolves `runs-on` to `ubuntu-22.04` for `pull_request` events, and the Bazel jobs that need vmon are skipped on PRs. PR jobs build nothing with Bazel.
 - That expression is not a security boundary by itself: for `pull_request` events GitHub runs the workflow file **from the PR's merge commit**, so a PR can rewrite `runs-on`. The boundaries are:
   1. vmon's public-repo allow-list (§3.4): a PR author outside the list cannot get a sandbox, even when a maintainer re-runs the job (both `actor` and `triggering_actor` must be listed);
-  2. GitHub withholds repository secrets from fork PRs, so a fork job can never authenticate to bazel-remote, even on a vmon runner;
+  2. the vmon node's caches take writes only from jobs saving to a branch or tag: a pull request job, even on a vmon runner, can read the Bazel cache but not write it, and saves Actions cache entries only to its own pull request scope;
   3. **Settings → Actions → General → Fork pull request workflows: require approval for all outside collaborators**, so fork workflows do not start unattended.
-- bazel-remote is content-addressed and writes need the `ci` credentials, so the poisoning surface is exactly the set of jobs holding the secrets: trusted pushes, dispatches and releases ([04-caching.md](04-caching.md#5-poisoning-boundary)).
-- Sandboxes get no vmon credentials and no environment from vmon besides the runner's `.env`; jobs see only what GitHub gives them.
-- Sandbox egress follows vmon's default policy: public internet only, with private, link-local and tailnet ranges always denied. bazel-remote is therefore reached on its public endpoint.
+- The cache poisoning surface is therefore the set of trusted branch and tag runs: pushes, dispatches and releases ([03-caching.md](03-caching.md#3-poisoning-boundary)).
+- Sandboxes get no vmon credentials and no environment from vmon besides the runner's `.env` (and `VMON_CACHE_URL`); jobs see only what GitHub gives them.
+- Sandbox egress follows vmon's default policy: public internet only, with private, link-local and tailnet ranges always denied.
 
 ## 5. Operations
 

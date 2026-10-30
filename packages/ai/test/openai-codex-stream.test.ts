@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { completeSimple, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import * as codexAttestation from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import {
 	buildTransformedCodexRequestBody,
 	createOpenAICodexCompatibilityMetadata,
-	getOpenAICodexTransportDetails,
-	getOpenAICodexWebSocketDebugStats,
 	openCodexCompactionEventStream,
 	prewarmOpenAICodexResponses,
-	resetOpenAICodexHistoryAfterCompaction,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	getCodexProviderSessionState,
+	getOpenAICodexTransportDetails,
+	getOpenAICodexWebSocketDebugStats,
+	resetOpenAICodexHistoryAfterCompaction,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import type {
 	CodexCompactionRequestContext,
 	Context,
@@ -6435,6 +6439,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it("joins an in-flight websocket handshake instead of tearing it down", async () => {
+		vi.spyOn(codexAttestation, "getCodexAttestationHeader").mockResolvedValue(undefined);
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		const token = createCodexTestToken();
@@ -6444,11 +6449,14 @@ describe("openai-codex streaming", () => {
 
 		let constructorCount = 0;
 		const sockets: DeferredOpenWebSocket[] = [];
+		const handshakeStarted = Promise.withResolvers<void>();
+		const handshakeJoined = Promise.withResolvers<void>();
 		class DeferredOpenWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
 				constructorCount += 1;
 				sockets.push(this);
+				handshakeStarted.resolve();
 			}
 
 			open(): void {
@@ -6478,6 +6486,16 @@ describe("openai-codex streaming", () => {
 			sessionId: "ws-join-session",
 			providerSessionState,
 		});
+		await Promise.race([handshakeStarted.promise, prewarmPromise]);
+		const connection = getCodexProviderSessionState(providerSessionState)?.webSocketSessions.values().next()
+			.value?.connection;
+		if (!connection) throw new Error("Prewarm did not create a websocket connection");
+		const connect = connection.connect.bind(connection);
+		vi.spyOn(connection, "connect").mockImplementation(signal => {
+			const joined = connect(signal);
+			handshakeJoined.resolve();
+			return joined;
+		});
 		const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
@@ -6485,8 +6503,8 @@ describe("openai-codex streaming", () => {
 			providerSessionState,
 		}).result();
 
-		// Let both callers reach the handshake before the socket opens.
-		await Bun.sleep(5);
+		// Open only after the second caller has joined the pending handshake.
+		await Promise.race([handshakeJoined.promise, prewarmPromise]);
 		for (const socket of sockets) socket.open();
 
 		await prewarmPromise;
@@ -6502,7 +6520,7 @@ describe("openai-codex streaming", () => {
 		});
 		expect(details.websocketDisabled).toBe(false);
 		expect(fetchMock).not.toHaveBeenCalled();
-	}, 15_000); // real handshake join; 5s default flakes under full-suite load
+	});
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");

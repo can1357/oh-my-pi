@@ -2,7 +2,7 @@
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/bazel-remote.yaml).
+CI caches with Bazel's content-addressed action cache (see infra/docs/03-caching.md).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
