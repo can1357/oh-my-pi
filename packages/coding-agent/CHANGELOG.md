@@ -109,6 +109,7 @@
 
 ### Changed
 
+- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Updated Bun engine requirement to ≥1.4.4
 
 ### Fixed
