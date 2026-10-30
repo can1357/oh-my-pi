@@ -292,6 +292,16 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
 	// decided nobody is here must not then rename the directory out from under
 	// a record published a moment later.
 	await withSandboxLock(found.baseDir, "record a writer in", async () => {
+		// A fact established before a lock is not a fact after it: the sandbox
+		// found above may have been retired, renamed or reclaimed while this
+		// call waited. Re-read the claim under the lock and refuse rather than
+		// publishing a record into a path that is no longer there.
+		const claim = await readIsolationClaim(found.baseDir);
+		if (claim.kind !== "claimed") {
+			throw new Error(
+				`Isolation workspace ${found.baseDir} is no longer claimable (${claim.kind}); cannot record a writer.`,
+			);
+		}
 		await writeProcessIdentity(record);
 	});
 	return async () => {
@@ -497,11 +507,13 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			// references come back. A lease that is only *ours* is different —
 			// waiting for ourselves is not a reason to keep the process alive,
 			// and a retained self-lease kept a finished program from exiting.
-			// Re-read the writer records before unreferencing: the snapshot above
-			// was taken before this one, and a foreign writer that arrived in
-			// between — or was already there — is work this process must stay
-			// for. Departure was fixed last round; this is arrival.
-			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+			// Re-read the writer records *under the sandbox lock*, which is what
+			// publication now takes: a record queued at the moment of the
+			// listing used to land just after it, and the owner exited without
+			// capturing it. Under the lock there is no "just after".
+			const writersNow = await withSandboxLock(baseDir, "check writers in", async () =>
+				readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR)),
+			);
 			if (leases.allOurs && !leases.unknown && writersNow.allOurs && !writersNow.unknown) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();

@@ -239,9 +239,19 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 			// symlink also gives. `lstat` answers the question that was meant: is
 			// there an entry here at all? An entry whose target is gone is a
 			// marker nobody can read, which is unknown, not absent.
-			const entry = await fs.lstat(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
-			if (entry === undefined) return { kind: "absent" };
-			return { kind: "unknown", reason: "owner marker entry exists but its target is missing" };
+			// A failure to look is not an absence here either: only `ENOENT`
+			// from `lstat` says there is no entry, and anything else — `EACCES`,
+			// `EIO` — is a marker this caller cannot read.
+			try {
+				await fs.lstat(path.join(baseDir, ISOLATION_OWNER_FILE));
+				return { kind: "unknown", reason: "owner marker entry exists but its target is missing" };
+			} catch (lstatError) {
+				if (isEnoent(lstatError)) return { kind: "absent" };
+				return {
+					kind: "unknown",
+					reason: lstatError instanceof Error ? lstatError.message : String(lstatError),
+				};
+			}
 		}
 		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
 	}
@@ -267,7 +277,16 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
  * owner's teardown finds a generation that is not its own.
  */
 export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
-	const entries = await fs.readdir(baseDir).catch(() => [] as string[]);
+	// A listing that fails is not an empty sandbox: reading it as one leaves
+	// the previous owner's data in place under this run's claim, and the run
+	// then works in a workspace it believes is clean.
+	let entries: string[];
+	try {
+		entries = await fs.readdir(baseDir);
+	} catch (error) {
+		if (isEnoent(error)) return;
+		throw error;
+	}
 	for (const entry of entries) {
 		if (entry === ISOLATION_OWNER_FILE) continue;
 		await fs.rm(path.join(baseDir, entry), { recursive: true, force: true });
@@ -396,7 +415,14 @@ export async function writeRetainedBackend(baseDir: string, backend: number): Pr
  */
 export async function readRetainedMountBackend(dir: string): Promise<number | undefined> {
 	const sidecar = path.join(dir, RETAINED_BACKEND_FILE);
-	if (!(await Bun.file(sidecar).exists())) return undefined;
+	// `exists()` answers false for a sidecar that is there but unreadable,
+	// which is the guard bypass this function's contract exists to prevent.
+	try {
+		await fs.stat(sidecar);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
 	const decoded: unknown = await Bun.file(sidecar).json();
 	if (typeof decoded !== "object" || decoded === null || !("backend" in decoded)) {
 		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
@@ -476,22 +502,48 @@ export async function describeSandboxLockFailure(
  * straight through a peer's hold and moved a workspace in five milliseconds.
  * The code should look rather than be told.
  */
-const heldSandboxLocks = new AsyncLocalStorage<Set<string>>();
+const heldSandboxLocks = new AsyncLocalStorage<Map<string, SandboxLockHandle>>();
 
 /**
- * Run `body` with this sandbox's lock recorded as held by the current async
- * context, for a caller that has already acquired it itself. Everything
- * `body` calls then detects the hold instead of waiting on it.
+ * A hold, recorded as the lock itself rather than as a note that one was
+ * taken. Releasing the lock invalidates it, so "do I hold this?" is answered
+ * by the lock's own state: a boolean left in a context is still a declaration,
+ * just one the code wrote instead of the caller, and an unawaited child kept
+ * it true long enough to move a workspace a different process was holding.
  */
-export async function runHoldingSandboxLock<T>(baseDir: string, body: () => Promise<T>): Promise<T> {
-	const held = new Set(heldSandboxLocks.getStore() ?? []);
-	held.add(baseDir);
+export interface SandboxLockHandle {
+	release(): void;
+	/** Whether this lock is still held, asked of the lock rather than of a note. */
+	isHeld(): boolean;
+}
+
+/**
+ * Run `body` inside the hold of a lock this caller has already acquired, so
+ * everything `body` calls detects the hold instead of waiting on it.
+ *
+ * The lock itself is what gets recorded — there is no way to assert a hold
+ * without having taken one, and releasing it invalidates the record.
+ */
+export async function runHoldingSandboxLock<T>(
+	baseDir: string,
+	lock: SandboxLockHandle,
+	body: () => Promise<T>,
+): Promise<T> {
+	const held = new Map(heldSandboxLocks.getStore() ?? []);
+	held.set(baseDir, lock);
 	return await heldSandboxLocks.run(held, body);
 }
 
-/** Whether the caller's async context already holds the lock for `baseDir`. */
+/**
+ * Whether the caller's async context holds the lock for `baseDir` *now*.
+ *
+ * Asked of the lock, not of a flag left behind: an unawaited child outlives
+ * the call that recorded the hold, and a recorded boolean stayed true after
+ * its wrapper released, which let retention move a workspace another process
+ * was holding.
+ */
 export function holdsSandboxLock(baseDir: string): boolean {
-	return heldSandboxLocks.getStore()?.has(baseDir) === true;
+	return heldSandboxLocks.getStore()?.get(baseDir)?.isHeld() === true;
 }
 
 /**
@@ -501,10 +553,8 @@ export function holdsSandboxLock(baseDir: string): boolean {
 export async function withSandboxLock<T>(baseDir: string, purpose: string, body: () => Promise<T>): Promise<T> {
 	if (holdsSandboxLock(baseDir)) return await body();
 	const lock = await acquireSandboxLockWithNotice(baseDir, purpose);
-	const held = new Set(heldSandboxLocks.getStore() ?? []);
-	held.add(baseDir);
 	try {
-		return await heldSandboxLocks.run(held, body);
+		return await runHoldingSandboxLock(baseDir, lock, body);
 	} finally {
 		lock.release();
 	}
@@ -525,29 +575,45 @@ const SANDBOX_LOCK_REMINDER_MS = 30_000;
  * kernel object, and the pid in the marker is the run that built the
  * workspace, which may not be the holder.
  */
-export async function acquireSandboxLockWithNotice(baseDir: string, purpose: string): Promise<{ release: () => void }> {
+export async function acquireSandboxLockWithNotice(baseDir: string, purpose: string): Promise<SandboxLockHandle> {
 	const startedAt = Date.now();
 	const announce = async (): Promise<void> => {
-		const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
-		const recorded =
-			owner === undefined || owner === "unreadable"
-				? "its recorded owner is not readable"
-				: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
-		// Clearing a timer does not cancel a callback that is already running,
-		// and the marker read above takes time: a notice that announces after
-		// the lock was taken says the opposite of the truth.
-		if (settled) return;
-		const message =
-			`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — another run holds it. ` +
-			`The holder is not identifiable, and ${recorded}. \`omp worktree list\` shows what owns it.`;
-		process.stderr.write(`${message}\n`);
-		logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
-			waitedMs: Date.now() - startedAt,
-			detail:
-				`Another run holds it; the holder is not identifiable, and ${recorded}. A workspace is held while ` +
-				"its task's patch is being saved, while it is being built, and while it is being removed. " +
-				"`omp worktree list` shows what owns it.",
-		});
+		try {
+			const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
+			const recorded =
+				owner === undefined || owner === "unreadable"
+					? "its recorded owner is not readable"
+					: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
+			// Clearing a timer does not cancel a callback that is already running,
+			// and the marker read above takes time: a notice that announces after
+			// the lock was taken says the opposite of the truth.
+			if (settled) return;
+			// Says only what is true at this moment: the lock has not been granted.
+			// Whether that is a holder or a lock that cannot be opened is not known
+			// until the attempt ends, and claiming a holder here contradicted the
+			// failure that followed.
+			const message =
+				`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — it has not been granted yet. ` +
+				`If another run holds it, the holder is not identifiable, and ${recorded}. ` +
+				"`omp worktree list` shows what owns it.";
+			// A diagnostic must never be fatal: a closed stderr or a broken pipe
+			// killed the run it was meant to inform.
+			try {
+				process.stderr.write(`${message}\n`);
+			} catch {
+				// Nothing to do: the caller cannot be told, and that is not a reason
+				// to fail the work.
+			}
+			logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
+				waitedMs: Date.now() - startedAt,
+				detail:
+					`Another run holds it; the holder is not identifiable, and ${recorded}. A workspace is held while ` +
+					"its task's patch is being saved, while it is being built, and while it is being removed. " +
+					"`omp worktree list` shows what owns it.",
+			});
+		} catch {
+			// An announcement that fails is still only an announcement.
+		}
 	};
 	let settled = false;
 	const notice = setTimeout(() => void announce(), SANDBOX_LOCK_NOTICE_MS);
@@ -555,7 +621,17 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 	notice.unref?.();
 	reminder.unref?.();
 	try {
-		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+		const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+		// The handle carries its own state, so a hold recorded against it stops
+		// being a hold the moment it is released.
+		let released = false;
+		return {
+			release: () => {
+				released = true;
+				lock.release();
+			},
+			isHeld: () => !released,
+		};
 	} catch (error) {
 		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
 	} finally {

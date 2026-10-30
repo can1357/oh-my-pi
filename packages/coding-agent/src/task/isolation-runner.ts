@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { acquireFileLock, logger, prompt } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -38,7 +38,7 @@ const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
-import { resolveSandboxIdentity, withSandboxLock } from "./isolation-ownership";
+import { readRetainedMountBackend, resolveSandboxIdentity, withSandboxLock } from "./isolation-ownership";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -318,6 +318,12 @@ export interface RetainedWorkspace {
 	 * manual unmount instead of advertising plain `worktree clear`.
 	 */
 	sidecarOk: boolean;
+	/**
+	 * False when no workspace is on disk to recover from: a teardown won the
+	 * race and removed it. Naming a path that is not there sends the user to
+	 * an empty name.
+	 */
+	present: boolean;
 }
 
 export async function retainIsolationWorkspace(
@@ -335,32 +341,73 @@ export async function retainIsolationWorkspace(
 		// teardown that won the race, has moved it. Reporting a path that does
 		// not exist sends the user to an empty name, so the sibling that does
 		// exist is reported instead.
-		const existing = await fs.stat(isolationDir).catch(() => undefined);
-		if (existing === undefined) {
+		// Only `ENOENT` says the workspace has moved. A stat that fails for any
+		// other reason is a workspace this caller could not look at, and
+		// retention goes ahead on the real path rather than hunting siblings.
+		const existing = await fs.stat(isolationDir).then(
+			() => "present" as const,
+			(error: unknown) => (isEnoent(error) ? ("gone" as const) : ("present" as const)),
+		);
+		if (existing === "gone") {
+			// Someone else moved it. Report a path that exists and a sidecar
+			// state that is read rather than assumed: a decoy `.retained-*`
+			// without a mount, or an older sibling, sent callers to the wrong
+			// workspace and claimed metadata nothing had written.
 			const retained = await findRetainedSibling(baseDir);
-			return { dir: retained ?? isolationDir, sidecarOk: retained !== undefined };
+			// Could not look: saying "nothing survives" on a failed listing is
+			// the same mistake as reading an error as an absence, so the path
+			// is named and the metadata called missing instead.
+			if (retained === "unknown") return { dir: isolationDir, sidecarOk: false, present: true };
+			if (retained === undefined) return { dir: isolationDir, sidecarOk: false, present: false };
+			return {
+				dir: retained,
+				sidecarOk: await hasRetainedSidecar(path.dirname(retained), backend),
+				present: true,
+			};
 		}
 		return await retainUnderLock(isolationDir, baseDir, backend);
 	});
 }
 
-/** The `.retained-*` copy an earlier retention of this sandbox left, if one is there. */
-async function findRetainedSibling(baseDir: string): Promise<string | undefined> {
+/** The newest `.retained-*` copy of this sandbox that actually holds a workspace. */
+async function findRetainedSibling(baseDir: string): Promise<string | undefined | "unknown"> {
 	const parent = path.dirname(baseDir);
 	const prefix = `${path.basename(baseDir)}.retained-`;
-	const entries = await fs.readdir(parent).catch(() => [] as string[]);
+	let entries: string[];
+	try {
+		entries = await fs.readdir(parent);
+	} catch {
+		return "unknown";
+	}
+	let newest: { dir: string; mtimeMs: number } | undefined;
 	for (const entry of entries) {
 		if (!entry.startsWith(prefix)) continue;
 		const candidate = path.join(parent, entry, TASK_ISOLATION_MOUNT_NAME);
-		if (
-			await Bun.file(path.join(candidate, "."))
-				.exists()
-				.catch(() => false)
-		)
-			return candidate;
-		return candidate;
+		// A retained copy with no mount directory is not this workspace, and an
+		// older sibling belongs to somebody else's retention. A candidate that
+		// cannot be looked at is not evidence either way, so the whole answer
+		// becomes "I do not know" rather than silently the next best one.
+		let stat: Awaited<ReturnType<typeof fs.stat>>;
+		try {
+			stat = await fs.stat(candidate);
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			return "unknown";
+		}
+		if (!stat.isDirectory()) continue;
+		if (newest === undefined || stat.mtimeMs > newest.mtimeMs) newest = { dir: candidate, mtimeMs: stat.mtimeMs };
 	}
-	return undefined;
+	return newest?.dir;
+}
+
+/**
+ * Whether the cleanup metadata `clear` would need is really on disk for a
+ * retained workspace — read, not inferred from the fact that a sibling exists:
+ * a second retention reported it present while the first had failed to write it.
+ */
+async function hasRetainedSidecar(retainedBase: string, backend: natives.IsoBackendKind | undefined): Promise<boolean> {
+	if (backend === undefined || !needsNativeTeardown(backend)) return true;
+	return (await readRetainedMountBackend(retainedBase).catch(() => undefined)) !== undefined;
 }
 
 async function retainUnderLock(
@@ -386,7 +433,7 @@ async function retainUnderLock(
 				() => false,
 			);
 		}
-		return { dir: isolationDir, sidecarOk: inPlaceSidecarOk };
+		return { dir: isolationDir, sidecarOk: inPlaceSidecarOk, present: true };
 	}
 	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
 	let sidecarOk = !needsSidecar;
@@ -403,13 +450,13 @@ async function retainUnderLock(
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			await fs.rename(baseDir, retainedBase);
-			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk };
+			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk, present: true };
 		} catch {
-			if (attempt === 2) return { dir: isolationDir, sidecarOk };
+			if (attempt === 2) return { dir: isolationDir, sidecarOk, present: true };
 			await Bun.sleep(25);
 		}
 	}
-	return { dir: isolationDir, sidecarOk };
+	return { dir: isolationDir, sidecarOk, present: true };
 }
 /** Context for `isolation-error.md`: the `result.error` text for a run whose changes could not be captured or landed. */
 interface IsolationErrorContext {
@@ -425,6 +472,8 @@ interface IsolationErrorContext {
 	 * unmount instead of advertising plain `worktree clear`.
 	 */
 	sidecarMissing?: boolean;
+	/** Set when the retained workspace is not on disk at all, so no path can be named. */
+	retainedGone?: boolean;
 }
 
 function renderIsolationError(context: IsolationErrorContext): string {
@@ -519,6 +568,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					message: captureErr instanceof Error ? captureErr.message : String(captureErr),
 					retainedDir: retained.dir,
 					sidecarMissing: !retained.sidecarOk,
+					retainedGone: !retained.present,
 				}),
 			);
 		}
@@ -716,6 +766,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 							rescueBranch,
 							retainedDir: retained.dir,
 							sidecarMissing: !retained.sidecarOk,
+							retainedGone: !retained.present,
 						}),
 					});
 				}
@@ -749,6 +800,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						message: persistErr instanceof Error ? persistErr.message : String(persistErr),
 						retainedDir: retained.dir,
 						sidecarMissing: !retained.sidecarOk,
+						retainedGone: !retained.present,
 					}),
 				});
 			}
@@ -768,6 +820,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						message: patchErr instanceof Error ? patchErr.message : String(patchErr),
 						retainedDir: retained.dir,
 						sidecarMissing: !retained.sidecarOk,
+						retainedGone: !retained.present,
 					}),
 				});
 			}

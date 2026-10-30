@@ -956,7 +956,7 @@ export async function cleanupIsolation(
 			// The capture runs inside this teardown's hold: retention it calls
 			// detects that rather than waiting sixty seconds on a lock this
 			// very call owns.
-			const capturing = runHoldingSandboxLock(baseDir, options.capture)
+			const capturing = runHoldingSandboxLock(baseDir, lock, options.capture)
 				.then(() => true)
 				.catch(error => {
 					logger.warn("isolation capture failed; keeping the workspace", {
