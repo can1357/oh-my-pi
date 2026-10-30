@@ -199,6 +199,7 @@ import type {
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
+	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
@@ -223,11 +224,13 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
+import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
+import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
+import { transportFetch } from "../utils/transport-fetch";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
@@ -734,6 +737,12 @@ interface CursorHttp1RunTransportOptions {
 	headers: Record<string, string>;
 	requestId: string;
 	signal?: AbortSignal;
+	/**
+	 * The caller's transport fetch. Every RunSSE and BidiAppend request goes
+	 * through it, so each waits on the caller's dispatch hold — the proxy, the
+	 * CA bundle and `PI_REQ_DEBUG` ride along with it.
+	 */
+	fetch: FetchImpl;
 }
 
 interface CursorPendingAppend {
@@ -763,7 +772,7 @@ function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): CursorRunTransport {
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
-	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	const fetchImpl = options.fetch;
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
@@ -1332,6 +1341,11 @@ function streamCursorWithWireMode(
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+				// `client.request` puts this turn's HEADERS on the wire, so the hold
+				// runs here — after the payload build, the request-debug dump and the
+				// proxy tunnel, all of which can span a `/pause`. The HTTP/1 transport
+				// holds in the transport fetch it was given instead, once per request.
+				await holdBeforeDispatch(options?.beforeDispatch, options?.signal);
 				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
 			} else {
 				runTransport = createHttp1RunTransport({
@@ -1339,6 +1353,7 @@ function streamCursorWithWireMode(
 					headers: requestHeaders,
 					requestId,
 					signal: options?.signal,
+					fetch: transportFetch(model, options?.fetch, options?.beforeDispatch),
 				});
 			}
 

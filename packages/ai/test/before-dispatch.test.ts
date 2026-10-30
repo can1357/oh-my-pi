@@ -14,7 +14,7 @@ import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as duoWorkflow from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { __providerInFlightForTesting, completeSimple, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { __providerInFlightForTesting, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -525,5 +525,61 @@ describe("beforeDispatch", () => {
 		expect(transportFetch(model(), twice, first)).toBe(twice);
 		await twice("https://example.invalid/v1/messages", { method: "POST" });
 		expect(calls).toEqual(["first", "second", "request"]);
+	});
+
+	// Cursor builds its payload after the chokepoint hold and then sent through
+	// a fetch of its own, so a pause engaged during the build reached Cursor and
+	// the caller's transport (proxy, CA bundle, PI_REQ_DEBUG) was skipped too.
+	test("sends Cursor's HTTP/1 run request through the caller's held transport", async () => {
+		const sentWhileHeld: boolean[] = [];
+		const gate = { closed: false };
+		const resumed = Promise.withResolvers<void>();
+		const forbidden: typeof fetch = Object.assign(
+			async () => {
+				throw new Error("Cursor must not bypass the caller's transport");
+			},
+			{ preconnect: () => {} },
+		);
+		const globalFetch = spyOn(globalThis, "fetch").mockImplementation(forbidden);
+		try {
+			const cursor = buildModel({
+				id: "claude-sonnet-4",
+				name: "Cursor Hold",
+				api: "cursor-agent",
+				provider: "cursor",
+				baseUrl: "http://127.0.0.1:9876",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 1_000,
+			} satisfies ModelSpec<"cursor-agent">);
+
+			await stream(cursor, context(), {
+				apiKey: "cursor-token",
+				transport: "http1",
+				fetch: async () => {
+					sentWhileHeld.push(gate.closed);
+					return new Response("{}", { status: 400 });
+				},
+				// The request payload is built after the chokepoint hold.
+				onPayload: () => {
+					gate.closed = true;
+				},
+				beforeDispatch: () => {
+					if (!gate.closed) return;
+					queueMicrotask(() => {
+						gate.closed = false;
+						resumed.resolve();
+					});
+					return resumed.promise;
+				},
+			}).result();
+		} finally {
+			globalFetch.mockRestore();
+		}
+
+		expect(sentWhileHeld.length).toBeGreaterThan(0);
+		expect(sentWhileHeld.every(held => !held)).toBe(true);
 	});
 });
