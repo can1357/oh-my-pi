@@ -246,10 +246,9 @@ import {
 	reportTernSession,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
-	setTerminalTitleBrand,
+	setTerminalTitleLayout,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
-	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
 	aggregateVibeWorkerTokensPerSecond,
@@ -2611,9 +2610,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
-		// Brand first: the run-state setter emits, and an unbranded opt-out must never flash `π`.
-		setTerminalTitleBrand(cfgTuiTitleBrand.get(this.settings));
-		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		setTerminalTitleLayout(cfgTuiTitleState.get(this.settings), cfgTuiTitleBrand.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
@@ -4265,8 +4262,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}
-		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
-		if (any("tui.titleBrand")) setTerminalTitleBrand(cfgTuiTitleBrand.get(this.settings));
+		if (any("tui.titleState", "tui.titleBrand")) {
+			setTerminalTitleLayout(cfgTuiTitleState.get(this.settings), cfgTuiTitleBrand.get(this.settings));
+		}
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 

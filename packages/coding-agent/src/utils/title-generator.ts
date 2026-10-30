@@ -1003,17 +1003,16 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	emitTerminalTitle();
 }
 
-/** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
-export function setTerminalTitleStateEnabled(enabled: boolean): void {
-	terminalTitleRuntime.enabled = enabled;
-	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
-	else stopTerminalTitleSpinner();
-	emitTerminalTitle();
-}
-
-/** Show or drop the `π` brand at the head of the terminal title (driven by the `tui.titleBrand` setting). */
-export function setTerminalTitleBrand(brand: boolean): void {
+/**
+ * Apply the title layout settings together: the run-state separator
+ * (`tui.titleState`) and the `π` brand (`tui.titleBrand`). One emit after both
+ * are set, so turning both off never flashes a title that still has either.
+ */
+export function setTerminalTitleLayout(runState: boolean, brand: boolean): void {
+	terminalTitleRuntime.enabled = runState;
 	terminalTitleRuntime.brand = brand;
+	if (runState && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
+	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 

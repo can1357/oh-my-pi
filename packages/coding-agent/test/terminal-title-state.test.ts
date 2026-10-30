@@ -8,6 +8,7 @@ import {
 	popTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
+	setTerminalTitleLayout,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 	type TerminalTitleState,
@@ -171,6 +172,7 @@ describe("disposeTerminalTitleState", () => {
 		// test's teardown latched it off), a fresh session base, run state idle.
 		initTerminalTitleState();
 		setTerminalTitleSpinnerStyle("braille");
+		setTerminalTitleLayout(true, true);
 		setSessionTerminalTitle("my-project");
 		setTerminalTitleState("idle");
 		resetObserved(writes, windowsTitleMock);
@@ -349,6 +351,16 @@ describe("disposeTerminalTitleState", () => {
 			expect(title).toContain("my-project");
 			expect(title).toMatch(/^π [○◔◑◕●] my-project$/);
 		}
+	});
+
+	it("turns the brand and run state off in one write, with no intermediate title", () => {
+		setTerminalTitleState("working");
+		resetObserved(writes, windowsTitleMock);
+
+		setTerminalTitleLayout(false, false);
+
+		expect(observedTitles(writes, windowsTitleMock)).toEqual(["my-project"]);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("releases the latch and re-arms a live spinner when the terminal is claimed again", () => {
