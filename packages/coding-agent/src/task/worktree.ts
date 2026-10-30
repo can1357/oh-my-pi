@@ -21,8 +21,10 @@ import {
 } from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
+	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
+	readProcessIdentity,
 	readIsolationClaim,
 	resolveSandboxIdentity,
 	SANDBOX_LOCK_WAIT,
@@ -842,8 +844,13 @@ async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ r
 	try {
 		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	} catch (error) {
+		const claim = await readIsolationClaim(baseDir).catch(() => undefined);
+		const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
+		const held =
+			owner === undefined || owner === "unreadable" ? "its owner is not readable" : `it is held by pid ${owner.pid}`;
+		const state = claim === undefined ? "unknown" : claim.kind;
 		throw new Error(
-			`Could not ${purpose} isolation workspace ${baseDir}: another run has held it for ` +
+			`Could not ${purpose} isolation workspace ${baseDir} (${state}; ${held}): another run has held it for ` +
 				`${Math.round((SANDBOX_LOCK_WAIT.retries * SANDBOX_LOCK_WAIT.retryDelayMs) / 1000)}s. ` +
 				"A workspace is held while its task's patch is being saved, while it is being built, and while it " +
 				"is being removed; the hold ends when that finishes. Retry, or run `omp worktree list` to see what " +

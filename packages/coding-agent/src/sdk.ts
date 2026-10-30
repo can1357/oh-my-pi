@@ -4496,6 +4496,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd(), { agentId: resolvedAgentId });
 		let workspaceLeaseTimer: NodeJS.Timeout | undefined;
 		let workspaceLeaseDropped = false;
+		/**
+		 * One record for this session, created at most once and cleared at most
+		 * once. Two records — one at the start of disposal and another at the
+		 * grace — left the second uncleared, and a workspace nobody could reuse.
+		 */
+		let writerRecord: Promise<() => Promise<void>> | undefined;
+		const recordWriter = (): Promise<() => Promise<void>> => {
+			writerRecord ??= markUnfinishedWriter(sessionManager.getCwd());
+			return writerRecord;
+		};
+		const clearWriterRecord = async (): Promise<void> => {
+			if (writerRecord === undefined) return;
+			const clear = await writerRecord.catch(() => undefined);
+			if (clear === undefined) return;
+			for (let attempt = 0; attempt < 5; attempt += 1) {
+				try {
+					await clear();
+					writerRecord = undefined;
+					return;
+				} catch (error) {
+					logger.warn("could not clear this session's unfinished-writer record; retrying", {
+						attempt,
+						error: String(error),
+					});
+					await scheduler.wait(200);
+				}
+			}
+		};
 		const dropWorkspaceLease = (): void => {
 			if (workspaceLeaseDropped) return;
 			// Marked dropped only once the lease is really gone: a removal that
@@ -4521,60 +4549,50 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Held until disposal *finishes*: a shutdown writer still saving into
 		// the workspace is a user of it, and dropping the lease when disposal
 		// merely starts lets the owner delete the directory under that write.
-		let clearUnfinishedWriter: (() => Promise<void>) | undefined;
 		disposeCallbacks.add(() => {
-			// Finished: the record that kept the workspace alive for this writer
-			// goes with it, or the sandbox is never reclaimed.
-			if (clearUnfinishedWriter !== undefined) {
-				void clearUnfinishedWriter().catch(error => {
-					logger.warn("could not clear this session's unfinished-writer record", { error: String(error) });
-				});
-			}
-			dropWorkspaceLease();
+			void (async () => {
+				// Disposal ending is not proof that a handler it abandoned at its
+				// timeout has stopped. When it did, the record stays: it names
+				// this process, so it retires when this process does, and until
+				// then nothing deletes or reuses the workspace underneath that
+				// handler.
+				if (session.hasAbandonedShutdownWork()) {
+					logger.warn("keeping this session's unfinished-writer record: disposal abandoned a shutdown handler", {
+						id: resolvedAgentId,
+					});
+					await recordWriter().catch(error => {
+						logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+					});
+				} else {
+					await clearWriterRecord();
+				}
+				dropWorkspaceLease();
+			})();
 		});
 		// Bounded from the moment disposal starts, because a disposal that
 		// never finishes would otherwise hold the sandbox — and the kernel
 		// behind it — for the life of the host.
 		beginDisposeCallbacks.add(() => {
-			// Recorded for the whole of disposal, not only past the grace: a
-			// shutdown handler that outruns its own timeout is still writing
-			// here while disposal finishes, and the owner must not delete the
-			// directory under it. Cleared when disposal is done.
-			void markUnfinishedWriter(sessionManager.getCwd())
-				.then(clear => {
-					clearUnfinishedWriter ??= clear;
-				})
-				.catch(error => {
-					logger.warn("could not record this session as an unfinished writer", { error: String(error) });
-				});
+			// Recorded for the whole of disposal: a shutdown handler that outruns
+			// its own timeout is still writing here while disposal finishes.
+			void recordWriter().catch(error => {
+				logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+			});
 			workspaceLeaseTimer = setTimeout(() => {
 				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
 					id: resolvedAgentId,
 					graceMs: SESSION_LEASE_DISPOSE_GRACE_MS,
 				});
-				// Giving the lease up is how a stalled disposal stops holding a
-				// kernel; it is not a statement that this session has stopped
-				// writing. Saying so keeps the owner from deleting the directory
-				// under a handler that is still running.
-				// The lease goes only once the record is on disk. A caller that
-				// could not say "I may still be writing" has not been told it is
-				// safe to stop holding it, so a failed write keeps the lease and
-				// the next attempt tries again.
-				void (async () => {
-					for (let attempt = 0; attempt < 5; attempt += 1) {
-						try {
-							clearUnfinishedWriter = await markUnfinishedWriter(sessionManager.getCwd());
-							dropWorkspaceLease();
-							return;
-						} catch (error) {
-							logger.warn("could not record an unfinished writer; keeping the workspace lease", {
-								attempt,
-								error: String(error),
-							});
-							await scheduler.wait(200);
-						}
-					}
-				})();
+				// The same record, not a second one. Giving the lease up is how a
+				// stalled disposal stops holding a kernel; it is not a statement
+				// that this session has stopped writing.
+				void recordWriter()
+					.catch(error => {
+						logger.warn("could not record an unfinished writer on the workspace", {
+							error: String(error),
+						});
+					})
+					.finally(dropWorkspaceLease);
 			}, SESSION_LEASE_DISPOSE_GRACE_MS);
 			workspaceLeaseTimer.unref?.();
 		});

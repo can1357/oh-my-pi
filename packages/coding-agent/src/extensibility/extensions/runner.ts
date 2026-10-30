@@ -1406,6 +1406,9 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** Handlers abandoned at their timeout, and so possibly still running. */
+	timedOutHandlers = 0;
+
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -1792,6 +1795,10 @@ export class ExtensionRunner {
 		}
 		if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
 		if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
+			// The handler was abandoned, not stopped: whatever it was doing — a
+			// write into the session's workspace, an IPC round trip — may still
+			// be going. Anything that tears that workspace down has to know.
+			this.timedOutHandlers += 1;
 			const error = `handler timed out after ${timeoutMs}ms`;
 			logger.warn("Extension handler timed out", {
 				extensionPath: ext.path,

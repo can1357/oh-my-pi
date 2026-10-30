@@ -497,7 +497,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// parent's result is built from, and a capture postponed to an
 			// unknown later moment leaves that result with no patch and no
 			// branch for work the child really did.
-			await capture();
+			//
+			// A failure here is reported and does not stop the release. This
+			// capture is not what authorises a deletion — the one under the
+			// sandbox lock below is, and that one raises — so throwing out of
+			// here only abandons the caller's hold and replaces a child's real
+			// output with a blank failure result.
+			await capture().catch(error => {
+				logger.warn("capture at release failed; the locked capture before removal decides", {
+					agentId: opts.agentId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 			const sandbox = handle;
 			// Someone is still working in the sandbox — a nested child that
 			// inherited this cwd, a session another process opened in it. The
