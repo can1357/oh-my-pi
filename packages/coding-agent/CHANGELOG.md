@@ -9,6 +9,7 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
+- Shared the canonical harness-tag classifier and memory credential redactor with `@oh-my-pi/pi-mnemopi` ([#17425](https://github.com/can1357/oh-my-pi/pull/17425) by [@GTanger](https://github.com/GTanger)).
 
 ## [18.14.0] - 2026-10-29
 

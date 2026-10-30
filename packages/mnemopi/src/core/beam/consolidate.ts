@@ -3,6 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { polyphonicRecallEnabled } from "../../config";
 import { generateId, stableMemoryId } from "../../util/ids";
 import { aaakEncode } from "../aaak";
+import { redactMemorySecrets, sanitizeContent } from "../content-sanitizer";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
@@ -486,12 +487,14 @@ function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summar
 
 export function consolidateToEpisodic(
 	beam: BeamMemoryState,
-	summary: string,
+	rawSummary: string,
 	sourceWmIds: readonly string[],
 	source = "consolidation",
 	importance = 0.6,
 	options: ConsolidateOptions = {},
 ): string {
+	const [summary] = sanitizeContent(rawSummary);
+	const [cleanSource] = sanitizeContent(redactMemorySecrets(source));
 	const memoryId = generateId(summary);
 	const timestamp = isoNow();
 	const scope = options.scope ?? "session";
@@ -505,7 +508,7 @@ export function consolidateToEpisodic(
 		[
 			memoryId,
 			summary,
-			source,
+			cleanSource,
 			timestamp,
 			sourceSession(beam),
 			importance,
@@ -524,7 +527,7 @@ export function consolidateToEpisodic(
 	extractAndStoreFacts(beam, summary, 0, memoryId);
 	ingestIntoEpisodicGraph(beam, memoryId, summary);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
-	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
+	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, cleanSource, importance, {
 		summary_of: [...sourceWmIds],
 		...metadata,
 	});
