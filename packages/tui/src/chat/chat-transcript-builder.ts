@@ -86,6 +86,8 @@ export interface ChatTranscriptBuilderDeps {
 	linkTargets?: ReadonlyMap<string, string>;
 	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
 	tableCharts?: boolean;
+	/** Reader for the session's GitHub repo as of a message timestamp, for bare `#N` prose refs. */
+	proseGithubRepo?: (at?: number) => () => string | undefined;
 	requestRender: () => void;
 }
 
@@ -426,6 +428,8 @@ export class ChatTranscriptBuilder {
 			proseOnlyThinking,
 			this.#deps.linkTargets,
 			expandThinkingBlocks,
+			undefined,
+			this.#deps.proseGithubRepo?.(message.timestamp),
 		);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.#mountProse(assistantComponent);
@@ -461,6 +465,8 @@ export class ChatTranscriptBuilder {
 				proseOnlyThinking,
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
+				undefined,
+				this.#deps.proseGithubRepo?.(segment.timestamp),
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;
