@@ -21,12 +21,11 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { acquireFileLock } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import {
 	decideIsolationReclaim,
-	acquireSandboxLockWithNotice,
+	withSandboxLock,
 	ISOLATION_OWNER_FILE,
 	readRetainedMountBackend,
 	resolveSandboxIdentity,
@@ -246,18 +245,16 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					// lock, ask again — unless `--all` was asked for, which
 					// deletes whatever is there.
 					const sandbox = await resolveSandboxIdentity(target.path);
-					const lock = await acquireSandboxLockWithNotice(sandbox, "remove");
-					try {
-						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) {
-							results.push({ path: target.path, ok: true, skipped: true });
-							continue;
-						}
+					// Through the one entry point, so the decision and the
+					// removal share a recorded hold and anything they call
+					// detects it rather than queueing behind this command.
+					const removed = await withSandboxLock(sandbox, "remove", async () => {
+						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) return false;
 						await stopRetainedMount(sandbox);
 						await fs.rm(sandbox, { recursive: true, force: true });
-					} finally {
-						lock.release();
-					}
-					results.push({ path: target.path, ok: true });
+						return true;
+					});
+					results.push(removed ? { path: target.path, ok: true } : { path: target.path, ok: true, skipped: true });
 					continue;
 				}
 				await fs.rm(target.path, { recursive: true, force: true });

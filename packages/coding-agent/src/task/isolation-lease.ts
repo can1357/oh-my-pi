@@ -29,16 +29,14 @@
 import { type FSWatcher, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
-	acquireSandboxLockWithNotice,
 	withSandboxLock,
 	isProcessStillLive,
 	type ProcessIdentity,
 	readIsolationClaim,
 	readProcessIdentity,
 	resolveSandboxIdentity,
-	SANDBOX_LOCK_WAIT,
 	writeProcessIdentity,
 } from "./isolation-ownership";
 
@@ -245,16 +243,15 @@ export async function leaseIsolationWorkspace(
 	}
 	const sandbox = found.baseDir;
 	const leaseFile = path.join(sandbox, ISOLATION_LEASE_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	const lock = await acquireSandboxLockWithNotice(sandbox, "lease");
-	try {
+	// Through the one entry point every acquisition uses, so a caller that
+	// already holds this lock is served rather than queued behind itself.
+	await withSandboxLock(sandbox, "lease", async () => {
 		const claim = await readIsolationClaim(sandbox);
 		if (claim.kind !== "claimed") {
 			throw new Error(`Isolation workspace ${sandbox} is being torn down and cannot be leased.`);
 		}
 		await writeProcessIdentity(leaseFile, options.agentId === undefined ? {} : { agentId: options.agentId });
-	} finally {
-		lock.release();
-	}
+	});
 	let released = false;
 	return async () => {
 		if (!released) {
@@ -415,12 +412,9 @@ export function isLocalIsolationOwner(baseDir: string): boolean {
 
 /** Remove a lease under the lock. Raises when the file is still there, so the caller can retry. */
 async function dropLease(sandbox: string, leaseFile: string): Promise<void> {
-	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT);
-	try {
+	await withSandboxLock(sandbox, "drop a lease in", async () => {
 		await fs.rm(leaseFile, { force: true });
-	} finally {
-		lock.release();
-	}
+	});
 }
 
 /** Watch a sandbox's lease directory, so a lease going away is acted on at once. */
@@ -491,11 +485,12 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 	// Taking the registration is done under the sandbox lock, so a watch or a
 	// poll cannot start the teardown beside a caller that is deciding the same
 	// thing under that lock; the teardown itself takes the lock again, so it is
-	// released before running it.
-	const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
-	let pending: (() => Promise<void>) | undefined;
-	try {
-		if (workspace.pendingTeardown === undefined) return;
+	// released before running it. One entry point, so this decision and anything it calls — publication,
+	// a writer listing — share the hold instead of queueing behind it. Taking
+	// the lock raw here and re-entering through the wrapper deadlocked against
+	// this very call.
+	const pending = await withSandboxLock(baseDir, "settle", async (): Promise<(() => Promise<void>) | undefined> => {
+		if (workspace.pendingTeardown === undefined) return undefined;
 		// The owner's own session counts as much as anyone else's. Excluding it
 		// let a teardown delete the workspace its own child was still writing
 		// in; the run's result no longer depends on that exclusion, because the
@@ -507,13 +502,11 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			// references come back. A lease that is only *ours* is different —
 			// waiting for ourselves is not a reason to keep the process alive,
 			// and a retained self-lease kept a finished program from exiting.
-			// Re-read the writer records *under the sandbox lock*, which is what
-			// publication now takes: a record queued at the moment of the
-			// listing used to land just after it, and the owner exited without
-			// capturing it. Under the lock there is no "just after".
-			const writersNow = await withSandboxLock(baseDir, "check writers in", async () =>
-				readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR)),
-			);
+			// Re-read the writer records, and under this same hold: publication
+			// takes this lock, so a record queued at the moment of the listing
+			// used to land just after it and the owner exited without capturing
+			// it. Under the lock there is no "just after".
+			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
 			if (leases.allOurs && !leases.unknown && writersNow.allOurs && !writersNow.unknown) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();
@@ -521,7 +514,7 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 				workspace.poll?.ref?.();
 				workspace.watcher?.ref?.();
 			}
-			return;
+			return undefined;
 		}
 		// A writer that gave up its lease but has not finished is still a user:
 		// its record going away is the event this is waiting for just as much
@@ -540,14 +533,15 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 				workspace.poll?.ref?.();
 				workspace.watcher?.ref?.();
 			}
-			return;
+			return undefined;
 		}
-		pending = workspace.pendingTeardown;
+		const owed = workspace.pendingTeardown;
 		workspace.pendingTeardown = undefined;
 		disarmTeardownWatch(workspace);
-	} finally {
-		lock.release();
-	}
+		return owed;
+	});
+	// Outside the hold: the teardown takes this lock itself, and running it
+	// from inside would be the same self-deadlock in another place.
 	if (pending === undefined) return;
 	await pending().catch(error => {
 		logger.warn("deferred isolation teardown failed", { mergedDir, error: String(error) });

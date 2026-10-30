@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { acquireFileLock, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";

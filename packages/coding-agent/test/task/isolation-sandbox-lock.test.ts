@@ -4,9 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import {
+	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
+	ISOLATION_LEASE_DIR,
 	ISOLATION_UNFINISHED_DIR,
+	leaseIsolationWorkspace,
 	markUnfinishedWriter,
+	registerIsolationWorkspace,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	acquireSandboxLockWithNotice,
@@ -82,6 +86,33 @@ describe("the sandbox lock", () => {
 		holder.release();
 
 		expect(await late).toBeGreaterThanOrEqual(releasedAt);
+	});
+
+	it("settles a sandbox another holder is in without queueing behind its own lock", async () => {
+		// Taking the lock raw in the settle path and re-entering through the
+		// hold-aware wrapper for the writer listing made this call wait sixty
+		// seconds for a lock it was holding itself, and the owner was killed
+		// before it could capture.
+		const { baseDir, mergedDir } = await makeSandbox();
+		registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+		registered.push(mergedDir);
+		await Bun.write(path.join(baseDir, ISOLATION_LEASE_DIR, "live.json"), JSON.stringify({ pid: process.pid }));
+		const ours = await leaseIsolationWorkspace(mergedDir);
+		let torndown = 0;
+		expect(await deferTeardownWhileLeased(mergedDir, async () => void (torndown += 1), { generation: "gen-1" })).toBe(
+			true,
+		);
+
+		const outcome = await Promise.race([
+			ours().then(() => "settled" as const),
+			// Short on purpose: the point is that this call does not wait on a
+			// lock it is holding itself, and the old path waited sixty seconds.
+			scheduler.wait(3_000).then(() => "stuck" as const),
+		]);
+
+		expect(outcome).toBe("settled");
+		// Another holder is still here, so the teardown is still owed.
+		expect(torndown).toBe(0);
 	});
 
 	it("records a writer only if the claim is still there under the lock", async () => {

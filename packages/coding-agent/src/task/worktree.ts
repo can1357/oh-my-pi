@@ -7,7 +7,7 @@ import { scheduler } from "node:timers/promises";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -22,7 +22,9 @@ import {
 import {
 	clearClaimedWorkspace,
 	acquireSandboxLockWithNotice,
+	holdsSandboxLock,
 	runHoldingSandboxLock,
+	withSandboxLock,
 	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
@@ -751,84 +753,93 @@ export async function ensureIsolation(
 		// The whole attempt runs under the sandbox lock, so a teardown cannot
 		// retire the directory out from under a materialisation that has already
 		// claimed it, and two materialisations of one id cannot interleave.
-		const lock = await acquireSandboxLockWithNotice(baseDir, "materialise");
-		let claimed = false;
-		try {
-			// Taking this slot destroys what is in it, so the same question the
-			// teardown asks is asked here, under the same lock: is anybody still
-			// working in this sandbox? A live lease belongs to a session — this
-			// process's or another's — whose cwd and whose files would go with
-			// the directory, and no replacement is worth that.
-			if (await hasLiveIsolationLease(baseDir)) {
-				throw new Error(
-					`Isolation workspace ${baseDir} is still in use by a live session; refusing to materialise over it.`,
-				);
+		const outcome = await withSandboxLock(baseDir, "materialise", async (): Promise<MaterialiseOutcome> => {
+			let claimed = false;
+			try {
+				// Taking this slot destroys what is in it, so the same question the
+				// teardown asks is asked here, under the same lock: is anybody still
+				// working in this sandbox? A live lease belongs to a session — this
+				// process's or another's — whose cwd and whose files would go with
+				// the directory, and no replacement is worth that.
+				if (await hasLiveIsolationLease(baseDir)) {
+					throw new Error(
+						`Isolation workspace ${baseDir} is still in use by a live session; refusing to materialise over it.`,
+					);
+				}
+				// A writer that gave up its lease but said it might still be saving
+				// into this directory is as much a user of it as a lease holder:
+				// taking the slot erases what it is writing.
+				if (await hasUnfinishedWriter(baseDir)) {
+					throw new Error(
+						`Isolation workspace ${baseDir} still has an unfinished writer; refusing to materialise over it.`,
+					);
+				}
+				// A teardown that outran its bound left its backend stop running on
+				// this path. Materialising beside it hands the successor to that
+				// stop's removal.
+				const existingClaim = await readIsolationClaim(baseDir);
+				if (existingClaim.kind === "retiring") {
+					throw new Error(`Isolation workspace ${baseDir} is being torn down; refusing to materialise over it.`);
+				}
+				// Claim ownership before anything is destroyed or materialised. The
+				// previous contents go only once this generation's marker is on disk,
+				// so live data never sits under no marker, and the previous owner's
+				// teardown finds a generation that is not its own. Backends only
+				// create/replace `mergedDir` (and overlay upper/work), never the base
+				// dir, so the marker survives `isoStart` — and a concurrent
+				// `omp worktree clear` never sees this sandbox without a live owner,
+				// even while a large clone is still in progress.
+				await fs.mkdir(baseDir, { recursive: true });
+				const generation = await writeIsolationOwner(baseDir, id);
+				claimed = true;
+				await clearClaimedWorkspace(baseDir);
+				await natives.isoStart(candidate, repoRoot, mergedDir);
+				// Sever the isolation's git metadata from the source checkout. Copy
+				// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
+				// pointer file (or the rcopy `git worktree add` registration) leaves
+				// the isolation sharing the source's HEAD/index/ref namespace, so a
+				// task's git operations would mutate the parent checkout and stack
+				// parallel task branches. Detaching gives each isolation a private,
+				// frozen repo that still borrows the source object DB via alternates.
+				await detachSubmodules(repoRoot, mergedDir);
+				await vcs.detachGitDir(mergedDir, sourceCommonDir);
+				// Descendants that inherit this cwd without materialising anything of
+				// their own are accounted for against this sandbox from here. The
+				// owner's own child session leases it too, under this agent id, and
+				// that lease does not pin the sandbox against its own run.
+				registerIsolationWorkspace(mergedDir, { baseDir, generation, agentId: id });
+				return {
+					kind: "ready",
+					handle: {
+						mergedDir,
+						generation,
+						backend: candidate,
+						fellBack: candidate !== resolution.kind || resolution.fellBack,
+						fallbackReason,
+					},
+				};
+			} catch (err) {
+				// Only a claimed sandbox may be emptied — and only under this
+				// hold: a failure before the claim landed leaves whatever was
+				// there for its own owner.
+				if (claimed) await clearClaimedWorkspace(baseDir).catch(() => undefined);
+				const message = errorMessage(err);
+				if (!natives.isoIsUnavailableError(message)) throw err;
+				return { kind: "unavailable", message };
 			}
-			// A writer that gave up its lease but said it might still be saving
-			// into this directory is as much a user of it as a lease holder:
-			// taking the slot erases what it is writing.
-			if (await hasUnfinishedWriter(baseDir)) {
-				throw new Error(
-					`Isolation workspace ${baseDir} still has an unfinished writer; refusing to materialise over it.`,
-				);
-			}
-			// A teardown that outran its bound left its backend stop running on
-			// this path. Materialising beside it hands the successor to that
-			// stop's removal.
-			const existingClaim = await readIsolationClaim(baseDir);
-			if (existingClaim.kind === "retiring") {
-				throw new Error(`Isolation workspace ${baseDir} is being torn down; refusing to materialise over it.`);
-			}
-			// Claim ownership before anything is destroyed or materialised. The
-			// previous contents go only once this generation's marker is on disk,
-			// so live data never sits under no marker, and the previous owner's
-			// teardown finds a generation that is not its own. Backends only
-			// create/replace `mergedDir` (and overlay upper/work), never the base
-			// dir, so the marker survives `isoStart` — and a concurrent
-			// `omp worktree clear` never sees this sandbox without a live owner,
-			// even while a large clone is still in progress.
-			await fs.mkdir(baseDir, { recursive: true });
-			const generation = await writeIsolationOwner(baseDir, id);
-			claimed = true;
-			await clearClaimedWorkspace(baseDir);
-			await natives.isoStart(candidate, repoRoot, mergedDir);
-			// Sever the isolation's git metadata from the source checkout. Copy
-			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
-			// pointer file (or the rcopy `git worktree add` registration) leaves
-			// the isolation sharing the source's HEAD/index/ref namespace, so a
-			// task's git operations would mutate the parent checkout and stack
-			// parallel task branches. Detaching gives each isolation a private,
-			// frozen repo that still borrows the source object DB via alternates.
-			await detachSubmodules(repoRoot, mergedDir);
-			await vcs.detachGitDir(mergedDir, sourceCommonDir);
-			// Descendants that inherit this cwd without materialising anything of
-			// their own are accounted for against this sandbox from here. The
-			// owner's own child session leases it too, under this agent id, and
-			// that lease does not pin the sandbox against its own run.
-			registerIsolationWorkspace(mergedDir, { baseDir, generation, agentId: id });
-			return {
-				mergedDir,
-				generation,
-				backend: candidate,
-				fellBack: candidate !== resolution.kind || resolution.fellBack,
-				fallbackReason,
-			};
-		} catch (err) {
-			// Only a claimed sandbox may be emptied: a failure before the claim
-			// landed leaves whatever was there for its own owner.
-			if (claimed) await clearClaimedWorkspace(baseDir).catch(() => undefined);
-			const message = errorMessage(err);
-			if (!natives.isoIsUnavailableError(message)) {
-				throw err;
-			}
-			fallbackReason ??= message;
-		} finally {
-			lock.release();
-		}
+		});
+		if (outcome.kind === "ready") return outcome.handle;
+		fallbackReason ??= outcome.message;
 	}
 
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
+
+/** Result of one backend attempt under the materialisation hold. */
+type MaterialiseOutcome =
+	| { kind: "ready"; handle: IsolationHandle }
+	/** This backend is not available here; the loop tries the next one. */
+	| { kind: "unavailable"; message: string };
 
 /**
  * Wait for a backend stop this teardown had to leave running, then put the
@@ -901,190 +912,205 @@ export async function cleanupIsolation(
 	// baseDir is the parent of the merged directory, resolved to the directory
 	// itself: a lock on an alias of this path excludes nobody.
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
+	// This lock outlives the decision — an in-place teardown keeps it across
+	// the backend stop, and hands it to the continuation when the retiring
+	// marker cannot be written — so it is taken as a handle rather than in a
+	// `withSandboxLock` body. The hold is still *recorded* for the whole
+	// teardown, which is what lets the capture's retention, and everything
+	// else under here, detect it instead of queueing behind it.
+	//
+	// Re-entering would queue this call behind itself for the full wait, so
+	// say so immediately instead of hanging: the deferred teardown is run
+	// outside the hold that decided to run it, and nothing else may call this
+	// while holding the lock.
+	if (holdsSandboxLock(baseDir)) {
+		throw new Error(`Isolation teardown of ${baseDir} was called while its sandbox lock is already held.`);
+	}
 	// Waiting for a slow materialisation or teardown is the point of the lock,
 	// so wait generously rather than failing the run that needs the sandbox.
-	// Taken through the context-aware hold, so a capture that calls retention
-	// inside it is seen to hold this lock already instead of waiting on it.
 	const lock = await acquireSandboxLockWithNotice(baseDir, "tear down");
 	let retiredDir: string | undefined;
 	let proceed = false;
-	try {
-		if (handle.generation !== undefined) {
-			const claim = await readIsolationClaim(baseDir);
-			if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
-				logger.warn("isolation cleanup skipped: the workspace is no longer provably this run's", {
+	await runHoldingSandboxLock(baseDir, lock, async () => {
+		try {
+			if (handle.generation !== undefined) {
+				const claim = await readIsolationClaim(baseDir);
+				if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
+					logger.warn("isolation cleanup skipped: the workspace is no longer provably this run's", {
+						mergedDir: handle.mergedDir,
+						expected: handle.generation,
+						found: claim.kind === "claimed" ? claim.generation : claim.kind,
+					});
+					return;
+				}
+			}
+			// Someone is still working in here — a nested child that inherited this
+			// cwd, a session another process opened in it. Asked under the lock and
+			// after the claim check, so a lease taken while this teardown was
+			// deciding still counts. The owner keeps the teardown; the last user to
+			// leave runs it. See `isolation-lease`.
+			if (
+				await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle, options), {
+					generation: handle.generation,
+				})
+			) {
+				return;
+			}
+			// A user had to give up its lease while its own shutdown might still be
+			// writing here. Removing the directory under that write loses the work
+			// just as surely as deleting it with the lease held would have, so the
+			// workspace stays and reclamation takes it once that process is gone.
+			if (await hasUnfinishedWriter(baseDir)) {
+				logger.warn("isolation workspace kept: a user may still be writing into it", {
 					mergedDir: handle.mergedDir,
-					expected: handle.generation,
-					found: claim.kind === "claimed" ? claim.generation : claim.kind,
 				});
 				return;
 			}
-		}
-		// Someone is still working in here — a nested child that inherited this
-		// cwd, a session another process opened in it. Asked under the lock and
-		// after the claim check, so a lease taken while this teardown was
-		// deciding still counts. The owner keeps the teardown; the last user to
-		// leave runs it. See `isolation-lease`.
-		if (
-			await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle, options), {
-				generation: handle.generation,
-			})
-		) {
-			return;
-		}
-		// A user had to give up its lease while its own shutdown might still be
-		// writing here. Removing the directory under that write loses the work
-		// just as surely as deleting it with the lease held would have, so the
-		// workspace stays and reclamation takes it once that process is gone.
-		if (await hasUnfinishedWriter(baseDir)) {
-			logger.warn("isolation workspace kept: a user may still be writing into it", {
-				mergedDir: handle.mergedDir,
-			});
-			return;
-		}
-		// The last thing before the directory goes, and still under the lock
-		// that authorises its going.
-		//
-		// The deadline decides the *outcome*, never the holding. A capture
-		// cannot be cancelled once a patch write or a branch commit is under
-		// way, so releasing the lock at a deadline while that work continues
-		// hands the pathname to the next materialisation and lets the capture
-		// land in — or move — a successor's workspace. The lock is held until
-		// the capture really stops; past the deadline the only thing that
-		// changes is that this teardown no longer deletes.
-		if (options.capture) {
-			// The capture runs inside this teardown's hold: retention it calls
-			// detects that rather than waiting sixty seconds on a lock this
-			// very call owns.
-			const capturing = runHoldingSandboxLock(baseDir, lock, options.capture)
-				.then(() => true)
-				.catch(error => {
-					logger.warn("isolation capture failed; keeping the workspace", {
-						mergedDir: handle.mergedDir,
-						error: error instanceof Error ? error.message : String(error),
+			// The last thing before the directory goes, and still under the lock
+			// that authorises its going.
+			//
+			// The deadline decides the *outcome*, never the holding. A capture
+			// cannot be cancelled once a patch write or a branch commit is under
+			// way, so releasing the lock at a deadline while that work continues
+			// hands the pathname to the next materialisation and lets the capture
+			// land in — or move — a successor's workspace. The lock is held until
+			// the capture really stops; past the deadline the only thing that
+			// changes is that this teardown no longer deletes.
+			if (options.capture) {
+				// The capture runs inside this teardown's hold: retention it calls
+				// detects that rather than waiting sixty seconds on a lock this
+				// very call owns.
+				const capturing = options
+					.capture()
+					.then(() => true)
+					.catch(error => {
+						logger.warn("isolation capture failed; keeping the workspace", {
+							mergedDir: handle.mergedDir,
+							error: error instanceof Error ? error.message : String(error),
+						});
+						return false;
 					});
-					return false;
-				});
-			const deadline = new AbortController();
-			const overran = await Promise.race([
-				capturing.then(() => false),
-				// Aborted the moment the capture settles, so the loser cannot
-				// keep this process alive after the work is done.
-				scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS, { signal: deadline.signal }).then(
-					() => true,
-					() => false,
-				),
-			]);
-			deadline.abort();
-			if (overran) {
-				logger.warn(
-					"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",
-					{
-						mergedDir: handle.mergedDir,
-						waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
-					},
-				);
-				await capturing;
-				return;
-			}
-			if (!(await capturing)) return;
-		}
-		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
-		try {
-			await fs.rename(baseDir, candidate);
-			retiredDir = candidate;
-			// The copy left behind is nobody's sandbox now. Saying so keeps a
-			// failed removal below from looking like a live owner's workspace to
-			// `omp worktree clear`, which would then never reclaim it while this
-			// process lives.
-			await markIsolationRetired(candidate).catch(() => undefined);
-		} catch {
-			// A live mount pins the directory in place; hold the lock across the
-			// teardown instead, so no materialisation can start beside it.
-			retiredDir = undefined;
-		}
-		proceed = true;
-	} finally {
-		// Held past here only when the directory could not be retired.
-		if (!proceed || retiredDir !== undefined) lock.release();
-	}
-	const teardownBase = retiredDir ?? baseDir;
-	const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
-	// An in-place teardown holds the lock, so a backend stop that never settles
-	// would deny every later materialisation of this id. Bounded: past the
-	// bound the stop is left running, the lock goes back, and the directory is
-	// left to `omp worktree clear`, which can tell a retired sandbox from a
-	// live one.
-	let abandoned = false;
-	let lockHandedOver = false;
-	try {
-		try {
-			const stop = natives.isoStop(handle.backend, teardownMerged);
-			if (retiredDir === undefined) {
-				abandoned = !(await Promise.race([
-					stop.then(() => true),
-					scheduler.wait(SANDBOX_STOP_MAX_WAIT_MS).then(() => false),
-				]));
-				if (abandoned) {
-					logger.warn("isolation backend stop outran its teardown bound", {
-						backend: handle.backend,
-						mergedDir: teardownMerged,
-					});
-					// The stop is still running on this exact path and can still
-					// delete it, so nothing may take the slot until it settles.
-					// The marker is what says so; when it cannot be written the
-					// lock stays held instead — a slot nobody can take is the
-					// same answer, and releasing it on a failed write is how a
-					// successor's data ends up deleted by that stop.
-					const marked = await markIsolationRetiring(teardownBase).then(
+				const deadline = new AbortController();
+				const overran = await Promise.race([
+					capturing.then(() => false),
+					// Aborted the moment the capture settles, so the loser cannot
+					// keep this process alive after the work is done.
+					scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS, { signal: deadline.signal }).then(
 						() => true,
-						(error: unknown) => {
-							logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
-								mergedDir: teardownMerged,
-								error: error instanceof Error ? error.message : String(error),
-							});
-							return false;
+						() => false,
+					),
+				]);
+				deadline.abort();
+				if (overran) {
+					logger.warn(
+						"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",
+						{
+							mergedDir: handle.mergedDir,
+							waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
 						},
 					);
-					// The stop is still this teardown's: when it ends, the slot
-					// goes back into service rather than staying refused for the
-					// life of the owner.
-					// Handed to the continuation when the marker could not be
-					// written: it, and not the `finally` below, gives the lock
-					// back once the stop settles.
-					lockHandedOver = !marked;
-					trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
-						id: path.basename(teardownBase),
-						resource: "isolation",
-					});
+					await capturing;
+					return;
 				}
-			} else {
-				await stop;
+				if (!(await capturing)) return;
 			}
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: teardownMerged,
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
-	} finally {
-		try {
-			if (!abandoned) await fs.rm(teardownBase, { recursive: true, force: true });
-		} catch (err) {
-			logger.warn("isolation workspace removal failed; leaving it for reclamation", {
-				mergedDir: teardownMerged,
-				error: err instanceof Error ? err.message : String(err),
-			});
+			const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
+			try {
+				await fs.rename(baseDir, candidate);
+				retiredDir = candidate;
+				// The copy left behind is nobody's sandbox now. Saying so keeps a
+				// failed removal below from looking like a live owner's workspace to
+				// `omp worktree clear`, which would then never reclaim it while this
+				// process lives.
+				await markIsolationRetired(candidate).catch(() => undefined);
+			} catch {
+				// A live mount pins the directory in place; hold the lock across the
+				// teardown instead, so no materialisation can start beside it.
+				retiredDir = undefined;
+			}
+			proceed = true;
 		} finally {
-			// Always: a removal that threw must not keep the sandbox locked for
-			// the life of this process. Keyed by generation, so an older
-			// teardown finishing cannot drop the record — and the pending
-			// teardown — of the materialisation that replaced it.
-			forgetIsolationWorkspace(handle.mergedDir, handle.generation);
-			if (retiredDir === undefined && !lockHandedOver) lock.release();
+			// Held past here only when the directory could not be retired.
+			if (!proceed || retiredDir !== undefined) lock.release();
 		}
-	}
+		const teardownBase = retiredDir ?? baseDir;
+		const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
+		// An in-place teardown holds the lock, so a backend stop that never settles
+		// would deny every later materialisation of this id. Bounded: past the
+		// bound the stop is left running, the lock goes back, and the directory is
+		// left to `omp worktree clear`, which can tell a retired sandbox from a
+		// live one.
+		let abandoned = false;
+		let lockHandedOver = false;
+		try {
+			try {
+				const stop = natives.isoStop(handle.backend, teardownMerged);
+				if (retiredDir === undefined) {
+					abandoned = !(await Promise.race([
+						stop.then(() => true),
+						scheduler.wait(SANDBOX_STOP_MAX_WAIT_MS).then(() => false),
+					]));
+					if (abandoned) {
+						logger.warn("isolation backend stop outran its teardown bound", {
+							backend: handle.backend,
+							mergedDir: teardownMerged,
+						});
+						// The stop is still running on this exact path and can still
+						// delete it, so nothing may take the slot until it settles.
+						// The marker is what says so; when it cannot be written the
+						// lock stays held instead — a slot nobody can take is the
+						// same answer, and releasing it on a failed write is how a
+						// successor's data ends up deleted by that stop.
+						const marked = await markIsolationRetiring(teardownBase).then(
+							() => true,
+							(error: unknown) => {
+								logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
+									mergedDir: teardownMerged,
+									error: error instanceof Error ? error.message : String(error),
+								});
+								return false;
+							},
+						);
+						// The stop is still this teardown's: when it ends, the slot
+						// goes back into service rather than staying refused for the
+						// life of the owner.
+						// Handed to the continuation when the marker could not be
+						// written: it, and not the `finally` below, gives the lock
+						// back once the stop settles.
+						lockHandedOver = !marked;
+						trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
+							id: path.basename(teardownBase),
+							resource: "isolation",
+						});
+					}
+				} else {
+					await stop;
+				}
+			} catch (err) {
+				logger.warn("isolation backend stop failed during cleanup", {
+					backend: handle.backend,
+					mergedDir: teardownMerged,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		} finally {
+			try {
+				if (!abandoned) await fs.rm(teardownBase, { recursive: true, force: true });
+			} catch (err) {
+				logger.warn("isolation workspace removal failed; leaving it for reclamation", {
+					mergedDir: teardownMerged,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			} finally {
+				// Always: a removal that threw must not keep the sandbox locked for
+				// the life of this process. Keyed by generation, so an older
+				// teardown finishing cannot drop the record — and the pending
+				// teardown — of the materialisation that replaced it.
+				forgetIsolationWorkspace(handle.mergedDir, handle.generation);
+				if (retiredDir === undefined && !lockHandedOver) lock.release();
+			}
+		}
+	});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

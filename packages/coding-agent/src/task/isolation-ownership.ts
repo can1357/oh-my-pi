@@ -627,6 +627,9 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 		let released = false;
 		return {
 			release: () => {
+				// Idempotent: a caller that hands this handle to a continuation
+				// and a `finally` that also releases must not unlock twice.
+				if (released) return;
 				released = true;
 				lock.release();
 			},
