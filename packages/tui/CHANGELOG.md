@@ -5,6 +5,7 @@
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+- Added `Ctrl+D` in the model hub to remove a recently used model from its recent section, with a footer hint shown only on rows it can remove ([#15461](https://github.com/can1357/oh-my-pi/pull/15461) by [@TheDiscoScript](https://github.com/TheDiscoScript))
 
 ## [18.14.0] - 2026-10-29
 

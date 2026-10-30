@@ -1218,6 +1218,16 @@ export class ModelBrowser implements Component {
 		return true;
 	}
 
+	/** Selector of the nearest selectable row `direction` steps from the selection; undefined past the edge. */
+	adjacentSelector(direction: 1 | -1): string | undefined {
+		const items = this.#menu.visibleItems;
+		for (let i = this.#menu.selectedIndex + direction; i >= 0 && i < items.length; i += direction) {
+			const item = items[i];
+			if (item && !this.#isDisabled(item)) return item.selector;
+		}
+		return undefined;
+	}
+
 	#isDisabled(item: ModelBrowserItem): boolean {
 		return item.id === "separator";
 	}

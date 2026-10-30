@@ -22,7 +22,9 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 import { cfgCycleOrder, cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
@@ -151,6 +153,7 @@ function createHub(options: {
 			onSwitchPreset: options.callbacks?.onSwitchPreset,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
+			onForgetRecent: options.callbacks?.onForgetRecent,
 		},
 		options.hub,
 	);
@@ -167,6 +170,8 @@ const OPTION_RIGHT_MAC = "\x1bf";
 const CTRL_LEFT = "\x1b[1;5D";
 const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
+const RIGHT = "\x1b[C";
+const CTRL_D = "\x04";
 
 describe("ModelHub", () => {
 	beforeAll(async () => {
@@ -1858,6 +1863,109 @@ describe("ModelHub", () => {
 
 			hub.handleInput("\n");
 			expect(onLoginRequest).toHaveBeenCalledWith("anthropic");
+		});
+	});
+
+	describe("forgetting recent models", () => {
+		let tempDir: TempDir | undefined;
+
+		afterEach(async () => {
+			AgentStorage.close();
+			try {
+				await tempDir?.remove();
+			} catch {}
+			tempDir = undefined;
+		});
+
+		/** Hub over real storage where `test/recent` is the only recently used model, list focused on it. */
+		async function recentHub(
+			options: {
+				hub?: ModelHubOptions;
+				modelRoles?: Record<string, string>;
+				onForgetRecent?: ModelHubCallbacks["onForgetRecent"];
+			} = {},
+		): Promise<{ hub: ModelHubComponent; storage: AgentStorage }> {
+			tempDir = TempDir.createSync("@omp-model-hub-recent-");
+			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
+			storage.recordModelUsage("test/recent");
+			const { hub } = createHub({
+				models: [makeModel("test", "alpha"), makeModel("test", "recent"), makeModel("test", "zulu")],
+				settings: Settings.isolated(options.modelRoles ? { modelRoles: options.modelRoles } : {}, { storage }),
+				callbacks: {
+					// Mirror the controller: forgetting deletes the stored usage row.
+					onForgetRecent:
+						options.onForgetRecent ??
+						(selector => {
+							storage.forgetModelUsage(selector);
+							return true;
+						}),
+				},
+				hub: options.hub,
+			});
+			hub.handleInput(RIGHT); // Sidebar → model list, on the recent row.
+			return { hub, storage };
+		}
+
+		test("ctrl+d drops the selected recent model and keeps the cursor on the next row", async () => {
+			const { hub, storage } = await recentHub();
+			expect(footerLine(hub.render(220))).toContain("remove from recent");
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual([]);
+			expect(footerLine(hub.render(220))).not.toContain("remove from recent");
+			hub.handleInput("\n");
+			expect(footerLine(hub.render(220))).toContain("fallbacks:alpha");
+		});
+
+		test("ctrl+d leaves models that were never used alone", async () => {
+			const { hub, storage } = await recentHub();
+			hub.handleInput(DOWN);
+			expect(footerLine(hub.render(220))).not.toContain("remove from recent");
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual(["test/recent"]);
+		});
+
+		test("ctrl+d keeps the session's current model", async () => {
+			const { hub, storage } = await recentHub({ hub: { currentSelector: "test/recent" } });
+			expect(footerLine(hub.render(220))).not.toContain("remove from recent");
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual(["test/recent"]);
+		});
+
+		test("ctrl+d follows the session after an in-hub switch away from the current model", async () => {
+			const { hub, storage } = await recentHub({ hub: { currentSelector: "test/recent" } });
+			hub.setCurrentSelector("test/alpha"); // what the controller does after an assignment switches models
+			hub.refreshAfterExternalMutation();
+			expect(footerLine(hub.render(220))).toContain("remove from recent");
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual([]);
+		});
+
+		test("a failed removal keeps the model offered and the cursor on it", async () => {
+			const { hub, storage } = await recentHub({ onForgetRecent: () => false });
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual(["test/recent"]);
+			expect(footerLine(hub.render(220))).toContain("remove from recent");
+			hub.handleInput("\n");
+			expect(footerLine(hub.render(220))).toContain("fallbacks:recent");
+		});
+
+		test("ctrl+d keeps a recent model that holds a role", async () => {
+			const { hub, storage } = await recentHub({ modelRoles: { smol: "test/recent" } });
+			expect(footerLine(hub.render(220))).not.toContain("remove from recent");
+
+			hub.handleInput(CTRL_D);
+
+			expect(storage.getModelUsageOrder()).toEqual(["test/recent"]);
 		});
 	});
 });
