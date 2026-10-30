@@ -77,6 +77,12 @@ provider "muse-code" {
 	// built-in tools declared.
 	tool-name-prefix "_"
 	on-api "openai-responses" {
+		// api.meta.ai answers 400 "name must be at most 64 characters" for a longer
+		// tool name (#9130); omp caps MCP names at exactly 64 for it. Scoped by
+		// provider and API so it outranks the 128 Responses default in
+		// tool-call-names.kdl. A name the `_` prefix would push past it goes out
+		// unprefixed.
+		tool-call-name-max-length 64
 		// Spark 1.3 Contributor warmed siblings hit 10/10 vs 0/10 with per-child keys (2026-10-12).
 		// Meta documents shared-prefix prompt_cache_key routing; keep the opt-in on these exact Muse Code IDs.
 		models "muse-spark-1.3" "muse-spark-1.3-contributor" "muse-wonder-1.0" "muse-wonder-1.0-contributor" "muse-wonder-full-1.0" "muse-wonder-full-1.0-contributor" {

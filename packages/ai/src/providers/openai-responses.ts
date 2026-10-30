@@ -1,3 +1,4 @@
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	$flag,
@@ -115,6 +116,8 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
+	type ResponsesToolNaming,
+	responsesToolNamesByWire,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -991,6 +994,8 @@ const streamOpenAIResponsesOnce = (
 				}
 				return openaiStream;
 			};
+			// Built before the request opens so a wire-name collision fails the turn unsent.
+			const toolNamesByWire = responsesToolNamesByWire(context.tools, responsesToolNaming(model));
 			let openaiStream = await openResponsesStreamWithFallbacks();
 			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 			stream.push({ type: "start", partial: output });
@@ -1045,7 +1050,7 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: options?.serviceTier,
-						toolNamePrefix: model.compat.toolNamePrefix,
+						toolNamesByWire,
 					});
 
 					const localAbortReason = abortTracker.getLocalAbortReason();
@@ -1164,7 +1169,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: options?.serviceTier,
-										toolNamePrefix: model.compat.toolNamePrefix,
+										toolNamesByWire,
 									},
 								);
 								const resumedLocalAbort = abortTracker.getLocalAbortReason();
@@ -1570,6 +1575,7 @@ export function buildParams(
 	// retain required text/placeholder replay, including DeepSeek's #10690 fallback.
 	const canReconstructReasoningReplay =
 		!policy.reasoning.filterReasoningHistory || policy.reasoning.allowsSyntheticReasoningContentForToolCalls;
+	const toolNaming = responsesToolNaming(model);
 	const messages = buildResponsesInput({
 		model,
 		context,
@@ -1589,7 +1595,7 @@ export function buildParams(
 			policy.reasoning.requiresReasoningContentForToolCalls &&
 			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
-		toolNamePrefix: model.compat.toolNamePrefix,
+		toolNaming,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1681,7 +1687,7 @@ export function buildParams(
 					: context.tools.filter(
 							t =>
 								emittedNames.has(t.customWireName ?? t.name) ||
-								emittedNames.has(encodeResponsesToolName(t.name, model.compat.toolNamePrefix)) ||
+								emittedNames.has(encodeResponsesToolName(t.name, toolNaming)) ||
 								(t.native?.type === "computer" && emittedComputer),
 						);
 			const mappedToolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
@@ -1690,7 +1696,7 @@ export function buildParams(
 				typeof mappedToolChoice === "object" && mappedToolChoice.type === "function"
 					? {
 							...mappedToolChoice,
-							name: encodeResponsesToolName(mappedToolChoice.name, model.compat.toolNamePrefix),
+							name: encodeResponsesToolName(mappedToolChoice.name, toolNaming),
 						}
 					: mappedToolChoice;
 			if (toolChoice !== undefined && params.tools.length > 0) {
@@ -1852,6 +1858,19 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	return customTool ? { type: "custom", name: customTool.customWireName ?? customTool.name } : mapped;
 }
 
+/**
+ * Tool-name rule for the model's host (`compat.toolNamePrefix` and the catalog
+ * name-length limit), or undefined when the host takes names unchanged.
+ */
+function responsesToolNaming(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+): ResponsesToolNaming | undefined {
+	const prefix = model.compat.toolNamePrefix;
+	if (!prefix) return undefined;
+	const maxLength = resolveCatalogPolicy(model).toolCallNameMaxLength;
+	return { prefix, maxLength: typeof maxLength === "number" ? maxLength : undefined };
+}
+
 /** @internal Exported for tests. */
 export function convertTools(
 	tools: Tool[],
@@ -1864,6 +1883,7 @@ export function convertTools(
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
+	const toolNaming = responsesToolNaming(model);
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
@@ -1914,7 +1934,7 @@ export function convertTools(
 		}
 		out.push({
 			type: "function",
-			name: encodeResponsesToolName(tool.name, model.compat.toolNamePrefix),
+			name: encodeResponsesToolName(tool.name, toolNaming),
 			description: tool.description || "",
 			parameters,
 			// `strict: false` and an omitted `strict` are NOT equivalent for every

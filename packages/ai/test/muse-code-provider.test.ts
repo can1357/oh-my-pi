@@ -6,7 +6,7 @@ import {
 	mapOpenAIResponsesToolChoiceForTools,
 	streamOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { decodeResponsesToolName, encodeResponsesToolName } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { responsesToolNamesByWire } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { AssistantMessage, Context, FetchImpl, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -121,9 +121,14 @@ describe("Muse Code provider", () => {
 		// 2026-10-31: a subscription key answers 403 `client_attestation_denied`
 		// when the declared tools include `bash`, `web_search` and other reserved
 		// exact names; the same tools prefixed with `_` are accepted.
+		// api.meta.ai also rejects tool names over 64 characters (#9130), and omp
+		// caps MCP names at exactly 64, so such a name must go out unprefixed.
+		const mcpName = "mcp__long_server_name_tool_name_tool_name_tool_name_too_139vuzq6";
+		expect(mcpName).toHaveLength(64);
 		const tools: Tool[] = [
 			{ name: "bash", description: "Run a command.", parameters: type({ command: "string" }) },
 			{ name: "web_search", description: "Search the web.", parameters: type({ query: "string" }) },
+			{ name: mcpName, description: "An MCP tool.", parameters: type({ query: "string" }) },
 		];
 		const runTurn = async (provider: "muse-code" | "meta") => {
 			const model = buildModel(seedModels<"openai-responses">(provider).find(spec => spec.id === "muse-spark-1.3")!);
@@ -152,18 +157,23 @@ describe("Muse Code provider", () => {
 					{ role: "user", content: "search for omp", timestamp: 4 },
 				],
 			};
-			const wireName = provider === "muse-code" ? "_web_search" : "web_search";
-			const call = { type: "function_call", id: "fc_1", call_id: "call_1", name: wireName, arguments: "" };
+			const searchName = provider === "muse-code" ? "_web_search" : "web_search";
+			const calls = [
+				{ type: "function_call", id: "fc_1", call_id: "call_1", name: searchName, arguments: "" },
+				{ type: "function_call", id: "fc_2", call_id: "call_2", name: mcpName, arguments: "" },
+			];
 			let body: { tools: Array<{ name: string }>; input: Array<{ type?: string; name?: string }> } | undefined;
 			const fetch: FetchImpl = async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return sseResponse([
-					{ type: "response.output_item.added", output_index: 0, item: call },
-					{
-						type: "response.output_item.done",
-						output_index: 0,
-						item: { ...call, arguments: '{"query":"omp"}', status: "completed" },
-					},
+					...calls.flatMap((call, outputIndex) => [
+						{ type: "response.output_item.added", output_index: outputIndex, item: call },
+						{
+							type: "response.output_item.done",
+							output_index: outputIndex,
+							item: { ...call, arguments: '{"query":"omp"}', status: "completed" },
+						},
+					]),
 					{ type: "response.completed", response: { id: "resp_1", status: "completed" } },
 				]);
 			};
@@ -172,23 +182,32 @@ describe("Muse Code provider", () => {
 		};
 
 		const muse = await runTurn("muse-code");
-		expect(muse.body.tools.map(tool => tool.name)).toEqual(["_bash", "_web_search"]);
+		expect(muse.body.tools.map(tool => tool.name)).toEqual(["_bash", "_web_search", mcpName]);
 		expect(muse.body.input.filter(item => item.type === "function_call").map(item => item.name)).toEqual(["_bash"]);
 		expect(muse.result.content).toEqual([
 			expect.objectContaining({ type: "toolCall", name: "web_search", arguments: { query: "omp" } }),
+			expect.objectContaining({ type: "toolCall", name: mcpName, arguments: { query: "omp" } }),
 		]);
 
 		// Direct Meta API keys are not attested and keep the plain names.
 		const meta = await runTurn("meta");
-		expect(meta.body.tools.map(tool => tool.name)).toEqual(["bash", "web_search"]);
+		expect(meta.body.tools.map(tool => tool.name)).toEqual(["bash", "web_search", mcpName]);
 		expect(meta.body.input.filter(item => item.type === "function_call").map(item => item.name)).toEqual(["bash"]);
-		expect(meta.result.content).toEqual([expect.objectContaining({ type: "toolCall", name: "web_search" })]);
+		expect(meta.result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "web_search" }),
+			expect.objectContaining({ type: "toolCall", name: mcpName }),
+		]);
 	});
 
-	test("tool-name prefix round-trips names that already start with it", () => {
-		expect(encodeResponsesToolName("_private", "_")).toBe("__private");
-		expect(decodeResponsesToolName("__private", "_")).toBe("_private");
-		// A call the model returns without the prefix still reaches its tool.
-		expect(decodeResponsesToolName("bash", "_")).toBe("bash");
+	test("maps wire names back to tools, and rejects two tools that would share a wire name", () => {
+		const tool = (name: string): Tool => ({ name, description: "", parameters: type({}) });
+		// A name that already starts with the prefix gets a second one and comes back intact.
+		expect(responsesToolNamesByWire([tool("_private")], { prefix: "_", maxLength: 64 })?.get("__private")).toBe(
+			"_private",
+		);
+		// `_abc` is too long to prefix under a 4-character limit, and `abc` prefixes to `_abc`.
+		expect(() => responsesToolNamesByWire([tool("_abc"), tool("abc")], { prefix: "_", maxLength: 4 })).toThrow(
+			'Tools "_abc" and "abc" would both be sent as "_abc"',
+		);
 	});
 });
