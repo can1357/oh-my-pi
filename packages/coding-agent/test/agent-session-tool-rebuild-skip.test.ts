@@ -181,7 +181,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: { getApiKey: async () => "test-key" } as never,
+			modelRegistry: {
+				getApiKey: async () => "test-key",
+				fitContextWindow: (model: Model) => model,
+			} as never,
 			toolRegistry,
 			createVibeTools: options.createVibeTools,
 			builtInToolNames: options.xdev && !options.lazyWrite ? ["read", "write"] : ["read"],
@@ -668,7 +671,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			toolRegistry,
 			setActiveToolNames: names => {
 				activeToolNames.clear();

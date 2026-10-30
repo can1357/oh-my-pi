@@ -41,7 +41,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		responses: Array<() => MockResponse | Promise<MockResponse>>,
 		textOnly = false,
 		options: {
-			modelRegistry?: Pick<ModelRegistry, "getApiKey">;
+			modelRegistry?: Pick<ModelRegistry, "getApiKey" | "fitContextWindow">;
 			clientBridge?: unknown;
 			extensionRunner?: unknown;
 		} = {},
@@ -466,6 +466,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		// setup and then fails it — the exact window a steer can arrive in
 		// (#promptInFlightCount > 0 with no agent loop owning it yet).
 		const modelRegistry = {
+			fitContextWindow: (model: Model) => model,
 			getApiKey: async () => {
 				apiKeyCalls++;
 				if (apiKeyCalls === 1) return "test-key";
@@ -520,6 +521,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		const apiKeyGate = Promise.withResolvers<void>();
 		const secondKeyRequested = Promise.withResolvers<void>();
 		const modelRegistry = {
+			fitContextWindow: (model: Model) => model,
 			getApiKey: async () => {
 				apiKeyCalls++;
 				if (apiKeyCalls === 1) return "test-key";

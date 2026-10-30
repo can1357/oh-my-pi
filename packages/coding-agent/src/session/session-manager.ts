@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { ContextWindowPolicy } from "../config/model-registry";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { ArtifactManager } from "./artifacts";
@@ -3667,6 +3668,7 @@ export class SessionManager {
 		readSummarize?: boolean;
 		advisor?: string;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+		contextWindowPolicy?: ContextWindowPolicy;
 		isolated?: boolean;
 		workPoolYieldItems?: WorkPoolYieldItem[];
 	}): string {
@@ -4708,6 +4710,7 @@ export interface PersistedSessionInit {
 	readSummarize?: boolean;
 	advisor?: string;
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	contextWindowPolicy?: ContextWindowPolicy;
 	isolated?: boolean;
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
@@ -4737,6 +4740,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			advisor: entry.advisor,
 			isolated: entry.isolated,
 			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
+			...(entry.contextWindowPolicy !== undefined ? { contextWindowPolicy: entry.contextWindowPolicy } : undefined),
 			...(entry.workPoolYieldItems !== undefined ? { workPoolYieldItems: entry.workPoolYieldItems } : undefined),
 		};
 	}

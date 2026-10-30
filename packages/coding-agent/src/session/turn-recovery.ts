@@ -261,6 +261,7 @@ export interface TurnRecoveryHost {
 	modelRegistry: ModelRegistry;
 	configWarnings: string[];
 	model(): Model | undefined;
+	fitModelForSession(model: Model): Model;
 	/**
 	 * Whether the live context fits `model`'s usable window. `excludedMessage`
 	 * identifies a failed assistant turn that will be removed before retrying, so
@@ -2031,15 +2032,17 @@ export class TurnRecovery {
 		}
 		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
 
-		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
+		let fallback: { role: string; selector: RetryFallbackSelector; model: Model; apiKey: string } | undefined;
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const chainKeys = this.retryFallbackChainKeys(currentSelector, currentModel);
 		for (const role of chainKeys) {
 			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
-				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				const catalogModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
+				if (!catalogModel) continue;
+				const candidateModel = this.#host.fitModelForSession(catalogModel);
+				if (!this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
 				// A usage fallback must also fit: skip a candidate whose window cannot
 				// hold the live context so we never switch onto an oversized request
@@ -2085,7 +2088,7 @@ export class TurnRecovery {
 				}
 				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 				if (!apiKey) continue;
-				fallback = { role, selector: candidate, apiKey };
+				fallback = { role, selector: candidate, model: candidateModel, apiKey };
 				break;
 			}
 			if (fallback) break;
@@ -2125,6 +2128,7 @@ export class TurnRecovery {
 		return this.applyRetryFallbackCandidate(fallback.role, fallback.selector, currentSelector, {
 			pinFallback: true,
 			apiKey: fallback.apiKey,
+			model: fallback.model,
 			signal,
 			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
 		});
@@ -2172,12 +2176,23 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+			/** Session-fitted candidate already checked against the retry budget. */
+			model?: Model;
+		},
 	): Promise<boolean> {
-		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+		let candidate = options?.model;
 		if (!candidate) {
-			throw new Error(`Retry fallback model not found: ${selector.raw}`);
+			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+			const catalogModel = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+			if (!catalogModel) {
+				throw new Error(`Retry fallback model not found: ${selector.raw}`);
+			}
+			candidate = this.#host.fitModelForSession(catalogModel);
 		}
 		const apiKey =
 			options?.apiKey ??
@@ -2305,8 +2320,9 @@ export class TurnRecovery {
 				// has already been refused on, and the budget no longer stops it.
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
-				if (!candidate) continue;
+				const catalogModel = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+				if (!catalogModel) continue;
+				const candidate = this.#host.fitModelForSession(catalogModel);
 				// A candidate that would leave the request exactly as it is — same
 				// routed model, same effective thinking level — is not a switch, and
 				// must never be applied: `findRetryFallbackCandidates` excludes the
@@ -2390,6 +2406,8 @@ export class TurnRecovery {
 				const previousTools = [...this.#host.agent.state.tools];
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
+					model: candidate,
+					apiKey,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
@@ -2507,8 +2525,9 @@ export class TurnRecovery {
 	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
-		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
-		if (!baseModel) return false;
+		const catalogModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
+		if (!catalogModel) return false;
+		const baseModel = this.#host.fitModelForSession(catalogModel);
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
@@ -2567,9 +2586,10 @@ export class TurnRecovery {
 			this.#host.modelRegistry,
 			this.#host.settings,
 		);
-		const primaryModel =
+		const catalogModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
-		if (!primaryModel) return false;
+		if (!catalogModel) return false;
+		const primaryModel = this.#host.fitModelForSession(catalogModel);
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 

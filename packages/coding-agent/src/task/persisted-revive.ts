@@ -164,6 +164,8 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
 				);
 			}
+			// Do not apply today's worker preference to a session without a recorded policy.
+			const contextWindowPolicy = init.contextWindowPolicy ?? "inherit";
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 			// advisor-role model, anything else = the pattern stamped onto this
 			// session's `modelRoles.advisor`. Spawn persists it already expanded
@@ -172,6 +174,10 @@ export function createPersistedSubagentReviverFactory(
 			// in files written before that. Absent = unadvised (the
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
+				// Only structured spawns captured a descendant preference; legacy/direct callers keep it live.
+				...(init.contextWindowPolicy !== undefined
+					? { "task.standardContextOnly": contextWindowPolicy === "standard-only" }
+					: undefined),
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 				...(init.advisor
 					? {
@@ -241,6 +247,7 @@ export function createPersistedSubagentReviverFactory(
 					// frames ride the same bus the RPC/collab surfaces subscribed to.
 					subagentEventBus: ctx.subagentEventBus,
 					modelRegistry: ctx.modelRegistry,
+					contextWindowPolicy,
 					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 					modelPatternAuthFallback: restoredSeance ? undefined : init.resolvedModel,
 					settings: subagentSettings,

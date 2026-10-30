@@ -413,6 +413,7 @@ export interface SessionMaintenanceHost {
 	/** Live `providers.openaiWebsockets` hint for provider calls. */
 	preferWebsockets(): boolean | undefined;
 	model(): Model | undefined;
+	fitModelForSession(model: Model): Model;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
@@ -3261,7 +3262,7 @@ export class SessionMaintenance {
 			cfgContextPromotionEnabled.get(this.#host.settings)
 		) {
 			const foundModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
-			const failedModel = foundModel && this.#host.modelRegistry.fitContextWindow(foundModel, this.#host.settings);
+			const failedModel = foundModel && this.#host.fitModelForSession(foundModel);
 			const failedWindow = failedModel?.contextWindow ?? 0;
 			const promotionTarget = failedModel
 				? resolveContextPromotionConfiguredTarget(failedModel, this.#host.modelRegistry.getAvailable())
@@ -3586,13 +3587,14 @@ export class SessionMaintenance {
 		currentModel: Model,
 		contextWindow: number,
 		signal?: AbortSignal,
+		fitModel: (model: Model) => Model = this.#host.fitModelForSession,
 	): Promise<Model | undefined> {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
 		const configured = resolveContextPromotionConfiguredTarget(currentModel, availableModels);
 		// Judge the window this session would actually run the target with.
-		const candidate = configured && this.#host.modelRegistry.fitContextWindow(configured, this.#host.settings);
+		const candidate = configured && fitModel(configured);
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
@@ -3609,12 +3611,12 @@ export class SessionMaintenance {
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
+		fitModel: (model: Model) => Model = this.#host.fitModelForSession,
 	): Model[] {
 		// Shared catalog rows carry the registry's extended-window opt-ins; judge
 		// and compact with the window this session's settings select.
-		const registry = this.#host.modelRegistry;
-		const settings = this.#host.settings;
-		availableModels = availableModels.map(model => registry.fitContextWindow(model, settings));
+		if (preferredModel) preferredModel = fitModel(preferredModel);
+		availableModels = availableModels.map(fitModel);
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
 
@@ -4321,6 +4323,7 @@ export class SessionMaintenance {
 	 * prior behavior).
 	 */
 	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
+		model = this.#host.fitModelForSession(model);
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
 		const messages = this.#host.messages();

@@ -187,6 +187,10 @@ Definitions with `protocolDefault: ["rpc", "acp"]` make RPC/ACP hosts start from
 
 Subagents receive `parent.overlay(overrides)`: reads fall through to the parent live, while the overrides and any later writes stay in the child and are never persisted.
 
+Context policy is a spawn-time exception to that live inheritance. `task.standardContextOnly` (default `false`) selects `standard-only` for new task/eval/workpool workers, including isolated workers and seance consultations; otherwise they use `inherit`. The resolved `contextWindowPolicy` is fixed on the worker session, inherited by descendants, and retained across warm follow-ups and cold revival. Later root setting changes affect future root spawns, not existing worker trees with a recorded policy. Legacy worker state without this field defaults to `inherit` for that session; without a recorded spawn preference, new workers it spawns use the current root setting. A `standard-only` policy takes precedence over `extendedContext` and model-threshold opt-ins without changing the other compaction settings. See [Standard context for subagents](settings.md#standard-context-for-subagents).
+
+`AgentSession` applies its context policy to the initial model and every later model adoption, including direct construction outside `createAgentSession`. The main session's policy does not constrain an independent advisor's model.
+
 Generic setting-handle writes target the global layer; config overlays are read-only. Model roles have explicit project-write APIs: `setProjectModelRole()` / `clearProjectModelRole()` update the project layer and persist only the changed roles to `<cwd>/.omp/config.yml`. If an existing runtime override would shadow the role, setting a project role temporarily replaces it; clearing removes that runtime slot. The original override is captured for restoration when changing project scope.
 
 ### Settings load failures

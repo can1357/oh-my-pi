@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ContextWindowPolicy } from "../config/model-registry";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -300,6 +301,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	advisor?: string;
 	/** Effective thresholds for a child with an explicit compaction override. */
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	/** Structured worker's spawn-time context cap. Legacy/direct callers omit it and retain inherited model behavior. */
+	contextWindowPolicy?: ContextWindowPolicy;
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
 	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */

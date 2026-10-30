@@ -67,6 +67,7 @@ function createModelRegistryStub(key = "key") {
 		resolver: vi.fn(() => async () => key),
 		authStorage: { usage: { ingestHeaders: vi.fn() }, oauth: { identity: vi.fn() } },
 		hasLazyRuntimeMetadata: vi.fn(() => false),
+		fitContextWindow: (model: Model) => model,
 	};
 }
 
@@ -709,7 +710,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			transformContext,
 			convertToLlm,
 		});
@@ -727,7 +728,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 		});
 		sessions.push(session);
 		// #queueUserMessage schedules an idle-queue drain that would agent.continue()
@@ -753,7 +754,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 		});
 		sessions.push(session);
 
@@ -786,7 +787,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 		});
 		sessions.push(session);
 
@@ -979,7 +980,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			transformContext: wrapSteeringForModel,
 			convertToLlm,
 		});
@@ -1014,7 +1015,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			onPayload: sessionOnPayload,
 		});
 		sessions.push(session);
@@ -1038,7 +1039,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			onPayload: async () => controller.abort(new Error("cancelled by payload hook")),
 		});
 		sessions.push(session);
@@ -1875,6 +1876,7 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry: {
 				getApiKey: vi.fn(async () => "old-key"),
 				resolver,
+				fitContextWindow: (model: Model) => model,
 			} as never,
 		});
 		sessions.push(session);
@@ -2104,7 +2106,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			onSseEvent: requestOnSseEvent,
 		});
 		sessions.push(session);
@@ -2130,7 +2132,7 @@ describe("AgentSession message pipeline", () => {
 			agent: createAgent(),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
+			modelRegistry: { fitContextWindow: (model: Model) => model } as never,
 			extensionRunner: {
 				hasHandlers: () => true,
 				emit: extensionEmit,

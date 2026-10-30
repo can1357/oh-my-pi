@@ -53,7 +53,10 @@ function sessionWith(
 		}),
 		sessionManager: SessionManager.inMemory(),
 		settings: options.settings ?? Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-		modelRegistry: { getApiKey: async () => "test-key" } as never,
+		modelRegistry: {
+			getApiKey: async () => "test-key",
+			fitContextWindow: (model: Model) => model,
+		} as never,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		builtInToolNames: ["read"],
 		skills: options.skills,

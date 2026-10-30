@@ -55,6 +55,7 @@ describe("subagent context window after a model swap", () => {
 				sessionManager: { getSessionId: () => "context-window-swap" },
 				settings: Settings.isolated({}),
 				modelRegistry: {},
+				fitModelForSession: (candidate: Model) => candidate,
 				configWarnings: [],
 			} as unknown as TurnRecoveryHost);
 			const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];

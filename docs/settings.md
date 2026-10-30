@@ -108,6 +108,8 @@ Symlinked configs follow edits to their target and replacement of any intermedia
 
 Reloading changes the settings values available to consumers; startup-only work is not rerun. Provider-source switches take effect on the next discovery pass. Task/eval dispatch also reloads persisted settings before resolving a subagent's policy.
 
+`task.standardContextOnly` changes apply to future subagents launched from the main session, not existing workers or their descendants. Each worker keeps its spawn-time context policy, including after it is parked and revived.
+
 Routing changes to `modelRoles`, `retry.fallbackChains`, and `task.agentModelOverrides` apply to subsequent subagent launches and fallback decisions without restarting the host. `auth.accountPolicies` and `retry.usageReservePct` also update the long-lived account router for subsequent credential selection and quota checks. Reloading does not restart running subagents or switch a healthy active session's model; explicit runtime overrides still take precedence.
 
 ## Precedence
@@ -787,6 +789,7 @@ memory:
 | Key                                      | Type    | Default                                     | Notes                                                                                                                                                                                                                                           |
 | ---------------------------------------- | ------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `extendedContext`                        | boolean | `false`                                     | Opt in to larger model windows; `/extended-context on`, `off`, or `status`.                                                                                                                                                                     |
+| `task.standardContextOnly`               | boolean | `false`                                     | Keep task/eval/workpool subagents on each model's standard context tier without changing the main session's `extendedContext` setting. See below.                                                                                               |
 | `workspace.additionalDirectories`        | array   | `[]`                                        | Additional workspace roots added to every session; relative paths resolve from cwd. `/add-dir` and `/remove-dir` manage them live.                                                                                                              |
 | `contextPromotion.enabled`               | boolean | `false`                                     | Promote to the active model's explicit `contextPromotionTarget` on context overflow. Does not affect `retry.fallbackChains`; `retry.modelFallback` controls those switches.                                                                     |
 | `compaction.enabled`                     | boolean | `true`                                      | Automatic conversation compaction.                                                                                                                                                                                                              |
@@ -829,7 +832,7 @@ compaction:
 - The trigger follows the active model: switching models, context promotion, and advisors each use their own model's entry.
 - A `task.agentCompactionThresholdOverrides` entry outranks model entries for that agent, including entries added while it runs.
 - The hub refuses an edit when the project config sets the same model key; change it in the project config instead.
-- A token base larger than the model's standard window, or a fixed trigger at or past it, opts that model into its extended window (the window `extendedContext` would give it, including long-context pricing tiers) without turning `extendedContext` on. A base is the window size you want, so it opens the extended window even when its scaled trigger lands inside the standard one (a `300k` base on a 272K model compacts at 255K but runs on the larger window, keeping the reserve as headroom); use a base at or below the standard window, or an `f` trigger below it, to stay on the standard window. The hub warns first and saves on a second Enter; it rejects a base larger than the largest window the model can run with, and a fixed trigger at or past it. A subagent whose `task.agentCompactionThresholdOverrides` entry applies ignores model entries, so it keeps the standard window.
+- A token base larger than the model's standard window, or a fixed trigger at or past it, opts that model into its extended window (the window `extendedContext` would give it, including long-context pricing tiers) without turning `extendedContext` on. A base is the window size you want, so it opens the extended window even when its scaled trigger lands inside the standard one (a `300k` base on a 272K model compacts at 255K but runs on the larger window, keeping the reserve as headroom); use a base at or below the standard window, or an `f` trigger below it, to stay on the standard window. The hub warns first and saves on a second Enter; it rejects a base larger than the largest window the model can run with, and a fixed trigger at or past it. A subagent whose `task.agentCompactionThresholdOverrides` entry applies ignores model entries, including their implicit extended-window opt-in. A worker spawned with `task.standardContextOnly` enabled cannot opt into the extended tier through model entries or `extendedContext`.
 
 Per-agent compaction triggers for task/eval subagents. This keeps the main session at 40,000 tokens while `scout` compacts at 80% of its window and `task` at 90,000 tokens:
 
@@ -848,6 +851,32 @@ task:
 - `null` clears an entry set by a lower-priority settings layer. Any other value fails settings load.
 - Agents without an entry — including agents spawned by an overridden agent — use the main session's `compaction.*` thresholds. The main session and Vibe workers are unaffected.
 - The resolved trigger is stored with the subagent session and reused when it is revived.
+
+#### Standard context for subagents
+
+To keep the main session on Extended context while structured workers use Standard context, add this to your `config.yml`:
+
+```yaml
+extendedContext: true
+task:
+  standardContextOnly: true
+```
+
+Or use the normal config commands:
+
+```bash
+omp config set extendedContext true
+omp config set task.standardContextOnly true
+omp config get task.standardContextOnly
+```
+
+In `/settings`, the worker setting is **Standard Context Only**. It defaults to `false`, preserving normal inherited context behavior. It covers task, eval `agent`, and workpool workers, including isolated workers and seance consultations. It does not change the main session, `/tan` clones, Vibe workers, or independent helper calls.
+
+Each worker records its context policy at spawn, and nested workers inherit that policy rather than re-reading the root toggle. Both warm follow-ups and cold revival from persisted state retain it. Legacy worker state without a recorded policy uses the old inherited behavior for that session, but new workers it spawns use the current root setting because no spawn preference was recorded. `omp config set task.standardContextOnly false` restores normal behavior for future workers launched from the main session, but does not uncap existing workers or their descendants with a recorded policy.
+
+The standard tier takes priority over `extendedContext` and the implicit extended-window opt-in from `compaction.modelThresholds`. Compaction still follows the existing per-agent, per-model, and global threshold precedence within that window: lower triggers remain effective, and reserve calculations are unchanged. The policy follows a worker through model refreshes, fallback, context promotion, and its own summarization. Routing to a different model with a larger standard window remains allowed.
+
+This is a context-tier policy, not a universal token cap or a guarantee of lower usage or cost. Models without distinguishable standard and extended tiers use their known window. A `models.yml` override with only `contextWindow` remains a fixed window; custom models with paired `contextWindow` and `maxContextWindow` values use the standard `contextWindow`. Provider request limits still apply.
 
 ### Appearance and terminal
 

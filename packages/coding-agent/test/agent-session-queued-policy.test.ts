@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { setImmediate } from "node:timers/promises";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -76,8 +76,11 @@ describe("queued user delivery policy", () => {
 		const events: BeforeAgentStartEvent[] = [];
 		const delivered: AgentMessage[] = [];
 		const manager = SessionManager.inMemory();
-		// Only credential lookup is needed; requests use the local scripted provider.
-		const registry = { getApiKey: async () => "test-key" } as unknown as ModelRegistry;
+		// Requests use the local scripted provider; the fixture has no context-window tiers.
+		const registry = {
+			getApiKey: async () => "test-key",
+			fitContextWindow: (model: Model) => model,
+		} as unknown as ModelRegistry;
 		let beforePrepare: (() => Promise<void>) | undefined;
 		const extensions = [
 			extension("policy", async event => {

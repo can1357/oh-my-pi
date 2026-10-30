@@ -263,6 +263,9 @@ function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
 }
 
+/** Session-local limit on which context-window tier may be selected. */
+export type ContextWindowPolicy = "inherit" | "standard-only";
+
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
 	standard: number;
@@ -2870,14 +2873,20 @@ export class ModelRegistry {
 	 * the registry's settings; a session whose settings differ (a subagent with a
 	 * `task.agentCompactionThresholdOverrides` entry runs with model entries off)
 	 * adopts rows through this so it never inherits another scope's opt-in.
+	 * A standard-only session overrides both opt-ins without changing the catalog.
 	 * Returns `model` itself when it already has that window.
 	 */
-	fitContextWindow(model: Model<Api>, scope: Settings): Model<Api> {
+	fitContextWindow(
+		model: Model<Api>,
+		scope: Settings,
+		contextWindowPolicy: ContextWindowPolicy = "inherit",
+	): Model<Api> {
 		const tiers = this.contextWindowTiers(model);
 		if (!tiers || (model.contextWindow !== tiers.standard && model.contextWindow !== tiers.extended)) return model;
 		const window =
-			isExtendedContextEnabledFromSettings(scope) ||
-			compactionPointReaches(getModelCompactionPointsFromSettings(scope), model, tiers.standard)
+			contextWindowPolicy !== "standard-only" &&
+			(isExtendedContextEnabledFromSettings(scope) ||
+				compactionPointReaches(getModelCompactionPointsFromSettings(scope), model, tiers.standard))
 				? tiers.extended
 				: tiers.standard;
 		if (model.contextWindow === window) return model;

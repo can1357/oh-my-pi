@@ -3,8 +3,9 @@ import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { type ContextWindowPolicy, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
@@ -70,6 +71,8 @@ describe("async speculative compaction", () => {
 	function createMaintenance(
 		options: {
 			asyncEnabled?: boolean;
+			settings?: Settings;
+			contextWindowPolicy?: ContextWindowPolicy;
 			methodOrder?: CompactionMethod[];
 			experimental?: boolean;
 			recoveryTools?: boolean;
@@ -84,19 +87,22 @@ describe("async speculative compaction", () => {
 			) => Promise<{ document: string } | undefined>;
 		} = {},
 	): SessionMaintenance {
+		const settings =
+			options.settings ??
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": options.asyncEnabled ?? true,
+				"compaction.methodOrder": options.methodOrder ?? ["soft"],
+				"compaction.thresholdPercent": 50,
+				"compaction.keepRecentTokens": 1,
+				"compaction.autoContinue": false,
+				"compaction.experimentalContextManagement": options.experimental ?? false,
+			});
+		maintenanceSettings = settings;
+		model = modelRegistry.fitContextWindow(model, settings, options.contextWindowPolicy);
 		agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
-		const settings = Settings.isolated({
-			"compaction.enabled": true,
-			"compaction.asyncEnabled": options.asyncEnabled ?? true,
-			"compaction.methodOrder": options.methodOrder ?? ["soft"],
-			"compaction.thresholdPercent": 50,
-			"compaction.keepRecentTokens": 1,
-			"compaction.autoContinue": false,
-			"compaction.experimentalContextManagement": options.experimental ?? false,
-		});
-		maintenanceSettings = settings;
 		const host = {
 			agent,
 			sessionManager,
@@ -109,6 +115,8 @@ describe("async speculative compaction", () => {
 			providerSessionState: new Map(),
 			preferWebsockets: () => undefined,
 			model: () => model,
+			fitModelForSession: (candidate: Model) =>
+				modelRegistry.fitContextWindow(candidate, settings, options.contextWindowPolicy),
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
 			isStreaming: () => false,
@@ -200,6 +208,72 @@ describe("async speculative compaction", () => {
 
 	afterAll(() => {
 		authStorage.close();
+	});
+
+	it.each([
+		{ point: 400_000, trigger: 136_000 },
+		{ point: "f400000", trigger: 252_000 },
+	])("compacts safely inside the standard window with a high model point $point", async ({ point, trigger }) => {
+		const settings = Settings.isolated({
+			extendedContext: false,
+			"compaction.enabled": true,
+			"compaction.asyncEnabled": false,
+			"compaction.methodOrder": ["soft"],
+			"compaction.keepRecentTokens": 1,
+			"compaction.autoContinue": false,
+			"compaction.thresholdPercent": 50,
+			"compaction.reserveTokens": 20_000,
+			"compaction.modelThresholdsEnabled": true,
+			"compaction.modelThresholds": { "openai/gpt-5.6-terra": point },
+		});
+		const catalogModel = modelRegistry.find("openai", "gpt-5.6-terra");
+		if (!catalogModel) throw new Error("Expected tiered model");
+		authStorage.keys.setRuntime("openai", "test-key");
+		model = modelRegistry.fitContextWindow(catalogModel, settings);
+		maintenance = createMaintenance({ settings, contextWindowPolicy: "standard-only" });
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "bounded summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		await maintenance.runPrePromptCompactionIfNeeded([userMessage("x".repeat(Math.floor(trigger * 0.9) * 4))]);
+		expect(compactSpy).not.toHaveBeenCalled();
+		await maintenance.runPrePromptCompactionIfNeeded([userMessage("x".repeat(Math.floor(trigger * 1.05) * 4))]);
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls[0]?.[1].contextWindow).toBe(272_000);
+		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(true);
+	});
+
+	it("rejects extended-only promotion while retaining a larger distinct standard target", async () => {
+		const settings = Settings.isolated({ extendedContext: true });
+		const tieredTarget = modelRegistry.find("openai", "gpt-5.6-terra");
+		const largerTarget = modelRegistry.find("anthropic", "claude-opus-4-8");
+		if (!tieredTarget || !largerTarget) throw new Error("Expected promotion models");
+		authStorage.keys.setRuntime("openai", "test-key");
+		const extendedTarget = modelRegistry.fitContextWindow(tieredTarget, settings);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([extendedTarget, largerTarget]);
+		model = buildModel({
+			...defaultModel,
+			contextWindow: 300_000,
+			contextPromotionTarget: `${tieredTarget.provider}/${tieredTarget.id}`,
+			compat: defaultModel.compatConfig,
+		});
+		maintenance = createMaintenance({ settings });
+		expect(await maintenance.resolveContextPromotionTarget(model, 300_000)).toBe(extendedTarget);
+		maintenance = createMaintenance({ settings, contextWindowPolicy: "standard-only" });
+
+		expect(await maintenance.resolveContextPromotionTarget(model, 300_000)).toBeUndefined();
+		const promotable = buildModel({
+			...model,
+			contextPromotionTarget: `${largerTarget.provider}/${largerTarget.id}`,
+			compat: model.compatConfig,
+		});
+		const promoted = await maintenance.resolveContextPromotionTarget(promotable, 300_000);
+		expect(promoted?.id).toBe(largerTarget.id);
+		expect(promoted?.contextWindow).toBe(1_000_000);
 	});
 
 	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {

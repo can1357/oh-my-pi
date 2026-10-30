@@ -27,6 +27,7 @@ const POLICY = {
 	agent: AGENT,
 	effectiveAgent: AGENT,
 	structured: true,
+	contextWindowPolicy: "inherit",
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
 	isIsolated: false,

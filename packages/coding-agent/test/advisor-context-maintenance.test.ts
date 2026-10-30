@@ -4,6 +4,7 @@ import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { calculateContextTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import type { AssistantMessage, Model, OpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -28,12 +29,19 @@ const CONTEXT_WINDOW = 372_000;
 const CACHE_READ_TOKENS = 371_200;
 const INPUT_TOKENS = 200;
 const OUTPUT_TOKENS = 150;
+const STANDARD_WORKER_WINDOW = 200_000;
+const EXTENDED_ADVISOR_WINDOW = 1_000_000;
+const ADVISOR_MAINTENANCE_API = "typesafe";
+const ADVISOR_MAINTENANCE_SOURCE = "advisor-context-maintenance-test";
+const TIERED_MODEL_ID = "tiered-advisor-maintenance";
 
 interface MaintenanceHarness {
 	advisor: Agent;
 	advisorMock: MockModel;
 	modelRegistry: ModelRegistry;
 	settings: Settings;
+	primaryRequests: Model[];
+	advisorRequests: Model[];
 }
 
 interface AdvisorCompactionSummaryFixture extends CompactionSummaryMessage {
@@ -55,6 +63,7 @@ describe("AgentSession advisor context maintenance", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		await session?.dispose();
+		unregisterCustomApis(ADVISOR_MAINTENANCE_SOURCE);
 	});
 
 	afterAll(async () => {
@@ -62,8 +71,13 @@ describe("AgentSession advisor context maintenance", () => {
 		await tempDir.remove();
 	});
 
-	function createHarness(contextPromotionTarget?: string, contextPromotionEnabled = false): MaintenanceHarness {
+	function createHarness(
+		contextPromotionTarget?: string,
+		contextPromotionEnabled = false,
+		workerModelsPath?: string,
+	): MaintenanceHarness {
 		const primaryMock = createMockModel({
+			...(workerModelsPath ? { id: TIERED_MODEL_ID, contextWindow: EXTENDED_ADVISOR_WINDOW } : {}),
 			provider: "anthropic",
 			responses: [{ content: ["primary complete"] }],
 		});
@@ -73,26 +87,36 @@ describe("AgentSession advisor context maintenance", () => {
 			responses: [{ content: ["advisor reviewed current update"] }],
 		});
 		Object.assign(advisorMock, { contextPromotionTarget });
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const modelRegistry = new ModelRegistry(authStorage, workerModelsPath ?? tempDir.join("models.yml"));
 		const settings = Settings.isolated({
+			...(workerModelsPath ? { extendedContext: true } : {}),
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
 			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": contextPromotionEnabled,
 			modelRoles: { advisor: "anthropic/claude-sonnet-4-5" },
 		});
+		const primaryRequests: Model[] = [];
+		const advisorRequests: Model[] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
-			streamFn: primaryMock.stream,
+			streamFn: (model, context, options) => {
+				primaryRequests.push(model);
+				return primaryMock.stream(model, context, options);
+			},
 		});
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			contextWindowPolicy: workerModelsPath ? "standard-only" : "inherit",
 			advisorTools: [],
-			advisorStreamFn: advisorMock.stream,
+			advisorStreamFn: (model, context, options) => {
+				advisorRequests.push(model);
+				return advisorMock.stream(model, context, options);
+			},
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = session.getAdvisorAgent();
@@ -104,7 +128,44 @@ describe("AgentSession advisor context maintenance", () => {
 		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model =>
 			model === primaryMock ? "test-key" : undefined,
 		);
-		return { advisor, advisorMock, modelRegistry, settings };
+		return { advisor, advisorMock, modelRegistry, settings, primaryRequests, advisorRequests };
+	}
+
+	async function createWorkerMaintenanceHarness(contextPromotionEnabled: boolean) {
+		const modelsPath = tempDir.join("worker-maintenance-models.json");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						baseUrl: "https://advisor-maintenance.invalid",
+						apiKey: "test-key",
+						api: ADVISOR_MAINTENANCE_API,
+						models: [
+							{
+								id: TIERED_MODEL_ID,
+								contextWindow: STANDARD_WORKER_WINDOW,
+								maxContextWindow: EXTENDED_ADVISOR_WINDOW,
+								maxTokens: 8192,
+							},
+						],
+					},
+				},
+			}),
+		);
+		const selector = `anthropic/${TIERED_MODEL_ID}`;
+		const harness = createHarness(
+			contextPromotionEnabled ? selector : undefined,
+			contextPromotionEnabled,
+			modelsPath,
+		);
+		const configError = harness.modelRegistry.getError();
+		if (configError) throw configError;
+		const target = harness.modelRegistry.find("anthropic", TIERED_MODEL_ID);
+		if (!target) throw new Error("Expected configured advisor maintenance target");
+		vi.spyOn(harness.modelRegistry, "getAvailable").mockReturnValue([harness.advisorMock, target]);
+		vi.spyOn(harness.modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		return { ...harness, target, selector };
 	}
 
 	function usageAnchor(advisorMock: MockModel, timestamp: number, cost = 0): AssistantMessage {
@@ -252,6 +313,66 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisorCall.context.messages)).toContain("small current update");
 		expect(JSON.stringify(advisor.state.messages)).not.toContain("prior advisor output");
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
+	});
+
+	it("promotes an independent advisor to extended context while its worker keeps standard requests", async () => {
+		const { advisor, advisorMock, primaryRequests, advisorRequests } = await createWorkerMaintenanceHarness(true);
+		advisor.state.messages.push(
+			{ role: "user", content: "decision preserved by advisor promotion", timestamp: Date.now() - 2_000 },
+			usageAnchor(advisorMock, Date.now() - 1_000),
+		);
+
+		await session.prompt("review with the advisor's larger context");
+
+		// The target's standard tier is smaller than the overflowing advisor's
+		// current window: borrowing the worker fitter would reject promotion.
+		expect(primaryRequests.map(model => model.contextWindow)).toEqual([STANDARD_WORKER_WINDOW]);
+		expect(advisorRequests.map(model => [model.id, model.contextWindow])).toEqual([
+			[TIERED_MODEL_ID, EXTENDED_ADVISOR_WINDOW],
+		]);
+		expect(JSON.stringify(advisorMock.calls[0].context.messages)).toContain(
+			"decision preserved by advisor promotion",
+		);
+		expect(advisor.state.messages.some(message => message.role === "compactionSummary")).toBe(false);
+		expect(session.model?.contextWindow).toBe(STANDARD_WORKER_WINDOW);
+	});
+
+	it("summarizes independent advisor history with an extended candidate while its worker stays standard", async () => {
+		const { advisor, advisorMock, settings, selector, primaryRequests, advisorRequests } =
+			await createWorkerMaintenanceHarness(false);
+		Object.assign(advisorMock, { compactionModel: selector });
+		const summarizer = createMockModel({
+			provider: "anthropic",
+			handler: () => ({ content: ["portable advisor maintenance decision"] }),
+		});
+		const summaryRequests: Model[] = [];
+		registerCustomApi(
+			ADVISOR_MAINTENANCE_API,
+			(model, context, options) => {
+				summaryRequests.push(model);
+				return summarizer.stream(model, context, options);
+			},
+			ADVISOR_MAINTENANCE_SOURCE,
+		);
+		cfgCompactionKeepRecentTokens.set(settings, 1);
+		advisor.state.messages.push(
+			{ role: "user", content: "archived advisor maintenance decision", timestamp: Date.now() - 3_000 },
+			usageAnchor(advisorMock, Date.now() - 2_000),
+			{ role: "user", content: "retained advisor maintenance tail", timestamp: Date.now() - 1_000 },
+		);
+
+		await session.prompt("review after advisor summary maintenance");
+
+		expect(primaryRequests.map(model => model.contextWindow)).toEqual([STANDARD_WORKER_WINDOW]);
+		for (const model of summaryRequests) {
+			expect([model.id, model.contextWindow]).toEqual([TIERED_MODEL_ID, EXTENDED_ADVISOR_WINDOW]);
+		}
+		expect(JSON.stringify(summarizer.calls[0].context.messages)).toContain("archived advisor maintenance decision");
+		const advisorContext = JSON.stringify(advisorMock.calls[0].context.messages);
+		expect(advisorContext).toContain("portable advisor maintenance decision");
+		expect(advisorContext.match(/retained advisor maintenance tail/g)).toHaveLength(1);
+		expect(advisorRequests.map(model => model.contextWindow)).toEqual([CONTEXT_WINDOW]);
+		expect(session.model?.contextWindow).toBe(STANDARD_WORKER_WINDOW);
 	});
 
 	it("ignores late context-promotion credentials after a session transition", async () => {

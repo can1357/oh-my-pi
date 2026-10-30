@@ -5,7 +5,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { type ContextWindowPolicy, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -51,6 +51,7 @@ function createHost(
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
 		shakeSucceeds?: boolean;
+		contextWindowPolicy?: ContextWindowPolicy;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
@@ -82,6 +83,7 @@ function createHost(
 		modelRegistry,
 		configWarnings: [],
 		model: () => model,
+		fitModelForSession: candidate => modelRegistry.fitContextWindow(candidate, settings, options.contextWindowPolicy),
 		contextFitsModel: () => true,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
@@ -119,6 +121,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
+	let extendedModelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-replay-");
@@ -128,6 +131,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistrySettings = Settings.isolated();
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: modelRegistrySettings });
+		extendedModelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), {
+			settings: Settings.isolated({ extendedContext: true }),
+		});
 	});
 
 	afterAll(() => {
@@ -135,22 +141,26 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		tempDir.removeSync();
 	});
 
-	it("rolls back a usage fallback cancelled during model reconciliation", async () => {
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
-		if (!fallback) throw new Error("Expected bundled fallback model");
+	it("rolls back a standard-fitted usage fallback cancelled during model reconciliation", async () => {
+		const fallback = extendedModelRegistry.find("openai", "gpt-5.6-terra");
+		if (!fallback) throw new Error("Expected extended bundled fallback model");
+		expect(fallback.contextWindow).toBe(1_050_000);
 		let activeModel = model;
 		const fallbackApplied = Promise.withResolvers<void>();
 		const releaseReconciliation = Promise.withResolvers<void>();
 		const modelChanges: string[] = [];
 		const emittedEvents: string[] = [];
-		const host = createHost(model, modelRegistry);
+		const host = createHost(model, extendedModelRegistry, { contextWindowPolicy: "standard-only" });
+		const adoptedModels: Model[] = [];
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
-			activeModel = nextModel;
+			// Simulate the SDK adoption resolver applying the session's fitter again.
+			activeModel = host.fitModelForSession(nextModel);
+			adoptedModels.push(nextModel);
 			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
@@ -174,27 +184,34 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		);
 
 		await fallbackApplied.promise;
+		expect(adoptedModels[0]?.contextWindow).toBe(272_000);
+		expect(activeModel).toBe(adoptedModels[0]);
+		expect(activeModel).not.toBe(fallback);
 		controller.abort();
 		releaseReconciliation.resolve();
 		const committed = await applying;
 
 		expect(committed).toBe(false);
 		expect(activeModel).toBe(model);
+		expect(adoptedModels[1]).toBe(model);
+		expect(fallback.contextWindow).toBe(1_050_000);
 		expect(modelChanges).toEqual([]);
 		expect(emittedEvents).toEqual([]);
 	});
 
-	it("does not commit a fallback superseded during model reconciliation", async () => {
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
-		if (!fallback) throw new Error("Expected bundled fallback race model");
-		const selectedModel = { ...fallback, baseUrl: "https://user-selected-route.example" };
+	it.each([false, true])("protects a same-selector replacement (cancelled: %s)", async cancelled => {
+		const fallback = extendedModelRegistry.find("openai", "gpt-5.6-terra");
+		if (!fallback) throw new Error("Expected extended bundled fallback race model");
+		expect(fallback.contextWindow).toBe(1_050_000);
 		let activeModel = model;
 		const fallbackApplied = Promise.withResolvers<void>();
 		const releaseReconciliation = Promise.withResolvers<void>();
 		const modelChanges: string[] = [];
 		const emittedEvents: string[] = [];
 		const thinkingChanges: unknown[] = [];
-		const host = createHost(model, modelRegistry);
+		const host = createHost(model, extendedModelRegistry, { contextWindowPolicy: "standard-only" });
+		const selectedModel = { ...host.fitModelForSession(fallback) };
+		const adoptedModels: Model[] = [];
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
@@ -202,7 +219,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		} as never;
 		host.setThinkingLevel = level => thinkingChanges.push(level);
 		host.setModelWithProviderSessionReset = async nextModel => {
-			activeModel = nextModel;
+			// A resolver must preserve the identity of an already-fitted candidate.
+			activeModel = host.fitModelForSession(nextModel);
+			adoptedModels.push(nextModel);
 			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
@@ -212,6 +231,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			emittedEvents.push(event.type);
 		};
 		const recovery = new TurnRecovery(host);
+		const controller = new AbortController();
 		const applying = recovery.applyRetryFallbackCandidate(
 			"default",
 			{
@@ -221,35 +241,46 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key" },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
 		);
 
 		await fallbackApplied.promise;
+		expect(adoptedModels[0]?.contextWindow).toBe(272_000);
+		expect(activeModel).toBe(adoptedModels[0]);
+		expect(selectedModel).toEqual(activeModel);
+		expect(selectedModel).not.toBe(activeModel);
 		activeModel = selectedModel;
+		if (cancelled) controller.abort();
 		releaseReconciliation.resolve();
 		const committed = await applying;
 
 		expect(committed).toBe(false);
 		expect(activeModel).toBe(selectedModel);
+		expect(adoptedModels).toHaveLength(1);
 		expect(modelChanges).toEqual([]);
 		expect(thinkingChanges).toEqual([]);
 		expect(emittedEvents).toEqual([]);
 	});
-	it("keeps a committed fallback when cancellation arrives during applied-event delivery", async () => {
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
-		if (!fallback) throw new Error("Expected bundled fallback model");
+
+	it("commits a standard-fitted fallback despite cancellation during applied-event delivery", async () => {
+		const fallback = extendedModelRegistry.find("openai", "gpt-5.6-terra");
+		if (!fallback) throw new Error("Expected extended bundled fallback model");
+		expect(fallback.contextWindow).toBe(1_050_000);
 		let activeModel = model;
 		const eventStarted = Promise.withResolvers<void>();
 		const releaseEvent = Promise.withResolvers<void>();
 		const modelChanges: string[] = [];
-		const host = createHost(model, modelRegistry);
+		const host = createHost(model, extendedModelRegistry, { contextWindowPolicy: "standard-only" });
+		const adoptedModels: Model[] = [];
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
-			activeModel = nextModel;
+			// Simulate the SDK resolver refitting the model as the agent adopts it.
+			activeModel = host.fitModelForSession(nextModel);
+			adoptedModels.push(nextModel);
 		};
 		host.emitSessionEvent = async event => {
 			if (event.type !== "retry_fallback_applied") return;
@@ -270,7 +301,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
 		);
 
-		await eventStarted.promise;
+		await Promise.race([eventStarted.promise, applying]);
 		controller.abort();
 		releaseEvent.resolve();
 		const committed = await applying;
@@ -278,6 +309,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(committed).toBe(true);
 		expect(activeModel.provider).toBe(fallback.provider);
 		expect(activeModel.id).toBe(fallback.id);
+		expect(activeModel.contextWindow).toBe(272_000);
+		expect(activeModel).toBe(adoptedModels[0]);
+		expect(activeModel).not.toBe(fallback);
+		expect(fallback.contextWindow).toBe(1_050_000);
 		expect(modelChanges).toEqual([`${fallback.provider}/${fallback.id}`]);
 	});
 

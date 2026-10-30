@@ -15,6 +15,7 @@
  */
 import { describe, expect, it, vi } from "bun:test";
 import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -30,7 +31,7 @@ async function createTestSession(
 ) {
 	const sessionManager = SessionManager.inMemory();
 	const settings = Settings.isolated();
-	const modelRegistry = {} as never;
+	const modelRegistry = { fitContextWindow: (model: Model) => model } as never;
 	const session = new AgentSession({
 		agent: new Agent({
 			getApiKey: () => "test-key",

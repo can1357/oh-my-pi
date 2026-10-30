@@ -58,13 +58,17 @@ const codexTurn = (text: string, timestamp: number) => responsesTurn(active, tex
  */
 function maintenance(
 	messages: AgentMessage[],
-	options: { usageTokens?: number; providerSessionState?: Map<string, ProviderSessionState> } = {},
+	options: {
+		usageTokens?: number;
+		providerSessionState?: Map<string, ProviderSessionState>;
+	} = {},
 ): SessionMaintenance {
 	const agent = new Agent({ initialState: { model: active, systemPrompt: [], tools: [], messages } });
 	const host = {
 		agent,
 		settings: Settings.isolated({ "compaction.reserveTokens": 200 }),
 		model: () => active,
+		fitModelForSession: (model: Model) => model,
 		messages: () => agent.state.messages,
 		nonMessageTokenSource: () => ({}),
 		providerSessionState: options.providerSessionState,

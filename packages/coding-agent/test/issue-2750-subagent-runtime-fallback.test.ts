@@ -124,6 +124,7 @@ describe("subagent runtime model resolution", () => {
 				let activeLevel: ThinkingLevel | undefined = level;
 				const recovery = new TurnRecovery({
 					model: () => activeModel,
+					fitModelForSession: (candidate: Model) => candidate,
 					thinkingLevel: () => activeLevel,
 					sessionManager: { getSessionId: () => "literal-model" },
 					settings: Settings.isolated({}),
@@ -186,6 +187,7 @@ describe("subagent runtime model resolution", () => {
 			if (!options?.settings || !options.sessionManager) throw new Error("Expected child settings and history");
 			const recovery = new TurnRecovery({
 				model: () => primary,
+				fitModelForSession: (candidate: Model) => candidate,
 				thinkingLevel: () => undefined,
 				sessionManager: options.sessionManager,
 				settings: options.settings,

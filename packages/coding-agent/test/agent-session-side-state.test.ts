@@ -78,6 +78,7 @@ describe("one-shot side request state", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: {
+				fitContextWindow: (model: Model) => model,
 				resolver: () => async () => "test-key",
 				authStorage: { usage: { ingestHeaders() {} }, oauth: { identity() {} } },
 				hasLazyRuntimeMetadata: () => false,

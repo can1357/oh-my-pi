@@ -14,7 +14,7 @@ import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, un
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { ModelRegistry } from "../config/model-registry";
+import { type ContextWindowPolicy, ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	previewLine,
@@ -400,6 +400,8 @@ export interface ExecutorOptions {
 	costGate?: CostGate;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
+	/** Fixed worker policy resolved by structured dispatch, not the shared executor's settings. */
+	contextWindowPolicy?: ContextWindowPolicy;
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	/** Parent session's manager; the child and its revived turns use this exact delivery scope. */
@@ -4290,6 +4292,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	const contextWindowPolicy = options.contextWindowPolicy ?? "inherit";
 	// Per-agent advisor: the agent definition's `advisor` frontmatter or the
 	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
 	// pattern) pairs the spawned session with an advisor. Subagents default to
@@ -4311,6 +4314,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
+			// Only structured workers snapshot this preference; direct executor callers retain their settings behavior.
+			...(options.contextWindowPolicy !== undefined
+				? { "task.standardContextOnly": contextWindowPolicy === "standard-only" }
+				: undefined),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
@@ -4717,6 +4724,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
 					modelRegistry,
+					contextWindowPolicy,
 					getApiKey: options.getApiKey,
 					credentialSourceSessionId: options.credentialSourceSessionId,
 					oauthAccountPools: options.oauthAccountPools,
@@ -4962,6 +4970,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,
 				compactionThreshold: options.compactionThresholdOverride,
+				contextWindowPolicy: options.contextWindowPolicy,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

@@ -6709,104 +6709,209 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels.filter(id => id === `${primaryModel.provider}/${primaryModel.id}`)).toHaveLength(1);
 	});
 
-	it("does not send oversized context to a smaller retry fallback model", async () => {
-		// Regression for #8065: the forward counterpart of #7952. A retryable
-		// error on a large-window primary switches to a retry-fallback candidate,
-		// but candidate selection never compared the candidate's window with the
-		// live context. A 1M-window primary could fall onto a 4000-window fallback
-		// and immediately send a predictably oversized request. The fit gate must
-		// skip the undersized candidate and advance to the first configured
-		// candidate whose window can hold the accumulated context.
-		const modelsConfigPath = path.join(tempDir.path(), "fallback-overflow-models.json");
-		await Bun.write(
-			modelsConfigPath,
-			JSON.stringify({
-				providers: {
-					anthropic: {
-						modelOverrides: {
-							"claude-sonnet-4-5": { contextWindow: 1_000_000 },
+	it.each([
+		["standard-only", 32_000],
+		["inherit", 128_000],
+	] as const)(
+		"dispatches direct-session models at the %s context tier on startup and later adoption",
+		async (contextWindowPolicy, expectedWindow) => {
+			const provider = "direct-session-context-policy";
+			const modelIds = ["initial", "agent-adoption", "session-adoption"];
+			const modelsConfigPath = path.join(tempDir.path(), `direct-session-${contextWindowPolicy}-models.json`);
+			await Bun.write(
+				modelsConfigPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl: "https://direct-session.invalid/v1",
+							api: "openai-completions",
+							apiKey: "test-key",
+							models: modelIds.map(id => ({
+								id,
+								contextWindow: 32_000,
+								maxContextWindow: 128_000,
+								maxTokens: 8192,
+							})),
 						},
 					},
-					openai: {
-						modelOverrides: {
-							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: "openai/gpt-4o" },
-							"gpt-4o": { contextWindow: 1_000_000 },
-						},
-					},
-				},
-			}),
-		);
-		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+				}),
+			);
+			const settings = Settings.isolated({ extendedContext: true, "compaction.enabled": false });
+			modelRegistry = new ModelRegistry(authStorage, modelsConfigPath, { settings });
+			const models = modelIds.map(id => {
+				const model = modelRegistry.find(provider, id);
+				if (!model) throw new Error(`Expected synthetic tiered model ${provider}/${id}`);
+				return model;
+			});
+			const [initialModel, agentAdoptionModel, sessionAdoptionModel] = models;
+			expect(models.map(model => model.contextWindow)).toEqual([128_000, 128_000, 128_000]);
 
-		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
-		const smallFallback = modelRegistry.find("openai", "gpt-4o-mini");
-		const largeFallback = modelRegistry.find("openai", "gpt-4o");
-		if (!primaryModel || !smallFallback || !largeFallback) {
-			throw new Error("Expected override models to resolve");
-		}
-		expect(primaryModel.contextWindow).toBe(1_000_000);
-		expect(smallFallback.contextWindow).toBe(4000);
-		expect(largeFallback.contextWindow).toBe(1_000_000);
-
-		// ~15k estimated tokens in the initial prompt: fits the 1M primary and the
-		// 1M large fallback, but far exceeds the 4000-window small fallback
-		// (80% => 3200), so the small fallback cannot legally receive the request.
-		const bigText = "lorem ipsum ".repeat(5000);
-		const requestedModels: string[] = [];
-		const mock = createMockModel();
-		let primaryAttempts = 0;
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: {
-				model: primaryModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				if (model.id === primaryModel.id && primaryAttempts === 0) {
-					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
-				} else {
+			const requests: Array<{ id: string; contextWindow: number | null }> = [];
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: initialModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requests.push({ id: model.id, contextWindow: model.contextWindow });
 					mock.push({ content: ["ok"] });
-				}
-				return mock.stream(model, context, options);
-			},
-		});
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				contextWindowPolicy,
+			});
 
-		const settings = Settings.isolated({
-			"compaction.enabled": true,
-			"compaction.methodOrder": ["soft"],
-			"compaction.thresholdPercent": 80,
-			"compaction.thresholdTokens": -1,
-			"contextPromotion.enabled": true,
-			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": {
-				default: [`${smallFallback.provider}/${smallFallback.id}`, `${largeFallback.provider}/${largeFallback.id}`],
-			},
-		});
-		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			await session.prompt("Use the initial model");
+			await session.waitForIdle();
+			agent.setModel(agentAdoptionModel);
+			await session.prompt("Use the model adopted directly by the agent");
+			await session.waitForIdle();
+			await session.setModel(sessionAdoptionModel, "default", { persist: false });
+			await session.prompt("Use the model adopted by the session");
+			await session.waitForIdle();
 
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const now = Date.now();
-		vi.spyOn(Date, "now").mockImplementation(() => now);
+			// Assert the provider boundary, not just session state: constructor policy
+			// must fit both the existing model and every later Agent.setModel call.
+			expect(requests).toEqual(modelIds.map(id => ({ id, contextWindow: expectedWindow })));
+			// Restricting one session must not downgrade its shared extended catalog.
+			expect(modelRegistry.find(provider, initialModel.id)?.contextWindow).toBe(128_000);
+		},
+	);
 
-		// Primary rate-limits with a live ~15k context; the retry-fallback path
-		// must skip the 4000-window candidate and land on the 1M-window one.
-		await session.prompt(bigText);
-		await session.waitForIdle();
+	it.each([
+		["inherit", false],
+		["standard-only", false],
+		["standard-only", true],
+	] as const)(
+		"does not send oversized context to a smaller fallback (%s, usage preflight=%s)",
+		async (contextWindowPolicy, usagePreflight) => {
+			// Regression for #8065: the forward counterpart of #7952. A retryable
+			// error on a large-window primary switches to a retry-fallback candidate,
+			// but candidate selection never compared the candidate's window with the
+			// live context. A 1M-window primary could fall onto a 4000-window fallback
+			// and immediately send a predictably oversized request. The fit gate must
+			// skip the undersized candidate and advance to the first configured
+			// candidate whose window can hold the accumulated context.
+			const modelsConfigPath = path.join(tempDir.path(), "fallback-overflow-models.json");
+			await Bun.write(
+				modelsConfigPath,
+				JSON.stringify({
+					providers: {
+						anthropic: {
+							modelOverrides: {
+								"claude-sonnet-4-5": { contextWindow: 1_000_000 },
+							},
+						},
+						openai: {
+							modelOverrides: {
+								"gpt-4o-mini": {
+									contextWindow: 4000,
+									...(contextWindowPolicy === "standard-only" ? { maxContextWindow: 1_000_000 } : {}),
+									contextPromotionTarget: "openai/gpt-4o",
+								},
+								"gpt-4o":
+									contextWindowPolicy === "standard-only"
+										? { contextWindow: 100_000, maxContextWindow: 1_000_000 }
+										: { contextWindow: 1_000_000 },
+							},
+						},
+					},
+				}),
+			);
+			const registrySettings = Settings.isolated({ extendedContext: true });
+			modelRegistry = new ModelRegistry(authStorage, modelsConfigPath, { settings: registrySettings });
 
-		expect(requestedModels).not.toContain(`${smallFallback.provider}/${smallFallback.id}`);
-		expect(requestedModels).toContain(`${largeFallback.provider}/${largeFallback.id}`);
-		expect(session.model?.id).toBe(largeFallback.id);
-		expect(requestedModels.at(-1)).toBe(`${largeFallback.provider}/${largeFallback.id}`);
-	});
+			const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			const smallFallback = modelRegistry.find("openai", "gpt-4o-mini");
+			const largeFallback = modelRegistry.find("openai", "gpt-4o");
+			if (!primaryModel || !smallFallback || !largeFallback) {
+				throw new Error("Expected override models to resolve");
+			}
+			// The restricted worker must reject the small model even though the shared
+			// catalog advertises its extended window, then adopt the larger Standard tier.
+
+			// This history fits the primary and the larger fallback's Standard window,
+			// but not the small fallback's Standard window.
+			const bigText = "lorem ipsum ".repeat(5000);
+			const requestedModels: string[] = [];
+			const requestedWindows: number[] = [];
+			const mock = createMockModel();
+			let primaryAttempts = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: usagePreflight ? [{ role: "user", content: bigText, timestamp: Date.now() }] : [],
+				},
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					requestedWindows.push(model.contextWindow ?? 0);
+					if (model.id === primaryModel.id && primaryAttempts === 0) {
+						primaryAttempts += 1;
+						mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					} else {
+						mock.push({ content: ["ok"] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				extendedContext: true,
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"contextPromotion.enabled": true,
+				"retry.baseDelayMs": 5,
+				"retry.usageAwareFallback": usagePreflight,
+				"retry.usageReservePolicy": "auto",
+				"retry.fallbackChains": {
+					default: [
+						`${smallFallback.provider}/${smallFallback.id}`,
+						`${largeFallback.provider}/${largeFallback.id}`,
+					],
+				},
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			if (usagePreflight) {
+				vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) =>
+					options.modelId === primaryModel.id
+						? {
+								state: "depleted",
+								accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
+							}
+						: { state: "healthy", accounts: [] },
+				);
+			}
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				contextWindowPolicy,
+			});
+			const now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt(usagePreflight ? "Continue" : bigText);
+			await session.waitForIdle();
+
+			expect(requestedModels).not.toContain(`${smallFallback.provider}/${smallFallback.id}`);
+			expect(requestedModels).toContain(`${largeFallback.provider}/${largeFallback.id}`);
+			expect(session.model?.id).toBe(largeFallback.id);
+			expect(requestedModels.at(-1)).toBe(`${largeFallback.provider}/${largeFallback.id}`);
+			expect(requestedWindows.at(-1)).toBe(contextWindowPolicy === "standard-only" ? 100_000 : 1_000_000);
+			if (usagePreflight) expect(requestedModels).not.toContain(`${primaryModel.provider}/${primaryModel.id}`);
+		},
+	);
 
 	it("fits retry fallbacks after excluding the failed assistant turn", async () => {
 		const modelsConfigPath = path.join(tempDir.path(), "fallback-failed-turn-models.json");

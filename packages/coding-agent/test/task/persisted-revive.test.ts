@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -1283,6 +1284,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 				getApiKey: async () => "test-key",
 				getAvailable: () => [],
 				find: () => agent.state.model,
+				fitContextWindow: (model: Model) => model,
 				hasConfiguredAuth: () => true,
 			} as never,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),

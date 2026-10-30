@@ -238,6 +238,20 @@ export const cfgTaskEager = register({
 	},
 });
 
+export const cfgTaskStandardContextOnly = register({
+	id: "task.standardContextOnly",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Standard Context Only",
+		description:
+			"Keep newly spawned Task, Eval, and workpool workers within the model's standard context window, including their descendants and revived sessions",
+	},
+});
+
 export const cfgTaskBatch = register({
 	id: "task.batch",
 	protocolDefault: ["rpc", "acp"],

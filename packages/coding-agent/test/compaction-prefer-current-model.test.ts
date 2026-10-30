@@ -173,6 +173,72 @@ describe("compaction prefers the current session model over modelRoles.default",
 		]);
 	});
 
+	it.each([false, true])(
+		"fits the summary model to standard context without changing shared rows (configured=%j)",
+		async configured => {
+			const settings = Settings.isolated({
+				extendedContext: true,
+				"compaction.keepRecentTokens": 1,
+				"compaction.methodOrder": ["soft"],
+			});
+			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+			authStorage.keys.setRuntime("openai", "openai-token");
+			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), { settings });
+			const current = modelRegistry.find("openai", "gpt-5.6-terra");
+			const summary = modelRegistry.find("openai", "gpt-5.6-sol");
+			if (!current || !summary) throw new Error("Expected tiered models");
+			const expectedSummary = configured ? summary : current;
+			const tiers = modelRegistry.contextWindowTiers(expectedSummary);
+			if (!tiers) throw new Error("Expected standard and extended windows");
+			const currentModel = configured
+				? buildModel({
+						...current,
+						compactionModel: `${summary.provider}/${summary.id}`,
+						compat: current.compatConfig,
+					})
+				: current;
+			const agent = new Agent({
+				initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				contextWindowPolicy: "standard-only",
+			});
+			session.subscribe(() => {});
+			for (const [userText, assistantText] of [
+				["first question", "first answer"],
+				["second question", "second answer"],
+			] as const) {
+				const user = userMsg(userText);
+				const assistant = assistantMsg(assistantText);
+				session.agent.appendMessage(user);
+				session.sessionManager.appendMessage(user);
+				session.agent.appendMessage(assistant);
+				session.sessionManager.appendMessage(assistant);
+			}
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "standard summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+
+			await session.compact();
+
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			const [, summaryModel] = compactSpy.mock.calls[0]!;
+			expect(summaryModel.id).toBe(expectedSummary.id);
+			expect(summaryModel.contextWindow).toBe(tiers.standard);
+			expect(session.model?.id).toBe(current.id);
+			expect(modelRegistry.find(expectedSummary.provider, expectedSummary.id)).toBe(expectedSummary);
+			expect(expectedSummary.contextWindow).toBe(tiers.extended);
+			expect(session.sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(true);
+		},
+	);
+
 	it("uses compactionModel only for the summary call and leaves the active model unchanged", async () => {
 		const baseCurrentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const compactionModel = getBundledModel("openai", "gpt-5");

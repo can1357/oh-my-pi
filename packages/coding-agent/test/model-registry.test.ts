@@ -2555,6 +2555,42 @@ describe("ModelRegistry", () => {
 			defaultLevel: Effort.Low,
 		};
 
+		test.each([
+			["explicit extended context", true],
+			["model compaction threshold", false],
+		] as const)("standard-only overrides %s without changing a shared registry", (_name, extendedContext) => {
+			const testSettings = Settings.isolated({ extendedContext });
+			if (!extendedContext) {
+				cfgCompactionModelThresholds.set(testSettings, { "openai/gpt-5.6-terra": 400_000 });
+			}
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const row = registry.find("openai", "gpt-5.6-terra");
+			if (!row) throw new Error("Expected bundled gpt-5.6-terra model");
+			expect(row.contextWindow).toBe(1_050_000);
+
+			const restricted = registry.fitContextWindow(row, testSettings, "standard-only");
+			expect(restricted.contextWindow).toBe(272_000);
+			expect(registry.fitContextWindow(row, testSettings, "standard-only")).toBe(restricted);
+			expect(registry.fitContextWindow(restricted, testSettings, "standard-only")).toBe(restricted);
+
+			// A second session sharing both settings and registry still opts in.
+			expect(registry.fitContextWindow(restricted, testSettings).contextWindow).toBe(1_050_000);
+			expect(registry.fitContextWindow(row, testSettings, "inherit")).toBe(row);
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
+			expect(row.contextWindow).toBe(1_050_000);
+		});
+
+		test("standard-only preserves a runtime context override outside the recorded tiers", () => {
+			const testSettings = Settings.isolated({ extendedContext: true });
+			const row = sharedBuiltin.find("openai", "gpt-5.6-terra");
+			if (!row) throw new Error("Expected bundled gpt-5.6-terra model");
+			const overridden = applyModelPatch(row, { contextWindow: 400_000 }, "merge");
+
+			expect(sharedBuiltin.fitContextWindow(row, testSettings).contextWindow).toBe(1_050_000);
+			expect(sharedBuiltin.fitContextWindow(overridden, testSettings, "standard-only")).toBe(overridden);
+			expect(sharedBuiltin.fitContextWindow(overridden, testSettings, "inherit")).toBe(overridden);
+		});
+
 		test.each(
 			[
 				["openai-codex", "gpt-6-astra"],
@@ -2660,7 +2696,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(512_000);
 		});
 
-		test("a custom maximum replacing a bundled row reports and runs the window an opt-in actually gets", async () => {
+		test("a custom maximum opts in while standard-only retains the custom standard window", async () => {
 			writeRawModelsJson({
 				openai: {
 					baseUrl: "https://example.com/v1",
@@ -2688,6 +2724,10 @@ describe("ModelRegistry", () => {
 			});
 			if (!row) throw new Error("Expected the custom gpt-5.6-terra row");
 			expect(registry.fitContextWindow(row, subagentScope).contextWindow).toBe(128_000);
+			expect(registry.fitContextWindow(row, testSettings, "standard-only").contextWindow).toBe(128_000);
+			cfgExtendedContext.set(testSettings, true);
+			expect(registry.fitContextWindow(row, testSettings, "standard-only").contextWindow).toBe(128_000);
+			expect(registry.fitContextWindow(row, testSettings).contextWindow).toBe(512_000);
 		});
 
 		test("an overlay that authors no window keeps the bundled row's tiers", async () => {
@@ -2755,7 +2795,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 		});
 
-		test("preserves an explicit Astra context override across extended context toggles", async () => {
+		test("preserves an explicit Astra context override across toggles and standard-only fitting", async () => {
 			writeRawModelsJson({
 				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 400_000, thinking } } },
 			});
@@ -2766,6 +2806,9 @@ describe("ModelRegistry", () => {
 			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
+			const pinned = registry.find("openai-codex", "gpt-6-astra");
+			if (!pinned) throw new Error("Expected the pinned Astra model");
+			expect(registry.fitContextWindow(pinned, testSettings, "standard-only")).toBe(pinned);
 
 			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
@@ -2853,7 +2896,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 		});
 
-		test("off caps billable premium models without shrinking subscription estimates", async () => {
+		test("off caps billable premium models while standard-only preserves untiered and subscription windows", async () => {
 			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 
@@ -2865,6 +2908,16 @@ describe("ModelRegistry", () => {
 			// SuperGrok carries public xAI tiers (200K threshold) for stats estimates,
 			// not billing, so it keeps its full 1M window.
 			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(1_000_000);
+
+			const extendedScope = Settings.isolated({ extendedContext: true });
+			for (const [provider, id] of [
+				["anthropic", "claude-opus-4-8"],
+				["xai-oauth", "grok-4.20-0309-reasoning"],
+			]) {
+				const untiered = registry.find(provider, id);
+				if (!untiered) throw new Error(`Expected untiered model: ${provider}/${id}`);
+				expect(registry.fitContextWindow(untiered, extendedScope, "standard-only")).toBe(untiered);
+			}
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {

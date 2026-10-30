@@ -123,7 +123,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
-import type { ModelRegistry } from "../config/model-registry";
+import type { ContextWindowPolicy, ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
 	getModelMatchPreferences,
@@ -891,6 +891,7 @@ export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly contextWindowPolicy: ContextWindowPolicy;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
 	#costGate: CostGate;
@@ -1935,11 +1936,15 @@ export class AgentSession implements SettingsScope {
 		);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.contextWindowPolicy = config.contextWindowPolicy ?? "inherit";
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
+		// Fit the initial model and every later adoption to this session's settings
+		// and fixed context policy, including sessions constructed outside the SDK.
+		this.agent.setModelResolver(next => this.fitModelForSession(next));
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
@@ -2127,6 +2132,7 @@ export class AgentSession implements SettingsScope {
 			modelRegistry: this.#modelRegistry,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
+			fitModelForSession: model => this.fitModelForSession(model),
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
@@ -2593,6 +2599,9 @@ export class AgentSession implements SettingsScope {
 			};
 		});
 
+		// Independent advisors inherit context settings, not their host worker's tier cap.
+		const fitAdvisorModel = (model: Model): Model =>
+			this.#modelRegistry.fitContextWindow(model, this.settings, "inherit");
 		const advisorsHost: SessionAdvisorsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2622,9 +2631,9 @@ export class AgentSession implements SettingsScope {
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			resolveContextPromotionTarget: (model, contextWindow, signal) =>
-				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal),
+				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal, fitAdvisorModel),
 			resolveCompactionModelCandidates: (model, availableModels) =>
-				this.#maintenance.resolveCompactionModelCandidates(model, availableModels),
+				this.#maintenance.resolveCompactionModelCandidates(model, availableModels, undefined, fitAdvisorModel),
 			resolveRetryFallbackRole: (selector, model, roleHint) =>
 				this.#recovery.resolveRetryFallbackRole(selector, model, roleHint),
 			retryFallbackChainKeys: (selector, model, options) =>
@@ -2670,6 +2679,7 @@ export class AgentSession implements SettingsScope {
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: () => this.preferWebsockets,
 			model: () => this.model,
+			fitModelForSession: model => this.fitModelForSession(model),
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -6682,12 +6692,14 @@ export class AgentSession implements SettingsScope {
 		return this.#refreshLazyLocalContext(model);
 	}
 
+	/** Apply this session's fixed tier policy to catalog and maintenance models. */
+	fitModelForSession(model: Model): Model {
+		return this.#modelRegistry.fitContextWindow(model, this.settings, this.contextWindowPolicy);
+	}
+
 	async #refreshLazyLocalContext(model: Model): Promise<void> {
 		try {
-			const refreshed = this.#modelRegistry.fitContextWindow(
-				await this.#modelRegistry.refreshSelectedModelMetadata(model),
-				this.settings,
-			);
+			const refreshed = this.fitModelForSession(await this.#modelRegistry.refreshSelectedModelMetadata(model));
 			const current = this.model;
 			// Skip if the user switched models mid-stream, or the runtime window
 			// matches what the session already holds.
@@ -12180,7 +12192,7 @@ export class AgentSession implements SettingsScope {
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
 			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
-			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+			const updated = found && this.fitModelForSession(found);
 			// Compare against the window bound before the refit so dependent state
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
@@ -15108,7 +15120,7 @@ export class AgentSession implements SettingsScope {
 		const current = this.model;
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
 		const found = this.#modelRegistry.find(current.provider, current.id);
-		const refreshed = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+		const refreshed = found && this.fitModelForSession(found);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(refreshed);

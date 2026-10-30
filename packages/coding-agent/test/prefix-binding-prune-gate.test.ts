@@ -104,7 +104,10 @@ function newSession(model: Model): AgentSession {
 			"compaction.dropUseless": false,
 			"compaction.supersedeReads": true,
 		}),
-		modelRegistry: { getApiKey: async () => "test-key" } as never,
+		modelRegistry: {
+			getApiKey: async () => "test-key",
+			fitContextWindow: (model: Model) => model,
+		} as never,
 	});
 	session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 	return session;

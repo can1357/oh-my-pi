@@ -10,6 +10,7 @@ import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import type { ContextWindowPolicy } from "../config/model-registry";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
@@ -73,6 +74,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
+	cfgTaskStandardContextOnly,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -182,6 +184,8 @@ export interface EffectiveSubagentPolicy {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name entry normalized to both child compaction threshold fields. */
 	compactionThresholdOverride?: CompactionThresholdPair;
+	/** Spawn-time context cap, inherited monotonically through the worker tree. */
+	contextWindowPolicy: ContextWindowPolicy;
 	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
 	oauthAccountPools?: OAuthAccountPools;
 	parentActiveModelPattern?: string;
@@ -460,6 +464,11 @@ export async function resolveEffectiveSubagentPolicy(
 		modelRole,
 		serviceTierOverride,
 		compactionThresholdOverride,
+		contextWindowPolicy:
+			request.session.contextWindowPolicy === "standard-only" ||
+			cfgTaskStandardContextOnly.get(request.session.settings)
+				? "standard-only"
+				: "inherit",
 		oauthAccountPools,
 		parentActiveModelPattern,
 		structured,
@@ -616,6 +625,7 @@ function buildExecutorOptions(
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
+		contextWindowPolicy: policy.contextWindowPolicy,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
