@@ -432,7 +432,13 @@ export class EventController {
 			irc_message: e => this.#handleIrcMessage(e),
 			user_wait_start: async event => {
 				this.#sessionUserWait = { state: "blocked", kind: "question", msg: event.prompt };
-				setRunStatus(this.#sessionUserWait);
+				// A tool's own dialog opens this bracket too, through the extension
+				// UI tracker, and the label it carries is generic ("an extension
+				// approve dialog"). The prompt already recorded for that tool call
+				// names the actual question and its `permission` kind, so it stays
+				// the one reported; the session wait is what is left when no tool
+				// prompt is waiting.
+				setRunStatus(this.#blockingPrompts.values().next().value ?? this.#sessionUserWait);
 				this.ctx.ui.requestRender();
 			},
 			user_wait_end: async () => {

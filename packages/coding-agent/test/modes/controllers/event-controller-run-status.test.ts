@@ -236,4 +236,25 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(titleState).toHaveBeenLastCalledWith("attention");
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
 	});
+
+	it("keeps a tool's own question when its dialog opens the session wait", async () => {
+		// The tool UI brackets its approval through `trackUserWaits`, whose label
+		// is generic. The prompt recorded for that tool call names the question
+		// and its kind, so that is what the title and the OSC record report.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "rm -rf build" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: "an extension approve dialog" });
+		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
 });
