@@ -32,6 +32,7 @@ import * as path from "node:path";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	acquireSandboxLockWithNotice,
+	withSandboxLock,
 	isProcessStillLive,
 	type ProcessIdentity,
 	readIsolationClaim,
@@ -287,7 +288,12 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
 		);
 	}
 	const record = path.join(found.baseDir, ISOLATION_UNFINISHED_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	await writeProcessIdentity(record);
+	// Under the sandbox lock, like lease admission: a retention that has
+	// decided nobody is here must not then rename the directory out from under
+	// a record published a moment later.
+	await withSandboxLock(found.baseDir, "record a writer in", async () => {
+		await writeProcessIdentity(record);
+	});
 	return async () => {
 		await fs.rm(record, { force: true });
 	};
@@ -491,7 +497,12 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 			// references come back. A lease that is only *ours* is different —
 			// waiting for ourselves is not a reason to keep the process alive,
 			// and a retained self-lease kept a finished program from exiting.
-			if (leases.allOurs && !leases.unknown) {
+			// Re-read the writer records before unreferencing: the snapshot above
+			// was taken before this one, and a foreign writer that arrived in
+			// between — or was already there — is work this process must stay
+			// for. Departure was fixed last round; this is arrival.
+			const writersNow = await readHolders(path.join(baseDir, ISOLATION_UNFINISHED_DIR));
+			if (leases.allOurs && !leases.unknown && writersNow.allOurs && !writersNow.unknown) {
 				workspace.poll?.unref?.();
 				workspace.watcher?.unref?.();
 			} else {

@@ -9,6 +9,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
@@ -233,7 +234,15 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	try {
 		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
 	} catch (error) {
-		if (isEnoent(error)) return { kind: "absent" };
+		if (isEnoent(error)) {
+			// `ENOENT` from opening says the *target* is missing, which a dangling
+			// symlink also gives. `lstat` answers the question that was meant: is
+			// there an entry here at all? An entry whose target is gone is a
+			// marker nobody can read, which is unknown, not absent.
+			const entry = await fs.lstat(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
+			if (entry === undefined) return { kind: "absent" };
+			return { kind: "unknown", reason: "owner marker entry exists but its target is missing" };
+		}
 		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
 	}
 	if (typeof decoded !== "object" || decoded === null) {
@@ -443,7 +452,10 @@ export async function describeSandboxLockFailure(
 			: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
 	const claim = await readIsolationClaim(baseDir).catch(() => undefined);
 	const state = claim === undefined ? "unknown" : claim.kind;
-	const contended = waitedMs >= SANDBOX_LOCK_WAIT.retryDelayMs * 2;
+	// Contention is what the lock reports, not what the clock suggests: an
+	// `EACCES` after a second is a failure to open, not a holder, and saying
+	// "another run holds it" for one sends the caller after nobody.
+	const contended = /attempts|timed out|lock is held/i.test(text);
 	return new Error(
 		`Could not ${purpose} isolation workspace ${baseDir} after ${waited} (${state}): ` +
 			(contended
@@ -453,6 +465,49 @@ export async function describeSandboxLockFailure(
 				: `the lock could not be taken at all (${text}); nothing is known about a holder, and ${recorded}.`),
 		{ cause: error },
 	);
+}
+
+/**
+ * Sandbox paths whose lock the current async context holds.
+ *
+ * A hold is *detected*, never declared. The flag this replaces had to be
+ * passed by hand: the one production caller forgot it and deadlocked against
+ * its own lock for sixty seconds, and a caller that asserted it wrongly walked
+ * straight through a peer's hold and moved a workspace in five milliseconds.
+ * The code should look rather than be told.
+ */
+const heldSandboxLocks = new AsyncLocalStorage<Set<string>>();
+
+/**
+ * Run `body` with this sandbox's lock recorded as held by the current async
+ * context, for a caller that has already acquired it itself. Everything
+ * `body` calls then detects the hold instead of waiting on it.
+ */
+export async function runHoldingSandboxLock<T>(baseDir: string, body: () => Promise<T>): Promise<T> {
+	const held = new Set(heldSandboxLocks.getStore() ?? []);
+	held.add(baseDir);
+	return await heldSandboxLocks.run(held, body);
+}
+
+/** Whether the caller's async context already holds the lock for `baseDir`. */
+export function holdsSandboxLock(baseDir: string): boolean {
+	return heldSandboxLocks.getStore()?.has(baseDir) === true;
+}
+
+/**
+ * Run `body` holding the sandbox lock, with the hold visible to everything it
+ * calls. Re-entering for the same sandbox inside `body` takes no second lock.
+ */
+export async function withSandboxLock<T>(baseDir: string, purpose: string, body: () => Promise<T>): Promise<T> {
+	if (holdsSandboxLock(baseDir)) return await body();
+	const lock = await acquireSandboxLockWithNotice(baseDir, purpose);
+	const held = new Set(heldSandboxLocks.getStore() ?? []);
+	held.add(baseDir);
+	try {
+		return await heldSandboxLocks.run(held, body);
+	} finally {
+		lock.release();
+	}
 }
 
 /** How long a lock wait runs before the caller is told it is waiting, and how often after. */
@@ -478,6 +533,14 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 			owner === undefined || owner === "unreadable"
 				? "its recorded owner is not readable"
 				: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
+		// Clearing a timer does not cancel a callback that is already running,
+		// and the marker read above takes time: a notice that announces after
+		// the lock was taken says the opposite of the truth.
+		if (settled) return;
+		const message =
+			`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — another run holds it. ` +
+			`The holder is not identifiable, and ${recorded}. \`omp worktree list\` shows what owns it.`;
+		process.stderr.write(`${message}\n`);
 		logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
 			waitedMs: Date.now() - startedAt,
 			detail:
@@ -486,6 +549,7 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 				"`omp worktree list` shows what owns it.",
 		});
 	};
+	let settled = false;
 	const notice = setTimeout(() => void announce(), SANDBOX_LOCK_NOTICE_MS);
 	const reminder = setInterval(() => void announce(), SANDBOX_LOCK_REMINDER_MS);
 	notice.unref?.();
@@ -495,6 +559,7 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 	} catch (error) {
 		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
 	} finally {
+		settled = true;
 		clearTimeout(notice);
 		clearInterval(reminder);
 	}

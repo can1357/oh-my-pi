@@ -38,7 +38,7 @@ const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
-import { resolveSandboxIdentity, SANDBOX_LOCK_WAIT } from "./isolation-ownership";
+import { resolveSandboxIdentity, withSandboxLock } from "./isolation-ownership";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -305,6 +305,9 @@ async function writeIsolationPatch(
  * and a later write would leave a mounted workspace with a dead owner and
  * no metadata, and cleanup would traverse the live mount.
  */
+/** Mount directory name inside a sandbox base dir. */
+const TASK_ISOLATION_MOUNT_NAME = "m";
+
 export interface RetainedWorkspace {
 	/** Workspace path to report (unique sibling on success, original dir when the move fails). */
 	dir: string;
@@ -320,7 +323,6 @@ export interface RetainedWorkspace {
 export async function retainIsolationWorkspace(
 	isolationDir: string,
 	backend?: natives.IsoBackendKind,
-	options: { lockHeld?: boolean } = {},
 ): Promise<RetainedWorkspace> {
 	const baseDir = await resolveSandboxIdentity(path.dirname(isolationDir));
 	// Check and act under one hold. A session admitted *after* the check and
@@ -328,12 +330,37 @@ export async function retainIsolationWorkspace(
 	// is not a decision, and a lease taken in it is as real as one taken
 	// before. The teardown path already holds this lock, and re-taking it
 	// there would deadlock against itself, so it says so.
-	const lock = options.lockHeld ? undefined : await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
-	try {
+	return await withSandboxLock(baseDir, "retain", async () => {
+		// The directory may already be gone: a concurrent retention, or a
+		// teardown that won the race, has moved it. Reporting a path that does
+		// not exist sends the user to an empty name, so the sibling that does
+		// exist is reported instead.
+		const existing = await fs.stat(isolationDir).catch(() => undefined);
+		if (existing === undefined) {
+			const retained = await findRetainedSibling(baseDir);
+			return { dir: retained ?? isolationDir, sidecarOk: retained !== undefined };
+		}
 		return await retainUnderLock(isolationDir, baseDir, backend);
-	} finally {
-		lock?.release();
+	});
+}
+
+/** The `.retained-*` copy an earlier retention of this sandbox left, if one is there. */
+async function findRetainedSibling(baseDir: string): Promise<string | undefined> {
+	const parent = path.dirname(baseDir);
+	const prefix = `${path.basename(baseDir)}.retained-`;
+	const entries = await fs.readdir(parent).catch(() => [] as string[]);
+	for (const entry of entries) {
+		if (!entry.startsWith(prefix)) continue;
+		const candidate = path.join(parent, entry, TASK_ISOLATION_MOUNT_NAME);
+		if (
+			await Bun.file(path.join(candidate, "."))
+				.exists()
+				.catch(() => false)
+		)
+			return candidate;
+		return candidate;
 	}
+	return undefined;
 }
 
 async function retainUnderLock(
@@ -457,13 +484,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace)
-				await cleanupIsolation(handle, {
-					capture,
-					onLockHeld: held => {
-						captureHoldsSandboxLock = held;
-					},
-				});
+			if (handle && !retainWorkspace) await cleanupIsolation(handle, { capture });
 		})();
 		return cleanupPromise;
 	};
@@ -480,8 +501,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	 * throwing out of it abandons the caller's hold and replaces a child's real
 	 * output with a blank failure.
 	 */
-	/** True while the teardown is running this capture under the sandbox lock. */
-	let captureHoldsSandboxLock = false;
 	const capture = async (): Promise<void> => {
 		if (!handle || !taskBaseline || retainWorkspace) {
 			return;
@@ -573,19 +592,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// cleanup runs — capture under the sandbox lock, then removal — so
 			// a late departure gets the same guarantee, and it re-enters
 			// `cleanupIsolation` rather than the memoised handle cleanup.
-			armTeardown(
-				handle.mergedDir,
-				async () =>
-					await cleanupIsolation(sandbox, {
-						capture,
-						onLockHeld: held => {
-							captureHoldsSandboxLock = held;
-						},
-					}),
-				{
-					generation: handle.generation,
-				},
-			);
+			armTeardown(handle.mergedDir, async () => await cleanupIsolation(sandbox, { capture }), {
+				generation: handle.generation,
+			});
 			await cleanupHandle();
 		})();
 		return releasePromise;

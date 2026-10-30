@@ -22,6 +22,7 @@ import {
 import {
 	clearClaimedWorkspace,
 	acquireSandboxLockWithNotice,
+	runHoldingSandboxLock,
 	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
@@ -895,13 +896,15 @@ async function settleAbandonedStop(
 
 export async function cleanupIsolation(
 	handle: IsolationHandle,
-	options: { capture?: () => Promise<void>; onLockHeld?: (held: boolean) => void } = {},
+	options: { capture?: () => Promise<void> } = {},
 ): Promise<void> {
 	// baseDir is the parent of the merged directory, resolved to the directory
 	// itself: a lock on an alias of this path excludes nobody.
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
 	// Waiting for a slow materialisation or teardown is the point of the lock,
 	// so wait generously rather than failing the run that needs the sandbox.
+	// Taken through the context-aware hold, so a capture that calls retention
+	// inside it is seen to hold this lock already instead of waiting on it.
 	const lock = await acquireSandboxLockWithNotice(baseDir, "tear down");
 	let retiredDir: string | undefined;
 	let proceed = false;
@@ -950,9 +953,10 @@ export async function cleanupIsolation(
 		// the capture really stops; past the deadline the only thing that
 		// changes is that this teardown no longer deletes.
 		if (options.capture) {
-			options.onLockHeld?.(true);
-			const capturing = options
-				.capture()
+			// The capture runs inside this teardown's hold: retention it calls
+			// detects that rather than waiting sixty seconds on a lock this
+			// very call owns.
+			const capturing = runHoldingSandboxLock(baseDir, options.capture)
 				.then(() => true)
 				.catch(error => {
 					logger.warn("isolation capture failed; keeping the workspace", {
@@ -972,7 +976,6 @@ export async function cleanupIsolation(
 				),
 			]);
 			deadline.abort();
-			options.onLockHeld?.(false);
 			if (overran) {
 				logger.warn(
 					"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",
