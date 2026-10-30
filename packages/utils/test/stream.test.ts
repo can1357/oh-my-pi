@@ -384,6 +384,19 @@ describe("readSseJson", () => {
 			expect(output).toEqual([{ a: 1 }]);
 		}
 	});
+	it("recovers container-shaped frames that failed strict parse due to escape-split", async () => {
+		const cases = [
+			{ wire: 'data: {"c":"say hi\\nfrom 9router"}\n\n', expect: [{a:1}, {c:"say hi\nfrom 9router"}] },
+			{ wire: 'data: {"m":"he said \\"hi\\""}\n\n', expect: [{a:1}, {m:'he said "hi"'}] },
+			{ wire: 'data: {"c":"\\u00e9"}\n\n', expect: [{a:1}, {c:"é"}] },
+		];
+		for (const { wire: data, expect: exp } of cases) {
+			const chunks = [encoder.encode('data: {"a":1}\n\n'), encoder.encode(data)];
+			const stream = new ReadableStream({start(c){for(const x of chunks)c.enqueue(x);c.close();}});
+			const result = await collectAsync(readSseJson(stream));
+			expect(result).toEqual(exp);
+		}
+	});
 });
 
 describe("readSseJsonOrText", () => {
