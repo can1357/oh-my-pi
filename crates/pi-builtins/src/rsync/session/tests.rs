@@ -968,16 +968,21 @@ fn a_query_leaves_the_callers_signal_settings_alone() {
 /// child goes on to the `execve` it cannot do — so both halves fail.
 ///
 /// The storm carries a second signal, one the caller *ignores*. That is
-/// the caller's own instruction and it has to reach the utility: a child
-/// that put it back to default would die on the very delivery that proves
-/// the window was hit, and this requires that no child ever did. What it
-/// cannot reach is the case the same mistake was found in — an ignored
-/// disposition whose *read* is denied — because denying one read needs a
-/// kernel filter, which lives in this lane's harness rather than here.
+/// the caller's own instruction and it has to reach the utility, so the
+/// last query here runs a utility that raises that very signal at itself
+/// and then answers: it answers only if the ignore survived into the
+/// child. The weaker form — no child died on it — is not a guard, and
+/// this says so because it was one: a loop that resets a readable
+/// `SIG_IGN` is one line's difference and passed that form twenty times
+/// out of twenty. What neither form reaches is the case the fallback was
+/// repaired for — an ignored disposition whose *read* is denied —
+/// because denying one read needs a kernel filter, which lives in this
+/// lane's harness rather than here.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	use std::os::fd::AsRawFd as _;
+	use std::os::unix::fs::PermissionsExt as _;
 	use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 	/// This test's own number, and the descriptor the handler writes to.
@@ -1063,6 +1068,17 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	}
 	storming.store(false, Ordering::Relaxed);
 	storm.join().unwrap();
+	// With the storm stopped, one query says outright whether the ignored
+	// disposition reached a child: the utility raises that very signal at
+	// itself and then answers, so it answers only if the ignore survived
+	// into it. Not knowing of a child that died is not the same as
+	// knowing one lived — a loop that resets a readable `SIG_IGN` is one
+	// line's difference and passed the "no child died on it" form of this
+	// twenty times out of twenty.
+	let raises = dir.path().join("locale-raises-the-ignored-signal");
+	fs::write(&raises, format!("#!/bin/sh\nkill -{} $$\nprintf 'UTF-8\\n'\n", libc::SIGUSR2)).unwrap();
+	fs::set_permissions(&raises, fs::Permissions::from_mode(0o755)).unwrap();
+	let ignoring = crate::locale::codeset_from_utility_for_test(&raises, "C.UTF-8", &|_| None);
 	// SAFETY: putting back what this test changed, before it can fail.
 	unsafe {
 		libc::sigaction(libc::SIGUSR1, &raw const kept, std::ptr::null_mut());
@@ -1079,6 +1095,10 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	assert!(
 		died_ignoring.is_none(),
 		"a disposition the caller ignores was not left ignored: {died_ignoring:?}"
+	);
+	assert!(
+		matches!(&ignoring, crate::locale::Codeset::Loaded(found) if found == "UTF-8"),
+		"a utility that raises the signal the caller ignores survives it: {ignoring:?}"
 	);
 }
 

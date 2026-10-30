@@ -1221,11 +1221,15 @@ fn start_locale_utility(
 			//   disposition by itself — and cost a utility its ignored
 			//   `SIGPIPE`: with the read of 13 denied, it raised the
 			//   signal and died on it where it used to answer;
-			// * a signal that can be neither read nor set, or whose
-			//   ignored disposition cannot be put back, is kept *blocked*
-			//   in the mask the utility starts with, because a blocked
-			//   signal cannot be delivered before the `execve`, and the
-			//   `execve` drops the handler;
+			// * a signal whose handler cannot be replaced, whichever way
+			//   round the refusal came, is kept *blocked* in the mask the
+			//   utility starts with, because a blocked signal cannot be
+			//   delivered before the `execve`, and the `execve` drops the
+			//   handler. A read that worked and a set that did not used
+			//   to end the child outright, which made the easier failure
+			//   the one this handled worse: a filter denying only the
+			//   write gave status 124 where denying the read *as well*
+			//   answered;
 			// * and a signal that cannot be blocked either ends the
 			//   child, because nothing is left to make it safe.
 			//
@@ -1239,14 +1243,18 @@ fn start_locale_utility(
 			// them to an application anyway.
 			//
 			// The cost of that last rung, stated rather than engineered
-			// around: a signal blocked there stays blocked in the
-			// utility, so a utility that needs that very signal
-			// delivered does not get it — measured, a stand-in that
-			// raises `SIGUSR1` to itself exits 78 when neither reading
-			// nor setting 10 is permitted. There is no fourth thing to
-			// do with a disposition that can be neither read nor set:
-			// the signal is blocked, or its handler is left alive, or
-			// the query answers nothing at all.
+			// around: a signal that reaches it is blocked in the utility,
+			// with whatever that implies for the utility's own timers,
+			// children and termination. Measured, with reading and
+			// setting 10 both refused: a stand-in that raises `SIGUSR1`
+			// to itself exits 78; and with other numbers blocked the same
+			// way, a one-second `SIGALRM` wake-up became a five-second
+			// query timeout, a blocked `SIGCHLD` kept a handler from
+			// running, and a blocked `SIGTERM` left a utility running
+			// where it would have ended. There is no fourth thing to do
+			// with a handler that cannot be replaced: the signal is
+			// blocked, or the handler is left alive to run before the
+			// `execve`, or the query answers nothing at all.
 			let mut starts_with = held;
 			for signal in 1..=libc::SIGRTMAX() {
 				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
@@ -1260,24 +1268,24 @@ fn start_locale_utility(
 				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
 				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) == 0 {
 					let current = current.assume_init();
-					if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
-						continue;
-					}
-					if libc::sigaction(signal, &raw const default, std::ptr::null_mut()) != 0 {
-						libc::_exit(CHILD_NO_SETUP);
-					}
-					continue;
-				}
-				// The read was refused, so the set is asked what was
-				// there. It answers atomically: nothing of this
-				// process's runs in between.
-				let mut was = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
-				if libc::sigaction(signal, &raw const default, was.as_mut_ptr()) == 0 {
-					let was = was.assume_init();
-					if was.sa_sigaction != libc::SIG_IGN
-						|| libc::sigaction(signal, &raw const was, std::ptr::null_mut()) == 0
+					if current.sa_sigaction == libc::SIG_IGN
+						|| current.sa_sigaction == libc::SIG_DFL
+						|| libc::sigaction(signal, &raw const default, std::ptr::null_mut()) == 0
 					{
 						continue;
+					}
+				} else {
+					// The read was refused, so the set is asked what was
+					// there. It answers atomically: nothing of this
+					// process's runs in between.
+					let mut was = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+					if libc::sigaction(signal, &raw const default, was.as_mut_ptr()) == 0 {
+						let was = was.assume_init();
+						if was.sa_sigaction != libc::SIG_IGN
+							|| libc::sigaction(signal, &raw const was, std::ptr::null_mut()) == 0
+						{
+							continue;
+						}
 					}
 				}
 				// `sigaddset` first, and the bit itself where the library
