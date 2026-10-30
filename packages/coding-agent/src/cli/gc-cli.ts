@@ -443,8 +443,22 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	return await scanSessionTree(JSONL_BACKUP_GLOB, root);
 }
 
-/** How many links deep a session file is followed before giving up. */
-const SESSION_LINK_HOPS = 64;
+/**
+ * How many links deep a session file is followed before this gives up.
+ *
+ * Below Linux's own 40-link ceiling on purpose: a path this walk refuses is
+ * one the kernel may still resolve, so the refusal keeps blobs that are
+ * genuinely reachable rather than walking past a session the sweep then
+ * deletes.
+ */
+const SESSION_LINK_HOPS = 32;
+
+/** What a walk found, and whether it could finish — see {@link blobHashesOnSessionPath}. */
+interface ReachableBlobs {
+	hashes: string[];
+	/** Why the walk could not be completed, when it could not be. */
+	unresolved?: string;
+}
 
 /**
  * Blob hashes on the path `file` is reachable through — every hop of it, not
@@ -460,27 +474,44 @@ const SESSION_LINK_HOPS = 64;
  * the second takes the transcript and the blobs it referenced, both
  * reporting `errors: []`.
  *
- * The directories are compared as directories rather than as strings: a
- * symlinked agent directory, a symlinked blob directory, or one reached
- * across a filesystem boundary all give the same physical directory a
- * different name, and a string comparison then says the blob store is not
- * the blob store.
+ * Each hop is resolved the way the kernel resolves it: a relative target is
+ * taken from the *physical* directory the link lives in, not from the
+ * lexical one. `sessions/b -> ../offloaded` holding
+ * `session.jsonl -> ../blobs/<hash>` is where the two answers differ — the
+ * lexical one names `sessions/blobs/<hash>`, which does not exist, so the
+ * blob on the real path was left unprotected and swept.
+ *
+ * Directories are compared by device and inode rather than by name, because
+ * a symlinked agent directory, a symlinked blob directory or one reached
+ * across a filesystem boundary gives the same physical directory a different
+ * name. Where that identity cannot be established, or the walk cannot be
+ * finished, this says so rather than answering: a sweep that cannot
+ * establish something keeps.
  */
-async function blobHashesOnSessionPath(file: string, blobDir: Stats | undefined): Promise<string[]> {
-	if (!blobDir) return [];
+async function blobHashesOnSessionPath(file: string, blobDir: Stats | undefined): Promise<ReachableBlobs> {
+	if (!blobDir) return { hashes: [], unresolved: `${file}: the blob directory could not be identified` };
 	const hashes: string[] = [];
 	let current = path.resolve(file);
-	for (let hop = 0; hop < SESSION_LINK_HOPS; hop++) {
-		const parent = await statIfPresent(path.dirname(current));
+	for (let hop = 0; ; hop++) {
+		if (hop >= SESSION_LINK_HOPS) {
+			return { hashes, unresolved: `${file}: more than ${SESSION_LINK_HOPS} links deep` };
+		}
+		const holder = path.dirname(current);
+		const parent = await statIfPresent(holder);
 		if (parent?.dev === blobDir.dev && parent.ino === blobDir.ino) {
 			const hash = path.basename(current).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
 			if (hash && BLOB_HASH_RE.test(hash)) hashes.push(hash);
 		}
 		const target = await fs.readlink(current).catch(() => undefined);
-		if (target === undefined) break;
-		current = path.resolve(path.dirname(current), target);
+		if (target === undefined) return { hashes };
+		if (path.isAbsolute(target)) {
+			current = path.resolve(target);
+			continue;
+		}
+		const physical = await fs.realpath(holder).catch(() => undefined);
+		if (physical === undefined) return { hashes, unresolved: `${file}: ${holder} could not be resolved` };
+		current = path.resolve(physical, target);
 	}
-	return hashes;
 }
 
 /**
@@ -488,12 +519,18 @@ async function blobHashesOnSessionPath(file: string, blobDir: Stats | undefined)
  * hashes of the blob files those sessions are reachable through — see
  * {@link blobHashesOnSessionPath}. A file reachable as a session is a file
  * in use, whichever of its names the sweep happens to be walking.
+ *
+ * `unresolved` carries the walks that could not be completed, and the
+ * identity check every comparison here rested on, asked again at the end: a
+ * blob directory replaced mid-run, or one whose inode numbers are not
+ * stable, makes all of these answers meaningless. Nothing is deleted on the
+ * strength of a reading that admits it is incomplete.
  */
 async function collectReferencedBlobHashes(
 	sessionRoots: string[],
 	exactSessionFiles: string[],
 	blobDir: string,
-): Promise<Set<string>> {
+): Promise<{ hashes: Set<string>; unresolved: string[] }> {
 	const files = new Map<string, string>();
 	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
@@ -511,8 +548,12 @@ async function collectReferencedBlobHashes(
 
 	const blobs = await statIfPresent(blobDir);
 	const hashes = new Set<string>();
+	const unresolved: string[] = [];
+	if (!blobs) unresolved.push(`${blobDir}: the blob directory could not be identified`);
 	for (const file of files.values()) {
-		for (const hash of await blobHashesOnSessionPath(file, blobs)) hashes.add(hash);
+		const reachable = await blobHashesOnSessionPath(file, blobs);
+		for (const hash of reachable.hashes) hashes.add(hash);
+		if (reachable.unresolved) unresolved.push(reachable.unresolved);
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
 		await scanSessionLinesIfPresent(file, line => {
 			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
@@ -521,7 +562,11 @@ async function collectReferencedBlobHashes(
 			}
 		});
 	}
-	return hashes;
+	const standing = await statIfPresent(blobDir);
+	if (blobs && (standing?.dev !== blobs.dev || standing.ino !== blobs.ino)) {
+		unresolved.push(`${blobDir}: its identity changed while the sweep was reading`);
+	}
+	return { hashes, unresolved };
 }
 
 /**
@@ -590,9 +635,14 @@ async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
 		const hash = isStaging ? undefined : entry.match(BLOB_FILE_RE)?.[1];
 		if (!isStaging && !hash) continue;
 		const file = path.join(blobDir, entry);
-		const stat = await statIfPresent(file);
+		// `lstat`: these are entries in gc's own store, and the question is
+		// what is at the name rather than what it leads to. Following them
+		// threw `ELOOP` out of the whole sweep on a looping blob-named link,
+		// and read a link whose target had gone as nothing being there —
+		// which is how a `.HASH.…tmp` link outlived every later run.
+		const stat = await fs.lstat(file).catch(() => undefined);
 		if (!stat) continue;
-		if (!stat.isFile()) continue;
+		if (!stat.isFile() && !stat.isSymbolicLink()) continue;
 		if (!hash) {
 			staging.push({ path: file, bytes: stat.size, mtimeMs: stat.mtimeMs });
 			continue;
@@ -642,8 +692,14 @@ async function deleteBlobCandidate(
 				return false;
 			}
 		}
-		const stat = await statIfPresent(moved);
-		if (stat && stat.mtimeMs > deleteBeforeMs) {
+		// `lstat`, not `stat`: a canonical blob that is itself a symlink has a
+		// target that may already be gone, and asking about the target then
+		// says "nothing is there" about an entry that is very much there. The
+		// renamed link was dropped from the removal list on that answer and
+		// every later sweep skipped it, leaving `.HASH.…tmp` links behind for
+		// good.
+		const stat = await fs.lstat(moved).catch(() => undefined);
+		if (stat?.isFile() && stat.mtimeMs > deleteBeforeMs) {
 			await restoreReusedBlob(moved, canonical, result);
 			return false;
 		}
@@ -686,17 +742,29 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], blobDir);
 	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
-		referenced: referenced.size,
+		referenced: referenced.hashes.size,
 		candidates: candidates.length,
 		wouldDelete: 0,
 		deleted: 0,
 		bytes: 0,
 		errors: [],
 	};
+	// A sweep that could not finish reading keeps. Every refusal above is a
+	// reading this run knows is incomplete — a path it could not follow, a
+	// blob directory it could not identify or one that stopped being the
+	// directory it had been comparing against — and deleting on the strength
+	// of an incomplete reading is how an unreferenced-looking blob turns out
+	// to have been a session.
+	if (referenced.unresolved.length > 0) {
+		for (const reason of referenced.unresolved) {
+			result.errors.push(`${reason}; no blob was deleted in this run`);
+		}
+		return result;
+	}
 
 	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 	for (const candidate of candidates) {
-		if (referenced.has(candidate.hash)) continue;
+		if (referenced.hashes.has(candidate.hash)) continue;
 		if (candidate.mtimeMs > deleteBeforeMs) continue;
 		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
 		result.wouldDelete += candidate.paths.length;

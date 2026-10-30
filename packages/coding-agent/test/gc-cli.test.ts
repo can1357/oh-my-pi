@@ -308,6 +308,106 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(session).text()).toContain(innerHash);
 		expect(await Bun.file(inner).exists()).toBe(true);
 	});
+	test("keeps a blob a relative link reaches through a linked directory", async () => {
+		const innerHash = hashFor("inner-relative");
+		const transcriptHash = hashFor("transcript-relative");
+		const blobs = getBlobsDir(root);
+		const inner = await writeBlob(root, innerHash, "inner");
+		const session = await writeSession(root, "project", "relative", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = path.join(blobs, transcriptHash);
+		await Bun.write(transcript, await Bun.file(session).bytes());
+		await fs.rm(session);
+		// `sessions/project` reached through a link, holding a session whose
+		// own link is relative: the kernel takes `../blobs/<hash>` from the
+		// directory the link physically lives in, and anything that applies
+		// `..` to the lexical parent names a path that does not exist.
+		const offloaded = path.join(root, "offloaded");
+		await fs.mkdir(offloaded, { recursive: true });
+		await fs.symlink(path.join("..", "blobs", transcriptHash), path.join(offloaded, "relative.jsonl"));
+		await fs.rm(path.dirname(session), { recursive: true });
+		await fs.symlink(path.join("..", "offloaded"), path.dirname(session));
+		for (const file of [transcript, inner]) await agePath(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(transcript).exists()).toBe(true);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
+
+	test("deletes nothing when a session's path cannot be followed to the end", async () => {
+		const orphan = await writeBlob(root, hashFor("orphan"), "orphan");
+		await agePath(orphan);
+		const blobs = getBlobsDir(root);
+		// A chain deeper than the walk follows. "I could not follow this" is
+		// not "there is nothing there", so the run keeps everything and says
+		// why.
+		let previous = path.join(blobs, hashFor("deep-end"));
+		await Bun.write(previous, "deep");
+		for (let hop = 0; hop < 34; hop++) {
+			const link = path.join(blobs, hashFor(`deep-${hop}`));
+			await fs.symlink(previous, link);
+			previous = link;
+		}
+		const sessions = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessions, { recursive: true });
+		await fs.symlink(previous, path.join(sessions, "deep.jsonl"));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("no blob was deleted in this run");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	test("deletes nothing when the blob directory stops being the one it was reading", async () => {
+		const orphan = await writeBlob(root, hashFor("orphan"), "orphan");
+		await agePath(orphan);
+		await writeSession(root, "project", "plain", "complete");
+
+		// The identity every comparison rested on, taken away underneath it.
+		const realStat = fs.stat.bind(fs);
+		let seen = 0;
+		const stat = spyOn(fs, "stat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const answer = await (realStat as (...args: unknown[]) => Promise<Stats>)(target, ...rest);
+			if (String(target) === getBlobsDir(root) && seen++ > 0) {
+				return { ...answer, ino: answer.ino + 1 } as unknown as Stats;
+			}
+			return answer;
+		}) as typeof fs.stat);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			stat.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("identity changed");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+
+	test("leaves no staging link behind when the last link to a blob goes", async () => {
+		const hash = hashFor("linked-orphan");
+		const target = path.join(root, "elsewhere-blob");
+		await Bun.write(target, "orphan");
+		const blobs = getBlobsDir(root);
+		await fs.mkdir(blobs, { recursive: true });
+		// The canonical blob is itself a link; its target is gone by the time
+		// the sweep looks, which used to drop the renamed link from the
+		// removal list and strand it for every later run.
+		await fs.symlink(target, path.join(blobs, hash));
+		await fs.rm(target);
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(path.join(blobs, hash), aged, aged);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBeGreaterThan(0);
+		expect(await fs.readdir(blobs)).toEqual([]);
+	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");
