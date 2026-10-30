@@ -160,7 +160,7 @@ describe("single-instance menus", () => {
 		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
 		selectionPicker.handleInput?.("\r");
 
-		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`);
+		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`, model);
 		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
 		expect(ctx.session.applyRoleModel).not.toHaveBeenCalled();
 		expect(cfgTaskAgentModelOverrides.get(ctx.settings)).toEqual(taskDefaults);
@@ -218,7 +218,7 @@ describe("single-instance menus", () => {
 		expect(latestSelect).not.toHaveBeenCalled();
 		shown[1]?.handleInput?.("\r");
 		expect(oldSelect).not.toHaveBeenCalled();
-		expect(latestSelect).toHaveBeenCalledWith(selector);
+		expect(latestSelect).toHaveBeenCalledWith(selector, model);
 
 		controller.showModelSelector({
 			selectOnly: { currentSelector: selector, onSelect: vi.fn() },

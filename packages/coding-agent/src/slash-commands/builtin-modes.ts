@@ -306,11 +306,40 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "plan-review",
 		icon: "plan",
 		description: "Re-open the plan review for the latest plan (plan mode only)",
-		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
+		isTuiAvailable: runtime => runtime.ctx.planModeEnabled,
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "exec-model",
+		icon: "model",
+		description: "Choose the model that executes the approved plan (plan mode only; applies on approval)",
+		inlineHint: "[model|clear]",
+		allowArgs: true,
+		subcommands: [{ name: "clear", description: "Drop the pinned model; approval uses the slider tier" }],
+		subcommandOptional: true,
+		isTuiAvailable: runtime => runtime.ctx.planModeEnabled,
+		handleTui: (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			const selector = command.args.trim();
+			if (!selector) {
+				ctx.showPlanExecutionModelPicker();
+				return;
+			}
+			if (selector === "clear") {
+				ctx.clearPlanExecutionModel();
+				return;
+			}
+			const resolved = resolveSessionModelSelector(selector, ctx.session, ctx.settings);
+			if (!resolved.model) {
+				ctx.showError(`Unknown model: ${selector}`);
+				return;
+			}
+			if (resolved.warning) ctx.showStatus(resolved.warning);
+			ctx.setPlanExecutionModel(resolved.model, resolved.thinkingLevel);
 		},
 	},
 	{

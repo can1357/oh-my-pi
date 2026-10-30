@@ -78,7 +78,7 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -602,6 +602,11 @@ const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
+
+/** Where an approved plan executes: a slider role tier, or any model pinned via the picker. */
+type PlanExecutionTarget =
+	| { kind: "role"; entry: ResolvedRoleModel }
+	| { kind: "model"; model: Model; thinkingLevel?: ConfiguredThinkingLevel; label: string };
 
 const CFG_APPROVE_SESSION = "Always for this session";
 const CFG_APPROVE_ONCE = "Allow once";
@@ -1766,6 +1771,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	/** Model pinned via `/exec-model` or the review's `m` key; applied on approval after plan mode's own restore. */
+	#planExecutionPin: { model: Model; thinkingLevel?: ConfiguredThinkingLevel; label: string } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
@@ -5587,6 +5594,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.planModePlanFilePath = undefined;
 				this.#planModePreviousToolPresentation = undefined;
 				this.#planModePreviousModelState = undefined;
+				this.#planExecutionPin = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
 				this.#planModeHasEntered = false;
@@ -5847,21 +5855,26 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Idempotent post-compaction model transition for the plan-approval compact
-	 * path. The deferred pre-plan state is consumed on first application, so a
-	 * second call (the before-flush hook vs. the short-circuit fallback) is a
-	 * no-op. "failed" intentionally stays on the plan model — the context is
-	 * intact and we dispatch best-effort.
+	 * path. `transition.done` is set on first application, so a second call (the
+	 * before-flush hook vs. the short-circuit fallback) is a no-op. An execution
+	 * target applies even with no recorded pre-plan state (no `plan` role, or a
+	 * resumed plan session); the pre-plan state only drives the restore fallback.
+	 * "failed" intentionally stays on the plan model — the context is intact and
+	 * we dispatch best-effort.
 	 */
 	async #applyDeferredPlanModelTransition(
 		outcome: CompactionOutcome | undefined,
-		executionModel: ResolvedRoleModel | undefined,
+		executionModel: PlanExecutionTarget | undefined,
+		transition: { done: boolean },
 	): Promise<void> {
 		const deferredPrev = this.#planModePreviousModelState;
-		if (deferredPrev === undefined || outcome === "failed") return;
+		if (transition.done || outcome === "failed") return;
+		if (deferredPrev === undefined && !executionModel) return;
+		transition.done = true;
 		this.#planModePreviousModelState = undefined;
 		if (executionModel) {
 			await this.#applyPlanExecutionModel(executionModel);
-		} else {
+		} else if (deferredPrev) {
 			await this.#restorePlanPreviousModel(deferredPrev);
 		}
 	}
@@ -5965,6 +5978,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousToolPresentation = undefined;
+		this.#planExecutionPin = undefined;
 		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
@@ -6137,6 +6151,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			helpText?: string;
 			disabledIndices?: number[];
 			onExternalEditor?: () => void;
+			onPickExecutionModel?: () => void;
 			onPlanEdited?: (content: string) => void;
 			onFeedbackChange?: (feedback: string) => void;
 			annotationState?: PlanReviewAnnotationState;
@@ -6187,6 +6202,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				onCancel: () => finish(undefined),
 				onCopyPlan: content => void this.#copyPlanToClipboard(content),
 				onExternalEditor: dialogOptions?.onExternalEditor,
+				onPickExecutionModel: dialogOptions?.onPickExecutionModel,
 				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
 				onPlanEdited: dialogOptions?.onPlanEdited,
 				onFeedbackChange: dialogOptions?.onFeedbackChange,
@@ -6194,6 +6210,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		);
 		this.#planReviewOverlay = overlay;
+		overlay.setExecutionNotice(this.#planExecutionPin?.label);
 		this.#planReviewOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",
@@ -6255,7 +6272,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#getPlanApprovalContextUsage(): ContextUsage | undefined {
-		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
+		const executionModel =
+			this.#planExecutionPin?.model ?? this.#planModePreviousModelState?.model ?? this.session.model;
 		const contextWindow = executionModel?.contextWindow;
 		if (typeof contextWindow === "number") {
 			return this.session.getContextUsage({ contextWindow });
@@ -6489,17 +6507,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #applyPlanExecutionModel(entry: ResolvedRoleModel | undefined): Promise<void> {
-		if (!entry) return;
+	async #applyPlanExecutionModel(target: PlanExecutionTarget | undefined): Promise<void> {
+		if (!target) return;
+		const label =
+			target.kind === "role"
+				? `${target.entry.role}: ${target.entry.model.name || target.entry.model.id}`
+				: target.label;
 		try {
-			await this.session.applyRoleModel(entry);
+			if (target.kind === "role") {
+				await this.session.applyRoleModel(target.entry);
+			} else {
+				const level = target.thinkingLevel ?? this.session.resolveTemporaryModelThinkingLevel(target.model);
+				const current = this.session.model;
+				// Same model and route: only effort may differ; avoid resetting the provider session.
+				if (current && formatModelStringWithRouting(current) === formatModelStringWithRouting(target.model)) {
+					if (level !== undefined) this.session.setThinkingLevel(level);
+				} else {
+					await this.session.setModelTemporary(target.model, level);
+				}
+			}
 			this.statusLine.invalidate();
 			this.updateEditorBorderColor();
-			this.showStatus(`Continuing with ${entry.role}: ${entry.model.name || entry.model.id}`);
+			this.showStatus(`Continuing with ${label}`);
 		} catch (error) {
-			this.showWarning(
-				`Could not switch to the ${entry.role} model: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showWarning(`Could not switch to ${label}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -6519,7 +6550,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			title: string;
 			preserveContext?: boolean;
 			compactBeforeExecute?: boolean;
-			executionModel?: ResolvedRoleModel;
+			executionModel?: PlanExecutionTarget;
 			reviewOwner: object;
 		},
 	): Promise<boolean> {
@@ -6539,6 +6570,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.markPlanInternalAbortPending();
 		}
 		let compactOutcome: CompactionOutcome | undefined;
+		const transition = { done: false };
 		try {
 			await this.#exitPlanMode({
 				silent: true,
@@ -6580,7 +6612,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				compactOutcome = await this.handleCompactCommand(
 					undefined,
 					undefined,
-					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
+					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel, transition),
 					compactionPrompt,
 				);
 			}
@@ -6635,7 +6667,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// lands on the plan model. "failed" stays on the plan model (context
 		// intact) and dispatches best-effort.
 		if (options.compactBeforeExecute) {
-			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
+			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel, transition);
 		} else {
 			await this.#applyPlanExecutionModel(options.executionModel);
 		}
@@ -7422,6 +7454,65 @@ export class InteractiveMode implements InteractiveModeContext {
 		return opened.promise;
 	}
 
+	setPlanExecutionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): boolean {
+		if (!this.planModeEnabled) {
+			this.showWarning("Plan mode is not active.");
+			return false;
+		}
+		if (!this.session.modelRegistry.hasConfiguredAuth(model)) {
+			this.showError(`No credentials configured for ${formatModelString(model)}.`);
+			return false;
+		}
+		const label = `${formatModelStringWithRouting(model)}${thinkingLevel === undefined ? "" : `:${thinkingLevel}`}`;
+		this.#planExecutionPin = { model, thinkingLevel, label };
+		this.#planReviewOverlay?.setExecutionNotice(label);
+		this.ui.requestRender();
+		const planning = this.session.model ? formatModelString(this.session.model) : "the current model";
+		this.showStatus(`Execution model: ${label} — applies when you approve the plan; planning stays on ${planning}.`);
+		const tokens = this.session.getContextUsage()?.tokens ?? 0;
+		if (typeof model.contextWindow === "number" && tokens > model.contextWindow) {
+			this.showWarning(
+				`${label} has a smaller context window than this session, so execution may overflow it; compaction runs on the planning model first.`,
+			);
+		}
+		return true;
+	}
+
+	clearPlanExecutionModel(): void {
+		if (this.#dropPlanExecutionPin()) {
+			this.showStatus("Execution model pin cleared; approval uses the slider tier.");
+		}
+	}
+
+	/** Drops the pin without a status line (slider moves supersede it); true when one existed. */
+	#dropPlanExecutionPin(): boolean {
+		if (!this.#planExecutionPin) return false;
+		this.#planExecutionPin = undefined;
+		this.#planReviewOverlay?.setExecutionNotice(undefined);
+		this.ui.requestRender();
+		return true;
+	}
+
+	showPlanExecutionModelPicker(): void {
+		if (!this.planModeEnabled) {
+			this.showWarning("Plan mode is not active.");
+			return;
+		}
+		const defaultModel = this.session.resolveRoleModelWithThinking("default").model;
+		const preselect = this.#planExecutionPin?.model ?? defaultModel ?? this.session.model;
+		this.showModelSelector({
+			selectOnly: {
+				currentSelector: preselect ? formatModelString(preselect) : undefined,
+				focusAfter: () => this.#planReviewOverlay,
+				// The picker's model object is authoritative: it keeps an upstream route and covers
+				// synthetic scoped models that a registry lookup would reject.
+				onSelect: (_selector, picked) => {
+					this.setPlanExecutionModel(picked);
+				},
+			},
+		});
+	}
+
 	/** A plan review is open and can still take a remote answer. */
 	#hasAnswerablePlanReview(): boolean {
 		return this.#pendingPlanReview !== undefined && this.#planReviewPick !== undefined;
@@ -7511,6 +7602,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						})),
 						onChange: index => {
 							selectedTierIndex = index;
+							this.#dropPlanExecutionPin();
 						},
 					}
 				: undefined;
@@ -7553,6 +7645,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				? role => {
 						const index = cycle!.models.findIndex(entry => entry.role === role);
 						if (index < 0) return false;
+						this.#dropPlanExecutionPin();
 						this.#planReviewOverlay?.setSliderIndex(index);
 						return true;
 					}
@@ -7571,6 +7664,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				helpText,
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
+				onPickExecutionModel: () => this.showPlanExecutionModelPicker(),
 				onPlanEdited: content => {
 					editedContent = content;
 					void Bun.write(this.#resolvePlanFilePath(planFilePath), content);
@@ -7606,6 +7700,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			() => requestDelivered.resolve(),
 		);
 		const choice = await choicePromise;
+		// Freeze the pin at commit: an already-open picker can still complete during the
+		// async plan-file read below and must not override the committed review.
+		const pinAtCommit = this.#planExecutionPin;
 		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 		const remote = pending.remote;
 		const closePlanReview = (): void => {
@@ -7673,8 +7770,13 @@ export class InteractiveMode implements InteractiveModeContext {
 								return entry.thinkingLevel === restoredState.thinkingLevel;
 							})
 						: -1;
-				const executionModel =
-					slider && cycle && selectedTierIndex !== restoredIndex ? cycle.models[selectedTierIndex] : undefined;
+				// A pinned model wins over the slider tier; captured at commit because
+				// #approvePlan's #exitPlanMode clears the pin.
+				const executionModel: PlanExecutionTarget | undefined = pinAtCommit
+					? { kind: "model", ...pinAtCommit }
+					: slider && cycle && selectedTierIndex !== restoredIndex
+						? { kind: "role", entry: cycle.models[selectedTierIndex] }
+						: undefined;
 				const executionDispatched = await this.#approvePlan(latestPlanContent, {
 					planFilePath,
 					title: details.title,

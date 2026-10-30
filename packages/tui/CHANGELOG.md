@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `PlanReviewOverlayCallbacks.onPickExecutionModel` (`m` key) and `PlanReviewOverlay.setExecutionNotice()` to show a host-pinned execution model under the tier slider ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+- Added `SlashCommand.isAvailable`: a live gate that hides a command from the name list while it returns `false` ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 
 ### Fixed

@@ -329,6 +329,44 @@ describe("PlanReviewOverlay", () => {
 		expect(onCopyPlan).toHaveBeenCalledWith("# Edited plan\n\nnew body\n");
 	});
 
+	it("opens the execution-model picker on m, but types m inside an annotation note", () => {
+		const onPickExecutionModel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Overview\n\nintro body\n\n## Goal\n\ngoal body\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onPickExecutionModel },
+		);
+		render(overlay); // lay out the sections so the Contents region exists
+		overlay.handleInput("m");
+		expect(onPickExecutionModel).toHaveBeenCalledTimes(1);
+
+		overlay.handleInput(TAB); // -> toc
+		overlay.handleInput("a"); // annotate
+		overlay.handleInput("m");
+		expect(onPickExecutionModel).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows the pinned execution model with or without a slider and drops it when cleared", () => {
+		const slider: HookSelectorSlider = {
+			caption: "continue with",
+			index: 0,
+			segments: [{ label: "default" }, { label: "slow" }],
+			onChange: vi.fn(),
+		};
+		for (const withSlider of [false, true]) {
+			const overlay = new PlanReviewOverlay(
+				"plan",
+				{ promptTitle: "next", options: APPROVAL_OPTIONS, slider: withSlider ? slider : undefined },
+				{ onPick: vi.fn(), onCancel: vi.fn() },
+			);
+			expect(render(overlay)).not.toContain("claude-haiku-4-5");
+			overlay.setExecutionNotice("anthropic/claude-haiku-4-5");
+			expect(render(overlay)).toContain("anthropic/claude-haiku-4-5");
+			overlay.setExecutionNotice(undefined);
+			expect(render(overlay)).not.toContain("claude-haiku-4-5");
+		}
+	});
+
 	// Plan with ≥2 headings + nesting, wide enough for the sidebar at width 80.
 	const SECTION_PLAN =
 		"# Overview\n\nintro body\n\n## Goal\n\ngoal body\n\n## Steps\n\nstep body\n\n# Risks\n\nrisk body\n";

@@ -230,6 +230,8 @@ export interface PlanReviewOverlayCallbacks {
 	onCancel: () => void;
 	/** Invoked with the current full plan text when the copy hotkey is pressed. */
 	onCopyPlan?: (content: string) => void | Promise<void>;
+	/** Invoked when the model key is pressed: pick any model as the execution model (overlay stays open). */
+	onPickExecutionModel?: () => void;
 	/** Invoked when the external-editor key is pressed (overlay stays open). */
 	onExternalEditor?: () => void;
 	/** Invoked when the external-editor key edits the active annotation draft. */
@@ -293,6 +295,8 @@ export class PlanReviewOverlay implements Component {
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number;
+	/** Host-pinned execution model label, shown under the slider; overrides the slider tier. */
+	#executionNotice: string | undefined;
 
 	#focus: Focus = "actions";
 	#tocCursor = 0;
@@ -616,6 +620,12 @@ export class PlanReviewOverlay implements Component {
 		this.#moveSlider(index - this.#sliderIndex);
 	}
 
+	/** Show (or clear, with `undefined`) the host-pinned execution model line. */
+	setExecutionNotice(label: string | undefined): void {
+		if (this.#committed) return;
+		this.#executionNotice = label;
+	}
+
 	/** Commit an external answer through the same input-locking path as Enter; false when nothing was committed. */
 	selectOption(label: string): boolean {
 		if (this.#committed) return false;
@@ -675,6 +685,10 @@ export class PlanReviewOverlay implements Component {
 		}
 		if (this.callbacks.onCopyPlan && keyData === "c") {
 			void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
+			return;
+		}
+		if (this.callbacks.onPickExecutionModel && keyData === "m") {
+			this.callbacks.onPickExecutionModel();
 			return;
 		}
 		if (matchesKey(keyData, "tab") || keyData === "\t") {
@@ -1202,17 +1216,23 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#renderSliderLines(): string[] {
+		const lines: string[] = [];
 		const slider = this.#slider;
-		if (!slider) return [];
-		const active = this.#sliderIndex;
-		const track = renderSegmentTrack(slider.segments, active);
-		const leftArrow = theme.fg(active > 0 ? "accent" : "dim", "◂");
-		const rightArrow = theme.fg(active < slider.segments.length - 1 ? "accent" : "dim", "▸");
-		const caption = slider.caption ? `${theme.fg("dim", slider.caption)}  ` : "";
-		const trackLine = `${caption}${leftArrow}  ${track}  ${rightArrow}`;
-		const detail = slider.segments[active]?.detail;
-		if (!detail) return [trackLine];
-		return [trackLine, `  ${theme.fg("dim", "↳")} ${theme.fg("muted", detail)}`];
+		if (slider) {
+			const active = this.#sliderIndex;
+			const track = renderSegmentTrack(slider.segments, active);
+			const leftArrow = theme.fg(active > 0 ? "accent" : "dim", "◂");
+			const rightArrow = theme.fg(active < slider.segments.length - 1 ? "accent" : "dim", "▸");
+			const caption = slider.caption ? `${theme.fg("dim", slider.caption)}  ` : "";
+			lines.push(`${caption}${leftArrow}  ${track}  ${rightArrow}`);
+			const detail = slider.segments[active]?.detail;
+			if (detail) lines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("muted", detail)}`);
+		}
+		if (this.#executionNotice) {
+			const notice = sanitizeStatusText(this.#executionNotice);
+			lines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("accent", `execute with ${notice} (overrides tier)`)}`);
+		}
+		return lines;
 	}
 
 	#renderOptionLines(): string[] {
@@ -1270,6 +1290,7 @@ export class PlanReviewOverlay implements Component {
 				break;
 		}
 		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
+		if (this.callbacks.onPickExecutionModel) parts.push(`${formatKeyHint("m")} any model`);
 		parts.push(`${formatKeyHint("tab")} regions`);
 		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
 		parts.push(this.#helpSuffix ?? `${editorKey("tui.select.cancel")} cancel`);
@@ -1548,6 +1569,7 @@ export class PlanReviewOverlay implements Component {
 			this.#jump?.n ?? 0,
 			this.#selectedIndex,
 			this.#sliderIndex,
+			this.#executionNotice ?? "",
 			this.#committed ? `committed:${this.#committedLabel ?? ""}` : "",
 			this.#annotating
 				? `annotating:${target?.sectionIndex}:${target?.row}:${target?.context}:${this.#editingAnnotation !== undefined}`
@@ -1751,23 +1773,35 @@ export class PlanReviewOverlay implements Component {
 
 	#describeSlider(): NativeNode[] {
 		const slider = this.#slider;
-		if (!slider) return [];
-		const tabs = node(
-			"tabs",
-			{
-				items: slider.segments.map((segment, i) => ({ id: `t${i}`, label: segment.label })),
-				active: `t${this.#sliderIndex}`,
-				actions: { click: "select" },
-				role: "omp.plan.strategy",
-			},
-			undefined,
-			"tabs",
-		);
-		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
-		// A role of its own: Tern's sheet lets only the role-less split row (Contents + body) shrink and scroll.
-		const out = [keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider")];
-		const detail = slider.segments[this.#sliderIndex]?.detail;
-		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
+		const out: NativeNode[] = [];
+		if (slider) {
+			const tabs = node(
+				"tabs",
+				{
+					items: slider.segments.map((segment, i) => ({ id: `t${i}`, label: segment.label })),
+					active: `t${this.#sliderIndex}`,
+					actions: { click: "select" },
+					role: "omp.plan.strategy",
+				},
+				undefined,
+				"tabs",
+			);
+			const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
+			// Keep the slider outside the shrinking, scrolling Contents/body row.
+			out.push(keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider"));
+			const detail = slider.segments[this.#sliderIndex]?.detail;
+			if (detail)
+				out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
+		}
+		if (this.#executionNotice) {
+			const notice = sanitizeStatusText(this.#executionNotice);
+			out.push(
+				keyed(
+					text([span("↳ ", "dim"), span(`execute with ${notice} (overrides tier)`, "accent")], { wrap: "word" }),
+					"executionNotice",
+				),
+			);
+		}
 		return out;
 	}
 
@@ -1862,6 +1896,7 @@ export class PlanReviewOverlay implements Component {
 				);
 				break;
 		}
+		if (this.callbacks.onPickExecutionModel) hints.push(key("m", "any model"));
 		// Copy and the external editor are head buttons with their keycaps; the hints skip them.
 		hints.push(key("tab", "regions"));
 		hints.push(this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", "cancel"));

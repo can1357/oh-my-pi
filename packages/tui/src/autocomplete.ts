@@ -249,6 +249,8 @@ export interface SlashCommand {
 	allowArgs?: boolean;
 	/** Dynamic display-only description for slash-command autocomplete. Must be synchronous and side-effect free. */
 	getAutocompleteDescription?: () => string | undefined;
+	/** Live visibility gate for the command-name list; `false` hides the command until it applies again. Must be synchronous and side-effect free. */
+	isAvailable?: () => boolean;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
@@ -390,6 +392,7 @@ function buildSlashCommandCompletions(
 	return (
 		commands
 			.flatMap(cmd => {
+				if ("isAvailable" in cmd && cmd.isAvailable?.() === false) return [];
 				const name = getCommandName(cmd);
 				if (!name) return [];
 				const usage = commandUsage?.(name) ?? 0;
