@@ -207,6 +207,12 @@ it("eval refuses both canonical and wire names after their tool is disabled", as
 	expect(session.getToolForEvalBridge("edit")).toBeUndefined();
 	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
 	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+	for (const name of ["edit", "apply_patch", "xd://apply_patch"]) {
+		await expect(callSessionTool(name, {}, { session: toolSession })).rejects.toThrow("disabled or excluded");
+	}
 });
 
 it("eval preserves raw patch validation when resolving a wire alias", async () => {
