@@ -497,4 +497,33 @@ describe("beforeDispatch", () => {
 
 		expect(sentWhileHeld).toEqual([false]);
 	});
+
+	// Re-stamping dropped a hold the built fetch did not already carry, so a
+	// caller that gated an existing transport got an ungated one back.
+	test("takes on a hold the stamped fetch does not carry, without a second layer", async () => {
+		const calls: string[] = [];
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const first = () => {
+			calls.push("first");
+		};
+		const second = () => {
+			calls.push("second");
+		};
+		const once = transportFetch(model(), base, first);
+		const twice = transportFetch(model(), once, second);
+
+		expect(twice).not.toBe(once);
+		await twice("https://example.invalid/v1/messages", { method: "POST" });
+		// Both holds, and still exactly one transport layer around `base`.
+		expect(calls).toEqual(["first", "second", "request"]);
+
+		calls.length = 0;
+		expect(transportFetch(model(), twice, second)).toBe(twice);
+		expect(transportFetch(model(), twice, first)).toBe(twice);
+		await twice("https://example.invalid/v1/messages", { method: "POST" });
+		expect(calls).toEqual(["first", "second", "request"]);
+	});
 });

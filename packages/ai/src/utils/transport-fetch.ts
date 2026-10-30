@@ -6,10 +6,17 @@ import { holdBeforeDispatch } from "./dispatch-hold";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
-/** Stamped on a fetch already built by {@link transportFetch}. */
+/** What {@link transportFetch} stamps on a fetch it built. */
+interface TransportFetchStamp {
+	/** The fetch it wraps, so a later hold rebuilds from it instead of layering onto it. */
+	base: FetchImpl;
+	/** Every hold baked in, in the order they were supplied. */
+	holds: readonly DispatchHold[];
+}
+
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
 
-type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
+type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: TransportFetchStamp };
 
 /**
  * The one fetch every inference request goes through. Per call it applies, in
@@ -30,13 +37,19 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * hold and all — `streamSimple` re-enters `stream`, and `streamSimpleRequest`
  * re-enters itself on auth retries, so without the stamp each entry point
  * would add another layer (three PI_REQ_DEBUG dumps, and three holds, for one
- * request).
+ * request). A hold the stamp does not already carry is not dropped: the fetch
+ * is rebuilt from the stamped base with that hold added, which gates the
+ * request without a second transport layer.
  */
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined, hold?: DispatchHold): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
-	if (given?.[TRANSPORT_FETCH]) return given;
+	const stamp = given?.[TRANSPORT_FETCH];
+	if (given && stamp && (hold === undefined || stamp.holds.includes(hold))) return given;
 	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+		stamp?.base ??
+		given ??
+		(model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	const holds: readonly DispatchHold[] = hold ? [...(stamp?.holds ?? []), hold] : (stamp?.holds ?? []);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -46,7 +59,8 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
 		const debug = isRequestDebugEnabled() ? await createFetchRequestDebugSession(input, init) : undefined;
-		await holdBeforeDispatch(hold, init?.signal ?? (input instanceof Request ? input.signal : undefined));
+		const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+		for (const pending of holds) await holdBeforeDispatch(pending, signal);
 		// Recorded for the request that is now going out, not for one a hold
 		// still gates or an abort cancelled.
 		if (method === "POST") recordDispatchOrigin(model, input);
@@ -54,7 +68,7 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		return debug ? debug.wrapResponse(response) : response;
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = true;
+	fetch[TRANSPORT_FETCH] = { base, holds };
 	return fetch;
 }
 
