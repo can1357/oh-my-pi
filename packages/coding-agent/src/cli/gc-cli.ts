@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
@@ -442,18 +443,51 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	return await scanSessionTree(JSONL_BACKUP_GLOB, root);
 }
 
+/** How many links deep a session file is followed before giving up. */
+const SESSION_LINK_HOPS = 64;
+
 /**
- * Blob hashes every session file below these roots refers to, plus the hashes
- * of blob files that *are* session files.
+ * Blob hashes on the path `file` is reachable through — every hop of it, not
+ * just where it ends.
  *
  * A transcript can be stored in its own content-addressed blob file and
- * linked into the sessions tree — that is one file with two names, and the
- * one in `blobs/` is the only real one. Reading its references is not
- * enough: the blob holding the transcript itself has no reference anywhere,
- * so the sweep deleted it, left a broken link behind, reported `errors: []`,
- * and then deleted the blobs that transcript referenced on the next run,
- * because by then nothing could read it. A file reachable as a session is a
- * file in use, whichever of its names the sweep happens to be walking.
+ * linked into the sessions tree: one file with two names, and the one in
+ * `blobs/` is the only real one. Reading its references is not enough,
+ * because the blob holding the transcript itself has no reference anywhere.
+ * Nor is protecting the endpoint enough: every link in between is a file in
+ * the blob directory too, and a sweep that takes one of those breaks the
+ * session just as thoroughly — the first run removes the intermediate link,
+ * the second takes the transcript and the blobs it referenced, both
+ * reporting `errors: []`.
+ *
+ * The directories are compared as directories rather than as strings: a
+ * symlinked agent directory, a symlinked blob directory, or one reached
+ * across a filesystem boundary all give the same physical directory a
+ * different name, and a string comparison then says the blob store is not
+ * the blob store.
+ */
+async function blobHashesOnSessionPath(file: string, blobDir: Stats | undefined): Promise<string[]> {
+	if (!blobDir) return [];
+	const hashes: string[] = [];
+	let current = path.resolve(file);
+	for (let hop = 0; hop < SESSION_LINK_HOPS; hop++) {
+		const parent = await statIfPresent(path.dirname(current));
+		if (parent?.dev === blobDir.dev && parent.ino === blobDir.ino) {
+			const hash = path.basename(current).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
+			if (hash && BLOB_HASH_RE.test(hash)) hashes.push(hash);
+		}
+		const target = await fs.readlink(current).catch(() => undefined);
+		if (target === undefined) break;
+		current = path.resolve(path.dirname(current), target);
+	}
+	return hashes;
+}
+
+/**
+ * Blob hashes every session file below these roots refers to, plus the
+ * hashes of the blob files those sessions are reachable through — see
+ * {@link blobHashesOnSessionPath}. A file reachable as a session is a file
+ * in use, whichever of its names the sweep happens to be walking.
  */
 async function collectReferencedBlobHashes(
 	sessionRoots: string[],
@@ -475,14 +509,10 @@ async function collectReferencedBlobHashes(
 		files.set(normalizePathForComparison(file), file);
 	}
 
-	const blobs = path.resolve(blobDir);
+	const blobs = await statIfPresent(blobDir);
 	const hashes = new Set<string>();
 	for (const file of files.values()) {
-		const real = await fs.realpath(file).catch(() => undefined);
-		if (real && path.dirname(real) === blobs) {
-			const hash = path.basename(real).match(BLOB_FILE_RE)?.[1]?.toLowerCase();
-			if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-		}
+		for (const hash of await blobHashesOnSessionPath(file, blobs)) hashes.add(hash);
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
 		await scanSessionLinesIfPresent(file, line => {
 			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {

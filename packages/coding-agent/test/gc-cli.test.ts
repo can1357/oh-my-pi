@@ -250,6 +250,64 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
+	test("keeps a transcript blob reached through a symlinked blob directory", async () => {
+		const innerHash = hashFor("inner-alias");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const session = await writeSession(root, "project", "aliased", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const transcript = await Bun.file(session).bytes();
+		// The blob store itself reached under another name: the same physical
+		// directory compares unequal to itself as a string, which used to
+		// make every blob on a session's path invisible again.
+		const elsewhere = path.join(root, "elsewhere-blobs");
+		await fs.rename(getBlobsDir(root), elsewhere);
+		await fs.symlink(elsewhere, getBlobsDir(root));
+		const transcriptHash = hashFor("transcript-aliased");
+		const asBlob = path.join(elsewhere, transcriptHash);
+		await Bun.write(asBlob, transcript);
+		await fs.rm(session);
+		await fs.symlink(asBlob, session);
+		await agePath(asBlob);
+		await agePath(path.join(elsewhere, innerHash));
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(asBlob).exists()).toBe(true);
+		expect(await Bun.file(inner.replace(getBlobsDir(root), elsewhere)).exists()).toBe(true);
+		expect((await fs.lstat(session)).isSymbolicLink()).toBe(true);
+	});
+
+	test("keeps every blob on the path a session is reachable through", async () => {
+		const innerHash = hashFor("inner-chain");
+		const transcriptHash = hashFor("transcript-chain");
+		const firstHop = hashFor("first-hop");
+		const secondHop = hashFor("second-hop");
+		const blobs = getBlobsDir(root);
+		const session = await writeSession(root, "project", "chained", "complete", {
+			blobRef: `blob:sha256:${innerHash}`,
+		});
+		const inner = await writeBlob(root, innerHash, "inner");
+		const transcript = path.join(blobs, transcriptHash);
+		await Bun.write(transcript, await Bun.file(session).bytes());
+		// session → second hop → first hop → the transcript blob. Each hop is
+		// a file in the blob directory, so a sweep that takes one of them
+		// breaks the session as thoroughly as taking the endpoint.
+		await fs.symlink(transcript, path.join(blobs, firstHop));
+		await fs.symlink(path.join(blobs, firstHop), path.join(blobs, secondHop));
+		await fs.rm(session);
+		await fs.symlink(path.join(blobs, secondHop), session);
+		for (const file of [transcript, path.join(blobs, firstHop), path.join(blobs, secondHop), inner]) {
+			await agePath(file);
+		}
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(session).text()).toContain(innerHash);
+		expect(await Bun.file(inner).exists()).toBe(true);
+	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");
