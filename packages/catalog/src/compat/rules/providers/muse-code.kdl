@@ -67,6 +67,15 @@ provider "muse-code" {
 	// `custom` tools are rejected with 400 "`custom` tools are not supported
 	// on this endpoint", so apply-patch must stay a function tool here.
 	edit-prompt-variant "compact"
+	// A Muse Code subscription key answers 403 `client_attestation_denied` when
+	// the request declares a tool with certain exact, case-sensitive names:
+	// `bash`, `shell`, `web_search`, `web_fetch`, `apply_patch`, `read_file`
+	// and `update_plan` (2026-10-31; `Bash`, `run_shell`, `local_shell` and
+	// omp's other built-in names pass, and the list is not exhaustive). Only
+	// declared names count: a replayed `bash` call in history is accepted.
+	// Prefixing every function tool with `_` was accepted with all of omp's
+	// built-in tools declared.
+	tool-name-prefix "_"
 	on-api "openai-responses" {
 		// Spark 1.3 Contributor warmed siblings hit 10/10 vs 0/10 with per-child keys (2026-10-12).
 		// Meta documents shared-prefix prompt_cache_key routing; keep the opt-in on these exact Muse Code IDs.
