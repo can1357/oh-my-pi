@@ -51,7 +51,7 @@ impl DisplayGeometry {
 #[derive(Debug, Clone, PartialEq)]
 enum FrameKind {
 	Desktop,
-	Window { captured_width: u32, captured_height: u32 },
+	Window { captured_width: u32, captured_height: u32, offset_x: i64, offset_y: i64 },
 	Identity,
 }
 
@@ -94,17 +94,34 @@ impl FrameGeometry {
 		Self { width, height, regions, layout: Vec::new(), kind: FrameKind::Desktop }
 	}
 
+	#[cfg(any(not(target_os = "macos"), test))]
 	pub(crate) fn for_window(window: &DesktopWindow, px_width: u32, px_height: u32) -> Self {
+		Self::for_window_capture(
+			window,
+			(window.x, window.y, window.width, window.height),
+			px_width,
+			px_height,
+		)
+	}
+
+	/// Captured bounds may cover only part of the window; retain its full size
+	/// for resize validation and its captured offset for reanchored input.
+	pub(crate) fn for_window_capture(
+		window: &DesktopWindow,
+		(x, y, width, height): (i32, i32, u32, u32),
+		px_width: u32,
+		px_height: u32,
+	) -> Self {
 		Self {
 			width:   px_width,
 			height:  px_height,
 			regions: vec![FrameRegion {
 				id:           window.id.clone(),
-				scale:        f64::from(px_width) / f64::from(window.width.max(1)),
-				x:            f64::from(window.x),
-				y:            f64::from(window.y),
-				width:        f64::from(window.width),
-				height:       f64::from(window.height),
+				scale:        f64::from(px_width) / f64::from(width.max(1)),
+				x:            f64::from(x),
+				y:            f64::from(y),
+				width:        f64::from(width),
+				height:       f64::from(height),
 				pixel_x:      0.0,
 				pixel_y:      0.0,
 				pixel_width:  f64::from(px_width),
@@ -114,6 +131,8 @@ impl FrameGeometry {
 			kind:    FrameKind::Window {
 				captured_width:  window.width,
 				captured_height: window.height,
+				offset_x:        i64::from(x) - i64::from(window.x),
+				offset_y:        i64::from(y) - i64::from(window.y),
 			},
 		}
 	}
@@ -180,7 +199,7 @@ impl FrameGeometry {
 	}
 
 	pub(crate) fn validate_window(&self, window: Option<&DesktopWindow>) -> CoreResult<()> {
-		if let FrameKind::Window { captured_width, captured_height } = self.kind {
+		if let FrameKind::Window { captured_width, captured_height, .. } = self.kind {
 			let current = window.ok_or_else(|| {
 				DesktopError::window_not_found("target window is no longer available")
 			})?;
@@ -351,11 +370,14 @@ impl FrameGeometry {
 		let local_x = (x - region.pixel_x) * region.width / region.pixel_width;
 		let local_y = (y - region.pixel_y) * region.height / region.pixel_height;
 		match self.kind {
-			FrameKind::Window { .. } => {
+			FrameKind::Window { offset_x, offset_y, .. } => {
 				let current = current_window.ok_or_else(|| {
 					DesktopError::window_not_found("target window is no longer available")
 				})?;
-				Ok((f64::from(current.x) + local_x, f64::from(current.y) + local_y))
+				Ok((
+					f64::from(current.x) + offset_x as f64 + local_x,
+					f64::from(current.y) + offset_y as f64 + local_y,
+				))
 			},
 			FrameKind::Desktop => Ok((region.x + local_x, region.y + local_y)),
 			FrameKind::Identity => Ok((x, y)),
@@ -396,6 +418,29 @@ impl FrameGeometry {
 				pixel_width:  region.pixel_width.round().max(1.0) as u32,
 				pixel_height: region.pixel_height.round().max(1.0) as u32,
 				is_primary:   display.is_primary,
+			})
+			.collect()
+	}
+
+	/// A window frame's display entry: the captured part of the window, which
+	/// may be clipped to one display, as window `id` named `name`.
+	pub(crate) fn window_metadata(&self, id: &str, name: &str) -> Vec<DesktopDisplay> {
+		self
+			.regions
+			.iter()
+			.map(|region| DesktopDisplay {
+				id:           id.to_string(),
+				name:         name.to_string(),
+				x:            region.x as i32,
+				y:            region.y as i32,
+				width:        region.width as u32,
+				height:       region.height as u32,
+				scale:        region.scale,
+				pixel_x:      region.pixel_x.round() as u32,
+				pixel_y:      region.pixel_y.round() as u32,
+				pixel_width:  region.pixel_width.round().max(1.0) as u32,
+				pixel_height: region.pixel_height.round().max(1.0) as u32,
+				is_primary:   false,
 			})
 			.collect()
 	}
@@ -554,6 +599,56 @@ mod tests {
 	fn moved_window_is_reanchored() {
 		let f = FrameGeometry::for_window(&window(10, 20), 800, 600);
 		assert_eq!(f.map_point(400.0, 300.0, Some(&window(110, 220))).unwrap(), (310.0, 370.0));
+	}
+
+	#[test]
+	fn clipped_window_maps_capped_pixels_and_metadata_to_captured_bounds() {
+		let original = window(-100, -50);
+		let mut frame = FrameGeometry::for_window_capture(&original, (0, 0, 300, 250), 600, 500);
+		apply_capture_caps(RgbaImage::new(600, 500), &mut frame, &CaptureCaps {
+			max_width:  Some(300),
+			max_height: None,
+		})
+		.unwrap();
+		assert_eq!(frame.dimensions(), (300, 250));
+		assert_eq!(frame.map_point(150.0, 125.0, Some(&original)).unwrap(), (150.0, 125.0));
+		assert_eq!(
+			frame
+				.map_point(150.0, 125.0, Some(&window(10, 20)))
+				.unwrap(),
+			(260.0, 195.0)
+		);
+		let resized = DesktopWindow { width: 300, ..original };
+		assert!(frame.validate_window(Some(&resized)).is_err());
+		let metadata = frame.window_metadata("7", "TextEdit — a");
+		assert_eq!(metadata[0].id, "7");
+		assert_eq!(
+			(metadata[0].x, metadata[0].y, metadata[0].width, metadata[0].height),
+			(0, 0, 300, 250)
+		);
+		assert_eq!((metadata[0].pixel_width, metadata[0].pixel_height), (300, 250));
+		assert_eq!(metadata[0].scale, 2.0);
+	}
+
+	#[test]
+	fn clipped_zoom_rejects_changed_capture_offset_even_when_dimensions_match() {
+		let original = window(-100, -50);
+		let base = FrameGeometry::for_window_capture(&original, (0, 0, 300, 250), 600, 500);
+		let region = CaptureRegion { x: 20.0, y: 10.0, width: 40.0, height: 30.0 };
+		let image = RgbaImage::from_fn(600, 500, |x, y| Rgba([x as u8, y as u8, 7, 255]));
+		let moved = window(-90, -40);
+		let fresh = FrameGeometry::for_window_capture(&moved, (10, 10, 300, 250), 600, 500);
+		let (crop, width, height) = base
+			.crop_region(image.clone(), &fresh, &region, &CaptureCaps::default())
+			.unwrap();
+		assert_eq!((width, height), (40, 30));
+		assert_eq!(crop.get_pixel(0, 0), &Rgba([20, 10, 7, 255]));
+		let changed_offset = FrameGeometry::for_window_capture(&moved, (0, 0, 300, 250), 600, 500);
+		assert!(
+			base
+				.crop_region(image, &changed_offset, &region, &CaptureCaps::default())
+				.is_err()
+		);
 	}
 
 	#[test]

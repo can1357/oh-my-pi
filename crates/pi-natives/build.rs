@@ -295,6 +295,9 @@ fn build_darwin_native_helper(
 		Err(error) => panic!("CARGO_CFG_TARGET_ARCH should be set: {error}"),
 	};
 	println!("cargo:rerun-if-changed={}", source.display());
+	if source.ends_with("desktop/macos/capture/helper.m") {
+		println!("cargo:rerun-if-changed=src/desktop/macos/capture/geometry.h");
+	}
 	println!("cargo:rerun-if-changed=src/oauth_callback/darwin_compiler.rs");
 	println!("cargo:rerun-if-env-changed=CC");
 	println!("cargo:rerun-if-env-changed=SDKROOT");

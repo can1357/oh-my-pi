@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include "geometry.h"
 
 static BOOL WriteAll(const void *bytes, size_t count) {
 	const uint8_t *cursor = bytes;
@@ -44,11 +45,25 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	uint32_t identifier = [request[@"id"] unsignedIntValue];
 	SCContentFilter *filter = nil;
 	CGRect bounds = CGRectZero;
+	CGRect sourceRect = CGRectZero;
+	CGRect targetBounds = CGRectZero;
 	if ([kind isEqualToString:@"window"]) {
 		for (SCWindow *window in content.windows) {
 			if (window.windowID != identifier) continue;
-			filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
-			bounds = window.frame;
+			targetBounds = window.frame;
+			SCDisplay *selectedDisplay = nil;
+			for (SCDisplay *display in content.displays) {
+				if (WindowCaptureDisplay(window.frame, window.isOnScreen, display.frame, &bounds, &sourceRect)) {
+					selectedDisplay = display;
+				}
+			}
+			if (selectedDisplay) {
+				// Display-local cropping preserves the window's on-screen geometry.
+				filter = [[SCContentFilter alloc] initWithDisplay:selectedDisplay includingWindows:@[window]];
+			} else {
+				filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
+				bounds = window.frame;
+			}
 			break;
 		}
 	} else {
@@ -56,6 +71,7 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 			if (display.displayID != identifier) continue;
 			filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
 			bounds = display.frame;
+			targetBounds = bounds;
 			break;
 		}
 	}
@@ -63,8 +79,9 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 		Failure([kind isEqualToString:@"window"] ? @"WindowNotFound" : @"InvalidTarget", @"Capture target is no longer available");
 		done(); return;
 	}
-	double width = ceil(filter.contentRect.size.width * filter.pointPixelScale);
-	double height = ceil(filter.contentRect.size.height * filter.pointPixelScale);
+	CGSize captureSize = CGRectIsEmpty(sourceRect) ? filter.contentRect.size : sourceRect.size;
+	double width = ceil(captureSize.width * filter.pointPixelScale);
+	double height = ceil(captureSize.height * filter.pointPixelScale);
 	if (!isfinite(width) || !isfinite(height) || width < 1 || height < 1 ||
 		width > UINT32_MAX || height > UINT32_MAX || width * height > maxPixels) {
 		Failure(@"CaptureFailed", @"Native screenshot dimensions exceed the safety limit");
@@ -73,6 +90,7 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	SCStreamConfiguration *configuration = [SCStreamConfiguration new];
 	configuration.width = (size_t)width;
 	configuration.height = (size_t)height;
+	if (!CGRectIsEmpty(sourceRect)) configuration.sourceRect = sourceRect;
 	configuration.pixelFormat = kCVPixelFormatType_32BGRA;
 	configuration.colorSpaceName = kCGColorSpaceSRGB;
 	configuration.showsCursor = NO;
@@ -105,7 +123,9 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 			CGContextRelease(bitmap);
 			Header(@{ @"kind": @"frame", @"index": @(index), @"width": @(pixelWidth), @"height": @(pixelHeight),
 				@"byteLength": @(length), @"bounds": @{ @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
-					@"width": @(bounds.size.width), @"height": @(bounds.size.height) } });
+					@"width": @(bounds.size.width), @"height": @(bounds.size.height) },
+				@"targetBounds": @{ @"x": @(targetBounds.origin.x), @"y": @(targetBounds.origin.y),
+					@"width": @(targetBounds.size.width), @"height": @(targetBounds.size.height) } });
 			if (!WriteAll(pixels.bytes, pixels.length)) _exit(74);
 			CaptureNext(content, requests, index + 1, maxPixels, done);
 		}

@@ -35,7 +35,7 @@ def _darwin_helper_impl(ctx):
     ctx.actions.run(
         executable = compiler,
         arguments = [args],
-        inputs = depset([ctx.file.src], transitive = [cc_toolchain.all_files]),
+        inputs = depset([ctx.file.src] + ctx.files.hdrs, transitive = [cc_toolchain.all_files]),
         outputs = [out],
         env = env,
         mnemonic = "DarwinHelper",
@@ -48,6 +48,7 @@ _darwin_helper = rule(
     attrs = {
         "arch": attr.string(mandatory = True, values = ["arm64", "x86_64"]),
         "frameworks": attr.string_list(),
+        "hdrs": attr.label_list(allow_files = [".h"]),
         "minimum_macos": attr.string(mandatory = True),
         "src": attr.label(mandatory = True, allow_single_file = [".m"]),
     },
@@ -55,10 +56,11 @@ _darwin_helper = rule(
     toolchains = use_cc_toolchain(),
 )
 
-def darwin_helper(name, src, frameworks = ["AppKit"], minimum_macos = "12.0"):
+def darwin_helper(name, src, frameworks = ["AppKit"], minimum_macos = "12.0", hdrs = []):
     _darwin_helper(
         name = name,
         src = src,
+        hdrs = hdrs,
         arch = select({
             "//bazel/triples:aarch64-apple-darwin": "arm64",
             "//bazel/triples:x86_64-apple-darwin": "x86_64",
