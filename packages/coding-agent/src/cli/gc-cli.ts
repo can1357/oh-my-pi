@@ -1064,24 +1064,11 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 	}
 }
 
-/**
- * Relative paths the archive already holds under `destination`, or undefined
- * when the destination does not exist. Directories are listed too, so a
- * cleanup can tell one it has to keep from one it made, and symlinks are
- * followed so the listing covers the same tree the copy writes into.
- */
-async function existingTreePaths(destination: string): Promise<Set<string> | undefined> {
-	if (!(await statIfPresent(destination))) return undefined;
-	const paths = new Set<string>();
-	for await (const name of ANY_FILE_GLOB.scan({
-		cwd: destination,
-		dot: true,
-		onlyFiles: false,
-		followSymlinks: true,
-	})) {
-		paths.add(name);
-	}
-	return paths;
+/** What one copy into the archive created, so a failure can undo exactly that. */
+interface ArchiveCopyState {
+	brokenLinks: number;
+	/** Absolute paths this copy created, deepest last. */
+	created: string[];
 }
 
 /**
@@ -1091,38 +1078,51 @@ async function existingTreePaths(destination: string): Promise<Set<string> | und
  * The live content is staged beside its destination first, so the comparison
  * runs against the bytes that are actually about to land rather than against
  * a live file that may have changed since. The archived copy standing there
- * is read through an open descriptor and identified by `dev`/`ino`, so a path
- * swapped underneath cannot turn an earlier observation into permission to
- * overwrite a file nothing examined, and the archived file being the live
- * file under another name is refused instead of copied over itself.
+ * is read through an open descriptor, so what is compared is the file, not
+ * the name.
  *
  * Only the destination's absence may skip that comparison. A destination
  * that cannot be opened — no permission, an I/O error — is not an empty
  * slot, and reading it as one is how a file nobody could read gets written
  * over.
  *
- * Nothing is written over a file this run did not examine. An absent
- * destination is published with `link`, which fails rather than replace
- * something that appeared in the meantime. A destination being repaired is
- * written through the very descriptor the comparison read, so a path swapped
- * underneath receives nothing at all: the swapped-in file keeps its own
- * inode and its own bytes, and the run reports that the archive moved under
- * it rather than finishing over someone's work.
+ * The live file being the archived file under another name — a hard link, a
+ * symlink onto it — is refused outright rather than archived over itself.
+ *
+ * Publication is a temp plus a link or a rename, never a write into the
+ * archived file: writing in place makes an interrupted repair a truncated
+ * archive, and truncates every other name of that inode along with it. An
+ * absent destination is published with `link`, which fails rather than
+ * replace a file that appeared in the meantime; a destination being repaired
+ * is replaced whole, so an interruption leaves either the old copy or the
+ * new one.
  */
-async function publishArtifactIntoArchive(source: string, destination: string): Promise<void> {
+async function publishArtifactIntoArchive(
+	source: string,
+	sourceStat: Stats,
+	destination: string,
+	state: ArchiveCopyState,
+): Promise<void> {
 	const tempPath = sessionStagingPath(destination);
 	try {
 		await fs.copyFile(source, tempPath);
-		const archived = await fs.open(destination, "r+").catch(error => {
+		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
 		});
 		if (!archived) {
 			await fs.link(tempPath, destination);
+			state.created.push(destination);
 			return;
 		}
 		try {
 			const verified = await archived.stat();
+			if (verified.dev === sourceStat.dev && verified.ino === sourceStat.ino) {
+				throw new Error(
+					`${source} is the archived ${destination} itself, not a second copy of it; ` +
+						`archiving it would write the archive over its own file`,
+				);
+			}
 			if (verified.isFile() && !(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
 				throw new Error(
 					`the archive already holds ${destination}, and ${source} does not hold its bytes; ` +
@@ -1130,21 +1130,10 @@ async function publishArtifactIntoArchive(source: string, destination: string): 
 						`Restore the session first (\`omp gc --restore\`), or move one of the two aside`,
 				);
 			}
-			await archived.truncate(0);
-			let at = 0;
-			for await (const chunk of Bun.file(tempPath).stream()) {
-				await archived.write(chunk, 0, chunk.byteLength, at);
-				at += chunk.byteLength;
-			}
-			const standing = await statIfPresent(destination);
-			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
-				throw new Error(
-					`${destination} was replaced while it was being archived, so the archive wrote nothing over it; run \`omp gc --archive\` again`,
-				);
-			}
 		} finally {
 			await archived.close();
 		}
+		await fs.rename(tempPath, destination);
 	} finally {
 		await fs.rm(tempPath, { force: true });
 	}
@@ -1160,7 +1149,7 @@ async function publishArtifactIntoArchive(source: string, destination: string): 
 async function copyArtifactEntryIntoArchive(
 	source: string,
 	destination: string,
-	state: { brokenLinks: number },
+	state: ArchiveCopyState,
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is already gone: one of them must not make a
@@ -1176,10 +1165,16 @@ async function copyArtifactEntryIntoArchive(
 		if (await isSamePath(source, destination)) {
 			throw new Error(`the live artifact tree ${source} is the archived tree ${destination} itself`);
 		}
+		const standing = await statIfPresent(destination);
 		await fs.mkdir(destination, { recursive: true });
-		// A directory deliberately kept private stays private in the archive:
-		// `mkdir` applies the umask, which would widen a `0700` tree to `0755`.
-		await fs.chmod(destination, stat.mode & 0o7777);
+		if (!standing) {
+			// A directory deliberately kept private stays private in the archive:
+			// `mkdir` applies the umask, which would widen a `0700` tree to
+			// `0755`. A directory the archive already holds keeps its own mode —
+			// merging into a private one must not widen it to the live tree's.
+			await fs.chmod(destination, stat.mode & 0o7777);
+			state.created.push(destination);
+		}
 		// Sorted, so a run that fails part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
 			await copyArtifactEntryIntoArchive(path.join(source, entry), path.join(destination, entry), state);
@@ -1187,31 +1182,27 @@ async function copyArtifactEntryIntoArchive(
 		return;
 	}
 	if (!stat.isFile()) return;
-	await publishArtifactIntoArchive(source, destination);
+	await publishArtifactIntoArchive(source, stat, destination, state);
 }
 
 /**
- * Undo one failed copy into the archive, and nothing more. With no
- * `preexisting` set the destination is this run's own creation and goes
- * whole; otherwise every path absent from that snapshot goes and every path
- * in it stays. Recursion is safe on a path the snapshot does not name: the
- * snapshot was taken before the copy, so nothing under a directory this run
- * created was there before it either. Entries a parent already took are
- * gone, which `force` passes over.
+ * Undo one failed copy into the archive, and nothing more.
+ *
+ * What goes is what this copy made, recorded as it made it — not every path
+ * absent from a snapshot taken before it started. Those are different sets
+ * the moment anything else writes into the tree: a file somebody created at
+ * a destination the copy then refused to replace is absent from the
+ * snapshot, and removing it would undo with one hand what `link` refused to
+ * do with the other. Deepest last, so a directory is empty when its turn
+ * comes.
  */
-async function removeTreeAdditions(destination: string, preexisting: Set<string> | undefined): Promise<void> {
-	if (!preexisting) {
-		await fs.rm(destination, { recursive: true, force: true });
-		return;
-	}
-	for await (const name of ANY_FILE_GLOB.scan({
-		cwd: destination,
-		dot: true,
-		onlyFiles: false,
-		followSymlinks: true,
-	})) {
-		if (preexisting.has(name)) continue;
-		await fs.rm(path.join(destination, name), { recursive: true, force: true }).catch(() => undefined);
+async function removeTreeAdditions(created: readonly string[]): Promise<void> {
+	for (const target of [...created].reverse()) {
+		// A directory goes only when it is empty: something else may have put a
+		// file in it since, and that file is not this run's to remove.
+		await fs.unlink(target).catch(async () => {
+			await fs.rmdir(target).catch(() => undefined);
+		});
 	}
 }
 
@@ -1301,12 +1292,11 @@ async function moveArtifactsTree(
 	destination: string,
 ): Promise<{ brokenLinks: number; leftoverSource?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const preexisting = await existingTreePaths(destination);
-	const state = { brokenLinks: 0 };
+	const state: ArchiveCopyState = { brokenLinks: 0, created: [] };
 	try {
 		await copyArtifactEntryIntoArchive(source, destination, state);
 	} catch (error) {
-		await removeTreeAdditions(destination, preexisting);
+		await removeTreeAdditions(state.created);
 		throw error;
 	}
 	if (!(await removeLiveTreeOnceArchived(source, destination))) {

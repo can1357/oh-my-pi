@@ -913,24 +913,26 @@ test("a legacy transcript that gains a title slot after a half restore still res
 	expect(await Bun.file(archiveFile).exists()).toBe(false);
 });
 
-test("a nested transcript renamed after a half restore is not read as a collision", async () => {
+test("a nested transcript renamed after a half restore keeps both copies", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	const stamp = "2026-01-01T00:00:00.000Z";
 	const nested = (title: string) =>
 		`${serializeTitleSlot({ title, source: "user", updatedAt: stamp })}${sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4c", "nested turn", root)}`;
 	await Bun.write(path.join(artifacts, "sub.jsonl"), nested("Before"));
 	await archiveEverything();
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
-	// The subagent session was resumed and renamed: its fixed-width slot was
-	// rewritten in place, every other byte untouched.
+	// The subagent session was resumed and renamed. Nothing in an artifact
+	// tree earns transcript semantics — a name is not provenance — so this is
+	// an artifact whose bytes differ, and both copies are kept.
 	await Bun.write(path.join(artifacts, "sub.jsonl"), nested("After"));
 
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.notRestored).toEqual([]);
-	expect(restored.artifactsRestored).toBe(true);
+	expect(restored.artifactsRestored).toBe(false);
 	expect(await Bun.file(path.join(artifacts, "sub.jsonl")).text()).toBe(nested("After"));
-	expect(await Bun.file(archiveFile).exists()).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "sub.jsonl")).text()).toBe(nested("Before"));
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
 test("a short title record does not let the comparison skip the session header", async () => {
@@ -1341,4 +1343,130 @@ test("staging residue in the archive is not carried home as an artifact", async 
 	expect(restored.artifactsRestored).toBe(true);
 	expect(await Bun.file(path.join(liveArtifacts, path.basename(residue))).exists()).toBe(false);
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("ARTIFACT");
+});
+test("an interrupted repair never truncates the live file the archive is linked to", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "COMPLETE-PREFIX-AND-SUFFIX");
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The live artifact is the archived file under another name. Writing into
+	// the archived file would write into this one too.
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await fs.link(path.join(archivedArtifacts, "tool.log"), path.join(liveArtifacts, "tool.log"));
+
+	const result = await archiveEverything();
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("COMPLETE-PREFIX-AND-SUFFIX");
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("COMPLETE-PREFIX-AND-SUFFIX");
+});
+
+test("a failed archive leaves alone the file its own refusal protected", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+
+	// Someone writes the first destination just before it is published, so the
+	// publish refuses; the cleanup must not then delete what it refused to
+	// replace.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		if (String(destination).endsWith("a.log")) await Bun.write(String(destination), "NEW USER WORK");
+		return await realLink(source, destination);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("NEW USER WORK");
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("ORIGINAL");
+});
+
+test("tool output named like a transcript keeps every byte", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	// A log named `.jsonl` whose first record is session-shaped, with the only
+	// copy of its content in a field a transcript would treat as a name.
+	// Neither its name nor its shape says omp wrote it as a transcript, so
+	// none of its bytes may be read as a name and skipped.
+	const shaped = (title: string) =>
+		`${JSON.stringify({ type: "session", version: 3, id: "example", title })}\n${JSON.stringify({
+			type: "message",
+			id: "a",
+			message: { role: "assistant", content: [] },
+		})}\n`;
+	const archivedTitle = "ARCHIVED UNIQUE OUTPUT";
+	await Bun.write(path.join(liveArtifacts, "tool-output.jsonl"), shaped(archivedTitle));
+	await archiveEverything();
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "tool-output.jsonl"), shaped("live"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool-output.jsonl")).text()).toBe(shaped(archivedTitle));
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a transcript is never restored over one that appeared in the meantime", async () => {
+	await archiveEverything();
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		if (String(destination) === sessionFile) await Bun.write(sessionFile, "NEW USER WORK\n");
+		return await realLink(source, destination);
+	});
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(await Bun.file(sessionFile).text()).toBe("NEW USER WORK\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a migrated transcript whose entry tree was reparented is refused", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const header = { type: "session", version: 1, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: root };
+	const user = (id: string, parentId: string | null, content: string) =>
+		JSON.stringify({ type: "message", id, parentId, message: { role: "user", content } });
+	const assistant = (id: string, parentId: string) =>
+		JSON.stringify({ type: "message", id, parentId, message: { role: "assistant", content: [] } });
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify(header)}\n${user("u", null, "FIRST")}\n${user("m", "u", "MIDDLE")}\n${assistant("a", "m")}\n`,
+	);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	// Migrated to version 3, every record kept — but the middle record now
+	// hangs off nothing instead of the first one, which is a different
+	// conversation however intact the records look.
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify({ ...header, version: 3 })}\n${user("u2", null, "FIRST")}\n${user("m2", null, "MIDDLE")}\n${assistant("a2", "m2")}\n`,
+	);
+
+	await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("different session file");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("archiving into an existing private archive directory does not widen it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
+	await archiveEverything();
+	await fs.chmod(archivedArtifacts, 0o700);
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
+	await fs.chmod(liveArtifacts, 0o755);
+
+	expect((await archiveEverything()).archive?.archived).toBe(1);
+
+	expect((await fs.stat(archivedArtifacts)).mode & 0o777).toBe(0o700);
 });

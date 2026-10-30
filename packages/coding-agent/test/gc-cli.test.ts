@@ -1053,10 +1053,10 @@ describe("runGcCommand cold-session archive", () => {
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
 		const archive = path.join(root, "archive", "sessions", "project", "rollback-write.jsonl.gz");
-		const rename = fs.rename.bind(fs);
-		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+		const link = fs.link.bind(fs);
+		const renameSpy = spyOn(fs, "link").mockImplementation(async (source, destination) => {
 			if (String(destination) === session) throw new Error("rollback publish failed");
-			await rename(source, destination);
+			await link(source, destination);
 		});
 		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async () => {
 			throw new Error("artifact move failed");

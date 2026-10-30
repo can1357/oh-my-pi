@@ -160,8 +160,12 @@ export async function inflateArchivedBytes(file: string): Promise<Uint8Array> {
  * disk then leaves the destination untouched instead of a zero-length
  * transcript — which is exactly what a hand-written `gunzip -c … > …`
  * produces. The temp file shares the destination's directory so the publish
- * is a rename, which the archive and the sessions tree being on different
+ * is a link, which the archive and the sessions tree being on different
  * filesystems would otherwise rule out.
+ *
+ * `link`, not `rename`: a transcript only comes out of the archive onto a
+ * path nothing holds, so a file that appeared there in the meantime is
+ * someone's work. `EEXIST` says so instead of writing over it.
  */
 export async function inflateArchivedTranscript(source: string, destination: string): Promise<number> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -170,11 +174,12 @@ export async function inflateArchivedTranscript(source: string, destination: str
 		const handle = await fs.open(tempPath, "w");
 		await pipeline(Bun.file(source).stream(), createGunzip(), handle.createWriteStream());
 		const { size } = await fs.stat(tempPath);
-		await fs.rename(tempPath, destination);
+		await fs.link(tempPath, destination);
 		return size;
 	} catch (error) {
-		await fs.rm(tempPath, { force: true });
 		throw archiveReadError(source, error);
+	} finally {
+		await fs.rm(tempPath, { force: true });
 	}
 }
 
@@ -258,17 +263,21 @@ function headersAreOneSession(a: Record<string, unknown>, b: Record<string, unkn
 const TRANSCRIPT_HEAD_BYTES = 64 * 1024;
 
 /**
- * Whether a path is a session transcript by name — the `.jsonl` the writer
- * gives one, in the sessions tree and nested in an artifact tree.
+ * Transcript semantics — reading part of a file as a session's name rather
+ * than as its content — are granted only where the file's provenance is
+ * known, and the one place it is known is the session transcript itself: the
+ * `.jsonl.gz` the archive is named for and the `.jsonl` it came from.
  *
- * Provenance, not shape: a tool-output log may happen to open with a record
- * that looks like a session header, and reading its bytes as a session's name
- * is how its content becomes ignorable. Only a file omp itself writes as a
- * transcript gets transcript semantics.
+ * Nothing in an artifact tree qualifies, which is why no helper here decides
+ * it from a path. A name does not say what wrote a file — tool output can be
+ * created as `.jsonl`, copied from a `.log`, or renamed either way — and
+ * neither does its shape, since a log that opens with a session-shaped
+ * record is exactly the thing this guards against. Every artifact is
+ * compared byte for byte, a nested subagent transcript included: one renamed
+ * since it was archived stops matching and its restore is refused with the
+ * archive kept, which costs a retry where granting it on a name costs the
+ * unique bytes of anything named to look like one.
  */
-function isTranscriptPath(file: string): boolean {
-	return file.endsWith(SESSION_SUFFIX);
-}
 
 /**
  * Whether the file open as `destination` holds every byte `source` yields.
@@ -400,18 +409,59 @@ function jsonContains(held: unknown, holder: unknown): boolean {
 	const inner = holder as Record<string, unknown>;
 	return Object.entries(held as Record<string, unknown>).every(([key, value]) => jsonContains(value, inner[key]));
 }
+
 /**
- * Fields `migrateToCurrentVersion` rewrites rather than preserves, by the
- * version the archived copy was written at.
+ * The entry tree `migrateV1ToV2` builds for a transcript that never had one.
  *
- * A v1 transcript gets the entry tree it never had: `migrateV1ToV2` assigns
- * every non-session record a fresh `id` and a `parentId`, and turns a
- * compaction's `firstKeptEntryIndex` into `firstKeptEntryId`. Those are the
- * migration's own bookkeeping, not the conversation, so they are set aside
- * for a transcript archived before version 2 and compared for every other.
- * Everything a record says — its type, its message, its content — is still
- * compared, so a rewritten history is still a different session.
+ * It gives every non-session record a fresh `id`, points its `parentId` at
+ * the record before it, and turns a compaction's `firstKeptEntryIndex` into
+ * the `firstKeptEntryId` of the record at that index. Those names are the
+ * migration's own, so they are not compared as names — but the relations
+ * they stand for are the conversation's branch and compaction structure, and
+ * those are compared: the archived name of a parent must map to the live
+ * name of the live record's parent. Exempting the fields outright would let
+ * a reparented or re-targeted history read as the same session, and the
+ * context the session rebuilds from it would be a different conversation.
  */
+class MigratedEntryTree {
+	readonly #liveIdByArchivedId = new Map<string, string>();
+	readonly #liveIdByIndex: (string | undefined)[] = [];
+
+	/** Record one archived record's position and the live name it was given. */
+	note(index: number, archived: Record<string, unknown>, live: Record<string, unknown>): void {
+		const liveId = typeof live.id === "string" ? live.id : undefined;
+		this.#liveIdByIndex[index] = liveId;
+		if (typeof archived.id === "string" && liveId !== undefined) {
+			this.#liveIdByArchivedId.set(archived.id, liveId);
+		}
+	}
+
+	/** Whether the live record stands in the same place in the tree as the archived one. */
+	holdsRelations(archived: Record<string, unknown>, live: Record<string, unknown>): boolean {
+		if ("parentId" in archived || "parentId" in live) {
+			const archivedParent = archived.parentId;
+			const liveParent = live.parentId;
+			if (archivedParent === null || archivedParent === undefined) {
+				if (liveParent !== null && liveParent !== undefined) return false;
+			} else if (typeof archivedParent !== "string") {
+				return false;
+			} else if (this.#liveIdByArchivedId.get(archivedParent) !== liveParent) {
+				return false;
+			}
+		}
+		const target = archived.firstKeptEntryIndex ?? archived.firstKeptEntryId;
+		if (target === undefined && live.firstKeptEntryId === undefined) return true;
+		const expected =
+			typeof target === "number"
+				? this.#liveIdByIndex[target]
+				: typeof target === "string"
+					? this.#liveIdByArchivedId.get(target)
+					: undefined;
+		return expected === live.firstKeptEntryId;
+	}
+}
+
+/** Names the v1 migration assigns; their meaning is checked by {@link MigratedEntryTree}. */
 const MIGRATED_RECORD_FIELDS: Record<string, true> = {
 	id: true,
 	parentId: true,
@@ -420,11 +470,12 @@ const MIGRATED_RECORD_FIELDS: Record<string, true> = {
 };
 
 /** Whether `holder` carries `held`, allowing for the migrations `version` has since been through. */
-function recordIsCarried(held: unknown, holder: unknown, version: number): boolean {
+function recordIsCarried(held: unknown, holder: unknown, version: number, tree: MigratedEntryTree): boolean {
 	if (typeof held !== "object" || held === null || Array.isArray(held)) return jsonContains(held, holder);
 	if (typeof holder !== "object" || holder === null || Array.isArray(holder)) return false;
 	const a = held as Record<string, unknown>;
 	const b = holder as Record<string, unknown>;
+	if (version < 2 && !tree.holdsRelations(a, b)) return false;
 	for (const [key, value] of Object.entries(a)) {
 		if (version < 2 && MIGRATED_RECORD_FIELDS[key]) continue;
 		// `migrateV2ToV3` renames the `hookMessage` role to `custom`.
@@ -503,14 +554,20 @@ async function recordsAreCarried(archived: AsyncGenerator<string>, live: AsyncGe
 	const holder = await openingHeader(live);
 	if (!held || !holder || !headersAreOneSession(held, holder)) return false;
 	const version = typeof held.version === "number" ? held.version : 1;
-	for (;;) {
+	const tree = new MigratedEntryTree();
+	for (let index = 0; ; index += 1) {
 		const next = await nextRecord(archived);
 		if (!next) return true;
 		const onto = await nextRecord(live);
 		if (!onto) return false;
+		const a = next.value;
+		const b = onto.value;
+		if (typeof a === "object" && a !== null && typeof b === "object" && b !== null) {
+			tree.note(index, a as Record<string, unknown>, b as Record<string, unknown>);
+		}
 		if (next.raw === onto.raw) continue;
-		if (next.value === undefined || onto.value === undefined) return false;
-		if (!recordIsCarried(next.value, onto.value, version)) return false;
+		if (a === undefined || b === undefined) return false;
+		if (!recordIsCarried(a, b, version, tree)) return false;
 	}
 }
 
@@ -591,11 +648,7 @@ async function removeArchiveTreeOnceCarried(source: string, destination: string,
 		if (!(await survivesRemovalOf(destination, liveStat, stat, archiveRoot))) {
 			throw new Error(`${destination} is the archived ${source} itself, not a second copy of it`);
 		}
-		const transcript = isTranscriptPath(source);
-		if (
-			!(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, transcript)) &&
-			!(transcript && (await recordsAreCarried(linesOf(Bun.file(source).stream()), linesOfHandle(live))))
-		) {
+		if (!(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false))) {
 			throw new Error(`${destination} no longer holds what the archived ${source} holds`);
 		}
 	} finally {
@@ -677,11 +730,7 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
 							`the archive is kept — give the live tree a file of its own and restore again`,
 					);
 				}
-				const transcript = isTranscriptPath(source);
-				if (await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, transcript)) return;
-				if (transcript && (await recordsAreCarried(linesOf(Bun.file(source).stream()), linesOfHandle(live)))) {
-					return;
-				}
+				if (await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false)) return;
 			}
 		} finally {
 			await live?.close();
@@ -760,7 +809,7 @@ export async function archivedHandleIsHeldBy(
 	archived: fs.FileHandle,
 	archivedStat: Stats,
 	candidatePath: string,
-	transcript = isTranscriptPath(candidatePath),
+	transcript = false,
 ): Promise<boolean> {
 	const candidate = await fs.open(candidatePath, "r").catch(() => undefined);
 	if (!candidate) return false;
