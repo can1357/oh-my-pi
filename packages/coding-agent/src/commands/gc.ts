@@ -5,6 +5,7 @@
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gcHelp as commandHelp } from "../cli/command-help";
 import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
+import { GC_BLOBS_WARNING } from "../cli/gc-settings";
 
 export default class Gc extends Command {
 	static description = commandHelp.description;
@@ -12,12 +13,7 @@ export default class Gc extends Command {
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)" }),
 		json: Flags.boolean({ description: "Output JSON" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
-		blobs: Flags.boolean({
-			description:
-				"Sweep unreferenced blobs. Quiescent machines only: concurrent session writes can permanently " +
-				"delete a blob a readable session still references. Stop every session writer first, including " +
-				"any that holds no ownership lease.",
-		}),
+		blobs: Flags.boolean({ description: `Sweep unreferenced blobs. ${GC_BLOBS_WARNING}` }),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		stale: Flags.boolean({

@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import { GC_BLOBS_WARNING } from "@oh-my-pi/pi-coding-agent/cli/gc-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -525,12 +526,13 @@ describe("runGcCommand blob sweep", () => {
 			}
 			const text = written.join("");
 
-			// A configured sweep is the one nobody typed, so the warning has
-			// to reach the person at the command rather than only in the
-			// setting's own documentation.
+			// A configured sweep is the one nobody typed, and a JSON caller is
+			// the one who automated it, so both routes carry the same string
+			// from the same place.
 			expect(result.blobs).toBeDefined();
-			expect(text).toContain("quiescent machine");
-			expect(text).toContain("stop every session writer first");
+			expect(result.warnings?.join("\n")).toContain(GC_BLOBS_WARNING);
+			expect(text).toContain("Quiescent machines only");
+			expect(text).toContain("Stop every session writer first");
 			expect(text).toContain("omp gc --wal --apply");
 		});
 	}

@@ -43,6 +43,7 @@ import {
 } from "./gc-compress";
 import {
 	cfgGcArchive,
+	GC_BLOBS_WARNING,
 	cfgGcBlobs,
 	cfgGcColdArchiveAfterDays,
 	cfgGcCompress,
@@ -194,6 +195,13 @@ export interface GcResult {
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
+	/**
+	 * What a reader has to be told, in the result rather than only in the
+	 * rendering of it. The text output held the only copy, so every JSON
+	 * route reclaimed silently — and a JSON consumer is exactly the caller
+	 * who automated this.
+	 */
+	warnings?: string[];
 }
 
 interface BlobCandidate {
@@ -551,9 +559,17 @@ function censusChange(before: Map<string, string>, after: Map<string, string>): 
  * Lifting the restriction needs a mechanism that makes the proof available
  * — writers participating, a quarantine a reader restores from — not
  * another arrangement handled. Until then the command says what it cannot
- * show rather than guessing, and reclamation is opt-in: a tree with no
- * links still refuses whenever a session is owned, unreadable or changing,
- * so nothing here reclaims the way the unguarded sweep used to.
+ * show rather than guessing, and reclamation is opt-in, because what it
+ * cannot show includes the ordinary case: a tree with no links refuses
+ * when a session is owned or unreadable, but a session rewritten in place
+ * while this runs — same name, same size, same modification time, which a
+ * one-second clock makes commonplace — is not seen, and that run exits 0
+ * having deleted a blob the session still refers to.
+ *
+ * The ownership lease is likewise narrower than it sounds: it is taken for
+ * sessions whose header id can be read, so a compressed transcript or one
+ * with no header is read, counted and reclaimed against without a lease
+ * being held for it at all.
  */
 async function collectReferencedBlobHashes(
 	sessionNames: string[],
@@ -868,13 +884,14 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	// both questions, so the thing compared is the thing read.
 	const before = await sessionTreeCensus(defaultRoots, options.agentDir);
 	const referenced = await collectReferencedBlobHashes([...(before.entries?.keys() ?? [])], blobDir);
-	// Every session read above is still held. The decision about which blobs
-	// are unreferenced and the deletions that act on it happen inside that
-	// hold, because a lease taken and given back is only a question about a
-	// moment that has passed: a writer that starts between the release and
-	// the deletion adds a reference to a blob this run has already judged
-	// unreferenced, and the session is then readable and pointing at
-	// something that is gone.
+	// Every session whose header id could be read is still held, and the
+	// decision about which blobs are unreferenced and the deletions that act
+	// on it happen inside that hold: a lease taken and given back is only a
+	// question about a moment that has passed, since a writer starting
+	// between the release and the deletion adds a reference to a blob this
+	// run has already judged unreferenced. A compressed or headerless
+	// transcript has no id to lease by, so it is read and counted with
+	// nothing held for it — one of the reasons this phase is opt-in.
 	try {
 		const { candidates, staging } = await collectBlobCandidates(blobDir);
 		const result: BlobGcResult = {
@@ -2567,16 +2584,6 @@ function renderText(result: GcResult): string {
 		lines.push(
 			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
 		);
-		// Said at the command, every time, because the setting's own text is
-		// not where a person meets this: a configured sweep is the one
-		// nobody typed, and a successful one otherwise prints a count and
-		// nothing else.
-		lines.push(
-			"  blobs: reclamation is for a quiescent machine. Concurrent session writes can permanently " +
-				"delete a blob a readable session still references; stop every session writer first, including " +
-				"any that holds no ownership lease. `omp gc --wal --apply` checkpoints the databases and " +
-				"reclaims nothing, whatever is configured.",
-		);
 		if (result.blobs.errors.length > 0) lines.push(`blob errors: ${result.blobs.errors.length}`);
 	}
 	if (result.archive) {
@@ -2616,6 +2623,8 @@ function renderText(result: GcResult): string {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
+	// From the result, so text and JSON say the same thing from one source.
+	for (const warning of result.warnings ?? []) lines.push(`warning: ${warning}`);
 	return `${lines.join("\n")}\n`;
 }
 
@@ -2630,7 +2639,12 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 			: [];
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
+		if (options.runBlobs) {
+			next.blobs = await runBlobGc(options, archiveRoot);
+			// On the result, so the JSON route carries it too: the renderer
+			// held the only copy and `--json` bypasses the renderer.
+			next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
+		}
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
 		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);

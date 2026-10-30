@@ -4,6 +4,23 @@
  */
 import { register } from "../config/registry";
 
+/**
+ * The one sentence every surface says about blob reclamation.
+ *
+ * Three places have to carry it — the flag's help, the setting's interface
+ * description, and the output of a run that reclaims — and when each held
+ * its own wording they drifted: the setting's copy lost "stop every session
+ * writer first", and the flag's lost the checkpoint-only alternative. A
+ * warning that is only as good as its least complete copy is worth exactly
+ * that, so there is one copy.
+ */
+export const GC_BLOBS_WARNING =
+	"Quiescent machines only: concurrent session writes can permanently delete a blob a readable " +
+	"session still references. Stop every session writer first, including any that holds no ownership " +
+	"lease. `omp gc --wal --apply` checkpoints the databases and reclaims nothing, whatever is " +
+	"configured — and `gc.blobs: true` in any configuration layer makes an unqualified `omp gc --apply` " +
+	"reclaim without the flag.";
+
 // Opt-in, default off, because reference discovery cannot be made sound
 // while sessions are being written. Deciding that a blob is unreferenced
 // means reading every session that could refer to it, and a session can be
@@ -17,19 +34,22 @@ export const cfgGcBlobs = register({
 	id: "gc.blobs",
 	type: "boolean",
 	default: false,
-	description:
-		"Reclaim unreferenced blobs during `omp gc --apply`. Quiescent machines only: concurrent session " +
-		"writes can permanently delete a blob a readable session still references. Setting this true in any " +
-		"configuration layer makes an unqualified `omp gc --apply` delete; `omp gc --wal --apply` checkpoints " +
-		"the databases and nothing else, whatever is configured.",
+	ui: {
+		tab: "tools",
+		group: "Developer",
+		label: "Reclaim Unreferenced Blobs",
+		description: `Reclaim unreferenced blobs during \`omp gc --apply\`. ${GC_BLOBS_WARNING}`,
+		warning: "Can permanently delete data a readable session references while sessions are being written.",
+	},
 });
 
 // Opt-in, like `gc.stale` and for a stronger reason: archiving is the one
 // phase that moves a session out of the sessions tree, and nothing in this
 // release — or in any release up to and including 18.14.0 — can find or read
 // what it leaves in `archive/sessions`. An unqualified `omp gc --apply`
-// therefore leaves cold sessions where they are; `--archive --apply` still
-// archives, for anyone who asks for it by name.
+// therefore leaves cold sessions where they are — unless `gc.archive: true`
+// is configured in any layer, which enables the phase without the flag the
+// same way `gc.blobs` does. `--archive --apply` asks for it by name.
 export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });
