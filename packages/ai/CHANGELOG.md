@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- AI/ML API chat requests sent to `https://api.aimlapi.com` now identify oh-my-pi to the gateway with client-identity and partner-attribution headers; requests to any other base URL, and redirects away from that origin, carry none of them ([#17374](https://github.com/can1357/oh-my-pi/pull/17374) by [@hugoaimlapi](https://github.com/hugoaimlapi))
+
 ### Changed
 
 - Cursor runs served through `omp auth-gateway` are limited to the client's own tools, all advertised as MCP; Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are no longer offered on that path ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed
 
+- Fixed a model or request header spelled in a different case being joined to, instead of replacing, a built-in Kimi Code, ClinePass, or AI/ML API client header ([#17374](https://github.com/can1357/oh-my-pi/pull/17374) by [@hugoaimlapi](https://github.com/hugoaimlapi))
 - Fixed every new Codex session, including each subagent, losing a response and retrying when the native turn lane refuses live steering; once refused, later sessions on the same account, endpoint, and model queue follow-ups for four hours ([#14158](https://github.com/can1357/oh-my-pi/issues/14158), [#17438](https://github.com/can1357/oh-my-pi/pull/17438) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); each call now reaches the client as one of its own tools and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 30 minutes; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
