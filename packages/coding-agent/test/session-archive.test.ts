@@ -18,6 +18,7 @@ import {
 	mintStagingGround,
 	type RestoredSession,
 	restoreArchivedSession,
+	removeStagingGround,
 	restoreRecordPath,
 	stagingLedgerDir,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
@@ -3351,3 +3352,137 @@ test("a rollback that cannot look at an entry it made says so", async () => {
 	expect(result.archive?.errors.join("\n")).toContain(`${archivedA} could not be looked at`);
 	expect(await Bun.file(archivedA).text()).toBe("FIRST");
 });
+
+for (const how of ["moved aside", "deleted"] as const) {
+	test(`a reclaim keeps a transcript that took the session's name after the original was ${how}`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		await restoreArchivedSession(archiveFile, root);
+		// Somebody else's session, put at the root name while an earlier entry
+		// was being removed: the root goes last, and it has to be the file
+		// that was proved, not whatever wears its name by then.
+		const foreign = sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4d", "UNIQUE FOREIGN TURN", root);
+		const realUnlink = fs.unlink;
+		let rebound = false;
+		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			await realUnlink(target);
+			if (!rebound && String(target) === path.join(liveArtifacts, "a.log")) {
+				rebound = true;
+				if (how === "moved aside") await fs.rename(sessionFile, path.join(root, "aside.jsonl"));
+				else await realUnlink(sessionFile);
+				await Bun.write(sessionFile, foreign);
+			}
+		});
+		let result: GcResult;
+		try {
+			result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+			});
+		} finally {
+			unlink.mockRestore();
+		}
+
+		expect(rebound).toBe(true);
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(await Bun.file(sessionFile).text()).toBe(foreign);
+	});
+}
+
+test("a staging directory left in the archive is not carried home as an artifact", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// What a run killed before it recorded its stage leaves, or one whose
+	// record could not be cleared: a staging directory nothing reclaims.
+	const stage = sessionStagingPath(path.join(archivedArtifacts, "b.log"));
+	await Bun.write(path.join(stage, "b.log"), "PLANTED");
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
+	expect(await Bun.file(path.join(stage, "b.log")).text()).toBe("PLANTED");
+});
+
+for (const shape of ["a different link", "a FIFO"] as const) {
+	test(`a link replaced by ${shape} after the reclaim walked past it is kept`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
+		await archiveEverything();
+		await restoreArchivedSession(archiveFile, root);
+		const link = path.join(liveArtifacts, "b.log");
+		await fs.rm(link);
+		await fs.symlink(path.join(archivedArtifacts, "b.log"), link);
+
+		// The replacement can come back on the inode the link just freed, so
+		// only its kind and, for a link, its target tell the two apart.
+		const elsewhere = path.join(root, "elsewhere.log");
+		const realUnlink = fs.unlink;
+		let replaced = false;
+		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			await realUnlink(target);
+			if (!replaced && String(target) === path.join(liveArtifacts, "a.log")) {
+				replaced = true;
+				await realUnlink(link);
+				if (shape === "a FIFO") expect(await Bun.spawn(["mkfifo", link]).exited).toBe(0);
+				else await fs.symlink(elsewhere, link);
+			}
+		});
+		let result: GcResult;
+		try {
+			result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+			});
+		} finally {
+			unlink.mockRestore();
+		}
+
+		expect(replaced).toBe(true);
+		expect(result.reclaim?.reclaimed).toBe(0);
+		const standing = await fs.lstat(link);
+		if (shape === "a FIFO") expect(standing.isFIFO()).toBe(true);
+		else expect(await fs.readlink(link)).toBe(elsewhere);
+	});
+}
+
+test("staging cleanup leaves a FIFO that took the staged file's place", async () => {
+	const ground = await mintStagingGround(path.join(root, "target.log"), stagingLedgerDir(root));
+	await ground.handle.close();
+	await fs.unlink(ground.file);
+	expect(await Bun.spawn(["mkfifo", ground.file]).exited).toBe(0);
+
+	const note = await removeStagingGround(ground);
+
+	expect((await fs.lstat(ground.file)).isFIFO()).toBe(true);
+	expect(note).toContain("is not what this run staged there");
+	await fs.rm(ground.dir, { recursive: true, force: true });
+});
+
+for (const apply of [false, true]) {
+	test(`a FIFO at the live transcript's name is refused rather than waited on (${apply ? "apply" : "preview"})`, async () => {
+		await archiveEverything();
+		expect(await Bun.spawn(["mkfifo", sessionFile]).exited).toBe(0);
+
+		const run = runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply, json: true } });
+		// A real timer, because the defect is a blocking open on a FIFO in the
+		// thread pool: no fake clock reaches it, and it raises no signal to
+		// await. A passing run resolves first and pays nothing.
+		const outcome = await Promise.race([run, Bun.sleep(5_000).then(() => "hung" as const)]);
+		if (outcome === "hung") {
+			// Give the blocked reader a writer and an end, so the run can finish
+			// and release the gc lock before the next test.
+			const writer = await fs.open(sessionFile, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+			await writer.close();
+			await run.catch(() => undefined);
+		}
+
+		expect(outcome).not.toBe("hung");
+		if (outcome !== "hung") expect(outcome.restore?.errors.length).toBeGreaterThan(0);
+		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
+	}, 15_000);
+}

@@ -58,6 +58,7 @@ import {
 	shellQuote,
 	archivedHandleIsPrefixOfLive,
 	isSamePath,
+	openRegularFile,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
 } from "../session/session-archive";
@@ -1530,12 +1531,55 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[], notes: s
 	}
 }
 
-/** One live entry a reclaim proved, as the entry rather than as its name. */
-interface ProvenEntry {
-	path: string;
-	destination: string;
+/** What an entry is, as distinct from its name: the identity a removal checks before it goes. */
+interface EntryIdentity {
 	dev: number;
 	ino: number;
+	/** The type bits of its mode: file, link, FIFO, device, socket. */
+	kind: number;
+	/** The device a device node stands for. */
+	rdev: number;
+	/** What a symbolic link points at. */
+	target?: string;
+}
+
+async function identityOf(entry: string, stat: Stats): Promise<EntryIdentity> {
+	return {
+		dev: stat.dev,
+		ino: stat.ino,
+		kind: stat.mode & fsConstants.S_IFMT,
+		rdev: stat.rdev,
+		target: stat.isSymbolicLink() ? await fs.readlink(entry) : undefined,
+	};
+}
+
+/**
+ * Whether `entry` still names exactly what `proved` describes. Inode numbers
+ * come back: one freed by removing an entry came straight back as the next
+ * entry made in that directory, so the number alone does not tell a link
+ * from the FIFO or the other link that replaced it. Kind, device and link
+ * target do. Absence is reported as `undefined`.
+ */
+async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boolean | undefined> {
+	const standing = await fs.lstat(entry).catch(error => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!standing) return undefined;
+	const now = await identityOf(entry, standing);
+	return (
+		now.dev === proved.dev &&
+		now.ino === proved.ino &&
+		now.kind === proved.kind &&
+		now.rdev === proved.rdev &&
+		now.target === proved.target
+	);
+}
+
+/** One live entry a reclaim proved, as the entry rather than as its name. */
+interface ProvenEntry extends EntryIdentity {
+	path: string;
+	destination: string;
 	/** A link, device or socket: nothing to compare, only a name to drop. */
 	compared: boolean;
 }
@@ -1547,7 +1591,7 @@ interface ProvenEntry {
  * The walk's reading is a fact about a moment that has passed by the time
  * the removal reaches this entry. A file is read again through a descriptor
  * opened now; a link or a device has nothing to read, so the name has to
- * still hold the very entry the walk saw.
+ * still hold the very entry the walk saw — see {@link standsAsProved}.
  *
  * The caller holds the lease of every transcript in the tree, so no process
  * that writes a session through its lease changes the answer after this.
@@ -1556,17 +1600,7 @@ interface ProvenEntry {
  */
 async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 	if (!entry.compared) {
-		const standing = await fs.lstat(entry.path).catch(error => {
-			if (codeOf(error) === "ENOENT") return undefined;
-			throw error;
-		});
-		// On its kind as well as its number: an inode freed by removing the
-		// link can come straight back as a new file at the same name, and a
-		// file holds bytes this run never proved.
-		if (
-			standing &&
-			(standing.isFile() || standing.isDirectory() || standing.dev !== entry.dev || standing.ino !== entry.ino)
-		) {
+		if ((await standsAsProved(entry.path, entry)) === false) {
 			throw new Error(`${entry.path} is no longer the entry this run proved; it was kept`);
 		}
 		return;
@@ -1587,6 +1621,41 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 	} finally {
 		await live.close().catch(() => undefined);
 	}
+	// The descriptor follows a link; the name has to be the file itself.
+	if ((await standsAsProved(entry.path, entry)) === false) {
+		throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
+	}
+}
+
+/**
+ * The same for the session's own transcript, which goes last: the name still
+ * holds the entry the reclaim proved under its lease, and what it holds, read
+ * through a descriptor opened now, is still exactly what the archive inflates
+ * to. A transcript somebody put at the name while the tree was being removed
+ * fails one of the two whichever way it got there — moved in beside the
+ * original, or created on the inode the original freed.
+ */
+async function proveTranscriptStillGoes(
+	sessionPath: string,
+	proved: EntryIdentity,
+	archiveFile: string,
+): Promise<void> {
+	const kept = (): Error => new Error(`${sessionPath} is no longer the transcript this run proved; it was kept`);
+	if ((await standsAsProved(sessionPath, proved)) !== true) throw kept();
+	const live = await openRegularFile(sessionPath).catch(() => undefined);
+	if (!live) throw kept();
+	try {
+		const [now, archived] = await Promise.all([
+			digestStream(bytesOfHandle(live)),
+			digestArchivedSessionFile(archiveFile),
+		]);
+		if (now.hash !== archived.hash || now.bytes !== archived.bytes) {
+			throw new Error(`${sessionPath} holds what ${archiveFile} does not; it was kept`);
+		}
+	} finally {
+		await live.close().catch(() => undefined);
+	}
+	if ((await standsAsProved(sessionPath, proved)) !== true) throw kept();
 }
 
 /**
@@ -1627,10 +1696,10 @@ async function proveLiveTreeIsArchived(
 	if (!stat.isFile()) {
 		// A link the copy resolved rather than carried, or a device: its own
 		// name is all there is to drop, and there is nothing to compare.
-		proven.files.push({ path: source, destination, dev: stat.dev, ino: stat.ino, compared: false });
+		proven.files.push({ path: source, destination, ...(await identityOf(source, stat)), compared: false });
 		return;
 	}
-	const live = await fs.open(source, "r").catch(error => {
+	const live = await fs.open(source, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
 		// Only absence is nothing. Anything else says what is there could not
 		// be read, which is not the same as the archive holding it.
 		if (codeOf(error) === "ENOENT") return undefined;
@@ -1650,7 +1719,7 @@ async function proveLiveTreeIsArchived(
 	} finally {
 		await live.close();
 	}
-	proven.files.push({ path: source, destination, dev: liveStat.dev, ino: liveStat.ino, compared: true });
+	proven.files.push({ path: source, destination, ...(await identityOf(source, liveStat)), compared: true });
 }
 
 /**
@@ -2664,6 +2733,12 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(notACopy());
 			return result;
 		}
+		// The root goes last, after every entry below it, so it is taken as
+		// the entry proved here and checked again as it goes, the way the
+		// entries are: a name rebound while the tree was being removed is
+		// somebody else's transcript.
+		const rootStat = await fs.lstat(sessionPath);
+		const root = await identityOf(sessionPath, rootStat);
 		// Every file settled before any of it goes. Proving and deleting as
 		// the walk went meant a tree that refused on its last file had
 		// already lost the ones before it, while the report said it was kept.
@@ -2691,6 +2766,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		const removed: string[] = [];
 		try {
 			await removeProvenLiveTree(proven, removed);
+			await proveTranscriptStillGoes(sessionPath, root, archiveFile);
 			await fs.unlink(sessionPath);
 		} catch (error) {
 			// The removal itself failed part-way. What went is named, because

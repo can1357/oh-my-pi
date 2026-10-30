@@ -27,7 +27,7 @@ import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
-import { readSessionHeaderId, sessionHeaderIdFromBytes } from "./session-loader";
+import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
@@ -563,11 +563,16 @@ export async function openRegularFile(file: string): Promise<fs.FileHandle | und
  * more after the read, because a file put there while the bytes were being
  * read leaves the descriptor right and the name wrong.
  *
- * The answer is about the moment of that last look. A process that can
- * write the destination's directory can rebind the name after it, and
- * nothing run here sees that; what this rules out is reporting a
- * publication whose name, when this run last looked, held somebody else's
- * file.
+ * The answer is about the moment of each look, and checking again does not
+ * make it a fact about later. Two writers are outside it. One that can write
+ * the published file itself — file-write access, a lower bar than access to
+ * the directory — can rewrite bytes in place after the digest: the inode,
+ * the length and the name all stay what they were, so a corrupt archive or
+ * transcript is reported as published. One that can write the destination's
+ * directory can rebind the name after the last look. What this rules out is
+ * reporting a publication whose name, when this run last looked, held
+ * somebody else's file, or whose bytes, when this run read them, were not
+ * what it wrote.
  */
 export async function publishedIsStaged(
 	destination: string,
@@ -841,7 +846,10 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
-	if (!stat) return;
+	// A killed writer's staging residue — a flat temp, or a staging
+	// directory a run did not record or could not clear — is not an artifact
+	// and was never carried home.
+	if (!stat || SESSION_STAGING_RE.test(path.basename(source))) return;
 	if (stat.isDirectory()) {
 		const live = await statIfPresent(destination);
 		if (!live?.isDirectory()) {
@@ -855,13 +863,9 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
 		}
 		return;
 	}
-	// A link, a device, or a killed writer's staging residue: none of them was
-	// carried home and none of them is an artifact.
-	if (!stat.isFile() || SESSION_STAGING_RE.test(path.basename(source))) return;
-	const live = await fs.open(destination, "r").catch(error => {
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
+	// A link or a device: neither was carried home, and neither is an artifact.
+	if (!stat.isFile()) return;
+	const live = await openRegularFile(destination);
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) {
@@ -914,7 +918,12 @@ async function copyEntryDereferenced(
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
-	if (!stat) return;
+	// Staging residue the archive holds — a flat temp, or a staging directory
+	// a run killed before recording it, or whose record could not be cleared,
+	// left behind — is not an artifact and is not carried home. Copying one
+	// would publish a partial or foreign file into the live tree as if the
+	// session had written it.
+	if (!stat || SESSION_STAGING_RE.test(path.basename(source))) return;
 	const existing = await fs.lstat(destination).catch(() => undefined);
 	if (stat.isDirectory()) {
 		// Through the link: a symlinked artifact directory is a directory the
@@ -949,7 +958,6 @@ async function copyEntryDereferenced(
 		return;
 	}
 	if (!stat.isFile()) return;
-	if (SESSION_STAGING_RE.test(path.basename(source))) return;
 	if (existing) {
 		const live = await openRegularFile(destination);
 		try {
@@ -1163,7 +1171,13 @@ async function clearStagingGround(
 			return undefined;
 		});
 		if (!standing) continue;
-		if (at !== file || !created || standing.dev !== created.dev || standing.ino !== created.ino) {
+		if (
+			at !== file ||
+			!created ||
+			!standing.isFile() ||
+			standing.dev !== created.dev ||
+			standing.ino !== created.ino
+		) {
 			notes.push(`${at} is not what ${stager} staged there, so it was left alone`);
 			continue;
 		}
@@ -1293,8 +1307,8 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
 	const outstanding: string[] = [];
 	for (const file of await treeFiles(archiveArtifacts)) {
-		if (SESSION_STAGING_RE.test(path.basename(file))) continue;
 		const name = path.relative(archiveArtifacts, file);
+		if (name.split(path.sep).some(part => SESSION_STAGING_RE.test(part))) continue;
 		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
 	}
 	return outstanding.sort();
@@ -1316,7 +1330,9 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  * title slot is the one span that may differ.
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
-	const live = await fs.open(sessionPath, "r");
+	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
+	const live = await openRegularFile(sessionPath);
+	if (!live) return false;
 	try {
 		let holds = false;
 		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -1351,7 +1367,8 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * being re-archivable with nothing competing with it at all.
  */
 export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
-	const live = await fs.open(livePath, "r");
+	const live = await openRegularFile(livePath);
+	if (!live) return false;
 	try {
 		let holds = false;
 		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -1385,7 +1402,7 @@ export async function archivedHandleIsHeldBy(
 	candidatePath: string,
 	transcript = false,
 ): Promise<boolean> {
-	const candidate = await fs.open(candidatePath, "r").catch(() => undefined);
+	const candidate = await openRegularFile(candidatePath).catch(() => undefined);
 	if (!candidate) return false;
 	try {
 		const candidateStat = await candidate.stat();
@@ -1598,12 +1615,24 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	// tree one of them could be in. What cannot go is the archive phase's to
 	// report: a resume is not the place to fail over somebody else's residue.
 	await reclaimRecordedStagingGrounds(ledger, true);
+	// Read through a non-blocking descriptor: a FIFO at the live transcript's
+	// name, or anywhere in either tree, owns nothing and must not hang this.
+	const headerId = async (file: string): Promise<string | undefined> => {
+		const handle = await openRegularFile(file).catch(error => {
+			if (codeOf(error) === "ENOTDIR") return undefined;
+			throw error;
+		});
+		if (!handle) return undefined;
+		try {
+			return await readSessionHeaderIdFromHandle(handle);
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
+	};
 	const owners = async (): Promise<(string | undefined)[]> => [
 		await inflateArchivedHeaderId(archiveFile),
 		...(await Promise.all(
-			[...(await treeFiles(archiveArtifacts)), ...(await treeFiles(liveArtifacts)), sessionPath].map(file =>
-				readSessionHeaderId(file),
-			),
+			[...(await treeFiles(archiveArtifacts)), ...(await treeFiles(liveArtifacts)), sessionPath].map(headerId),
 		)),
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);

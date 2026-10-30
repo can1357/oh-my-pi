@@ -214,6 +214,22 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 }
 
 /**
+ * {@link readSessionHeaderId} through a descriptor the caller opened, for a
+ * caller that has to decide how the file is opened — non-blocking, say, so a
+ * FIFO at a session's name is not waited on.
+ */
+export async function readSessionHeaderIdFromHandle(handle: fs.FileHandle): Promise<string | undefined> {
+	const first = Buffer.allocUnsafe(SESSION_HEADER_FIRST_READ);
+	const head = await handle.read(first, 0, first.byteLength, 0);
+	const id = sessionHeaderIdFromPrefix(first.subarray(0, head.bytesRead), head.bytesRead < SESSION_HEADER_FIRST_READ);
+	if (id !== HEADER_INCOMPLETE) return id;
+	const window = Buffer.allocUnsafe(SESSION_HEADER_READ_LIMIT);
+	const full = await handle.read(window, 0, window.byteLength, 0);
+	const whole = sessionHeaderIdFromPrefix(window.subarray(0, full.bytesRead), true);
+	return whole === HEADER_INCOMPLETE ? undefined : whole;
+}
+
+/**
  * The header id from a file's leading bytes, past the optional title slot
  * line. Parses only the first record, which may span lines (a pretty-printed
  * header). {@link HEADER_INCOMPLETE} when that record runs past `prefix` and
