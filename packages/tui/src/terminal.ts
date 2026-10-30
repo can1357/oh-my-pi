@@ -880,6 +880,17 @@ interface Osc11Cycle {
 	token?: TerminalAppearanceRequestToken;
 	/** False once the cycle gave up: its reply is still swallowed, never published. */
 	live: boolean;
+	/** True once somebody older spent the answer this cycle was waiting for. */
+	absorbed: boolean;
+}
+
+/**
+ * One answer a retired cycle may still send. `timer` is its deadline while it
+ * is only a possibility; a claim whose timer is gone is standing on evidence
+ * and waits as long as it has to.
+ */
+interface Osc11Claim {
+	timer?: Timer;
 }
 
 let nextOsc99ProbeId = 1;
@@ -1064,18 +1075,20 @@ export class ProcessTerminal implements Terminal {
 	/** Grace deadlines of surrendered cycles, so teardown can drop them all. */
 	#osc11GraceTimers = new Set<Timer>();
 	/**
-	 * An answer a cycle whose ownership has expired may still send. It swallows
-	 * one colour report so that report is neither forwarded to the application
-	 * nor published under the identity of the request that replaced it, and it
-	 * names nothing, because by now nothing can say whose it was.
+	 * Answers the cycles whose ownership has expired may still send, oldest
+	 * first. Each claim swallows one report so it is neither forwarded to the
+	 * application nor published under the identity of the request that replaced
+	 * it, and names nothing, because by now nothing can say whose it was.
 	 *
-	 * One, not a count. Cycles are serialised, so at most one cycle's answers
-	 * are plausibly still in flight; a long dead spell must not build a backlog
-	 * that swallows every future answer and leaves the appearance frozen.
+	 * One per retired cycle, not one in total: serialisation bounds how many
+	 * cycles are *live* at once, never how many answers are still in flight
+	 * behind them. Each claim carries its own deadline, so a dead spell leaves
+	 * a backlog that drains with time instead of swallowing every answer the
+	 * terminal ever sends again.
 	 */
-	#osc11OrphanReply = false;
-	/** The sentinel that follows an orphan's colour report, once one arrives. */
-	#osc11OrphanSentinelTimer?: Timer;
+	#osc11ReplyClaims: Osc11Claim[] = [];
+	/** The sentinels those same cycles still owe, on the same terms. */
+	#osc11SentinelClaims: Osc11Claim[] = [];
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1713,8 +1726,7 @@ export class ProcessTerminal implements Terminal {
 				// An orphaned cycle's colour report has just been swallowed, so the
 				// sentinel that follows it is this one. It belongs to that cycle
 				// and resolves nothing in the queue.
-				if (this.#osc11OrphanSentinelTimer) {
-					this.#clearOrphanOsc11Sentinel();
+				if (this.#takeOsc11Claim(this.#osc11SentinelClaims)) {
 					return;
 				}
 				const owner = this.#da1SentinelOwners.shift();
@@ -1856,32 +1868,42 @@ export class ProcessTerminal implements Terminal {
 			// deadline is a statement about how long to wait, never proof that
 			// bytes already on the wire cannot land.
 			//
+			// Only a *complete* recognised colour report is swallowed. A string
+			// that merely opens like one and then turns out to be something else
+			// is not held: holding it would append every later keystroke to a
+			// buffer that can never match, and the keyboard would go silent. A
+			// genuinely partial report is held only while something is still
+			// owed one, which is the only state it can be arriving for.
+			//
 			// Owners are consulted oldest first, since that is the order a
 			// terminal answers in. A cycle that gave up waiting still owns its
-			// own answer; a cycle whose ownership has since expired leaves the
-			// orphan claim, which can swallow one more answer but can never name
-			// it.
+			// own answer; a cycle whose ownership has since expired leaves a
+			// claim, which can swallow one more answer but can never name it.
 			if (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;")) {
 				if (this.#osc11ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					// New escape sequence arrived mid-buffer — not an OSC 11 continuation.
 					this.#osc11ResponseBuffer = "";
 					// Fall through to normal input handling below.
 				} else {
-					this.#osc11ResponseBuffer += sequence;
-					const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
-					if (!osc11Match) return;
-					const [, rHex, gHex, bHex] = osc11Match;
-					this.#osc11ResponseBuffer = "";
-					if (this.#osc11OrphanReply) {
-						this.#settleOrphanOsc11Reply();
+					const candidate = this.#osc11ResponseBuffer + sequence;
+					const osc11Match = candidate.match(osc11ResponsePattern);
+					if (!osc11Match) {
+						const terminated = candidate.endsWith("\x07") || candidate.endsWith("\x1b\\");
+						const owed = this.#osc11Cycles.length > 0 || this.#osc11ReplyClaims.length > 0;
+						if (!terminated && owed) {
+							this.#osc11ResponseBuffer = candidate;
+							return;
+						}
+						// Finished, and not a colour report — or nothing is waiting
+						// for one. Either way it is not ours to hold.
+						this.#osc11ResponseBuffer = "";
+						// Fall through to normal input handling below.
+					} else {
+						const [, rHex, gHex, bHex] = osc11Match;
+						this.#osc11ResponseBuffer = "";
+						this.#consumeOsc11Reply(rHex!, gHex!, bHex!);
 						return;
 					}
-					const cycle = this.#osc11Cycles.shift();
-					if (!cycle?.live) return;
-					this.#osc11Pending = false;
-					this.#osc11LiveCycle = undefined;
-					this.#handleOsc11Response(rHex!, gHex!, bHex!, cycle.token);
-					return;
 				}
 			}
 
@@ -2040,7 +2062,7 @@ export class ProcessTerminal implements Terminal {
 		cache: TerminalMultiplexerBackgroundColorCache | undefined,
 		token?: TerminalAppearanceRequestToken,
 	): void {
-		const cycle: Osc11Cycle = { token, live: true };
+		const cycle: Osc11Cycle = { token, live: true, absorbed: false };
 		this.#osc11Cycles.push(cycle);
 		this.#osc11LiveCycle = cycle;
 		this.#osc11Pending = true;
@@ -2048,7 +2070,7 @@ export class ProcessTerminal implements Terminal {
 		// the buffer belongs to an older cycle, or to an orphan claim, and
 		// dropping it would spill its tail into application input when the rest
 		// arrives.
-		if (this.#osc11Cycles.length === 1 && !this.#osc11OrphanReply) this.#osc11ResponseBuffer = "";
+		if (this.#osc11Cycles.length === 1 && this.#osc11ReplyClaims.length === 0) this.#osc11ResponseBuffer = "";
 		if (cache) {
 			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
 			this.#osc11CacheRefreshTimer = setTimeout(() => {
@@ -2101,6 +2123,19 @@ export class ProcessTerminal implements Terminal {
 	#abandonOsc11Cycle(owner: Da1SentinelOwner & { kind: "osc11" }): void {
 		const index = this.#da1SentinelOwners.indexOf(owner);
 		if (index < 0 || this.#dead) return;
+		if (owner.cycle.absorbed) {
+			// Its turn was spent on somebody older's answer, and the sentinel
+			// that went with it too. There is nothing left for this cycle to be
+			// owed, so it leaves no marker: a lost answer costs one update, not
+			// every update after it.
+			this.#da1SentinelOwners.splice(index, 1);
+			const spent = this.#osc11Cycles.indexOf(owner.cycle);
+			if (spent >= 0) this.#osc11Cycles.splice(spent, 1);
+			if (this.#osc11LiveCycle === owner.cycle) this.#osc11LiveCycle = undefined;
+			this.#osc11Pending = false;
+			this.#startQueuedOsc11Query();
+			return;
+		}
 		const owed = this.#osc11Cycles.includes(owner.cycle);
 		const marker: Da1SentinelOwner = { kind: "abandoned", cycle: owed ? owner.cycle : undefined };
 		this.#da1SentinelOwners[index] = marker;
@@ -2138,29 +2173,90 @@ export class ProcessTerminal implements Terminal {
 		const owed = this.#osc11Cycles.indexOf(marker.cycle);
 		if (owed < 0) return;
 		this.#osc11Cycles.splice(owed, 1);
-		this.#osc11OrphanReply = true;
+		// Only the colour becomes a claim. The sentinel that would follow it is
+		// claimed when that colour actually arrives, not before: a cycle that
+		// turns out to have sent nothing at all must not hold a sentinel back
+		// from the questions asked after it.
+		this.#addOsc11Claim(this.#osc11ReplyClaims);
 	}
 
 	/**
-	 * Consume the colour report an orphaned cycle finally sent. Its sentinel
-	 * follows — a terminal answers in that order — so one DA1 is swallowed
-	 * after it rather than being read as the live cycle's answer. That
-	 * expectation is itself bounded: a sentinel lost after a reply that late
-	 * must not leave the queue permanently offset.
+	 * Account for a complete colour report. The oldest party still owed one
+	 * takes it: a claim left by a retired cycle, else the oldest cycle in the
+	 * queue. Only a live cycle's own answer is published.
+	 *
+	 * When somebody older takes it, the cycle that is live right now is noted
+	 * as having had its turn absorbed. A terminal sends one answer per
+	 * question, so the answer that would have been its own has just been spent;
+	 * when it gives up it leaves nothing behind. Without that, one lost answer
+	 * would push every later answer one place out of step — each cycle
+	 * surrendering into a claim that takes its successor's answer — and nothing
+	 * would ever publish again.
 	 */
-	#settleOrphanOsc11Reply(): void {
-		this.#osc11OrphanReply = false;
-		this.#clearOrphanOsc11Sentinel();
-		const timer = setTimeout(() => {
-			if (this.#osc11OrphanSentinelTimer === timer) this.#osc11OrphanSentinelTimer = undefined;
-		}, OSC11_LATE_REPLY_GRACE_MS);
-		this.#osc11OrphanSentinelTimer = timer;
+	#consumeOsc11Reply(rHex: string, gHex: string, bHex: string): void {
+		if (this.#takeOsc11Claim(this.#osc11ReplyClaims)) {
+			// The colour arrived, so its sentinel is on its way behind it: that
+			// obligation stops counting down. It was a guess while nothing had
+			// been heard; now it is a consequence of what just was.
+			this.#standOsc11SentinelClaim();
+			this.#absorbLiveOsc11Turn();
+			return;
+		}
+		const cycle = this.#osc11Cycles.shift();
+		if (!cycle) return;
+		if (!cycle.live) {
+			this.#absorbLiveOsc11Turn();
+			return;
+		}
+		this.#osc11Pending = false;
+		this.#osc11LiveCycle = undefined;
+		this.#handleOsc11Response(rHex, gHex, bHex, cycle.token);
 	}
 
-	#clearOrphanOsc11Sentinel(): void {
-		if (!this.#osc11OrphanSentinelTimer) return;
-		clearTimeout(this.#osc11OrphanSentinelTimer);
-		this.#osc11OrphanSentinelTimer = undefined;
+	/** Note that somebody older spent the answer the live cycle was waiting for. */
+	#absorbLiveOsc11Turn(): void {
+		if (this.#osc11LiveCycle) this.#osc11LiveCycle.absorbed = true;
+	}
+
+	/** Record one more answer a retired cycle may still send, for a bounded while. */
+	#addOsc11Claim(claims: Osc11Claim[]): void {
+		const claim: Osc11Claim = {};
+		claim.timer = setTimeout(() => {
+			const index = claims.indexOf(claim);
+			if (index >= 0) claims.splice(index, 1);
+		}, OSC11_LATE_REPLY_GRACE_MS);
+		claims.push(claim);
+	}
+
+	/**
+	 * Stop the oldest sentinel claim from timing out, because the colour it
+	 * pairs with has just been accounted for. One sentinel follows one answer,
+	 * so letting this lapse would hand that sentinel to the next question and
+	 * end it unanswered.
+	 */
+	#standOsc11SentinelClaim(): void {
+		const claim = this.#osc11SentinelClaims[0];
+		if (claim) {
+			clearTimeout(claim.timer);
+			claim.timer = undefined;
+			return;
+		}
+		this.#osc11SentinelClaims.push({});
+	}
+
+	/** Spend the oldest claim of its kind, if one is still standing. */
+	#takeOsc11Claim(claims: Osc11Claim[]): boolean {
+		const claim = claims.shift();
+		if (claim === undefined) return false;
+		clearTimeout(claim.timer);
+		return true;
+	}
+
+	#clearOsc11Claims(): void {
+		for (const claims of [this.#osc11ReplyClaims, this.#osc11SentinelClaims]) {
+			for (const claim of claims) clearTimeout(claim.timer);
+			claims.length = 0;
+		}
 	}
 
 	/** Run the request parked behind the cycle that just ended, if there is one. */
@@ -2776,8 +2872,7 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#clearOsc11SentinelDeadline();
 		this.#clearOsc11GraceDeadlines();
-		this.#clearOrphanOsc11Sentinel();
-		this.#osc11OrphanReply = false;
+		this.#clearOsc11Claims();
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;

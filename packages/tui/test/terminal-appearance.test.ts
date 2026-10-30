@@ -406,6 +406,105 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it.each([
+		["an echoed query", "\x1b]11;?\x07"],
+		["a hex colour this parser does not accept", "\x1b]11;#ffffff\x07"],
+		["an unparseable rgb body", "\x1b]11;rgb:zz/zz/zz\x1b\\"],
+	])("keeps the keyboard alive after %s", (_name, sequence) => {
+		// Swallowing belongs to a complete recognised colour report. A string
+		// that merely opens like one and finishes as something else must not be
+		// held: held, it became a response buffer every later keystroke was
+		// appended to, and the keyboard went silent for the rest of the session.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		received.length = 0;
+
+		process.stdin.emit("data", sequence);
+		process.stdin.emit("data", "ordinary");
+		process.stdin.emit("data", "\r");
+		process.stdin.emit("data", "after");
+		vi.advanceTimersByTime(30_000);
+
+		expect(received.join("")).toContain("ordinary\rafter");
+		terminal.stop();
+	});
+
+	it("keeps publishing after a lost cycle, one answer per query", () => {
+		// One unanswered cycle used to put every later answer one place out of
+		// step: its claim took the next cycle's answer, that cycle surrendered
+		// into a claim of its own, and nothing published again for the life of
+		// the terminal however promptly the terminal replied.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const tokens: Array<number | undefined> = [];
+		terminal.onAppearanceReport?.((_appearance, token) => {
+			tokens.push(token);
+		});
+
+		// A cycle that is never answered at all, surrendered and retired.
+		expect(terminal.refreshAppearance?.(40)).toBe(40);
+		vi.advanceTimersByTime(15_000);
+		tokens.length = 0;
+
+		for (let token = 41; token <= 45; token++) {
+			const before = queryCount();
+			expect(terminal.refreshAppearance?.(token)).toBe(token);
+			expect(queryCount()).toBe(before + 1);
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+			vi.advanceTimersByTime(5_000);
+		}
+
+		// The first answer settles the lost cycle's claim; every later one is
+		// published under the token that asked for it.
+		expect(tokens).toEqual([42, 43, 44, 45]);
+		expect(terminal.appearance).toBe("light");
+		terminal.stop();
+	});
+
+	it("does not let two retired cycles collapse into one claim", () => {
+		// Serialisation bounds how many cycles are live at once, never how many
+		// answers are still in flight behind them. With a single claim the
+		// second old colour took the live request's token and its real answer
+		// was discarded.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		vi.advanceTimersByTime(20_100);
+		const requestToken = 43;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// Both retired exchanges, then the live one, in the order asked.
+		for (const colour of ["0000/0000/0000", "0000/0000/0000", "ffff/ffff/ffff"]) {
+			process.stdin.emit("data", `\x1b]11;rgb:${colour}\x07`);
+			process.stdin.emit("data", "\x1b[?1;2c");
+		}
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];
