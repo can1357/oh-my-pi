@@ -30,8 +30,8 @@ pub(crate) async fn generate_and_combine_brace_expansions(
 	}
 
 	let mut words = vec![];
-	for combination in expansions.into_iter().multi_cartesian_product() {
-		interp::loop_checkpoint(params).await?;
+	for (step, combination) in expansions.into_iter().multi_cartesian_product().enumerate() {
+		interp::element_checkpoint(params, step).await?;
 		words.push(combination.concat());
 	}
 
@@ -97,8 +97,8 @@ async fn expand_brace_expr_member(
 		},
 	};
 
-	for generated in sequence {
-		interp::loop_checkpoint(params).await?;
+	for (step, generated) in sequence.enumerate() {
+		interp::element_checkpoint(params, step).await?;
 		words.push(generated);
 	}
 

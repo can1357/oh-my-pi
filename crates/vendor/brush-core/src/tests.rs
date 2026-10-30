@@ -332,9 +332,14 @@ mod regression {
 	/// `n` as it is expanded, so a run that yields inside the generator is
 	/// cancelled before `n` is ever set; one that yields only in the element
 	/// loop has already expanded a budget's worth.
+	///
+	/// `N` is sized against [`crate::interp::ELEMENT_CHECKPOINT_STRIDE`]: the
+	/// generator spends one checkpoint per stride, and Tokio yields once per
+	/// 128 spent, so the range has to be long enough for the generator to
+	/// exhaust a budget on its own.
 	#[test]
 	fn brace_generator_reaches_a_cancellation_task() {
-		const ELEMENTS: usize = 4096;
+		const ELEMENTS: usize = 256 * crate::interp::ELEMENT_CHECKPOINT_STRIDE;
 
 		let command = format!(
 			"values=({{1..{ELEMENTS}}}$((n++))); (( ${{#values[@]}} == {ELEMENTS} && n == {ELEMENTS} ))"

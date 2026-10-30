@@ -757,8 +757,8 @@ impl ArrayLiteral {
 		params: &ExecutionParameters,
 	) -> Result<Self, error::Error> {
 		let mut literal = Vec::with_capacity(elements.len());
-		for (key, value) in elements {
-			interp::loop_checkpoint(params).await?;
+		for (step, (key, value)) in elements.iter().enumerate() {
+			interp::element_checkpoint(params, step).await?;
 			literal.push((key.as_ref().map(|key| key.value.clone()), value.value.clone()));
 		}
 
@@ -871,8 +871,8 @@ impl ShellValue {
 			.last_key_value()
 			.map_or(0, |(largest_index, _)| largest_index + 1);
 
-		for (key, value) in literal_values.0 {
-			interp::loop_checkpoint(params).await?;
+		for (step, (key, value)) in literal_values.0.into_iter().enumerate() {
+			interp::element_checkpoint(params, step).await?;
 			if let Some(key) = key {
 				new_key = literal_index(&key);
 			}
@@ -890,7 +890,8 @@ impl ShellValue {
 	/// key and value.
 	///
 	/// The literal can hold any number of elements and nothing in the loop
-	/// waits on anything, so it spends a checkpoint on each element.
+	/// waits on anything, so it spends a checkpoint every
+	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`] elements.
 	async fn update_associative_array_from_literals(
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
@@ -901,14 +902,14 @@ impl ShellValue {
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
-		interp::loop_checkpoint(params).await?;
+		interp::element_checkpoint(params, 0).await?;
 		let first_value = convert(first_value);
 
 		if let Some(first_key) = first_key {
 			existing_values.insert(first_key, first_value);
 
-			for (key, value) in literal_values {
-				interp::loop_checkpoint(params).await?;
+			for (step, (key, value)) in literal_values.enumerate() {
+				interp::element_checkpoint(params, step + 1).await?;
 				let Some(key) = key else {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
@@ -917,8 +918,8 @@ impl ShellValue {
 			}
 		} else {
 			let mut current_key = Some(first_value);
-			for (key, value) in literal_values {
-				interp::loop_checkpoint(params).await?;
+			for (step, (key, value)) in literal_values.enumerate() {
+				interp::element_checkpoint(params, step + 1).await?;
 				let value = convert(value);
 				let value = if let Some(key) = key {
 					let mut word = String::with_capacity(key.len() + value.len() + 3);

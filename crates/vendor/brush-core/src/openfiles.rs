@@ -32,6 +32,13 @@ pub trait Stream: std::io::Read + std::io::Write + Send + Sync {
 	/// worker takes that worker from every other task on the runtime, with no
 	/// way to get it back. Refusing [`Stream::try_borrow_as_fd`] says nothing
 	/// about this — a stream with no descriptor to show can still be a pipe.
+	///
+	/// Answering `false` is a promise the shell cannot check, and the cost of
+	/// breaking it is measured: a stream that answered `false` and then waited
+	/// held the only worker until an outside rescue at 400 ms, and one that
+	/// answered honestly but took 250 ms in a single `read` delayed a 20 ms
+	/// timer to 250 ms. Answer `false` only where a call returns in a time you
+	/// would be willing to block a scheduler for.
 	fn may_wait_for_peer(&self) -> bool {
 		true
 	}
@@ -337,14 +344,14 @@ enum CopySide {
 }
 
 impl CopySide {
-	fn classify(file: OpenFile) -> Self {
+	fn classify(file: OpenFile) -> std::io::Result<Self> {
 		if file.is_virtual() {
-			return Self::Awaits(file);
+			return Ok(Self::Awaits(file));
 		}
 		if waits_for_peer(&file) {
-			Self::Detached(Detached::new(file))
+			Detached::new(file).map(Self::Detached)
 		} else {
-			Self::Plain(file)
+			Ok(Self::Plain(file))
 		}
 	}
 
@@ -409,16 +416,110 @@ fn waits_for_peer(file: &OpenFile) -> bool {
 	}
 }
 
+/// How many copy sides may be waiting on a peer at once, across the process.
+///
+/// This is the bound, and it is deliberate. A side that can wait for a peer
+/// which may never come runs on a thread of its own, and a cancelled copy
+/// cannot take that thread back: the read it is parked in ends only when the
+/// peer acts, and no portable call interrupts it. Left unbounded, repeated
+/// abandoned `$(<fifo)` runs fill the process's thread table and
+/// `std::thread::spawn` panics. At the limit a copy is **refused** with
+/// [`std::io::ErrorKind::ResourceBusy`] rather than queued: queueing behind a
+/// read that may never end is the same deadlock one address further out, which
+/// is what Tokio's blocking pool already proved.
+///
+/// The number is chosen to be far above any real shell's concurrent
+/// peer-waiting reads and far below the process's thread limit. A copy whose
+/// sides are a regular file, a provider-backed file, or anything else that
+/// cannot wait for a peer takes no thread and is never refused; `$(<file)` on
+/// an ordinary file is in that set.
+pub const DETACHED_SIDE_LIMIT: usize = 64;
+
+/// Live detached threads. Released by the thread itself, not by [`Detached`],
+/// because an abandoned copy's thread outlives the struct that started it.
+static DETACHED_SIDES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds one place under [`DETACHED_SIDE_LIMIT`] for as long as its thread runs.
+struct DetachedPermit;
+
+impl DetachedPermit {
+	fn acquire() -> Option<Self> {
+		DETACHED_SIDES
+			.try_update(
+				std::sync::atomic::Ordering::AcqRel,
+				std::sync::atomic::Ordering::Acquire,
+				|live| (live < DETACHED_SIDE_LIMIT).then_some(live + 1),
+			)
+			.ok()
+			.map(|_previous| Self)
+	}
+}
+
+impl Drop for DetachedPermit {
+	fn drop(&mut self) {
+		DETACHED_SIDES.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+	}
+}
+
+/// Which way a handle has to become ready.
+#[derive(Clone, Copy)]
+enum Readiness {
+	Readable,
+	Writable,
+}
+
+/// Waits, on a detached thread, until `file` can make progress again.
+///
+/// A caller may hand the shell a descriptor that is **already** `O_NONBLOCK`,
+/// and this code deliberately never changes a descriptor's flags. `EAGAIN`
+/// from such a handle means "not yet", not "failed": returning it would make
+/// `$(</dev/stdin)` on a non-blocking pipe fail where a blocking one waits.
+/// So the thread that is allowed to block does — on readiness, with `poll`,
+/// which reads no flag and changes none.
+///
+/// A handle that reports not-ready and will not show a descriptor cannot be
+/// polled; it is retried after a short sleep, which is slower than readiness
+/// but keeps the contract. Nothing in this repository is such a handle.
+fn wait_until_ready(file: &OpenFile, readiness: Readiness) {
+	#[cfg(unix)]
+	{
+		use std::os::fd::AsRawFd as _;
+
+		if let Ok(borrowed) = file.try_borrow_as_fd() {
+			let mut waited = nix::libc::pollfd {
+				fd:      borrowed.as_raw_fd(),
+				events:  match readiness {
+					Readiness::Readable => nix::libc::POLLIN,
+					Readiness::Writable => nix::libc::POLLOUT,
+				},
+				revents: 0,
+			};
+			// SAFETY: one `pollfd` is passed with a length of one, the
+			// descriptor is open for as long as `file` is borrowed, and a
+			// negative timeout waits without end. A failure (`EINTR`) only
+			// returns early, and the caller retries the operation either way.
+			unsafe { nix::libc::poll(&raw mut waited, 1, -1) };
+			return;
+		}
+	}
+
+	std::thread::sleep(std::time::Duration::from_millis(1));
+}
+
 /// A handle whose blocking I/O runs on a thread of its own.
 ///
-/// Deliberately not Tokio's blocking pool. That pool is a bound, and a
-/// cancelled copy cannot give its slot back: a read from a pipe nobody writes
-/// to holds one for ever, so a few abandoned `$(<fifo)` runs disable every
-/// later copy, and a substitution nested inside a non-async pipeline stage
-/// deadlocks against the stage already holding a slot. A thread per copy is not
-/// a bound. It ends when the operation it is in returns, or when this struct
-/// drops and its request channel closes — so an abandoned copy leaves one
-/// thread parked on a descriptor rather than a scarce slot or a runtime worker.
+/// Deliberately not Tokio's blocking pool. That pool is a bound shared with
+/// every other blocking task in the process, and a cancelled copy cannot give
+/// its slot back: a read from a pipe nobody writes to holds one for ever, so a
+/// few abandoned `$(<fifo)` runs disable every later copy, and a substitution
+/// nested inside a non-async pipeline stage deadlocks against the stage already
+/// holding a slot. This has a bound of its own instead — see
+/// [`DETACHED_SIDE_LIMIT`] — so the failure at it is a refusal rather than a
+/// deadlock, a panic, or an exhausted process.
+///
+/// The thread ends when the operation it is in returns, or when this struct
+/// drops and its request channel closes; an abandoned copy leaves one thread
+/// parked on a descriptor rather than a runtime worker.
 struct Detached {
 	requests: std::sync::mpsc::Sender<DetachedRequest>,
 	replies:  tokio::sync::mpsc::UnboundedReceiver<std::io::Result<DetachedReply>>,
@@ -439,24 +540,63 @@ enum DetachedReply {
 }
 
 impl Detached {
-	fn new(mut file: OpenFile) -> Self {
+	fn new(mut file: OpenFile) -> std::io::Result<Self> {
+		let Some(permit) = DetachedPermit::acquire() else {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::ResourceBusy,
+				format!(
+					"{DETACHED_SIDE_LIMIT} reads or writes are already waiting on a peer that may \
+					 never answer"
+				),
+			));
+		};
 		let (requests, incoming) = std::sync::mpsc::channel::<DetachedRequest>();
 		let (outgoing, replies) = tokio::sync::mpsc::unbounded_channel();
 		std::thread::spawn(move || {
+			// Held until this thread ends, which is after the operation it is
+			// in returns — not when the copy that started it is abandoned.
+			let _permit = permit;
 			while let Ok(request) = incoming.recv() {
 				let reply = match request {
 					DetachedRequest::Read(mut buf) => loop {
 						match std::io::Read::read(&mut file, &mut buf) {
 							Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+							Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+								wait_until_ready(&file, Readiness::Readable);
+							},
 							Ok(read) => break Ok(DetachedReply::Read(buf, read)),
 							Err(error) => break Err(error),
 						}
 					},
+					// Not `write_all`: it cannot resume after a handle says it
+					// is not ready, so the loop belongs here.
 					DetachedRequest::Write(buf) => {
-						std::io::Write::write_all(&mut file, &buf).map(|()| DetachedReply::Wrote(buf))
+						let mut written = 0;
+						loop {
+							match std::io::Write::write(&mut file, &buf[written..]) {
+								Ok(0) => break Err(std::io::ErrorKind::WriteZero.into()),
+								Ok(wrote) => {
+									written += wrote;
+									if written == buf.len() {
+										break Ok(DetachedReply::Wrote(buf));
+									}
+								},
+								Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+								Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+									wait_until_ready(&file, Readiness::Writable);
+								},
+								Err(error) => break Err(error),
+							}
+						}
 					},
-					DetachedRequest::Flush => {
-						std::io::Write::flush(&mut file).map(|()| DetachedReply::Flushed)
+					DetachedRequest::Flush => loop {
+						match std::io::Write::flush(&mut file) {
+							Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+							Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+								wait_until_ready(&file, Readiness::Writable);
+							},
+							other => break other.map(|()| DetachedReply::Flushed),
+						}
 					},
 				};
 				if outgoing.send(reply).is_err() {
@@ -464,7 +604,7 @@ impl Detached {
 				}
 			}
 		});
-		Self { requests, replies, scratch: Some(Vec::new()) }
+		Ok(Self { requests, replies, scratch: Some(Vec::new()) })
 	}
 
 	/// The thread stopped without answering, which happens only if the handle's
@@ -516,7 +656,7 @@ impl Detached {
 ///
 /// Returns the first read error.
 pub async fn read_to_end_detached(file: OpenFile) -> std::io::Result<Vec<u8>> {
-	let mut side = CopySide::classify(file);
+	let mut side = CopySide::classify(file)?;
 	let mut buf = vec![0u8; COPY_CHUNK_BYTES];
 	let mut contents = Vec::new();
 	loop {
@@ -554,8 +694,8 @@ pub async fn read_to_end_detached(file: OpenFile) -> std::io::Result<Vec<u8>> {
 ///
 /// Returns the first read or write error.
 pub async fn copy_async(reader: OpenFile, writer: OpenFile) -> std::io::Result<()> {
-	let mut reader = CopySide::classify(reader);
-	let mut writer = CopySide::classify(writer);
+	let mut reader = CopySide::classify(reader)?;
+	let mut writer = CopySide::classify(writer)?;
 	let mut buf = vec![0u8; COPY_CHUNK_BYTES];
 	loop {
 		// A copy between two regular files awaits nothing; without this it would

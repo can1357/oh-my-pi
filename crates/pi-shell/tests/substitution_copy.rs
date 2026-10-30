@@ -532,3 +532,227 @@ fn a_copy_leaves_the_descriptors_status_flags_alone() {
 	assert_eq!(flags(&observer), before, "nor did it leave anything behind");
 	assert_eq!(during & libc::O_NONBLOCK, 0, "no other holder of this pipe sees EAGAIN");
 }
+
+/// A side that can wait for a peer runs on a thread of its own, and an
+/// abandoned copy cannot take that thread back. Unbounded, that is the wedge
+/// at a third address: 128 cancelled copies left 128 threads alive and
+/// `std::thread::spawn` eventually panics. The bound has to refuse rather than
+/// queue — queueing behind a read that may never end is the deadlock again.
+#[test]
+fn peer_waiting_copies_are_refused_at_their_bound() {
+	let limit = brush_core::openfiles::DETACHED_SIDE_LIMIT;
+	let mut writers = Vec::with_capacity(limit + 1);
+	let mut readers = Vec::with_capacity(limit);
+	for _ in 0..limit {
+		let (reader, writer) = std::io::pipe().expect("pipe");
+		writers.push(writer);
+		readers.push(reader);
+	}
+	let (extra_reader, extra_writer) = std::io::pipe().expect("pipe");
+	writers.push(extra_writer);
+
+	let refusal = on_single_worker(1, Duration::from_secs(60), async move {
+		let abandoned: Vec<_> = readers
+			.into_iter()
+			.map(|reader| {
+				tokio::spawn(copy_async(
+					OpenFile::from(reader),
+					OpenFile::from(tempfile::tempfile().expect("sink")),
+				))
+			})
+			.collect();
+		// Let every copy reach its first read, then walk away from all of them.
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		for task in &abandoned {
+			task.abort();
+		}
+		for task in abandoned {
+			let _ = task.await;
+		}
+
+		copy_async(OpenFile::from(extra_reader), OpenFile::from(tempfile::tempfile().expect("sink")))
+			.await
+			.err()
+			.map(|error| error.kind())
+	})
+	.expect("the runtime answered");
+
+	drop(writers);
+	assert_eq!(
+		refusal,
+		Some(std::io::ErrorKind::ResourceBusy),
+		"the copy past the bound is refused, not spawned"
+	);
+}
+
+/// Sets `O_NONBLOCK` on a descriptor this test owns, which is the one thing
+/// `copy_async` must never do to a handle it is given.
+fn make_non_blocking(fd: &impl std::os::fd::AsRawFd) {
+	// SAFETY: the descriptor is open and belongs to the caller.
+	unsafe {
+		let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+		assert!(flags >= 0, "F_GETFL");
+		assert_eq!(libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+	}
+}
+
+/// A caller may hand the shell a descriptor that is **already** non-blocking.
+/// `EAGAIN` from it means "not yet", not "failed": returning it made
+/// `$(</dev/stdin)` on a non-blocking pipe fail where a blocking one waits.
+#[test]
+fn an_already_non_blocking_input_waits_instead_of_failing() {
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	make_non_blocking(&reader);
+
+	let sink = tempfile::tempfile().expect("sink");
+	let mut inspect = sink.try_clone().expect("sink handle");
+	on_single_worker(1, Duration::from_secs(20), async move {
+		let copy = tokio::spawn(copy_async(OpenFile::from(reader), OpenFile::from(sink)));
+		// The first read finds nothing; a blocking handle would wait here.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		std::io::Write::write_all(&mut writer, b"late").expect("write");
+		drop(writer);
+		copy.await.expect("copy task")
+	})
+	.expect("the runtime answered")
+	.expect("the copy waited for its writer");
+
+	std::io::Seek::rewind(&mut inspect).expect("rewind");
+	let mut got = String::new();
+	std::io::Read::read_to_string(&mut inspect, &mut got).expect("read back");
+	assert_eq!(got, "late", "what arrived late still arrived");
+}
+
+/// The same on the writing side: a non-blocking pipe that fills has to be
+/// waited on, not reported as an error after one buffer's worth.
+#[test]
+fn an_already_non_blocking_output_waits_instead_of_failing() {
+	const BYTES: usize = 1 << 20;
+
+	let dir = tempfile::tempdir().expect("temp dir");
+	let path = scratch_file(dir.path(), "payload", BYTES);
+	let source = std::fs::File::open(&path).expect("source");
+	let (reader, writer) = std::io::pipe().expect("pipe");
+	make_non_blocking(&writer);
+
+	// Drains late, so the pipe fills first and the write finds it full.
+	let drain = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(50));
+		let mut reader = reader;
+		let mut drained = Vec::new();
+		std::io::Read::read_to_end(&mut reader, &mut drained).expect("drain");
+		drained.len()
+	});
+
+	on_single_worker(1, Duration::from_secs(30), async move {
+		copy_async(OpenFile::from(source), OpenFile::from(writer)).await
+	})
+	.expect("the runtime answered")
+	.expect("the copy waited for its drain");
+
+	assert_eq!(drain.join().expect("drain thread"), BYTES, "every byte went through");
+}
+
+/// Replaces the behavioural half of two scratch probes that pinned the
+/// previous mechanism and are therefore gone: a destination that closes while
+/// the copy is running must surface the error, a copy abandoned while it waits
+/// must end at once and leave the descriptor as it was, and two copies of one
+/// descriptor must both run without taking the worker. The mechanism half of
+/// those probes — that a pending copy sets `O_NONBLOCK`, and that a retained
+/// descriptor then reads `WouldBlock` — is what this change removed.
+#[test]
+fn a_destination_that_closes_mid_copy_surfaces_the_error() {
+	const BYTES: usize = 8 << 20;
+
+	let dir = tempfile::tempdir().expect("temp dir");
+	let path = scratch_file(dir.path(), "payload", BYTES);
+	let source = std::fs::File::open(&path).expect("source");
+	let (reader, writer) = std::io::pipe().expect("pipe");
+
+	// Takes one buffer and goes away, so the copy finds the far end gone.
+	let peer = std::thread::spawn(move || {
+		let mut reader = reader;
+		let mut taken = vec![0u8; 4096];
+		let read = std::io::Read::read(&mut reader, &mut taken).expect("peer read");
+		drop(reader);
+		read
+	});
+
+	let outcome = on_single_worker(1, Duration::from_secs(30), async move {
+		copy_async(OpenFile::from(source), OpenFile::from(writer))
+			.await
+			.map_err(|error| error.kind())
+	})
+	.expect("the runtime answered");
+
+	assert!(peer.join().expect("peer thread") > 0, "the peer took something first");
+	assert_eq!(
+		outcome,
+		Err(std::io::ErrorKind::BrokenPipe),
+		"a destination that went away is an error, not a silent stop"
+	);
+}
+
+/// Abandoning a copy that is waiting has to end the wait for the caller at
+/// once — the thread it leaves behind is the documented cost, not a delay the
+/// caller sees — and it must leave the descriptor exactly as it was.
+#[test]
+fn an_abandoned_copy_ends_at_once_and_leaves_its_descriptor_alone() {
+	fn flags(fd: &impl std::os::fd::AsRawFd) -> libc::c_int {
+		// SAFETY: `F_GETFL` only reads, and the descriptor is open.
+		unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) }
+	}
+
+	let (reader, writer) = std::io::pipe().expect("pipe");
+	let observer = reader.try_clone().expect("second descriptor");
+	let before = flags(&observer);
+
+	let elapsed = on_single_worker(1, Duration::from_secs(20), async move {
+		let copy = tokio::spawn(copy_async(
+			OpenFile::from(reader),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		let started = std::time::Instant::now();
+		copy.abort();
+		assert!(copy.await.expect_err("aborted").is_cancelled());
+		started.elapsed()
+	})
+	.expect("the runtime answered");
+
+	drop(writer);
+	assert!(elapsed < Duration::from_millis(100), "the caller waited {elapsed:?} for the abort");
+	assert_eq!(flags(&observer), before, "the abandoned copy left the description as it was");
+}
+
+/// Two copies of one descriptor, both waiting, must both finish and neither
+/// may take the worker: the timer below runs on it.
+#[test]
+fn two_copies_of_one_descriptor_both_run() {
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	let second = reader.try_clone().expect("second descriptor");
+
+	let (fired, bytes) = on_single_worker(1, Duration::from_secs(20), async move {
+		let first = tokio::spawn(copy_async(
+			OpenFile::from(reader),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		let other = tokio::spawn(copy_async(
+			OpenFile::from(second),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		let heartbeat = tokio::spawn(async {
+			tokio::time::sleep(Duration::from_millis(40)).await;
+			true
+		});
+		let fired = heartbeat.await.expect("heartbeat");
+		std::io::Write::write_all(&mut writer, b"shared").expect("write");
+		drop(writer);
+		let outcomes = (first.await.expect("first"), other.await.expect("other"));
+		(fired, outcomes.0.is_ok() && outcomes.1.is_ok())
+	})
+	.expect("the runtime answered");
+
+	assert!(fired, "a timer on the same worker still ran while both copies waited");
+	assert!(bytes, "both copies of the one descriptor finished");
+}

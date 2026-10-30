@@ -471,6 +471,32 @@ pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), 
 	ensure_not_cancelled(params)
 }
 
+/// How many steps of one element each a loop may take between checkpoints.
+///
+/// A checkpoint costs about 50 ns, and a step that only moves one element of
+/// an array costs about as much, so one checkpoint per element charged copying
+/// a million-element array 23%. Spreading it over this many steps bounds the
+/// stretch between yields at a fraction of a millisecond while charging the
+/// copy almost nothing — the same trade [`expansion`]'s field splitting already
+/// makes for a field that can be any length.
+pub(crate) const ELEMENT_CHECKPOINT_STRIDE: usize = 256;
+
+/// [`loop_checkpoint`] on every [`ELEMENT_CHECKPOINT_STRIDE`]-th step, for a
+/// loop whose count is set by run-time data and whose single step is cheap and
+/// bounded — one element of an array, one field of an expansion.
+///
+/// `step` is counted from zero, so the first step always spends one: a run
+/// already cancelled stops before it touches anything.
+pub(crate) async fn element_checkpoint(
+	params: &ExecutionParameters,
+	step: usize,
+) -> Result<(), error::Error> {
+	if step % ELEMENT_CHECKPOINT_STRIDE == 0 {
+		return loop_checkpoint(params).await;
+	}
+	Ok(())
+}
+
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
 pub enum ProcessGroupPolicy {
@@ -2072,9 +2098,10 @@ async fn expand_assignment_value(
 					// Array elements are treated as regular words, not assignments
 					let split_expanded_value =
 						expansion::full_expand_and_split_word(shell, params, value).await?;
-					// One element can expand to any number of words (`"${a[@]}"`).
-					for expanded_value in split_expanded_value {
-						loop_checkpoint(params).await?;
+					// One element can expand to any number of words (`"${a[@]}"`),
+					// and each step is one push.
+					for (step, expanded_value) in split_expanded_value.into_iter().enumerate() {
+						element_checkpoint(params, step).await?;
 						expanded_values.push((None, expanded_value.into()));
 					}
 				}
@@ -2139,9 +2166,10 @@ async fn apply_assignment(
 					// Array elements are treated as regular words, not assignments
 					let values =
 						expansion::full_expand_and_split_word(shell, params, unexpanded_value).await?;
-					// One element can expand to any number of words (`"${a[@]}"`).
-					for value in values {
-						loop_checkpoint(params).await?;
+					// One element can expand to any number of words (`"${a[@]}"`),
+					// and each step is one push.
+					for (step, value) in values.into_iter().enumerate() {
+						element_checkpoint(params, step).await?;
 						elements.push((None, value));
 					}
 				}

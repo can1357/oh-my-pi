@@ -95,10 +95,11 @@ impl Expansion {
 	///
 	/// `next` can hold a field for every element of an array (`${name[@]}`),
 	/// and this runs after the expansion that made them has spent its last
-	/// checkpoint, so each field placed spends one. A call that places none
-	/// one at a time (no fields, or nothing to join them onto, when they move
-	/// over whole) spends one too, being a step of its caller's loop over the
-	/// pieces of a word.
+	/// checkpoint, so the fields placed spend one every
+	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`]. A call that places none one at a
+	/// time (no fields, or nothing to join them onto, when they move over
+	/// whole) spends one too, being a step of its caller's loop over the pieces
+	/// of a word.
 	async fn coalesce(&mut self, next: Self, params: &ExecutionParameters) -> Result<(), error::Error> {
 		if self.fields.is_empty() || next.fields.is_empty() {
 			interp::loop_checkpoint(params).await?;
@@ -107,7 +108,7 @@ impl Expansion {
 			}
 		} else {
 			for (index, field) in next.fields.into_iter().enumerate() {
-				interp::loop_checkpoint(params).await?;
+				interp::element_checkpoint(params, index).await?;
 				join_or_push(&mut self.fields, index == 0, field.0);
 			}
 		}
@@ -130,8 +131,9 @@ impl Expansion {
 	/// Returns elements `index..end` of an array's expansion, or characters
 	/// `index..end` of anything else.
 	///
-	/// An array's expansion has a field per element, so taking a range of
-	/// them spends a checkpoint on each field up to the end of the range.
+	/// An array's expansion has a field per element, so taking a range of them
+	/// spends a checkpoint every [`interp::ELEMENT_CHECKPOINT_STRIDE`] fields
+	/// up to the end of the range.
 	async fn polymorphic_subslice(
 		self,
 		index: usize,
@@ -145,7 +147,7 @@ impl Expansion {
 		if self.from_array {
 			let mut fields = Vec::with_capacity(min(len, self.fields.len() - index));
 			for (position, field) in self.fields.into_iter().enumerate().take(end) {
-				interp::loop_checkpoint(params).await?;
+				interp::element_checkpoint(params, position).await?;
 				if position >= index {
 					fields.push(field);
 				}
@@ -599,13 +601,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 	/// Joins the fields of `expansion` into one string, separated by spaces.
 	///
-	/// `x="${name[@]}"` joins a field for every element of the array, after
-	/// the expansion has spent its last checkpoint, so each field joined
-	/// spends one.
+	/// `x="${name[@]}"` joins a field for every element of the array, after the
+	/// expansion has spent its last checkpoint, so the fields joined spend one
+	/// every [`interp::ELEMENT_CHECKPOINT_STRIDE`].
 	async fn join_fields(&self, expansion: Expansion) -> Result<String, error::Error> {
 		let mut joined = String::new();
 		for (index, field) in expansion.fields.into_iter().enumerate() {
-			interp::loop_checkpoint(self.params).await?;
+			interp::element_checkpoint(self.params, index).await?;
 			// TODO(IFS): Use IFS instead for separator?
 			if index > 0 {
 				joined.push(' ');
@@ -862,9 +864,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 		// Now expand pathnames if necessary. This also unquotes as a side effect.
 		let mut result = Vec::new();
-		for field in fields {
-			// One field per brace element, so the same count as above.
-			interp::loop_checkpoint(self.params).await?;
+		for (step, field) in fields.into_iter().enumerate() {
+			// One field per brace element or array element, and a field that
+			// does glob spends the walk's own checkpoints while it does.
+			interp::element_checkpoint(self.params, step).await?;
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
 				result.push(String::from(field));
 			} else {
@@ -1159,7 +1162,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				// string; with no fields, an empty one.
 				let mut concatenated = String::new();
 				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
-					interp::loop_checkpoint(self.params).await?;
+					interp::element_checkpoint(self.params, index).await?;
 					if index > 0 {
 						concatenated.push(concatenation_joiner);
 					}
@@ -1170,7 +1173,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				join_or_push(&mut fields, true, vec![ExpansionPiece::Unsplittable(concatenated)]);
 			} else {
 				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
-					interp::loop_checkpoint(self.params).await?;
+					interp::element_checkpoint(self.params, index).await?;
 					let pieces = pieces.into_iter().map(ExpansionPiece::make_unsplittable).collect();
 					join_or_push(&mut fields, index == 0, pieces);
 				}
@@ -1482,9 +1485,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				//
 
 				let mut transformed_fields = vec![];
-				for field in expanded_parameter.fields {
+				for (step, field) in expanded_parameter.fields.into_iter().enumerate() {
 					// `${name[@]…}` transforms one field per array element.
-					interp::loop_checkpoint(self.params).await?;
+					interp::element_checkpoint(self.params, step).await?;
 					let s = String::from(field);
 					let transformed = self.apply_transform_to(&op, s, came_from_undefined).await?;
 					transformed_fields.push(WordField::from(transformed));
@@ -2098,16 +2101,16 @@ fn to_initial_capitals(s: &str) -> String {
 	result
 }
 
-/// Makes a field of each of `values`, spending a checkpoint on each: there is
-/// one for every element of an array or every positional parameter, and
-/// making them waits on nothing.
+/// Makes a field of each of `values`: there is one for every element of an
+/// array or every positional parameter, and making one waits on nothing, so
+/// they spend a checkpoint every [`interp::ELEMENT_CHECKPOINT_STRIDE`].
 async fn fields_from(
 	params: &ExecutionParameters,
 	values: impl Iterator<Item = String>,
 ) -> Result<Vec<WordField>, error::Error> {
 	let mut fields = Vec::with_capacity(values.size_hint().0);
-	for value in values {
-		interp::loop_checkpoint(params).await?;
+	for (step, value) in values.enumerate() {
+		interp::element_checkpoint(params, step).await?;
 		fields.push(WordField::from(value));
 	}
 
@@ -2124,9 +2127,9 @@ where
 	FReturn: Future<Output = Result<String, error::Error>>,
 {
 	let mut transformed_fields = vec![];
-	for field in expansion.fields {
+	for (step, field) in expansion.fields.into_iter().enumerate() {
 		// One field per array element when the parameter is an array.
-		interp::loop_checkpoint(params).await?;
+		interp::element_checkpoint(params, step).await?;
 		let transformed_field = WordField::from(f(String::from(field)).await?);
 		transformed_fields.push(transformed_field);
 	}
