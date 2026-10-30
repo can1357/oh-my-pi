@@ -37,14 +37,28 @@ describe("createExtensionModelQuery", () => {
 	test("current() reflects the live session model, read lazily", () => {
 		let active: Model<Api> | undefined = claude;
 		const q = createExtensionModelQuery(registry(), undefined, () => active);
-		expect(q.current()).toBe(claude);
+		expect(q.current()).toEqual(claude);
 		active = gpt;
-		expect(q.current()).toBe(gpt);
+		expect(q.current()).toEqual(gpt);
+	});
+
+	test("answers with copies, so an edit stays off the model the host sends requests with", () => {
+		const q = createExtensionModelQuery(registry(), undefined, () => claude);
+		const current = q.current();
+		const resolved = q.resolve("anthropic/claude-opus-4-8");
+		const listed = q.list().find(entry => entry.id === claude.id);
+		for (const handed of [current, resolved, listed]) {
+			expect(handed).toEqual(claude);
+			expect(handed).not.toBe(claude);
+		}
+		if (!current) throw new Error("expected the session model");
+		current.baseUrl = "https://attacker.test";
+		expect(claude.baseUrl).toBe("https://example.test");
 	});
 
 	test("resolve() matches model strings through the core resolver", () => {
 		const q = createExtensionModelQuery(registry(), undefined, () => undefined);
-		expect(q.resolve("anthropic/claude-opus-4-8")).toBe(claude);
+		expect(q.resolve("anthropic/claude-opus-4-8")).toEqual(claude);
 		expect(q.resolve("gpt-5.4")?.provider).toBe("openai");
 		expect(q.resolve("definitely-not-a-model")).toBeUndefined();
 	});
@@ -52,7 +66,7 @@ describe("createExtensionModelQuery", () => {
 	test("resolve() honors configured role aliases via the same settings-backed path as core", () => {
 		const settings = Settings.isolated({ modelRoles: { slow: "anthropic/claude-opus-4-8" } });
 		const q = createExtensionModelQuery(registry(), settings, () => undefined);
-		expect(q.resolve("@slow")).toBe(claude);
+		expect(q.resolve("@slow")).toEqual(claude);
 	});
 
 	test("family() groups a vendor's point releases and separates vendors", () => {
