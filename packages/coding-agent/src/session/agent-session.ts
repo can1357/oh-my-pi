@@ -461,12 +461,7 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import {
-	buildSessionContext,
-	getReadableCompactionEntry,
-	getRestorableSessionModels,
-	isTranscriptEntry,
-} from "./session-context";
+import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import {
 	type CacheRefreshOutcome,
 	type CacheWarmer,
@@ -12655,11 +12650,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A model that cannot replay the latest provider-native compaction reads
 		// the history behind it instead (see `BuildSessionContextOptions.model`):
 		// rebuild the context whenever the two models stand on different boundaries.
-		if (isChanging) {
-			const branch = this.sessionManager.getBranch();
-			if (getReadableCompactionEntry(branch, currentModel) !== getReadableCompactionEntry(branch, model)) {
-				this.agent.replaceMessages(this.buildDisplaySessionContext(model).messages);
-			}
+		if (isChanging && this.#providerBoundary.readsOtherCompaction(currentModel, model)) {
+			this.agent.replaceMessages(this.buildDisplaySessionContext(model).messages);
 		}
 
 		await this.#reconcileModelDependentState(model);
@@ -13588,14 +13580,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The first build was read by the departing model; rebuild it for the
 			// model this session is about to adopt when that one sizes the archive
 			// differently or stands on another compaction boundary.
-			if (targetModel) {
-				const branch = this.sessionManager.getBranch();
-				if (
-					frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model) ||
-					getReadableCompactionEntry(branch, targetModel) !== getReadableCompactionEntry(branch, this.model)
-				) {
-					sessionContext = this.buildDisplaySessionContext(targetModel);
-				}
+			if (
+				targetModel &&
+				(frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model) ||
+					this.#providerBoundary.readsOtherCompaction(targetModel, this.model))
+			) {
+				sessionContext = this.buildDisplaySessionContext(targetModel);
 			}
 			const didReloadConversationChange =
 				previousSessionContext !== undefined &&

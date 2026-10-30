@@ -2490,7 +2490,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.model?.id).toBe(planModel.id);
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and compact context");
 		const compactSpy = vi.spyOn(mode, "handleCompactCommand").mockResolvedValue("ok");
-		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session, "prompt").mockResolvedValue(true);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
