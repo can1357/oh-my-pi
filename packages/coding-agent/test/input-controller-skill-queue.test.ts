@@ -256,6 +256,37 @@ describe("InputController skill queue chip metadata", () => {
 		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill arg1 arg2", "steer", undefined);
 	});
 
+	it("holds a queued skill behind a pending compaction", async () => {
+		const { ctx, promptCustomMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		Object.assign(ctx, { yieldCompaction: { text: "/compact", sessionId: "session", leafId: null } });
+		const controller = new InputController(ctx);
+
+		await controller.handleQueueCommand("/skill:test-skill arg1", { text: "/queue /skill:test-skill arg1" });
+
+		// The flush expands the skill after the compaction, not before it.
+		expect(promptCustomMessage).not.toHaveBeenCalled();
+		expect(ctx.compactionQueuedMessages).toEqual([
+			{ text: "/skill:test-skill arg1", mode: "followUp", images: undefined },
+		]);
+	});
+
+	it("restores the /queue wrapper when a queued skill fails to dispatch", async () => {
+		const { ctx, editor, promptCustomMessage, showError } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		promptCustomMessage.mockRejectedValueOnce(new Error("skill failed"));
+		const controller = new InputController(ctx);
+
+		await controller.handleQueueCommand("/skill:test-skill arg1", { text: "/queue /skill:test-skill arg1" });
+
+		expect(showError).toHaveBeenCalledWith("skill failed");
+		expect(editor.getText()).toBe("/queue /skill:test-skill arg1");
+	});
+
 	it("restores a queued skill follow-up as /queue and dispatches the skill", async () => {
 		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
 			skillCommands,

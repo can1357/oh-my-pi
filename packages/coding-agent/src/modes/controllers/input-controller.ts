@@ -1897,15 +1897,16 @@ export class InputController {
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
+		restoreText = text,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
 			if (preserveDraft) {
-				restoreDetachedDraft(this.ctx.editor, text, draftImages, draftImageLinks);
+				restoreDetachedDraft(this.ctx.editor, restoreText, draftImages, draftImageLinks);
 			} else {
-				this.ctx.editor.setText(text);
+				this.ctx.editor.setText(restoreText);
 				if (draftImages && draftImages.length > 0) {
 					this.ctx.editor.pendingImages = [...draftImages];
 					this.ctx.editor.pendingImageLinks = draftImageLinks
@@ -1914,7 +1915,7 @@ export class InputController {
 					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 				}
 				// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
-				this.ctx.editor.setCollapsedText(text);
+				this.ctx.editor.setCollapsedText(restoreText);
 			}
 		};
 
@@ -1991,20 +1992,6 @@ export class InputController {
 			return;
 		}
 
-		// A queued `/skill:<name>` is a prompt template, not literal text: dispatch it
-		// through the skill path so the model never receives the raw command and a
-		// restored follow-up keeps the mode it was queued under.
-		if (isKnownSkillCommand(this.ctx, text)) {
-			await this.#invokeSkillCommand(
-				text,
-				"followUp",
-				options.images,
-				options.imageLinks,
-				options.detachedText !== undefined,
-			);
-			return;
-		}
-
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.ctx.editor.clearDraft();
@@ -2038,6 +2025,22 @@ export class InputController {
 					: `Queued ${messages.length} messages for after compaction`,
 			);
 			this.ctx.ui.requestRender();
+			return;
+		}
+
+		// A queued `/skill:<name>` is a prompt template, not literal text: dispatch it
+		// through the skill path so the model never receives the raw command. Behind a
+		// compaction the entry stays in `compactionQueuedMessages` above and the flush
+		// expands it there, after the compaction.
+		if (isKnownSkillCommand(this.ctx, text)) {
+			await this.#invokeSkillCommand(
+				text,
+				"followUp",
+				options.images,
+				options.imageLinks,
+				options.detachedText !== undefined,
+				options.detachedText,
+			);
 			return;
 		}
 
