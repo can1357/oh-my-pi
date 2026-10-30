@@ -2025,3 +2025,117 @@ test("a restore leaves nothing a maintenance sweep would collect as scratch", as
 	for (const name of await fs.readdir(bucket)) expect(name.endsWith(".tmp")).toBe(false);
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
+test("reclaiming refuses while a process owns the session", async () => {
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const lease = tryAcquireSessionLease(SESSION_ID);
+	expect(lease).not.toBeNull();
+
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		lease?.release();
+	}
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain("owns");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("reclaiming refuses while a process owns a subagent session below it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	await Bun.write(path.join(liveArtifacts, "child.log"), sessionBody(childId, "UNIQUE CHILD TURN", root));
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const lease = tryAcquireSessionLease(childId);
+	expect(lease).not.toBeNull();
+
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		lease?.release();
+	}
+
+	// The owner was there before this ran; nothing about it is the disclosed
+	// window, and its file is still where it left it.
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain("subagent sessions");
+	expect(await Bun.file(path.join(liveArtifacts, "child.log")).text()).toContain("UNIQUE CHILD TURN");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("reclaiming proves the session under its lease, not before taking it", async () => {
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+
+	// A turn taken after the archive was made. The proof now runs under the
+	// leases rather than before them, so it reads the session as it stands and
+	// refuses instead of deleting a transcript it checked earlier.
+	await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "late" })}\n`);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain("is not a copy of");
+	expect(await Bun.file(sessionFile).text()).toContain("late");
+});
+
+test("reclaiming gives the live copy up once the archive is shown to hold it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARTIFACT");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.errors).toEqual([]);
+	expect(result.reclaim?.reclaimed).toBe(1);
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).exists()).toBe(false);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("an archived artifact updated in place is not written over by a superseding copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-AND-MORE");
+
+	// The archived file is rewritten in place while the copy is deciding:
+	// same inode, same length, different content. A name or inode comparison
+	// cannot see that; reading the descriptor again can.
+	const realStat = fs.stat.bind(fs);
+	let touched = false;
+	const stat = spyOn(fs, "stat").mockImplementation((async (target: Parameters<typeof fs.stat>[0]) => {
+		if (!touched && String(target).endsWith(".tmp") && String(target).includes("tool.log")) {
+			touched = true;
+			const handle = await fs.open(path.join(archivedArtifacts, "tool.log"), "r+");
+			await handle.write(Buffer.from("XXXXXX"), 0, 6, 0);
+			await handle.close();
+		}
+		return await realStat(target);
+	}) as typeof fs.stat);
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		stat.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("XXXXXX");
+});

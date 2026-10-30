@@ -26,7 +26,12 @@ import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
-import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import {
+	listSessionsReadOnly,
+	readSessionInfo,
+	type SessionInfo,
+	type SessionStatus,
+} from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import {
 	archiveIsPrefixOfLive,
@@ -176,6 +181,8 @@ export interface ReclaimGcResult {
 	sessionPath?: string;
 	/** 1 when the live copy went, 0 when it was kept and the reason is in `errors`. */
 	reclaimed: number;
+	/** The live artifact tree a refused reclaim left in place, with the reason in `errors`. */
+	keptArtifactTree?: string;
 	errors: string[];
 }
 
@@ -1042,7 +1049,7 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 	// One staging shape across the sessions tree and the archive, so the sweep
 	// that reclaims a killed writer's leftovers recognizes this one too.
 	const tempPath = sessionStagingPath(destination);
-	let published = false;
+	let published: Stats | undefined;
 	try {
 		const expected = await digestStream(Bun.file(source).stream());
 		// A killed run can leave this name linked to the archive it published;
@@ -1071,7 +1078,10 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 			// someone else's, and `EEXIST` says so rather than writing over it.
 			await fs.link(tempPath, destination);
 		}
-		published = true;
+		// Recorded from the temp, which is the same file either way: reading it
+		// from the destination could record whatever replaced it since, and the
+		// rollback below would then delete that instead.
+		published = await statIfPresent(tempPath);
 		const stored = await digestArchivedSessionFile(destination);
 		if (stored.hash !== expected.hash) {
 			throw new Error(
@@ -1082,8 +1092,15 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 	} catch (error) {
 		// A superseding archive holds everything the one it replaced held, so
 		// removing it would give up bytes to recover from a failure the live
-		// transcript survives anyway.
-		if (published && !supersedes) await fs.rm(destination, { force: true });
+		// transcript survives anyway. And what goes is the entry this run put
+		// there, not whatever now wears its name: a file published at that
+		// path since is not this run's to undo.
+		if (published && !supersedes) {
+			const standing = await fs.lstat(destination).catch(() => undefined);
+			if (standing?.dev === published.dev && standing.ino === published.ino) {
+				await fs.rm(destination, { force: true });
+			}
+		}
 		throw error;
 	} finally {
 		await fs.rm(tempPath, { force: true });
@@ -1176,11 +1193,14 @@ async function publishArtifactIntoArchive(
 			throw error;
 		});
 		if (!archived) {
+			// The inode is read from the temp, which `link` makes the same file:
+			// reading it from the destination afterwards would record whatever
+			// replaced it in between, and the rollback would then delete that.
+			const published = await statIfPresent(tempPath);
 			await fs.link(tempPath, destination);
-			await noteCreation(destination, state);
+			if (published) state.created.push({ path: destination, dev: published.dev, ino: published.ino });
 			return;
 		}
-		let supersedes: Stats | undefined;
 		try {
 			const verified = await archived.stat();
 			if (verified.dev === sourceStat.dev && verified.ino === sourceStat.ino) {
@@ -1190,40 +1210,41 @@ async function publishArtifactIntoArchive(
 				);
 			}
 			if (
-				verified.isFile() &&
-				(await survivesSourceRemoval(destination, sourceRoot)) &&
-				(await archivedHandleIsHeldBy(archived, verified, tempPath))
+				!verified.isFile() ||
+				!(await survivesSourceRemoval(destination, sourceRoot)) ||
+				!(await archivedHandleIsHeldBy(archived, verified, tempPath))
 			) {
-				// The archived copy is held in full by what would be written. If
-				// they are the same length the archive already holds exactly
-				// this and there is nothing to do; if the live one has grown —
-				// what a restore leaves behind, since it keeps its copy — the
-				// longer one replaces the shorter, which loses nothing because
-				// the shorter is inside it.
-				if (verified.size === (await fs.stat(tempPath)).size) return;
-				supersedes = verified;
+				const stem = path.basename(sourceRoot);
+				throw new Error(
+					`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
+						`the archive is left as it is. Bring the session home with ` +
+						`\`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
+						`— add \`--agent-dir <dir>\` when it is not the default one — and archive it again, ` +
+						`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
+				);
 			}
-		} finally {
-			await archived.close();
-		}
-		if (supersedes) {
-			// Re-identified immediately before the rename: a destination that
-			// changed since is refused rather than written over.
+			// The archived copy is held in full by what would be written. Same
+			// length means the archive already holds exactly this; longer on
+			// the live side — what a restore leaves behind, since it keeps its
+			// copy — means the longer replaces the shorter, which loses nothing
+			// because the shorter is inside it.
+			if (verified.size === (await fs.stat(tempPath)).size) return;
+			// Asked again through the descriptor that was read, with nothing
+			// left to do but rename. An inode comparison cannot see a file
+			// updated in place; this can, because it reads the file rather
+			// than its name.
+			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
+				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			}
 			const standing = await statIfPresent(destination);
-			if (!standing || standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
+			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
 				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
 			}
 			await fs.rename(tempPath, destination);
-			return;
+		} finally {
+			await archived.close();
 		}
-		const stem = path.basename(sourceRoot);
-		throw new Error(
-			`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
-				`the archive is left as it is. Bring the session home with ` +
-				`\`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
-				`— add \`--agent-dir <dir>\` when it is not the default one — and archive it again, ` +
-				`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
-		);
+		return;
 	} finally {
 		await fs.rm(tempPath, { force: true });
 	}
@@ -2154,27 +2175,44 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	result.sessionPath = sessionPath;
 	const liveArtifacts = sessionPath.slice(0, -".jsonl".length);
 	const archiveArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	// The archive must hold this session carried no further than it has: the
-	// live transcript is the archive plus nothing, or there are bytes only the
-	// live copy has and deleting it would lose them.
-	if (!(await archiveAlreadyHolds(sessionPath, archiveFile))) {
+	const holdsLive = async (): Promise<boolean> => await archiveAlreadyHolds(sessionPath, archiveFile);
+	const notACopy = (): string =>
+		`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
+		`\`omp gc --archive --apply\` and reclaim after that`;
+	if (!options.apply) {
+		// Say now what applying would refuse, without taking anything.
+		if (!(await holdsLive())) result.errors.push(notACopy());
+		return result;
+	}
+	// Leases first, and the whole tree's, the way the archive phase takes
+	// them. Proving before taking them proves nothing: the owner can write
+	// between the proof and the lease, and the deletion then runs against a
+	// reading that is already stale. And a parent's lease says nothing about
+	// the subagent sessions below it, whose files this deletes too.
+	const session = await readSessionInfo(sessionPath);
+	if (!session) {
+		result.errors.push(`${sessionPath} is not a session file`);
+		return result;
+	}
+	const tree = await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session));
+	if (!tree) {
 		result.errors.push(
-			`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
-				`\`omp gc --archive --apply\` and reclaim after that`,
+			`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
 		);
 		return result;
 	}
-	if (!options.apply) return result;
-	const lease = await tryAcquireSessionFileLease(sessionPath);
-	if (!lease) {
-		result.errors.push(`a running process owns ${sessionPath}; close it and reclaim again`);
-		return result;
-	}
 	try {
+		// Proved under the leases, so what was read is what no writer holding
+		// one can change while this runs.
+		if (!(await holdsLive())) {
+			result.errors.push(notACopy());
+			return result;
+		}
 		if (
 			(await pathExists(liveArtifacts)) &&
 			!(await removeLiveTreeOnceArchived(liveArtifacts, archiveArtifacts, liveArtifacts))
 		) {
+			result.keptArtifactTree = liveArtifacts;
 			result.errors.push(`${liveArtifacts} holds what the archive does not; it was kept`);
 			return result;
 		}
@@ -2183,7 +2221,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	} catch (error) {
 		result.errors.push(errorMessage(error));
 	} finally {
-		lease.release();
+		for (const held of tree.leases) held.release();
 	}
 	return result;
 }
