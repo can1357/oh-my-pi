@@ -1034,8 +1034,10 @@ export class AgentSession implements SettingsScope {
 
 	readonly #maintenance: SessionMaintenance;
 
-	// Branch summarization state
-	#branchSummaryAbortController: AbortController | undefined = undefined;
+	// Branch summarization state: one controller per navigation still preparing or summarizing.
+	// Navigations overlap, so a single slot let a later one replace or clear an earlier one's
+	// controller, and cancellation (disposal included) then missed the earlier summary.
+	readonly #branchSummaryAbortControllers = new Set<AbortController>();
 
 	readonly #handoff: SessionHandoff;
 
@@ -12050,10 +12052,16 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Cancel in-progress branch summarization.
+	 * Cancel every in-progress branch summarization.
 	 */
 	abortBranchSummary(): void {
-		this.#branchSummaryAbortController?.abort();
+		for (const controller of this.#branchSummaryAbortControllers) controller.abort();
+	}
+
+	/** Keep `controller` where {@link abortBranchSummary} reaches it until the returned handle is disposed. */
+	#trackBranchSummary(controller: AbortController): Disposable {
+		this.#branchSummaryAbortControllers.add(controller);
+		return { [Symbol.dispose]: () => this.#branchSummaryAbortControllers.delete(controller) };
 	}
 
 	/**
@@ -13949,8 +13957,10 @@ export class AgentSession implements SettingsScope {
 			userWantsSummary: options.summarize ?? false,
 		};
 
-		// Set up abort controller for summarization
-		this.#branchSummaryAbortController = new AbortController();
+		// This navigation's own cancellation, reachable by `abortBranchSummary()` and disposal until
+		// the navigation ends, however many others run meanwhile.
+		const branchSummaryAbort = new AbortController();
+		using _branchSummary = this.#trackBranchSummary(branchSummaryAbort);
 		let hookSummary: { summary: string; details?: unknown } | undefined;
 		let fromExtension = false;
 
@@ -13959,7 +13969,7 @@ export class AgentSession implements SettingsScope {
 			const result = (await this.#extensionRunner.emit({
 				type: "session_before_tree",
 				preparation,
-				signal: this.#branchSummaryAbortController.signal,
+				signal: branchSummaryAbort.signal,
 			})) as SessionBeforeTreeResult | undefined;
 
 			if (result?.cancel) {
@@ -13988,7 +13998,7 @@ export class AgentSession implements SettingsScope {
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
-				signal: this.#branchSummaryAbortController.signal,
+				signal: branchSummaryAbort.signal,
 				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
 				metadata: this.agent.metadataForProvider(model.provider),
@@ -14001,8 +14011,8 @@ export class AgentSession implements SettingsScope {
 					return stream.result();
 				},
 			});
-			this.#branchSummaryAbortController = undefined;
-			if (result.aborted) {
+			// A summary that settled as disposal began still leaves the tree as it was.
+			if (result.aborted || this.#isDisposed) {
 				return { cancelled: true, aborted: true };
 			}
 			if (result.error) {
@@ -14126,8 +14136,6 @@ export class AgentSession implements SettingsScope {
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-
-		this.#branchSummaryAbortController = undefined;
 
 		// Report a committed `ask` re-answer so the interactive caller can resume
 		// the agent via `resumeAfterAskReanswer()` *after* rebuilding its

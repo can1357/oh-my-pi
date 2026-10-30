@@ -407,6 +407,78 @@ describe("AgentSession provider requests at disposal", () => {
 			expect(requests).toEqual([]);
 			expect(session.sessionManager.getLeafId()).toBe(leafBefore);
 		});
+
+		/** Hold the first credential lookup a summary request makes until `release` settles. */
+		function holdFirstCredential(): { reached: Promise<void>; release: () => void } {
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const resolve = modelRegistry.resolver.bind(modelRegistry) as (
+				target: ApiKeyResolverModel,
+				sessionId?: string,
+			) => ApiKeyResolver;
+			let held = false;
+			vi.spyOn(modelRegistry, "resolver").mockImplementation(((
+				target: ApiKeyResolverModel,
+				sessionId?: string,
+			): ApiKeyResolver => {
+				const real = resolve(target, sessionId);
+				return async (context: ApiKeyResolveContext) => {
+					if (!held) {
+						held = true;
+						reached.resolve();
+						await release.promise;
+					}
+					return real(context);
+				};
+			}) as typeof modelRegistry.resolver);
+			return { reached: reached.promise, release: () => release.resolve() };
+		}
+
+		// Navigations overlap: a later one used to replace, then clear, the only controller an
+		// earlier summary had, so disposal could no longer cancel it.
+		it.each([
+			["a plain", false],
+			["a summarized", true],
+		] as const)(
+			"cancels a summary waiting for its credential after %s navigation completes and disposal begins",
+			async (_kind, secondSummarizes) => {
+				await seedConversation();
+				const credential = holdFirstCredential();
+				const messages = session.sessionManager.getEntries().filter(entry => entry.type === "message");
+				const first = session.navigateTree(messages[1]!.id, { summarize: true });
+				await credential.reached;
+				await session.navigateTree(messages[3]!.id, { summarize: secondSummarizes });
+				const leafBefore = session.sessionManager.getLeafId();
+				const entriesBefore = session.sessionManager.getEntries().length;
+
+				session.beginDispose();
+				credential.release();
+
+				expect(await first).toEqual({ cancelled: true, aborted: true });
+				expect(requests.filter(request => request.disposed)).toEqual([]);
+				expect(session.sessionManager.getLeafId()).toBe(leafBefore);
+				expect(session.sessionManager.getEntries()).toHaveLength(entriesBefore);
+			},
+		);
+
+		it("cancels a summary still streaming after a plain navigation completes and disposal begins", async () => {
+			await seedConversation();
+			holdFirst = true;
+			const messages = session.sessionManager.getEntries().filter(entry => entry.type === "message");
+			const first = session.navigateTree(messages[1]!.id, { summarize: true });
+			await firstRequest.promise;
+			await session.navigateTree(messages[3]!.id);
+			const leafBefore = session.sessionManager.getLeafId();
+			const entriesBefore = session.sessionManager.getEntries().length;
+
+			session.beginDispose();
+			releaseFirst.resolve();
+
+			expect(await first).toEqual({ cancelled: true, aborted: true });
+			expect(requests.map(request => request.disposed)).toEqual([false]);
+			expect(session.sessionManager.getLeafId()).toBe(leafBefore);
+			expect(session.sessionManager.getEntries()).toHaveLength(entriesBefore);
+		});
 	});
 
 	describe("image descriptions for queued messages", () => {
