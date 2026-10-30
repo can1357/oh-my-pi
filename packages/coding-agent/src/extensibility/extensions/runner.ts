@@ -19,6 +19,7 @@ import type {
 	ProviderResponseMetadata,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
+import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -40,7 +41,8 @@ import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
-import { assistantContentAsCopied, copyHandlerResult, copyHostData } from "./boundary-data";
+import { assistantContentAsCopied, copyHandlerResult, copyHostData, HandedSignals } from "./boundary-data";
+import { providerCallGate } from "./callback-ownership";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -864,7 +866,10 @@ export class ExtensionRunner {
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.getActiveTools = actions.getActiveTools;
-		this.runtime.getAllTools = actions.getAllTools;
+		// A copy: each tool's `parameters` is the host's own (a registered tool's is the copy taken
+		// at registration), and an extension editing what it was handed must not edit what the host
+		// validates against. A callable schema is handed as itself; a registered one is frozen.
+		this.runtime.getAllTools = () => copyHostData(actions.getAllTools());
 		this.runtime.setActiveTools = async toolNames => {
 			const registrationBarrier = this.#toolRegistrationBarrier;
 			if (registrationBarrier) await registrationBarrier;
@@ -1613,12 +1618,28 @@ export class ExtensionRunner {
 	 * attributed to this session rather than to whoever is on the stack.
 	 */
 	runScoped<T>(fn: () => T): T | undefined {
-		// Feature-tested, like every other reach into a host-supplied object here: embedders and
-		// this repo's tests pass runtimes that implement only what they use.
-		const owner = typeof this.runtime?.ownCallback === "function" ? this.runtime : undefined;
+		const owner = this.#scopeOwner;
 		if (!owner) return withActiveSettings(this.settings, fn);
 		if (owner.isRetired) return undefined;
 		return extensionCallbackScope.run(owner, () => owner.trackCallback(withActiveSettings(this.settings, fn)));
+	}
+
+	/** The owner {@link runScoped} runs callbacks as. Feature-tested, like every other reach into a
+	 *  host-supplied object here: embedders and this repo's tests pass runtimes that implement only
+	 *  what they use, and one without `ownCallback` runs its callbacks as the host's own. */
+	get #scopeOwner(): ExtensionRuntime | undefined {
+		return typeof this.runtime?.ownCallback === "function" ? this.runtime : undefined;
+	}
+
+	/**
+	 * The lifetime a signal handed to a callback this runner admits follows (`AdmittedSignal`,
+	 * `HandedSignals`): this session's, or none for a runner whose callbacks run as the host's
+	 * own, which hand the caller's signal itself. Used by the hooks here and by the tool adapter,
+	 * whose `execute` runs inside the tool wrapper's {@link runScoped}.
+	 */
+	get callbackGate(): ProviderCallGate | undefined {
+		const owner = this.#scopeOwner;
+		return owner ? providerCallGate(owner) : undefined;
 	}
 
 	/**
@@ -1895,7 +1916,10 @@ export class ExtensionRunner {
 	 * from its own records afterwards (`eventIsCopy` when the emitter built a fresh copy for this
 	 * handler itself), and what the handler returns is copied by the event's schema
 	 * (`copyHandlerResult`) before the admitted call settles — every later read by the emitter is of
-	 * the host's copy, and a result the host never reads is never touched.
+	 * the host's copy, and a result the host never reads is never touched. A signal the event
+	 * carries is handed as the one this admission aborts (`HandedSignals`), let go of when the
+	 * handler's own work is over, so a listener the handler installs runs as the session's work and
+	 * never after it.
 	 */
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
@@ -1927,6 +1951,7 @@ export class ExtensionRunner {
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;
 						let result: R | undefined;
+						const handedSignals = new HandedSignals(this.callbackGate);
 						try {
 							const handlerContext = createHandlerContext(
 								ctx,
@@ -1934,12 +1959,13 @@ export class ExtensionRunner {
 								event.type === "tool_call" ? budget : undefined,
 							);
 							const produced = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(eventIsCopy ? event : copyHostData(event), handlerContext),
+								handler(eventIsCopy ? event : copyHostData(event, handedSignals), handlerContext),
 							);
 							result = copyHandlerResult(event.type, produced, ext.path) as R | undefined;
 						} catch (error) {
 							handlerFailure = { error };
 						} finally {
+							handedSignals.release();
 							registrationScope.closed = true;
 						}
 						try {

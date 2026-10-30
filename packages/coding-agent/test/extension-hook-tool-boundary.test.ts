@@ -7,17 +7,34 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { validateAgentToolArguments } from "@oh-my-pi/pi-agent-core/tool-arguments";
+import type {
+	AgentLoopConfig,
+	SpeculativeChildDefinition,
+	SpeculativeOperationSink,
+} from "@oh-my-pi/pi-agent-core/types";
+import type { AssistantMessage, Message, ToolCall } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionAPI, ExtensionError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionActions,
+	ExtensionAPI,
+	ExtensionError,
+	ToolDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper, wrapRegisteredTool } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { deleteFileWithFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -111,6 +128,120 @@ function assistantMessage(text: string): AssistantMessage {
 		stopReason: "stop",
 		timestamp: 1,
 	} as AssistantMessage;
+}
+
+/** The host's action surface for a runner, with `getAllTools` answering `tools`. */
+function initializeRunner(h: Harness, tools: ExtensionActions["getAllTools"] = () => []): void {
+	h.runner.initialize(
+		{
+			sendMessage: () => {},
+			sendUserMessage: () => {},
+			appendEntry: () => {},
+			setLabel: () => {},
+			getActiveTools: () => [],
+			getAllTools: tools,
+			setActiveTools: async () => {},
+			getCommands: () => [],
+			setModel: async () => false,
+			getThinkingLevel: () => undefined,
+			setThinkingLevel: () => {},
+			getSessionName: () => undefined,
+			setSessionName: async () => {},
+		},
+		{
+			getModel: () => undefined,
+			isIdle: () => true,
+			abort: () => {},
+			hasPendingMessages: () => false,
+			shutdown: () => {},
+			getContextUsage: () => undefined,
+			compact: async () => {},
+			getSystemPrompt: () => [],
+		},
+	);
+}
+
+/** A registered tool as the agent loop is handed it: the extension's adapter inside the wrapper. */
+function wrappedTool(h: Harness, name: string): AgentTool {
+	const registered = h.runner.getRegisteredTool(name);
+	if (!registered) throw new Error(`tool ${name} not registered`);
+	return new ExtensionToolWrapper(wrapRegisteredTool(registered, h.runner), h.runner);
+}
+
+/** A tool definition carrying the agent-tool callbacks `registerTool` also accepts. */
+type RegisterableTool = ToolDefinition & Pick<AgentTool, "openArgStream" | "speculation">;
+
+function registerAgentTool(pi: ExtensionAPI, tool: RegisterableTool): void {
+	pi.registerTool(tool);
+}
+
+/** The abort listeners `signal` still holds, as its own add/remove calls report them. A `once`
+ *  listener that fired is not removed through them, so only use this where nothing aborts. */
+function abortListeners(signal: AbortSignal): Set<unknown> {
+	const listening = new Set<unknown>();
+	const add = signal.addEventListener.bind(signal);
+	const remove = signal.removeEventListener.bind(signal);
+	signal.addEventListener = (...args: Parameters<typeof add>) => {
+		if (args[0] === "abort") listening.add(args[1]);
+		add(...args);
+	};
+	signal.removeEventListener = (...args: Parameters<typeof remove>) => {
+		if (args[0] === "abort") listening.delete(args[1]);
+		remove(...args);
+	};
+	return listening;
+}
+
+/**
+ * One real `agentLoop` run in which the model calls `tool` with `{ value: "safe" }`, streamed the
+ * way a provider streams it (`toolcall_start`, a delta, `toolcall_end`), then closes the turn.
+ */
+async function runStreamedCall(tool: AgentTool, extra: Partial<AgentLoopConfig> = {}): Promise<void> {
+	const mock = createMockModel({ responses: [{ content: ["finished"] }] });
+	let turns = 0;
+	const streamFn: typeof mock.stream = (model, context, options) => {
+		if (turns++ > 0) return mock.stream(model, context, options);
+		const response = new AssistantMessageEventStream();
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "streamed-call",
+			name: tool.name,
+			arguments: { value: "safe" },
+		};
+		const partial: AssistantMessage = {
+			...assistantMessage(""),
+			content: [toolCall],
+			api: mock.model.api,
+			provider: mock.model.provider,
+			model: mock.model.id,
+			stopReason: "toolUse",
+		};
+		response.push({ type: "start", partial });
+		response.push({ type: "toolcall_start", contentIndex: 0, partial });
+		response.push({ type: "toolcall_delta", contentIndex: 0, delta: '{"value":"safe"}', partial });
+		response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+		response.push({ type: "done", reason: "toolUse", message: partial });
+		return response;
+	};
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: messages =>
+			messages.filter(
+				(message): message is Message =>
+					message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+			),
+		...extra,
+	};
+	const run = agentLoop(
+		[{ role: "user", content: "run", timestamp: 0 }],
+		{ systemPrompt: [""], messages: [], tools: [tool] },
+		config,
+		undefined,
+		streamFn,
+	);
+	for await (const _event of run) {
+	}
+	await run.result();
 }
 
 describe("hook results", () => {
@@ -533,7 +664,7 @@ describe("objects the host hands in", () => {
 		expect(result.content).toEqual([{ type: "text", text: "host output" }]);
 	});
 
-	it("session_before_compact: the preparation and entries stay the host's; the signal is handed as itself", async () => {
+	it("session_before_compact: the preparation and entries stay the host's; the signal is the admitted one", async () => {
 		let handedSignal: AbortSignal | undefined;
 		const h = await harness(pi => {
 			pi.on("session_before_compact", event => {
@@ -553,7 +684,10 @@ describe("objects the host hands in", () => {
 		});
 		expect(preparation.firstKeptEntryId).toBe("e1");
 		expect(branchEntries).toHaveLength(1);
-		expect(handedSignal).toBe(signal);
+		// The handler is handed the signal its admission aborts, not the host's: see "abort signals
+		// handed to hooks and tools" below.
+		expect(handedSignal).toBeInstanceOf(AbortSignal);
+		expect(handedSignal).not.toBe(signal);
 	});
 
 	it("turn_end: the host's message is not changed by a handler", async () => {
@@ -671,6 +805,532 @@ describe("registered tool definitions", () => {
 	});
 });
 
+describe("streamed arguments (openArgStream)", () => {
+	it("opens and feeds the receiver inside the admission, on a copy, so the input that executes is the model's", async () => {
+		const executed: string[] = [];
+		const h = await harness((pi, read) =>
+			registerAgentTool(pi, {
+				name: "streamed_tool",
+				label: "Streamed",
+				description: "streamed",
+				parameters: Type.Object({ value: Type.String() }),
+				openArgStream: () => {
+					read();
+					return {
+						push: () => {
+							read();
+						},
+						end: args => {
+							read();
+							(args as { value: string }).value = "unsafe";
+						},
+						cancel: () => {},
+					};
+				},
+				execute: async (_id, params) => {
+					executed.push((params as { value: string }).value);
+					return { content: [{ type: "text", text: "ran" }] };
+				},
+			}),
+		);
+		await runStreamedCall(wrappedTool(h, "streamed_tool"));
+		expect(executed).toEqual(["safe"]);
+		// `openArgStream`, `push` and `end`, each inside the session's admission.
+		expect(h.reads).toEqual([
+			{ inside: true, retired: false },
+			{ inside: true, retired: false },
+			{ inside: true, retired: false },
+		]);
+	});
+
+	it("copies what the receiver emits, and refuses the stream once the session has gone", async () => {
+		let emit: ((update: unknown) => void) | undefined;
+		const h = await harness((pi, read) =>
+			registerAgentTool(pi, {
+				name: "emitting_tool",
+				label: "Emitting",
+				description: "emitting",
+				parameters: Type.Object({}),
+				openArgStream: init => {
+					read();
+					emit = init.emit;
+					return { push: () => read(), end: () => read(), cancel: () => read() };
+				},
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			}),
+		);
+		const adapter = wrapRegisteredTool(h.runner.getRegisteredTool("emitting_tool")!, h.runner);
+		const emitted: unknown[] = [];
+		const stream = adapter.openArgStream?.({
+			toolCallId: "c1",
+			toolName: "emitting_tool",
+			emit: update => emitted.push(update),
+		});
+		expect(stream).toBeDefined();
+		const update = { preview: "first" };
+		emit?.(update);
+		update.preview = "edited after it was emitted";
+		expect(emitted).toEqual([{ preview: "first" }]);
+		h.release();
+		stream?.push("{}");
+		stream?.end({});
+		stream?.cancel();
+		expect(adapter.openArgStream?.({ toolCallId: "c2", toolName: "emitting_tool", emit: () => {} })).toBeUndefined();
+		expect(h.reads).toEqual([{ inside: true, retired: false }]);
+	});
+});
+
+describe("speculation policies", () => {
+	const speculationConfig: Partial<AgentLoopConfig> = { speculativeToolExecution: { enabled: true } };
+
+	function streamingTool(read: () => boolean, mutate: boolean): RegisterableTool {
+		return {
+			name: "speculating_tool",
+			label: "Speculating",
+			description: "speculating",
+			parameters: Type.Object({ value: Type.String() }),
+			speculation: {
+				stream: {
+					open: () => {
+						read();
+						return {
+							update: toolCall => {
+								read();
+								if (mutate) (toolCall.arguments as { value: string }).value = "unsafe";
+							},
+							finalize: context => {
+								read();
+								if (mutate) (context.args as { value: string }).value = "unsafe";
+							},
+							commit: () => {
+								read();
+							},
+							discard: () => {
+								read();
+							},
+						};
+					},
+				},
+			},
+			execute: async (_id, params) => ({ content: [{ type: "text", text: (params as { value: string }).value }] }),
+		};
+	}
+
+	it("runs a stream session inside the admission, on copies of the host's arguments (agentLoop)", async () => {
+		const executed: string[] = [];
+		const h = await harness((pi, read) => {
+			const tool = streamingTool(read, true);
+			registerAgentTool(pi, {
+				...tool,
+				execute: async (_id, params) => {
+					executed.push((params as { value: string }).value);
+					return { content: [{ type: "text", text: "ran" }] };
+				},
+			});
+		});
+		await runStreamedCall(wrappedTool(h, "speculating_tool"), speculationConfig);
+		expect(executed).toEqual(["safe"]);
+		expect(h.reads.length).toBeGreaterThan(0);
+		expect(h.reads.every(read => read.inside && !read.retired)).toBe(true);
+	});
+
+	it("refuses every speculation callback once the session has gone (agentLoop)", async () => {
+		const h = await harness((pi, read) => registerAgentTool(pi, streamingTool(read, false)));
+		const tool = wrappedTool(h, "speculating_tool");
+		h.release();
+		await runStreamedCall(tool, speculationConfig);
+		expect(h.reads).toEqual([]);
+	});
+
+	it("runs a finalized policy inside the admission: copies its arguments and answers, and bridges its signal", async () => {
+		let handed: AbortSignal | undefined;
+		const aborted: Read[] = [];
+		// A holder, so the closure below can read the runtime the harness makes after it is built.
+		const ownerRef: { current?: ExtensionRuntime } = {};
+		const h = await harness((pi, read) =>
+			registerAgentTool(pi, {
+				name: "finalized_tool",
+				label: "Finalized",
+				description: "finalized",
+				parameters: Type.Object({ value: Type.String() }),
+				speculation: {
+					finalized: {
+						assess: context => {
+							read();
+							(context.args as { value: string }).value = "edited by the policy";
+							return { eligible: true, effect: { kind: "pure" } };
+						},
+						execute: async (_context, signal) => {
+							read();
+							handed = signal;
+							signal.addEventListener("abort", () =>
+								aborted.push({
+									inside: extensionCallbackScope.getStore() === ownerRef.current,
+									retired: ownerRef.current!.isRetired,
+								}),
+							);
+							return {
+								kind: "result",
+								result: { content: [{ type: "text", text: "speculated" }] },
+								isError: false,
+							};
+						},
+					},
+				},
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			}),
+		);
+		ownerRef.current = h.owner;
+		const policy = wrapRegisteredTool(h.runner.getRegisteredTool("finalized_tool")!, h.runner).speculation?.finalized;
+		if (!policy) throw new Error("finalized policy missing");
+		const toolCall: ToolCall = { type: "toolCall", id: "c1", name: "finalized_tool", arguments: { value: "safe" } };
+		const args = { value: "safe" };
+		expect(await policy.assess({ toolCall, args })).toEqual({ eligible: true, effect: { kind: "pure" } });
+		expect(args).toEqual({ value: "safe" });
+		const caller = new AbortController();
+		const listeners = abortListeners(caller.signal);
+		const outcome = await policy.execute({ toolCall, args, effect: { kind: "pure" } }, caller.signal);
+		expectPlainData(outcome);
+		expect(handed).toBeInstanceOf(AbortSignal);
+		expect(handed).not.toBe(caller.signal);
+		expect(listeners.size).toBe(0);
+		h.release();
+		caller.abort("after the call");
+		expect(aborted).toEqual([]);
+		expect(h.reads).toEqual([
+			{ inside: true, retired: false },
+			{ inside: true, retired: false },
+		]);
+		await expect(Promise.resolve().then(() => policy.assess({ toolCall, args }))).rejects.toThrow("retired");
+		expect(h.reads).toHaveLength(2);
+	});
+
+	it("admits a child tool a stream session hands the coordinator", async () => {
+		let sink: SpeculativeOperationSink | undefined;
+		let child: AgentTool | undefined;
+		const h = await harness((pi, read) => {
+			child = {
+				name: "child_tool",
+				label: "Child",
+				description: "child",
+				parameters: { type: "object", properties: { value: { type: "string" } } },
+				speculation: {
+					finalized: {
+						assess: () => {
+							read();
+							return { eligible: true, effect: { kind: "pure" } };
+						},
+						execute: async () => ({ kind: "result", result: { content: [] }, isError: false }),
+					},
+				},
+				execute: async () => ({ content: [] }),
+			};
+			registerAgentTool(pi, {
+				name: "parent_tool",
+				label: "Parent",
+				description: "parent",
+				parameters: Type.Object({}),
+				speculation: {
+					stream: {
+						open: context => {
+							sink = context.coordinator;
+							return { update() {}, finalize() {}, commit() {}, discard() {} };
+						},
+					},
+				},
+				execute: async () => ({ content: [] }),
+			});
+		});
+		const received: SpeculativeChildDefinition[] = [];
+		const coordinator: SpeculativeOperationSink = {
+			maxInFlight: 1,
+			admit: async definition => {
+				received.push(definition);
+				return undefined;
+			},
+			close: () => {},
+		};
+		const adapter = wrapRegisteredTool(h.runner.getRegisteredTool("parent_tool")!, h.runner);
+		await adapter.speculation?.stream?.open({ coordinator, parentToolCallId: "p1" });
+		const toolCall: ToolCall = { type: "toolCall", id: "k1", name: "child_tool", arguments: { value: "safe" } };
+		await sink?.admit({
+			candidateId: "k1",
+			parentToolCallId: "p1",
+			dependencies: [],
+			toolCall,
+			tool: child!,
+			source: "eval_shadow",
+		});
+		(toolCall.arguments as { value: string }).value = "edited after admission";
+		const definition = received[0];
+		if (!definition) throw new Error("child not admitted");
+		expect(definition.tool).not.toBe(child);
+		expect(definition.toolCall.arguments).toEqual({ value: "safe" });
+		const assess = definition.tool.speculation?.finalized?.assess;
+		await assess?.({ toolCall: definition.toolCall, args: {} });
+		expect(h.reads).toEqual([{ inside: true, retired: false }]);
+		h.release();
+		await expect(Promise.resolve().then(() => assess?.({ toolCall: definition.toolCall, args: {} }))).rejects.toThrow(
+			"retired",
+		);
+		expect(h.reads).toHaveLength(1);
+	});
+});
+
+describe("registered parameter schemas", () => {
+	function call(tool: AgentTool, command: string): unknown {
+		return validateAgentToolArguments(tool, { type: "toolCall", id: "c1", name: tool.name, arguments: { command } });
+	}
+
+	it("copies a plain JSON Schema at registration: an edit to the extension's object changes neither validation nor the wire schema", async () => {
+		const executed: string[] = [];
+		const schema = {
+			type: "object",
+			properties: { command: { const: "safe" } as Record<string, unknown> },
+			required: ["command"],
+			additionalProperties: false,
+		};
+		const h = await harness(pi =>
+			pi.registerTool({
+				name: "json_schema_tool",
+				label: "JSON schema",
+				description: "json schema",
+				parameters: schema,
+				approval: () => {
+					schema.properties.command = { type: "string" };
+					return "read";
+				},
+				execute: async (_id, params) => {
+					executed.push((params as { command: string }).command);
+					return { content: [{ type: "text", text: "ran" }] };
+				},
+			}),
+		);
+		const tool = wrappedTool(h, "json_schema_tool");
+		expect(h.runner.getRegisteredTool("json_schema_tool")?.definition.parameters).not.toBe(schema);
+		expect(resolveApproval(tool, { command: "unsafe" }, "write").policy).toBe("allow");
+		// The approval callback did edit the extension's own object.
+		expect(schema.properties.command).toEqual({ type: "string" });
+		expect(() => call(tool, "unsafe")).toThrow();
+		expect(call(tool, "safe")).toEqual({ command: "safe" });
+		expect(JSON.stringify(toolWireSchema(tool))).toContain('"safe"');
+		expect(executed).toEqual([]);
+	});
+
+	it("reads a schema getter once, at registration, inside the admission", async () => {
+		const h = await harness((pi, read) =>
+			pi.registerTool({
+				name: "getter_schema_tool",
+				label: "Getter schema",
+				description: "getter schema",
+				parameters: {
+					type: "object",
+					get properties() {
+						read();
+						return { command: { type: "string" } };
+					},
+					required: ["command"],
+				},
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			}),
+		);
+		const tool = wrappedTool(h, "getter_schema_tool");
+		h.release();
+		expect(call(tool, "x")).toEqual({ command: "x" });
+		toolWireSchema(tool);
+		expect(h.reads).toEqual([{ inside: true, retired: false }]);
+	});
+
+	it("refuses a function inside a JSON Schema, naming the field", async () => {
+		let refused: unknown;
+		await harness(pi => {
+			try {
+				pi.registerTool({
+					name: "function_schema_tool",
+					label: "Function schema",
+					description: "function schema",
+					parameters: { type: "object", properties: { command: { type: "string", default: () => "ls" } } },
+					execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+				});
+			} catch (error) {
+				refused = error;
+			}
+		});
+		expect(String(refused)).toContain("registerTool() parameters.properties.command.default is a function");
+	});
+
+	it("runs an omptype schema's checks inside the admission and keeps the wire schema taken at registration", async () => {
+		let schema: object | undefined;
+		const h = await harness((pi, read) => {
+			const parameters = type({ command: "string" }).narrow((value, context) => {
+				read();
+				return value.command === "safe" || context.mustBe("the safe command");
+			});
+			schema = parameters;
+			pi.registerTool({
+				name: "omptype_schema_tool",
+				label: "omptype schema",
+				description: "omptype schema",
+				parameters,
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			});
+		});
+		const tool = wrappedTool(h, "omptype_schema_tool");
+		expect(tool.parameters).not.toBe(schema);
+		expect(Object.isFrozen(tool.parameters)).toBe(true);
+		const accepted = call(tool, "safe");
+		expect(accepted).toEqual({ command: "safe" });
+		expectPlainData(accepted);
+		expect(() => call(tool, "unsafe")).toThrow("the safe command");
+		// The extension's schema object changed after registration: the wire schema did not.
+		Object.defineProperty(schema!, "toJsonSchema", { value: () => ({ type: "object" }), configurable: true });
+		expect(JSON.stringify(toolWireSchema(tool))).toContain('"command"');
+		expect(h.reads).toEqual([
+			{ inside: true, retired: false },
+			{ inside: true, retired: false },
+		]);
+		h.release();
+		expect(() => call(tool, "safe")).toThrow("retired");
+		expect(h.reads).toHaveLength(2);
+	});
+
+	it("hands getAllTools() a copy of a registered schema, so an extension cannot edit the host's", async () => {
+		let api: ExtensionAPI | undefined;
+		const h = await harness(pi => {
+			api = pi;
+			pi.registerTool({
+				name: "listed_tool",
+				label: "Listed",
+				description: "listed",
+				parameters: { type: "object", properties: { command: { const: "safe" } }, required: ["command"] },
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			});
+		});
+		const registered = h.runner.getRegisteredTool("listed_tool")!;
+		initializeRunner(h, () => [
+			{
+				name: "listed_tool",
+				description: "listed",
+				parameters: registered.definition.parameters,
+				sourceInfo: { path: "<test>", source: "extension", scope: "temporary", origin: "top-level" },
+			},
+		]);
+		const [info] = api!.getAllTools();
+		(info!.parameters as { properties: { command: unknown } }).properties.command = { type: "string" };
+		expect(() => call(wrappedTool(h, "listed_tool"), "unsafe")).toThrow();
+	});
+});
+
+describe("abort signals handed to hooks and tools", () => {
+	type Route = "hook" | "tool";
+	interface Routed {
+		h: Harness;
+		call: (signal: AbortSignal) => Promise<unknown>;
+	}
+
+	/** A `session_before_compact` handler or a registered tool that runs `body` on the signal it is
+	 *  handed: `event.signal` for the hook, `execute`'s signal for the tool. */
+	async function routed(route: Route, body: (signal: AbortSignal | undefined) => unknown): Promise<Routed> {
+		const h = await harness(pi => {
+			if (route === "hook") {
+				pi.on("session_before_compact", async event => {
+					await body(event.signal);
+				});
+			} else {
+				pi.registerTool({
+					name: "signal_tool",
+					label: "Signal",
+					description: "signal",
+					parameters: Type.Object({}),
+					execute: async (_id, _params, signal) => {
+						await body(signal);
+						return { content: [{ type: "text", text: "ok" }] };
+					},
+				});
+			}
+		});
+		const call =
+			route === "hook"
+				? (signal: AbortSignal) =>
+						h.runner.emit({
+							type: "session_before_compact",
+							preparation: { firstKeptEntryId: "e1", messagesToSummarize: [], fileOps: {} } as never,
+							branchEntries: [] as never,
+							signal,
+						})
+				: (signal: AbortSignal) => wrappedTool(h, "signal_tool").execute("c1", {}, signal);
+		return { h, call };
+	}
+
+	for (const route of ["hook", "tool"] as const) {
+		it(`${route}: an abort reaches the listener inside the admission, with the caller's reason, in the same turn`, async () => {
+			const seen: Array<Read & { reason: unknown }> = [];
+			const entered = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<void>();
+			// A holder, so the closure below can read the runtime the harness makes after it is built.
+			const ownerRef: { current?: ExtensionRuntime } = {};
+			const { h, call } = await routed(route, async signal => {
+				signal?.addEventListener("abort", () =>
+					seen.push({
+						inside: extensionCallbackScope.getStore() === ownerRef.current,
+						retired: ownerRef.current!.isRetired,
+						reason: signal.reason,
+					}),
+				);
+				entered.resolve();
+				await finish.promise;
+			});
+			ownerRef.current = h.owner;
+			const caller = new AbortController();
+			const pending = call(caller.signal);
+			await entered.promise;
+			const reason = { why: "stopped by the user" };
+			caller.abort(reason);
+			const inTheSameTurn = seen.length;
+			finish.resolve();
+			await pending.catch(() => undefined);
+			expect(inTheSameTurn).toBe(1);
+			expect(seen).toEqual([{ inside: true, retired: false, reason }]);
+			expect(seen[0]?.reason).toBe(reason);
+		});
+
+		it(`${route}: a caller already aborted reaches the author aborted, with the same reason`, async () => {
+			const caller = new AbortController();
+			const reason = { why: "before the call" };
+			caller.abort(reason);
+			let observed: { aborted: boolean; reason: unknown; callers: boolean } | undefined;
+			const { call } = await routed(route, signal => {
+				observed = { aborted: signal?.aborted === true, reason: signal?.reason, callers: signal === caller.signal };
+			});
+			await call(caller.signal).catch(() => undefined);
+			expect(observed).toEqual({ aborted: true, reason, callers: false });
+			expect(observed?.reason).toBe(reason);
+		});
+
+		it(`${route}: stops following the caller's signal at the call's terminal, so a listener never outlives it`, async () => {
+			const seen: Read[] = [];
+			// A holder, so the closure below can read the runtime the harness makes after it is built.
+			const ownerRef: { current?: ExtensionRuntime } = {};
+			const { h, call } = await routed(route, signal => {
+				signal?.addEventListener("abort", () =>
+					seen.push({
+						inside: extensionCallbackScope.getStore() === ownerRef.current,
+						retired: ownerRef.current!.isRetired,
+					}),
+				);
+			});
+			ownerRef.current = h.owner;
+			const caller = new AbortController();
+			const listeners = abortListeners(caller.signal);
+			await call(caller.signal);
+			expect(listeners.size).toBe(0);
+			h.release();
+			caller.abort("after the session");
+			expect(seen).toEqual([]);
+		});
+	}
+});
+
 describe.skipIf(process.getuid?.() === 0 || process.platform === "win32")("file mutation fallbacks", () => {
 	it("hands a delete fallback a copy of the request, so the error the host rethrows stays its own", async () => {
 		const h = await harness(pi => {
@@ -681,33 +1341,7 @@ describe.skipIf(process.getuid?.() === 0 || process.platform === "win32")("file 
 				return false;
 			});
 		});
-		h.runner.initialize(
-			{
-				sendMessage: () => {},
-				sendUserMessage: () => {},
-				appendEntry: () => {},
-				setLabel: () => {},
-				getActiveTools: () => [],
-				getAllTools: () => [],
-				setActiveTools: async () => {},
-				getCommands: () => [],
-				setModel: async () => false,
-				getThinkingLevel: () => undefined,
-				setThinkingLevel: () => {},
-				getSessionName: () => undefined,
-				setSessionName: async () => {},
-			},
-			{
-				getModel: () => undefined,
-				isIdle: () => true,
-				abort: () => {},
-				hasPendingMessages: () => false,
-				shutdown: () => {},
-				getContextUsage: () => undefined,
-				compact: async () => {},
-				getSystemPrompt: () => [],
-			},
-		);
+		initializeRunner(h);
 		cleanups.push(() => h.runner.disposeFileFallbacks());
 		const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "boundary-fallback-")));
 		const locked = path.join(root, "locked");

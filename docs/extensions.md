@@ -261,6 +261,30 @@ object, the `headers` that `parseRateLimitHeaders` receives, and the fetch conte
 which forwards to the host's. Read them and change them freely — changing them changes nothing
 the host keeps. Return what you want it to keep.
 
+`pi.setModel` and `ctx.compact` copy what you hand them, once, and act on that copy — the key
+check and the selection read the same model, and the guidance a compaction validates is the
+guidance it summarises with. Both refuse a function where data belongs, and `ctx.compact` drops
+fields `CompactOptions` does not declare.
+
+### A registered tool
+
+`pi.registerTool` copies your definition when it runs. A later edit to a plain JSON Schema
+`parameters` object changes nothing; a callable schema — `pi.zod`, `pi.typebox`, an omptype or
+ArkType `type` — is kept rather than copied, because its checks are code, so its wire schema is
+asked for once at registration (where a `toJsonSchema` failure now surfaces) and its own checks
+run inside your session on copies of the arguments. A function anywhere in a JSON Schema
+`parameters` is refused with its path.
+
+`openArgStream`, `speculation`'s callbacks and the approval callbacks all run inside your
+session, on copies, and do nothing once the session has gone. **Editing the arguments a
+receiver is handed changes nothing that executes** — to change an input, return it from a
+`tool_call` hook.
+
+The `signal` a tool's `execute` receives, and the one a `session_stop`,
+`session_before_compact` or `session_before_tree` hook receives, is your session's own: already
+aborted if the caller's was, aborting with the caller's reason in the same turn, and no longer
+following the caller once the call ends.
+
 Your `streamSimple` and `stream` receive copies of the model, the context and the options.
 Tool parameters arrive as the JSON Schema that goes on the wire, not as the host's live schema
 object. The callbacks among the options — `onPayload`, `onResponse`, `onSseEvent`, `fetch`,

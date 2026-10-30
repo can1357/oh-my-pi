@@ -26,6 +26,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { runExtensionCompact, runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -260,12 +261,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: model => runExtensionSetModel(this.ctx.session, model),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -285,7 +281,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -493,12 +489,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: model => runExtensionSetModel(this.ctx.session, model),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -518,7 +509,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -641,7 +632,7 @@ export class ExtensionUiController {
 							...runner!.createContext(),
 							ui: uiContext,
 							hasUI: true,
-							compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+							compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 						}),
 					);
 				} catch (err) {
@@ -1444,14 +1435,11 @@ export class ExtensionUiController {
 		this.ctx.present(errorText);
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		await this.ctx.executeCompaction(instructionsOrOptions, false);
-	}
-
-	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
-		const options =
-			instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-		await this.ctx.session.compact(instructions, options);
+		// The interactive compaction (status, loader, transcript) runs on the copy the helper takes.
+		await runExtensionCompact(
+			{ compact: (instructions, options) => this.ctx.executeCompaction(options ?? instructions, false) },
+			instructionsOrOptions,
+		);
 	}
 
 	async #updateSessionName(name: string): Promise<void> {

@@ -161,6 +161,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
+import { runExtensionCompact } from "../extensibility/extensions/compact-handler";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
@@ -9543,12 +9544,7 @@ export class AgentSession implements SettingsScope {
 				const result = await this.navigateTree(targetId, { summarize: options?.summarize });
 				return { cancelled: result.cancelled };
 			},
-			compact: async instructionsOrOptions => {
-				const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
-				const options =
-					instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-				await this.compact(instructions, options);
-			},
+			compact: instructionsOrOptions => runExtensionCompact(this, instructionsOrOptions),
 			switchSession: async sessionPath => {
 				const success = await this.switchSession(sessionPath);
 				return { cancelled: !success };

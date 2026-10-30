@@ -337,8 +337,9 @@ const CURSOR_MODEL_PARAMETERS: AuthorDataSchema = {
 	items: fieldsOf<CursorModelParameter>({ id: DATA, value: DATA }),
 };
 
-/** A model row, as `oauth.modifyModels` returns it: every field a model has. */
-const MODEL_ROW = fieldsOf<Model<Api>>({
+/** A model row, as `oauth.modifyModels` returns it and `pi.setModel` hands one over: every field a
+ *  model has. */
+export const MODEL_ROW = fieldsOf<Model<Api>>({
 	id: DATA,
 	kind: DATA,
 	kindConfig: DATA,
@@ -641,6 +642,9 @@ export type ResolvedRequestAuth =
 			env?: Record<string, string>;
 	  }
 	| { ok: false; error: string };
+
+/** The fields of a model that resolving its request credential reads. */
+export type ModelCredentialFields = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "accountAccess">;
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
@@ -1169,14 +1173,16 @@ export class ModelRegistry {
 	 * and patch its context window to what the backend actually serves.
 	 */
 	async refreshSelectedModelMetadata(model: Model<Api>): Promise<Model<Api>> {
-		const discoveryConfig = this.#findLazyRuntimeDiscovery(model.provider);
+		// The provider and id are read once: the row patched is the row of the provider probed.
+		const { provider, id } = model;
+		const discoveryConfig = this.#findLazyRuntimeDiscovery(provider);
 		if (!discoveryConfig) {
 			return model;
 		}
 		this.#ensureFullSnapshot();
 		const headers = await this.resolveModelHeaders(model);
-		const { resolveHeaders: _resolveHeaders, ...plainModel } = model;
-		const requestModel = { ...plainModel, headers };
+		const { resolveHeaders, ...fields } = model;
+		const requestModel = { ...fields, provider, id, headers };
 		const runtimeMetadata =
 			discoveryConfig.discovery.type === "lm-studio"
 				? await discoverLmStudioModelRuntimeMetadata(
@@ -1190,10 +1196,13 @@ export class ModelRegistry {
 						discoveryConfig.discovery.timeoutMs,
 					);
 		if (runtimeMetadata === undefined) {
-			return this.find(model.provider, model.id) ?? model;
+			return this.find(provider, id) ?? model;
 		}
 		const { contextWindow, maxTokens, input } = runtimeMetadata;
-		const current = this.find(model.provider, model.id) ?? model;
+		// A model the registry does not hold is patched as the one read above, never read again.
+		const current: Model<Api> =
+			this.find(provider, id) ??
+			(resolveHeaders ? { ...fields, provider, id, resolveHeaders } : { ...fields, provider, id });
 		const override = this.#resolveLiveModelOverride(current);
 		const customModel = this.#resolveLiveCustomModelOverlay(current);
 		const patch: ModelPatch = {};
@@ -3885,8 +3894,11 @@ export class ModelRegistry {
 
 	/** Materialize a model's complete configured header chain for one request. */
 	async resolveModelHeaders(model: Model<Api>, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
-		if (model.resolveHeaders) return await model.resolveHeaders(signal);
-		return model.headers ? { ...model.headers } : undefined;
+		// One read each: the resolver called is the resolver checked, the headers copied the headers checked.
+		const resolveHeaders = model.resolveHeaders;
+		if (resolveHeaders) return await Reflect.apply(resolveHeaders, model, [signal]);
+		const headers = model.headers;
+		return headers ? { ...headers } : undefined;
 	}
 
 	#isKeylessProvider(provider: string): boolean {
@@ -3898,20 +3910,22 @@ export class ModelRegistry {
 
 	/** Resolve a model's request credential or the no-auth sentinel. */
 	async getApiKey(
-		model: Model<Api>,
+		model: ModelCredentialFields,
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
-		// A disabled provider gets no credential, so no request reaches it however
-		// its model was obtained.
-		if (this.#isProviderDisabled(model.provider)) return undefined;
-		if (this.#isKeylessProvider(model.provider)) {
+		// Each field is read once, so the provider checked is the provider whose credential is looked
+		// up. A disabled provider gets no credential, so no request reaches it however its model was
+		// obtained.
+		const { provider, baseUrl, id, accountAccess } = model;
+		if (this.#isProviderDisabled(provider)) return undefined;
+		if (this.#isKeylessProvider(provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.get(model.provider, sessionId, {
-			baseUrl: model.baseUrl,
-			modelId: model.id,
-			accountIds: model.accountAccess && Object.keys(model.accountAccess),
+		return this.authStorage.keys.get(provider, sessionId, {
+			baseUrl,
+			modelId: id,
+			accountIds: accountAccess && Object.keys(accountAccess),
 			signal: options?.signal,
 		});
 	}
@@ -3919,11 +3933,13 @@ export class ModelRegistry {
 	/** Resolve request authentication through the historical Pi extension facade. */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
-			const apiKey = await this.getApiKey(model);
+			// One read of the model: the key and the headers are for the same provider.
+			const { provider, baseUrl, id, accountAccess } = model;
+			const apiKey = await this.getApiKey({ provider, baseUrl, id, accountAccess });
 			if (apiKey === undefined) {
-				return { ok: false, error: `No API key found for "${model.provider}"` };
+				return { ok: false, error: `No API key found for "${provider}"` };
 			}
-			const headers = await this.getProviderHeaders(model.provider);
+			const headers = await this.getProviderHeaders(provider);
 			return { ok: true, apiKey, headers };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -3966,19 +3982,21 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		// Each option is read once: the model whose account access is looked up is the model passed on.
+		const { baseUrl, modelId, forceRefresh, refreshReason, rejectedAccessToken, signal } = options ?? {};
+		if (forceRefresh) this.#invalidateProviderCommandConfigs(provider);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		const accountAccess = modelId ? this.find(provider, modelId)?.accountAccess : undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
-			baseUrl: options?.baseUrl,
-			modelId: options?.modelId,
+			baseUrl,
+			modelId,
 			accountIds: accountAccess && Object.keys(accountAccess),
-			forceRefresh: options?.forceRefresh,
-			refreshReason: options?.refreshReason,
-			rejectedAccessToken: options?.rejectedAccessToken,
-			signal: options?.signal,
+			forceRefresh,
+			refreshReason,
+			rejectedAccessToken,
+			signal,
 		});
 	}
 
