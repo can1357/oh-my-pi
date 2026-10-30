@@ -12,8 +12,14 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { abortRejection, RESERVED_CLAIMS_FILE, whenArtifactCopiesSettle } from "../session/session-manager";
+import { isEnoent, toError } from "@oh-my-pi/pi-utils";
+
+import {
+	abortRejection,
+	mintSessionId,
+	RESERVED_CLAIMS_FILE,
+	whenArtifactCopiesSettle,
+} from "../session/session-manager";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
@@ -35,7 +41,7 @@ export class AgentOutputManager {
 	readonly #artifactsSettled: ((signal?: AbortSignal) => Promise<void>) | undefined;
 	readonly #reservedNames: (() => readonly string[]) | undefined;
 	/** Set when the claims beside the artifacts exist but could not be read. */
-	#claimsUnreadable = false;
+	#claimsUnreadable: Error | undefined;
 
 	constructor(
 		getArtifactsDir: () => string | null,
@@ -103,11 +109,11 @@ export class AgentOutputManager {
 				// nothing: the one name that must not be handed out wrongly is
 				// the one being asked for, so it is treated as spoken for and
 				// the caller gets a disambiguated one instead.
-				logger.warn("Could not read a session's reserved artifact claims; names will be disambiguated", {
-					dir,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				this.#claimsUnreadable = true;
+				// Not "no claims": no answer. Handing out any name from a
+				// directory whose spent names cannot be read is how a new
+				// subagent comes to answer for an `agent://` reference the
+				// conversation already made.
+				this.#claimsUnreadable = toError(error);
 			}
 		}
 
@@ -137,7 +143,16 @@ export class AgentOutputManager {
 
 	/** Pick the first free name (base, then `base-2`, `base-3`, …) and reserve it. */
 	#allocateUnique(id: string): string {
-		if (this.#claimsUnreadable) this.#taken.add(id);
+		if (this.#claimsUnreadable) {
+			// The names this session has spent cannot be read, so no suffix can
+			// be known to be free — `-2` least of all, since it is the one a
+			// previous disambiguation would have taken. A name nothing can
+			// already have is the only safe answer, and the failure is logged
+			// where it happened.
+			const unique = `${id}-${mintSessionId().slice(-8)}`;
+			this.#taken.add(unique);
+			return unique;
+		}
 		let candidate = id;
 		for (let n = 2; this.#taken.has(candidate); n++) {
 			candidate = `${id}-${n}`;

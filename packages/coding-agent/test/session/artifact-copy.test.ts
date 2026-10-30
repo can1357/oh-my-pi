@@ -78,7 +78,7 @@ describe("copying a session's artifacts to another session", () => {
 		expect(fs.readFileSync(path.join(destinationArtifacts, "local", "PLAN.md"), "utf8")).toBe("the plan");
 	});
 
-	it("leaves a destination that already holds artifacts alone, and says it did not arrive", async () => {
+	it("keeps every name a destination already holds, and brings the rest across", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
@@ -91,17 +91,24 @@ describe("copying a session's artifacts to another session", () => {
 
 		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
 
-		// The session wrote artifacts of its own while the copy ran, so the
-		// copy has nowhere to be handed over whole. It keeps its hands off what
-		// is there and reports that it did not arrive, rather than merging
-		// entry by entry — a merge has to be undone entry by entry too, and an
-		// undo of an object that may have been replaced is how somebody else's
-		// file gets deleted.
-		expect(fs.readdirSync(destinationArtifacts).sort()).toEqual(["1.shake.log", "nested"]);
+		// The session wrote artifacts of its own while the copy ran — and a
+		// session that lost its inherited ones records that beside them, which
+		// is the same case. Every name the destination has is its own; the
+		// rest is moved across through descriptors held on both directories,
+		// so nothing is overwritten and nothing has to be undone.
 		expect(fs.readFileSync(path.join(destinationArtifacts, "1.shake.log"), "utf8")).toBe("already here");
-		expect(fs.readdirSync(path.join(destinationArtifacts, "nested"))).toEqual([]);
-		expect(outcome.discarded).toBe(true);
-		expect(outcome.tally).toEqual({ entries: 0, bytes: 0, largest: [] });
+		expect(fs.readFileSync(path.join(destinationArtifacts, "3.bash.log"), "utf8")).toBe("s".repeat(40));
+		// A directory the destination already has is added to, not replaced.
+		expect(fs.readdirSync(path.join(destinationArtifacts, "nested"))).toEqual(["deep.log"]);
+		expect(outcome.discarded).toBe(false);
+		expect(outcome.tally).toEqual({
+			entries: 2,
+			bytes: 540,
+			largest: [
+				{ name: "nested", bytes: 500 },
+				{ name: "3.bash.log", bytes: 40 },
+			],
+		});
 		expect(stagingLeftovers(tempDir.path())).toEqual([]);
 	});
 
@@ -434,35 +441,25 @@ describe("copying a session's artifacts to another session", () => {
 		expect(fs.readFileSync(replaced, "utf8")).toBe("ONLY COPY OF SOMEBODY ELSE'S DATA");
 	});
 
-	it("withdraws a publication whose staged bytes changed, so no reader can see them", async () => {
+	it("publishes nothing when the staged bytes changed before the handover", async () => {
 		using tempDir = TempDir.createSync("@omp-artifact-copy-");
 		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
 		fs.mkdirSync(sourceArtifacts, { recursive: true });
 		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "ORIGINAL");
-		// Rewritten in place at the handover: same inode, different bytes. A
-		// copy that reports itself discarded while its destination still serves
-		// those bytes has not withheld anything.
-		const rename = fs.promises.rename;
-		let injected = false;
-		const rewriteOnRename = (async (from: fs.PathLike, to: fs.PathLike) => {
-			if (!injected && String(from).endsWith(STAGING_SUFFIX)) {
-				injected = true;
-				fs.writeFileSync(path.join(String(from), "0.bash.log"), "FOREIGN!");
-			}
-			return rename(from, to);
-		}) as typeof fs.promises.rename;
-		const spy = spyOn(fs.promises, "rename").mockImplementation(rewriteOnRename);
-		let outcome: ArtifactCopyOutcome;
-		try {
-			outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
-		} finally {
-			spy.mockRestore();
-		}
+		// Rewritten in place: same inode, different bytes. The check happens
+		// before the tree can be reached, because a check afterwards cannot
+		// withhold what a reader may already have opened.
+		const outcome = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				const staging = path.join(tempDir.path(), stagingLeftovers(tempDir.path())[0] as string);
+				fs.writeFileSync(path.join(staging, "0.bash.log"), "FOREIGN!");
+				return true;
+			},
+		});
 
-		expect(injected).toBe(true);
 		expect(outcome.discarded).toBe(true);
-		expect(fs.existsSync(path.join(destinationArtifacts, "0.bash.log"))).toBe(false);
+		expect(fs.existsSync(destinationArtifacts)).toBe(false);
 	});
 
 	it("does not sweep a live copier's tree that was moved to another staging name", async () => {
