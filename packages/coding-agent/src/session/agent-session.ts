@@ -6715,8 +6715,13 @@ export class AgentSession implements SettingsScope {
 				// The reset is itself a producer — it notifies queue-change observers synchronously —
 				// so the main path's lesson applies here too: ask again before releasing. Wait out
 				// what it started, but do NOT reset again: an observer that produces on every reset
-				// would never let this converge, and the transcript is already clear.
+				// would never let this converge.
 				await this.#waitForLiveSessionWork();
+				// That work can have appended to the in-memory transcript while it ran (an extension
+				// calling appendMessage, a bash result landing), and nothing else will clear it now.
+				// Drop it directly rather than resetting: replaceMessages touches no queue, so it
+				// starts nothing. The session file is sealed, so this is in-memory state only.
+				if (this.agent.state.messages.length > 0) this.agent.replaceMessages([]);
 				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
@@ -9356,7 +9361,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Try to execute an extension command. Returns true if command was found and executed.
+	 * Try to execute an extension command. Returns true if command was found and routed.
 	 * `onRouted` fires once the command is found, before its handler runs.
 	 */
 	async #tryExecuteExtensionCommand(text: string, onRouted?: () => void): Promise<boolean> {
@@ -9369,6 +9374,13 @@ export class AgentSession implements SettingsScope {
 
 		const command = this.#extensionRunner.getCommand(commandName);
 		if (!command) return false;
+		if (this.#isDisposed) {
+			// Work admitted after this session is gone, the same as a prompt submitted after
+			// beginDispose(): running the handler would give an extension this session's context and
+			// credentials with nothing left to own what it does. Routed, not executed.
+			logger.debug("Extension command refused: session disposed", { commandName });
+			return true;
+		}
 		onRouted?.();
 
 		// Get command context from extension runner (includes session control methods)

@@ -8,6 +8,7 @@ import { type OAuthAccountPools, SessionAccountPoolScope } from "@oh-my-pi/pi-co
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
@@ -266,15 +267,25 @@ describe("AgentSession settles what it promised", () => {
 			runtime,
 			"stranded-aside-sender",
 		);
-		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		// Settings reach the runner too: emitters gated on a setting (link activation) are inert
+		// without them.
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+			undefined,
+			settings,
+		);
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
-		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1412,6 +1423,123 @@ describe("AgentSession settles what it promised", () => {
 		} finally {
 			release.resolve();
 			await command?.catch(() => undefined);
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns a callback a controller invokes directly, not only one a broadcast dispatches", async () => {
+		await startPooledRunWithStrandedAside();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let callback: unknown;
+		try {
+			// Exactly how the input controller runs a keyboard shortcut and how the file
+			// write/delete fallbacks run their handlers: straight through `runScoped`, with no
+			// broadcast and no admitted submission to infer a lifetime from.
+			callback = session?.extensionRunner?.runScoped(async () => {
+				entered.resolve();
+				await release.promise;
+			});
+			await withTimeout(entered.promise, 5_000, "scoped callback never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			await callback;
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			await callback;
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("waits for a parked callback instead of polling for it", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.registerLinkScheme("r10poll");
+			pi.on("link_activate", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		cfgExtensionAssistantTextRenderers.set(session!.settings, true);
+		const waitSpy = spyOn(ExtensionRunner.prototype, "waitForPendingHandlerWork");
+		// The dispatch is outstanding while its one callback is parked. A finalizer that samples
+		// for the next callback instead of waiting for it burns an iteration per turn of the event
+		// loop; one that waits makes a single call and stays there.
+		const dispatch = session?.extensionRunner?.emitLinkActivate("r10poll:held");
+		try {
+			await withTimeout(entered.promise, 5_000, "link handler never entered");
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+
+			const waitsAfterDispose = waitSpy.mock.calls.length;
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(waitSpy.mock.calls.length - waitsAfterDispose).toBeLessThan(5);
+		} finally {
+			release.resolve();
+			await dispatch;
+			waitSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("leaves no in-memory transcript behind work its deferred reset started", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let armed = false;
+		let handled = 0;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.on("agent_start", async () => {
+				if (!armed) return;
+				if (++handled === 1) {
+					entered.resolve();
+					await release.promise;
+					return;
+				}
+				// Reset-produced work that writes to the in-memory transcript after disposal has
+				// already cleared it once.
+				session?.agent.appendMessage({
+					role: "custom",
+					customType: "r10-residue",
+					content: "R10_RESIDUE",
+					display: false,
+					timestamp: Date.now(),
+				});
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		const broadcasts: Promise<unknown>[] = [];
+		const offQueueChange = session?.agent.onQueueChange(() => {
+			if (session?.isDisposed !== true || resetSpy.mock.calls.length !== 2) return;
+			const dispatch = session?.extensionRunner?.emit({ type: "agent_start" });
+			if (dispatch) broadcasts.push(dispatch);
+		});
+		try {
+			armed = true;
+			const first = session?.extensionRunner?.emit({ type: "agent_start" });
+			if (first) broadcasts.push(first);
+			await withTimeout(entered.promise, 5_000, "first handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			release.resolve();
+			// The deferred pass's own reset is what dispatches the second broadcast, so the observer
+			// has to stay attached past the first dispatch completing.
+			for (let i = 0; i < 40; i++) await setImmediate();
+			offQueueChange?.();
+			await Promise.all(broadcasts);
+			for (let i = 0; i < 40; i++) await setImmediate();
+
+			// The second handler is the one that writes; without it the assertion below is vacuous.
+			expect(handled).toBe(2);
+			expect(session?.messages).toHaveLength(0);
+		} finally {
+			offQueueChange?.();
+			release.resolve();
+			await Promise.all(broadcasts);
 			resetSpy.mockRestore();
 		}
 	}, 20_000);

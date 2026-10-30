@@ -779,13 +779,15 @@ export class ExtensionRunner {
 		this.#ownEveryDispatch();
 	}
 
-	/** Dispatch ownership, installed once over the whole public `emit*` surface rather than inside
-	 *  each emitter. Several emitters (`emitInput`, `emitBeforeAgentStart`, `emitUserBash`,
-	 *  `emitResourcesDiscover`, `emitToolResult`, …) run their own sequential handler loops, and
-	 *  between two handlers of such a loop no callback is executing while work that was registered
-	 *  all along has not started — a caller asking "is extension work outstanding?" in that gap gets
-	 *  the wrong answer. Hooking the one surface they all share, instead of hand-listing the loops,
-	 *  is what stops the next emitter from reopening the hole by forgetting to opt in. */
+	/** Ownership of the GAP inside a broadcast, not of callback lifetimes — those belong to
+	 *  {@link runScoped}, which every path that invokes extension code goes through. Several
+	 *  emitters (`emitInput`, `emitBeforeAgentStart`, `emitUserBash`, `emitResourcesDiscover`,
+	 *  `emitToolResult`, …) run their own sequential handler loops, and between two handlers of
+	 *  such a loop no callback is executing while work that was registered all along has not
+	 *  started; a caller asking "is extension work outstanding?" in that gap would get the wrong
+	 *  answer. Hooking the surface those loops share, rather than hand-listing them, keeps a new
+	 *  emitter from reopening that hole — but it is a convention over method names, so it is the
+	 *  weaker of the two layers and never the one that owns a callback. */
 	#ownEveryDispatch(): void {
 		const prototype = ExtensionRunner.prototype as unknown as Record<string, unknown>;
 		for (const name of Object.getOwnPropertyNames(prototype)) {
@@ -1113,7 +1115,9 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							// Through runScoped like every other extension callback: invoked straight
+							// from the filesystem helper, it would otherwise run unowned.
+							if (await this.runScoped(() => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1132,7 +1136,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.runScoped(() => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1590,12 +1594,19 @@ export class ExtensionRunner {
 	/**
 	 * Run an extension-owned callback within this session's settings scope, so a
 	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
-	 * session's manager rather than a same-cwd sibling's. Event handlers get this
-	 * scope via {@link #runHandlerWithTimeout}; slash commands and shortcuts are
-	 * invoked directly by their controllers and route through here instead.
+	 * session's manager rather than a same-cwd sibling's.
+	 *
+	 * This is also where a callback's LIFETIME is owned. Every path that invokes extension code —
+	 * event handlers, slash commands, keyboard shortcuts, link activations, tool execution, the
+	 * file write/delete fallbacks — routes through here, so an asynchronous callback is counted as
+	 * outstanding until it returns, whoever started it. Ownership belongs here rather than at the
+	 * emitters: a method-name convention over `emit*` covers the broadcast loops and misses every
+	 * callback a controller invokes directly.
 	 */
 	runScoped<T>(fn: () => T): T {
-		return withActiveSettings(this.settings, fn);
+		const result = withActiveSettings(this.settings, fn);
+		if (result instanceof Promise) this.#trackHandlerWork(result);
+		return result;
 	}
 
 	/**
@@ -1776,13 +1787,27 @@ export class ExtensionRunner {
 	 *  or a caller waiting from inside one handler would wait for its own siblings. */
 	#pendingDispatches = new Set<Promise<unknown>>();
 
+	/** Settles whenever a tracked promise is added or removed, so a caller can wait for the next
+	 *  change instead of sampling for it. */
+	#workChanged: PromiseWithResolvers<void> | undefined;
+
 	#track(set: Set<Promise<unknown>>, work: Promise<unknown>): void {
 		const tracked: Promise<void> = work.then(
 			() => undefined,
 			() => undefined,
 		);
 		set.add(tracked);
-		void tracked.finally(() => set.delete(tracked));
+		this.#notifyWorkChanged();
+		void tracked.finally(() => {
+			set.delete(tracked);
+			this.#notifyWorkChanged();
+		});
+	}
+
+	#notifyWorkChanged(): void {
+		const changed = this.#workChanged;
+		this.#workChanged = undefined;
+		changed?.resolve();
 	}
 
 	#trackHandlerWork(handlerWork: Promise<unknown>): void {
@@ -1802,14 +1827,21 @@ export class ExtensionRunner {
 
 	/** Resolves once every handler callback that is executing has returned, including ones whose
 	 *  dispatch already gave up on them. Unbounded by design: a handler that never returns keeps
-	 *  whatever its caller is holding, which is safer than releasing under it. A broadcast with no
-	 *  callback executing is given one turn of the event loop to start its next handler, so a
-	 *  caller that loops on {@link hasPendingHandlerWork} converges instead of spinning. */
+	 *  whatever its caller is holding, which is safer than releasing under it.
+	 *
+	 *  A broadcast between two of its handlers is not awaited — a caller waiting from inside one
+	 *  handler would wait for its own siblings — but neither is it polled: this waits for the next
+	 *  change in the tracked sets, which is either that broadcast's next callback starting or the
+	 *  broadcast ending. A caller looping on {@link hasPendingHandlerWork} therefore makes one wait
+	 *  per real event rather than one per turn of the event loop. */
 	async waitForPendingHandlerWork(): Promise<void> {
 		while (this.#pendingHandlerWork.size > 0) {
 			await Promise.all([...this.#pendingHandlerWork]);
 		}
-		if (this.#pendingDispatches.size > 0) await Bun.sleep(0);
+		if (this.#pendingDispatches.size > 0) {
+			this.#workChanged ??= Promise.withResolvers<void>();
+			await this.#workChanged.promise;
+		}
 	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
