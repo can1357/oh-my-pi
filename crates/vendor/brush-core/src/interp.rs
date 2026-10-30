@@ -529,6 +529,12 @@ pub(crate) async fn extend_in_strides<T>(
 /// same number for the same reason.
 pub(crate) const BYTE_CHECKPOINT_STRIDE: usize = 64 * 1024;
 
+/// How many map insertions a loop may make between checkpoints.
+///
+/// An insertion is not a move: at [`ELEMENT_CHECKPOINT_STRIDE`] a million of
+/// them held the worker for 19.6 ms at a stretch in an optimised build.
+pub(crate) const INSERTION_CHECKPOINT_STRIDE: usize = 32;
+
 /// Counts the checkpoints a loop over elements owes, by both the number of
 /// steps and the bytes those steps copy.
 ///
@@ -541,13 +547,27 @@ pub(crate) const BYTE_CHECKPOINT_STRIDE: usize = 64 * 1024;
 /// nothing, cost copying a million-element array 9%: more than the
 /// checkpoints it spent.
 pub(crate) struct ElementBudget {
-	steps: usize,
-	bytes: usize,
+	steps:  usize,
+	bytes:  usize,
+	stride: usize,
 }
 
 impl ElementBudget {
 	pub(crate) const fn new() -> Self {
-		Self { steps: 0, bytes: 0 }
+		Self { steps: 0, bytes: 0, stride: ELEMENT_CHECKPOINT_STRIDE }
+	}
+
+	/// A budget for a loop whose step costs more than moving a value: it owes
+	/// a checkpoint every `stride` steps instead of every
+	/// [`ELEMENT_CHECKPOINT_STRIDE`].
+	///
+	/// Inserting into a map is such a step. At the default stride, a million
+	/// insertions spent 4,096 checkpoints, which is 32 yields, and the stretch
+	/// between two of them measured 19.6 ms in an optimised build — the step
+	/// stride is a count, and a count says nothing about what a step costs any
+	/// more than it says how much it copies.
+	pub(crate) const fn with_stride(stride: usize) -> Self {
+		Self { steps: 0, bytes: 0, stride }
 	}
 
 	/// Call once per step, before it runs, with the bytes that step copies or
@@ -567,7 +587,7 @@ impl ElementBudget {
 		let first = self.steps == 0;
 		self.steps += 1;
 		self.bytes = self.bytes.saturating_add(bytes);
-		let mut due = (first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0) as usize;
+		let mut due = (first || self.steps % self.stride == 0) as usize;
 		if self.bytes >= BYTE_CHECKPOINT_STRIDE {
 			due += self.bytes / BYTE_CHECKPOINT_STRIDE;
 			self.bytes %= BYTE_CHECKPOINT_STRIDE;
@@ -586,6 +606,64 @@ pub(crate) async fn loop_checkpoints(
 		loop_checkpoint(params).await?;
 	}
 	Ok(())
+}
+
+/// Copies `text` into a new `String`, spending a checkpoint before each
+/// [`BYTE_CHECKPOINT_STRIDE`] of it.
+///
+/// Charging a step for the bytes it is about to copy counts the work; it does
+/// not divide it. One element of 512 MiB owed 8,193 checkpoints, spent all of
+/// them, and then held the worker for 195 ms inside a single `clone`, because
+/// nothing can interrupt a copy already under way. A budget spent before an
+/// operation that cannot be interrupted buys nothing; the operation has to be
+/// the thing that is divided.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
+/// leaving the copy unfinished and discarded.
+pub(crate) async fn clone_in_strides(
+	params: &ExecutionParameters,
+	text: &str,
+) -> Result<String, error::Error> {
+	if text.len() <= BYTE_CHECKPOINT_STRIDE {
+		loop_checkpoint(params).await?;
+		return Ok(text.to_owned());
+	}
+	let mut copied = String::with_capacity(text.len());
+	push_str_in_strides(params, &mut copied, text).await?;
+	Ok(copied)
+}
+
+/// Appends `text` to `out`, spending a checkpoint before each
+/// [`BYTE_CHECKPOINT_STRIDE`] of it. See [`clone_in_strides`].
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
+/// leaving `out` holding what had been appended by then.
+pub(crate) async fn push_str_in_strides(
+	params: &ExecutionParameters,
+	out: &mut String,
+	text: &str,
+) -> Result<(), error::Error> {
+	out.reserve(text.len());
+	let mut rest = text;
+	loop {
+		loop_checkpoint(params).await?;
+		if rest.len() <= BYTE_CHECKPOINT_STRIDE {
+			out.push_str(rest);
+			return Ok(());
+		}
+		// A stride lands mid-character at most three bytes in.
+		let mut end = BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		out.push_str(piece);
+		rest = remaining;
+	}
 }
 
 #[derive(Clone, Debug, Default)]

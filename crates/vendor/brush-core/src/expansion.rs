@@ -608,22 +608,30 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	///
 	/// `x="${name[@]}"` joins a field for every element of the array, after the
 	/// expansion has spent its last checkpoint, so the fields joined spend one
-	/// every [`interp::ELEMENT_CHECKPOINT_STRIDE`].
+	/// every [`interp::ELEMENT_CHECKPOINT_STRIDE`] — and a field larger than a
+	/// byte stride is copied in strides rather than merely charged for, since
+	/// one of them can be of any size.
 	async fn join_fields(&self, expansion: Expansion) -> Result<String, error::Error> {
 		let mut joined = String::new();
 		let mut budget = interp::ElementBudget::new();
 		for (index, field) in expansion.fields.into_iter().enumerate() {
-			// Every piece of the field is copied into `joined`.
-			let due = budget.charge(field.len());
-			if due > 0 {
-				interp::loop_checkpoints(self.params, due).await?;
+			let long = field.len() > interp::BYTE_CHECKPOINT_STRIDE;
+			if !long {
+				let due = budget.charge(field.len());
+				if due > 0 {
+					interp::loop_checkpoints(self.params, due).await?;
+				}
 			}
 			// TODO(IFS): Use IFS instead for separator?
 			if index > 0 {
 				joined.push(' ');
 			}
 			for piece in field.0 {
-				joined.push_str(piece.as_str());
+				if long {
+					interp::push_str_in_strides(self.params, &mut joined, piece.as_str()).await?;
+				} else {
+					joined.push_str(piece.as_str());
+				}
 			}
 		}
 
@@ -884,7 +892,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				interp::loop_checkpoints(self.params, due).await?;
 			}
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
-				result.push(String::from(field));
+				// Only a field that cannot be unquoted in one step goes through
+				// the dividing path: calling an `async` function on every field
+				// of a million-element array costs more than the checkpoints.
+				result.push(if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+					self.unquote_in_strides(field).await?
+				} else {
+					String::from(field)
+				});
 			} else {
 				result.extend(self.expand_pathnames_in_field(field).await?);
 			}
@@ -951,11 +966,49 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(fields)
 	}
 
+	/// Copies a field a stride at a time, keeping each piece's quoting.
+	///
+	/// A field holds one array element, or one brace element, and either can be
+	/// of any size; a single `clone` of one held the worker for the whole copy.
+	async fn clone_field_in_strides(&self, field: &WordField) -> Result<WordField, error::Error> {
+		let mut pieces = Vec::with_capacity(field.0.len());
+		for piece in &field.0 {
+			let text = interp::clone_in_strides(self.params, piece.as_str()).await?;
+			pieces.push(match piece {
+				ExpansionPiece::Splittable(_) => ExpansionPiece::Splittable(text),
+				ExpansionPiece::Unsplittable(_) => ExpansionPiece::Unsplittable(text),
+			});
+		}
+
+		Ok(WordField(pieces))
+	}
+
+	/// Joins a field's pieces into the string it stands for, a stride at a
+	/// time. `String::from(field)` does the same in one copy, which one array
+	/// element of any size turns into a stretch nothing can interrupt.
+	async fn unquote_in_strides(&self, field: WordField) -> Result<String, error::Error> {
+		let mut text = String::new();
+		for piece in &field.0 {
+			interp::push_str_in_strides(self.params, &mut text, piece.as_str()).await?;
+		}
+
+		Ok(text)
+	}
+
 	async fn expand_pathnames_in_field(
 		&self,
 		field: WordField,
 	) -> Result<Vec<String>, error::Error> {
-		let pattern = patterns::Pattern::from(field.clone())
+		// One field can be of any size, and `Pattern` needs its own copy while
+		// the field itself is still needed below. Only a copy too large to make
+		// in one step is divided; the `async` call to divide it costs more than
+		// the copy does for an ordinary field.
+		let copied = if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+			self.clone_field_in_strides(&field).await?
+		} else {
+			field.clone()
+		};
+		let pattern = patterns::Pattern::from(copied)
 			.set_extended_globbing(self.parser_options.enable_extended_globbing)
 			.set_case_insensitive(self.shell.options().case_insensitive_pathname_expansion);
 
@@ -987,7 +1040,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			if self.shell.options().expand_non_matching_patterns_to_null {
 				Ok(vec![])
 			} else {
-				Ok(vec![String::from(field)])
+				// As above: divided only when one step cannot do it.
+				Ok(vec![if field.len() > interp::BYTE_CHECKPOINT_STRIDE {
+					self.unquote_in_strides(field).await?
+				} else {
+					String::from(field)
+				}])
 			}
 		} else {
 			Ok(paths)
@@ -1178,17 +1236,26 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let mut concatenated = String::new();
 				let mut budget = interp::ElementBudget::new();
 				for (index, field) in this_fields.into_iter().enumerate() {
-					// Every piece of the field is copied into `concatenated`.
-					let due = budget.charge(field.len());
-					if due > 0 {
-						interp::loop_checkpoints(self.params, due).await?;
+					// Every piece of the field is copied into `concatenated`, and
+					// one field can be of any size.
+					let long = field.len() > interp::BYTE_CHECKPOINT_STRIDE;
+					if !long {
+						let due = budget.charge(field.len());
+						if due > 0 {
+							interp::loop_checkpoints(self.params, due).await?;
+						}
 					}
 					let WordField(pieces) = field;
 					if index > 0 {
 						concatenated.push(concatenation_joiner);
 					}
 					for piece in pieces {
-						concatenated.push_str(piece.as_str());
+						if long {
+							interp::push_str_in_strides(self.params, &mut concatenated, piece.as_str())
+								.await?;
+						} else {
+							concatenated.push_str(piece.as_str());
+						}
 					}
 				}
 				join_or_push(&mut fields, true, vec![ExpansionPiece::Unsplittable(concatenated)]);
@@ -1879,16 +1946,20 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		match value {
 			ShellValue::Unset(_) | ShellValue::Dynamic { .. } => Ok(vec![]),
 			ShellValue::String(_) if keys => Ok(vec![WordField::from(String::from("0"))]),
-			ShellValue::String(s) => Ok(vec![WordField::from(s.clone())]),
+			ShellValue::String(s) => Ok(vec![WordField::from(
+				interp::clone_in_strides(self.params, s.as_str()).await?,
+			)]),
 			ShellValue::IndexedArray(array) if keys => {
 				fields_from(self.params, array.keys().map(u64::to_string)).await
 			},
-			ShellValue::IndexedArray(array) => fields_from(self.params, array.values().cloned()).await,
+			ShellValue::IndexedArray(array) => {
+				fields_copied_from(self.params, array.values().map(String::as_str)).await
+			},
 			ShellValue::AssociativeArray(array) if keys => {
-				fields_from(self.params, array.keys().cloned()).await
+				fields_copied_from(self.params, array.keys().map(String::as_str)).await
 			},
 			ShellValue::AssociativeArray(array) => {
-				fields_from(self.params, array.values().cloned()).await
+				fields_copied_from(self.params, array.values().map(String::as_str)).await
 			},
 		}
 	}
@@ -1916,9 +1987,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let expansion = match parameter {
 			brush_parser::word::SpecialParameter::AllPositionalParameters { concatenate } => {
 				Expansion {
-					fields:      fields_from(
+					fields:      fields_copied_from(
 						self.params,
-						self.shell.current_shell_args().iter().cloned(),
+						self.shell.current_shell_args().iter().map(String::as_str),
 					)
 					.await?,
 					concatenate: *concatenate,
@@ -2134,8 +2205,12 @@ fn to_initial_capitals(s: &str) -> String {
 }
 
 /// Makes a field of each of `values`: there is one for every element of an
-/// array or every positional parameter, and making one waits on nothing, so
-/// they spend a checkpoint every [`interp::ELEMENT_CHECKPOINT_STRIDE`].
+/// array or every positional parameter, and making one only moves a value the
+/// caller already owns, so they spend a checkpoint every
+/// [`interp::ELEMENT_CHECKPOINT_STRIDE`].
+///
+/// Use [`fields_copied_from`] where the values have to be copied out of
+/// something the shell owns; one of them can be of any size.
 async fn fields_from(
 	params: &ExecutionParameters,
 	values: impl Iterator<Item = String>,
@@ -2143,12 +2218,34 @@ async fn fields_from(
 	let mut fields = Vec::with_capacity(values.size_hint().0);
 	let mut budget = interp::ElementBudget::new();
 	for value in values {
-		// The caller copied this value out of the variable it came from.
-		let due = budget.charge(value.len());
+		let due = budget.charge(0);
 		if due > 0 {
 			interp::loop_checkpoints(params, due).await?;
 		}
 		fields.push(WordField::from(value));
+	}
+
+	Ok(fields)
+}
+
+/// Makes a field of a copy of each of `values`, dividing a copy too large to
+/// make in one step rather than only charging for it.
+async fn fields_copied_from<'a>(
+	params: &ExecutionParameters,
+	values: impl Iterator<Item = &'a str>,
+) -> Result<Vec<WordField>, error::Error> {
+	let mut fields = Vec::with_capacity(values.size_hint().0);
+	let mut budget = interp::ElementBudget::new();
+	for value in values {
+		if value.len() > interp::BYTE_CHECKPOINT_STRIDE {
+			fields.push(WordField::from(interp::clone_in_strides(params, value).await?));
+			continue;
+		}
+		let due = budget.charge(value.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
+		fields.push(WordField::from(value.to_owned()));
 	}
 
 	Ok(fields)

@@ -759,9 +759,20 @@ impl ArrayLiteral {
 		let mut literal = Vec::with_capacity(elements.len());
 		let mut budget = interp::ElementBudget::new();
 		for (key, value) in elements {
-			// Each step copies both strings, so the work is their length.
-			let bytes = key.as_ref().map_or(0, |key| key.value.len()) + value.value.len();
-			let due = budget.charge(bytes);
+			// One element can be of any size, so the copy itself is divided
+			// rather than merely charged for; the step charge is what makes a
+			// long list of short elements yield.
+			let long = key.as_ref().map_or(0, |key| key.value.len()) + value.value.len()
+				> interp::BYTE_CHECKPOINT_STRIDE;
+			if long {
+				let key = match key {
+					Some(key) => Some(interp::clone_in_strides(params, key.value.as_str()).await?),
+					None => None,
+				};
+				literal.push((key, interp::clone_in_strides(params, value.value.as_str()).await?));
+				continue;
+			}
+			let due = budget.charge(key.as_ref().map_or(0, |key| key.value.len()) + value.value.len());
 			if due > 0 {
 				interp::loop_checkpoints(params, due).await?;
 			}
@@ -877,7 +888,7 @@ impl ShellValue {
 			.last_key_value()
 			.map_or(0, |(largest_index, _)| largest_index + 1);
 
-		let mut budget = interp::ElementBudget::new();
+		let mut budget = interp::ElementBudget::with_stride(interp::INSERTION_CHECKPOINT_STRIDE);
 		for (key, value) in literal_values.0 {
 			// `convert` rewrites the value, so its length is the work.
 			let due = budget.charge(value.len());
@@ -913,7 +924,7 @@ impl ShellValue {
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
-		let mut budget = interp::ElementBudget::new();
+		let mut budget = interp::ElementBudget::with_stride(interp::INSERTION_CHECKPOINT_STRIDE);
 		interp::loop_checkpoints(params, budget.charge(first_value.len())).await?;
 		let first_value = convert(first_value);
 
