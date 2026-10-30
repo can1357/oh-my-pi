@@ -5,6 +5,7 @@
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
+- Added `metadata()` to JavaScript and Python completion handles to inspect model routing, request effort, and fallback attempts without changing completion results ([#14962](https://github.com/can1357/oh-my-pi/pull/14962) by [@xiangnan0811](https://github.com/xiangnan0811))
 
 ### Fixed
 

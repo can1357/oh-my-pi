@@ -1,6 +1,6 @@
 ```
 {{#if py}}completion(prompt, *, model?="default"|"smol"|"slow", system?=None, schema?=None){{else}}await completion(prompt, { model?: "default"|"smol"|"slow", system?, schema? }){{/if}} → handle
-    Returns at once; `.wait()` returns text (parsed with `schema`). Stateless, no tools/history.{{#ifAll py js}}
+    Returns at once; `.wait()` returns text (parsed with `schema`), and `.metadata()` returns detached provider-options routing evidence (what the bridge supplied, not service-side reasoning) without waiting (or `None`/`null` when unavailable). Stateless, no tools/history.{{#ifAll py js}}
     JS: ONE trailing object — `h = await completion(prompt, { model, system, schema })`; without `await`, `.id` is undefined. `.wait()` returns a Promise.{{else}}{{#if js}}
     Without `await completion(…)`, `.id` is undefined. `.wait()` returns a Promise.{{/if}}{{/ifAll}}
 {{#if py}}await judge(state, questions, *, images?=[path | ImageContent, …]){{else}}await judge(state, questions, { images?: [path | ImageContent, …] }){{/if}} → `{id: answer}`
