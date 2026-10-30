@@ -155,6 +155,20 @@ fn a_locale_only_the_shell_exports_is_honoured() {
 		assert_eq!(code, 0, "{path}: {}", cap.err());
 		assert!(cap.out().contains("ünï.txt"), "{path}: {}", cap.out());
 	}
+	// One relative entry is enough, wherever it sits in the list — and the list
+	// has to be the one this process carries too, or it already differs from
+	// ours for another reason. nextest runs each test in its own process, so
+	// this environment belongs to this test alone.
+	let shared = "/nonexistent-locales:locales";
+	// SAFETY: nextest gives this test its own process, and nothing else in it
+	// reads `LOCPATH` concurrently.
+	unsafe { std::env::set_var("LOCPATH", shared) };
+	let env = [("LC_ALL", "en_US"), ("LOCPATH", shared)];
+	let (code, cap) = run_util_env::<Rsync>(&["-ai", "src/ünï.txt", "dst-list/"], "", dir.path(), &env);
+	// SAFETY: as above.
+	unsafe { std::env::remove_var("LOCPATH") };
+	assert_eq!(code, 0, "{shared}: {}", cap.err());
+	assert!(cap.out().contains("ünï.txt"), "{shared}: {}", cap.out());
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.

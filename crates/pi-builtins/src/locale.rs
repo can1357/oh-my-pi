@@ -114,7 +114,12 @@ pub(crate) fn loaded_codeset(
 ) -> Option<String> {
 	let shell_path = LOCALE_PATH_VARS.map(|name| env(name).filter(|value| !value.is_empty()));
 	let needs_shell = LOCALE_PATH_VARS.iter().zip(&shell_path).any(|(name, shell)| {
-		let relative = shell.as_ref().is_some_and(|value| !value.starts_with('/'));
+		// A search path is a colon-separated list, and one relative entry is
+		// enough: libc resolves it against the caller's working directory, which
+		// is the shell's. An empty entry means that directory as well.
+		let relative = shell
+			.as_ref()
+			.is_some_and(|value| value.split(':').any(|entry| !entry.starts_with('/')));
 		relative || *shell != std::env::var(name).ok().filter(|value| !value.is_empty())
 	});
 	if needs_shell {
