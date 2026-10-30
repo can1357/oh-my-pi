@@ -33,6 +33,10 @@ provider "mistral" {
 	// reasoning_content field, even when it serves DeepSeek-family models.
 	requires-reasoning-content-for-tool-calls #false
 	requires-reasoning-content-for-all-assistant-turns #false
+	// Reasoning streams and replays as typed `thinking` content parts
+	// (https://docs.mistral.ai/studio/conversations/reasoning) for every
+	// reasoning model the host serves, including GLM and DeepSeek (#17375).
+	mistral-reasoning-content-parts #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

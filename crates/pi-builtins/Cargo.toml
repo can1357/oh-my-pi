@@ -38,7 +38,7 @@ brush-core = "^0.5.0"
 brush-parser = "^0.4.0"
 chrono = "0.4.44"
 clap = { version = "4.6.0", features = ["cargo", "color", "derive", "env", "wrap_help"] }
-fancy-regex = "0.17"
+fancy-regex.workspace = true
 futures = "0.3.32"
 itertools = "0.14.0"
 parking_lot = "0.12.5"
@@ -48,7 +48,8 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
-ansi-width = "0.1.0"
+# 0.1.1 moved to unicode-width 0.2, the version the rest of the graph uses.
+ansi-width = "0.1.1"
 argmax = "0.4.0"
 bigdecimal = "0.4"
 binary-heap-plus = "0.5.0"
