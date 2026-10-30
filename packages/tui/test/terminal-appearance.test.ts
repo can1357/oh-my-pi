@@ -505,6 +505,81 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it.each([25_001, 30_000, 120_000])("still consumes a retired cycle's answer %i ms later", age => {
+		// A claim carried a deadline, and when it lapsed the old answer became
+		// the live request's: dark under token 42 at 25,001 ms where 24,999 ms
+		// was correct. A deadline says how long to wait; it never proves an
+		// answer cannot arrive, so the claim is plain data now and holds until
+		// it is spent.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(age);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("charges a surrendered cycle's late answer to itself, not to its successor", () => {
+		// A cycle that surrendered still owns its own answer, so taking one on
+		// its behalf says nothing about whose turn was spent. Concluding that
+		// the live request had been answered deleted its record, and its own
+		// colour — still in flight — was then published under the request after
+		// it while the real answer disappeared.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(5_100);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		const requestToken = 43;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// 41 answers; 42 times out so 43 goes out; then 42 answers, then 43.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		vi.advanceTimersByTime(5_000);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events.filter(event => event.token === requestToken)).toEqual([
+			{ appearance: "light", token: requestToken },
+		]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];

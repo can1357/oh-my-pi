@@ -885,13 +885,18 @@ interface Osc11Cycle {
 }
 
 /**
- * One answer a retired cycle may still send. `timer` is its deadline while it
- * is only a possibility; a claim whose timer is gone is standing on evidence
- * and waits as long as it has to.
+ * Cap on the answers retired cycles may still be owed. Claims carry no
+ * deadline — a deadline is a statement about waiting, never proof that an
+ * answer cannot arrive — so this count is what keeps a terminal that stops
+ * answering from leaving a backlog that swallows answers for ever.
+ *
+ * Two: the deepest backlog anyone has reproduced is two retired cycles
+ * answering late together, and a dead spell has to be paid off one answer at a
+ * time before the appearance updates again. Past the cap an old answer can be
+ * published under a later request; below it, a deeper dead spell would cost
+ * every update behind it instead.
  */
-interface Osc11Claim {
-	timer?: Timer;
-}
+const OSC11_MAX_CLAIMS = 2;
 
 let nextOsc99ProbeId = 1;
 
@@ -1086,9 +1091,9 @@ export class ProcessTerminal implements Terminal {
 	 * a backlog that drains with time instead of swallowing every answer the
 	 * terminal ever sends again.
 	 */
-	#osc11ReplyClaims: Osc11Claim[] = [];
+	#osc11ReplyClaims = 0;
 	/** The sentinels those same cycles still owe, on the same terms. */
-	#osc11SentinelClaims: Osc11Claim[] = [];
+	#osc11SentinelClaims = 0;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1726,7 +1731,8 @@ export class ProcessTerminal implements Terminal {
 				// An orphaned cycle's colour report has just been swallowed, so the
 				// sentinel that follows it is this one. It belongs to that cycle
 				// and resolves nothing in the queue.
-				if (this.#takeOsc11Claim(this.#osc11SentinelClaims)) {
+				if (this.#osc11SentinelClaims > 0) {
+					this.#osc11SentinelClaims -= 1;
 					return;
 				}
 				const owner = this.#da1SentinelOwners.shift();
@@ -1889,7 +1895,7 @@ export class ProcessTerminal implements Terminal {
 					const osc11Match = candidate.match(osc11ResponsePattern);
 					if (!osc11Match) {
 						const terminated = candidate.endsWith("\x07") || candidate.endsWith("\x1b\\");
-						const owed = this.#osc11Cycles.length > 0 || this.#osc11ReplyClaims.length > 0;
+						const owed = this.#osc11Cycles.length > 0 || this.#osc11ReplyClaims > 0;
 						if (!terminated && owed) {
 							this.#osc11ResponseBuffer = candidate;
 							return;
@@ -2070,7 +2076,7 @@ export class ProcessTerminal implements Terminal {
 		// the buffer belongs to an older cycle, or to an orphan claim, and
 		// dropping it would spill its tail into application input when the rest
 		// arrives.
-		if (this.#osc11Cycles.length === 1 && this.#osc11ReplyClaims.length === 0) this.#osc11ResponseBuffer = "";
+		if (this.#osc11Cycles.length === 1 && this.#osc11ReplyClaims === 0) this.#osc11ResponseBuffer = "";
 		if (cache) {
 			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
 			this.#osc11CacheRefreshTimer = setTimeout(() => {
@@ -2177,7 +2183,7 @@ export class ProcessTerminal implements Terminal {
 		// claimed when that colour actually arrives, not before: a cycle that
 		// turns out to have sent nothing at all must not hold a sentinel back
 		// from the questions asked after it.
-		this.#addOsc11Claim(this.#osc11ReplyClaims);
+		this.#addOsc11Claim("reply");
 	}
 
 	/**
@@ -2185,29 +2191,29 @@ export class ProcessTerminal implements Terminal {
 	 * takes it: a claim left by a retired cycle, else the oldest cycle in the
 	 * queue. Only a live cycle's own answer is published.
 	 *
-	 * When somebody older takes it, the cycle that is live right now is noted
-	 * as having had its turn absorbed. A terminal sends one answer per
-	 * question, so the answer that would have been its own has just been spent;
-	 * when it gives up it leaves nothing behind. Without that, one lost answer
-	 * would push every later answer one place out of step — each cycle
-	 * surrendering into a claim that takes its successor's answer — and nothing
-	 * would ever publish again.
+	 * When a *claim* takes it — a cycle so old that its ownership is gone — the
+	 * live cycle is noted as having had its turn absorbed, and leaves nothing
+	 * behind when it gives up. Without that, one answer the terminal never sent
+	 * would push every later answer one place out of step for good and nothing
+	 * would publish again. A cycle that merely surrendered keeps its own claim
+	 * on its own answer, and takes this one without any inference about whose
+	 * turn was spent: its answer is still plausibly in flight, and the live
+	 * cycle's record is the only thing that can tell its late colour apart from
+	 * the live cycle's own.
 	 */
 	#consumeOsc11Reply(rHex: string, gHex: string, bHex: string): void {
-		if (this.#takeOsc11Claim(this.#osc11ReplyClaims)) {
-			// The colour arrived, so its sentinel is on its way behind it: that
-			// obligation stops counting down. It was a guess while nothing had
-			// been heard; now it is a consequence of what just was.
-			this.#standOsc11SentinelClaim();
+		if (this.#osc11ReplyClaims > 0) {
+			this.#osc11ReplyClaims -= 1;
+			// The colour arrived, so its sentinel is on its way behind it. One
+			// sentinel follows one answer: letting that go unrecorded would hand
+			// it to the next question and end that one unanswered.
+			this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
 			this.#absorbLiveOsc11Turn();
 			return;
 		}
 		const cycle = this.#osc11Cycles.shift();
 		if (!cycle) return;
-		if (!cycle.live) {
-			this.#absorbLiveOsc11Turn();
-			return;
-		}
+		if (!cycle.live) return;
 		this.#osc11Pending = false;
 		this.#osc11LiveCycle = undefined;
 		this.#handleOsc11Response(rHex, gHex, bHex, cycle.token);
@@ -2218,45 +2224,22 @@ export class ProcessTerminal implements Terminal {
 		if (this.#osc11LiveCycle) this.#osc11LiveCycle.absorbed = true;
 	}
 
-	/** Record one more answer a retired cycle may still send, for a bounded while. */
-	#addOsc11Claim(claims: Osc11Claim[]): void {
-		const claim: Osc11Claim = {};
-		claim.timer = setTimeout(() => {
-			const index = claims.indexOf(claim);
-			if (index >= 0) claims.splice(index, 1);
-		}, OSC11_LATE_REPLY_GRACE_MS);
-		claims.push(claim);
-	}
-
 	/**
-	 * Stop the oldest sentinel claim from timing out, because the colour it
-	 * pairs with has just been accounted for. One sentinel follows one answer,
-	 * so letting this lapse would hand that sentinel to the next question and
-	 * end it unanswered.
+	 * Record one more answer a retired cycle may still send. Plain data with no
+	 * deadline: a timer here would be another statement about waiting standing
+	 * in for proof that an answer cannot arrive, and every such deadline became
+	 * the next place that inference was wrong. The count is capped instead, so
+	 * a terminal that stops answering altogether cannot leave a backlog that
+	 * swallows answers for ever.
 	 */
-	#standOsc11SentinelClaim(): void {
-		const claim = this.#osc11SentinelClaims[0];
-		if (claim) {
-			clearTimeout(claim.timer);
-			claim.timer = undefined;
-			return;
-		}
-		this.#osc11SentinelClaims.push({});
-	}
-
-	/** Spend the oldest claim of its kind, if one is still standing. */
-	#takeOsc11Claim(claims: Osc11Claim[]): boolean {
-		const claim = claims.shift();
-		if (claim === undefined) return false;
-		clearTimeout(claim.timer);
-		return true;
+	#addOsc11Claim(kind: "reply" | "sentinel"): void {
+		if (kind === "reply") this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);
+		else this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
 	}
 
 	#clearOsc11Claims(): void {
-		for (const claims of [this.#osc11ReplyClaims, this.#osc11SentinelClaims]) {
-			for (const claim of claims) clearTimeout(claim.timer);
-			claims.length = 0;
-		}
+		this.#osc11ReplyClaims = 0;
+		this.#osc11SentinelClaims = 0;
 	}
 
 	/** Run the request parked behind the cycle that just ended, if there is one. */
