@@ -14,7 +14,7 @@
  * misrouting protobuf payloads.
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
 
 /** Whether the model registered under a provider id and requested model id has known pricing. */
 export type TelemetryModelPricingResolver = (providerId: string, modelId: string) => boolean;
@@ -144,6 +144,14 @@ function signalEnabled(
 		if (hasSelection && !hasOtlp) return false;
 	}
 	if (!endpoint) return false;
+	// A test process inherits the developer's OTEL endpoint, from the shell and from
+	// the dotenv files `@oh-my-pi/pi-utils` loads, and every in-process
+	// `runRootCommand` would ship its spans, logs and metrics there. Under test only a
+	// loopback receiver the test serves itself may be the target.
+	if (isBunTestRuntime() && !isLoopbackEndpoint(endpoint)) {
+		logger.debug(`OTEL ${signal} export disabled: a test process exports only to loopback`, { endpoint });
+		return false;
+	}
 
 	const protocol = protocolSelection?.trim().toLowerCase();
 	if (protocol && protocol !== "http/protobuf") {
@@ -153,4 +161,14 @@ function signalEnabled(
 		return false;
 	}
 	return true;
+}
+
+function isLoopbackEndpoint(endpoint: string): boolean {
+	let hostname: string;
+	try {
+		hostname = new URL(endpoint).hostname;
+	} catch {
+		return false;
+	}
+	return hostname === "localhost" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }

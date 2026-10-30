@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,12 @@ import { type TextPredictRequest, type TextPredictResponse, textPredictDaemon } 
 import { rejectionOf } from "./helpers/rejection";
 
 const cleanups: (() => Promise<void>)[] = [];
+
+// The client is process-wide: a connection another file opened would answer instead of the
+// stand-in daemon each case serves, so every case starts without one.
+beforeEach(() => {
+	closeTextPrediction();
+});
 
 afterEach(async () => {
 	closeTextPrediction();

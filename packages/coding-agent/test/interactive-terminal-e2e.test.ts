@@ -44,7 +44,10 @@ describe("libkitty end-to-end", () => {
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated(),
+			// Typed prose asks the word-completion engine for ghost text, and the default
+			// engine is the machine-global text-predict daemon: these rendering cases would
+			// start the developer's real broker and daemon and leave them running.
+			settings: Settings.isolated({ "spelling.autocomplete": "off" }),
 			modelRegistry,
 		});
 		term = new VirtualTerminal(120, 32);

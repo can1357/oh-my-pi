@@ -63,6 +63,7 @@ import {
 	formatNumber,
 	getActiveProfile,
 	getProjectDir,
+	isBunTestRuntime,
 	isEnoent,
 	logger,
 	postmortem,
@@ -2159,7 +2160,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncEditorMaxHeight();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
-		setWordPredictionHost(textPredictionBackend);
+		// The backend is the machine-global text-predict daemon. A test process that
+		// types prose into a real editor would start the developer's broker and daemon
+		// and leave them running, so tests get no host and editors show no ghost text.
+		if (!isBunTestRuntime()) setWordPredictionHost(textPredictionBackend);
 		try {
 			this.historyStorage = HistoryStorage.open();
 			this.editor.setHistoryStorage(this.historyStorage);
