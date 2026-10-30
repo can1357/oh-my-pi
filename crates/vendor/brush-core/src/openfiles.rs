@@ -287,26 +287,102 @@ impl OpenFile {
 			Self::Vfs(_) => false,
 		}
 	}
+
+	/// Reports whether this handle's I/O awaits rather than parking the thread
+	/// that runs it.
+	///
+	/// Only a provider-backed virtual file does; every other variant reads and
+	/// writes with blocking `std::io`. Handles a provider reports as native are
+	/// unwrapped into [`OpenFile::File`] on conversion, so `Vfs` is exactly the
+	/// awaiting set.
+	pub const fn is_virtual(&self) -> bool {
+		matches!(self, Self::Vfs(_))
+	}
 }
 
-/// Copies everything readable from `reader` into `writer`, awaiting virtual
-/// filesystem providers on either side rather than blocking the async runtime.
-///
-/// # Errors
-///
-/// Returns the first read or write error.
-pub async fn copy_async(reader: &mut OpenFile, writer: &mut OpenFile) -> std::io::Result<()> {
-	let mut buf = vec![0u8; 64 * 1024];
+/// How much a streaming copy moves between a read and a write.
+const COPY_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Runs a blocking operation off the runtime's workers.
+async fn offload<T: Send + 'static>(
+	operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+	tokio::task::spawn_blocking(operation).await.map_err(std::io::Error::other)?
+}
+
+/// Streams `reader` into `writer` with blocking `std::io`. Only ever called on
+/// the blocking pool.
+fn copy_blocking(reader: &mut OpenFile, writer: &mut OpenFile) -> std::io::Result<()> {
+	let mut buf = vec![0u8; COPY_CHUNK_BYTES];
 	loop {
-		let n = match reader.read_async(&mut buf).await {
+		let n = match std::io::Read::read(reader, &mut buf) {
 			Ok(0) => break,
 			Ok(n) => n,
 			Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
 			Err(error) => return Err(error),
 		};
-		writer.write_all_async(&buf[..n]).await?;
+		std::io::Write::write_all(writer, &buf[..n])?;
 	}
-	writer.flush_async().await
+	std::io::Write::flush(writer)
+}
+
+/// Copies everything readable from `reader` into `writer` without holding a
+/// runtime worker.
+///
+/// Every handle other than a virtual one reads and writes with blocking
+/// `std::io`. A write to a full pipe, or a read from a pipe nobody has written
+/// to yet, parks the calling thread with no yield point; on a Tokio worker that
+/// deadlocks whenever the task that would unblock it lives on the same runtime.
+/// `$(<file)` is exactly that case — the parent drains the substitution pipe on
+/// the runtime this copy runs on — so a file larger than the pipe's capacity
+/// took a worker for ever. Blocking handles therefore copy on the blocking
+/// pool, where parking costs nothing the scheduler needs.
+///
+/// A virtual handle awaits instead and cannot leave the runtime. When exactly
+/// one side is virtual the copy buffers at the boundary: the virtual side
+/// streams on the runtime, the blocking side runs as one offloaded operation.
+/// The only caller already holds the whole copy in memory, so that costs
+/// nothing extra.
+///
+/// # Errors
+///
+/// Returns the first read or write error.
+pub async fn copy_async(mut reader: OpenFile, mut writer: OpenFile) -> std::io::Result<()> {
+	match (reader.is_virtual(), writer.is_virtual()) {
+		(false, false) => offload(move || copy_blocking(&mut reader, &mut writer)).await,
+		(true, false) => {
+			let mut contents = Vec::new();
+			reader.read_to_end_async(&mut contents).await?;
+			offload(move || {
+				std::io::Write::write_all(&mut writer, &contents)?;
+				std::io::Write::flush(&mut writer)
+			})
+			.await
+		},
+		(false, true) => {
+			let contents = offload(move || {
+				let mut contents = Vec::new();
+				std::io::Read::read_to_end(&mut reader, &mut contents)?;
+				Ok(contents)
+			})
+			.await?;
+			writer.write_all_async(&contents).await?;
+			writer.flush_async().await
+		},
+		(true, true) => {
+			let mut buf = vec![0u8; COPY_CHUNK_BYTES];
+			loop {
+				let n = match reader.read_async(&mut buf).await {
+					Ok(0) => break,
+					Ok(n) => n,
+					Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+					Err(error) => return Err(error),
+				};
+				writer.write_all_async(&buf[..n]).await?;
+			}
+			writer.flush_async().await
+		},
+	}
 }
 
 impl From<std::io::Stdin> for OpenFile {

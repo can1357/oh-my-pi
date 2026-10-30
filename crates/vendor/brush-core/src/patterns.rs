@@ -72,9 +72,21 @@ fn is_empty_component(component: &PatternWord) -> bool {
 	component.iter().all(|piece| piece.as_str().is_empty())
 }
 
-/// Stops expansion with [`error::ErrorKind::Interrupted`] once the run is
-/// cancelled.
-fn ensure_not_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) -> Result<(), error::Error> {
+/// Cooperates with Tokio's scheduler at a traversal boundary, then stops
+/// expansion with [`error::ErrorKind::Interrupted`] once the run is cancelled.
+///
+/// On the native route every read below is synchronous, so a walk made only of
+/// them never returns `Pending` and the worker polling it never returns to the
+/// scheduler. The cancellation check alone cannot save that walk: the run's
+/// deadline and the task that sets `cancel` both need a worker of their own.
+/// Spending the cooperative budget first gives them one. See
+/// `interp::loop_checkpoint`, which does the same for the interpreter's loops.
+async fn walk_checkpoint(
+	cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	// After the cooperative yield, so a cancellation raised while this task was
+	// parked is seen on the step that follows it.
 	if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
 		return Err(error::ErrorKind::Interrupted.into());
 	}
@@ -464,7 +476,7 @@ impl Pattern {
 			let current_paths = std::mem::take(&mut paths_so_far);
 			for current_path in current_paths {
 				// After a `**` walk this lists every directory it found again.
-				ensure_not_cancelled(options.cancel.as_ref())?;
+				walk_checkpoint(options.cancel.as_ref()).await?;
 				let subpattern = Self::from(&component)
 					.set_extended_globbing(self.enable_extended_globbing)
 					.set_case_insensitive(self.case_insensitive);
@@ -487,7 +499,7 @@ impl Pattern {
 					for entry in entries.filter_map(Result::ok) {
 						// One directory can hold millions of entries, and nothing
 						// here yields on the native route.
-						ensure_not_cancelled(options.cancel.as_ref())?;
+						walk_checkpoint(options.cancel.as_ref()).await?;
 						let file_name = entry.file_name();
 						let name = file_name.to_string_lossy();
 						if !allow_dot_files && name.starts_with('.') {
@@ -518,7 +530,7 @@ impl Pattern {
 			let mut existing = Vec::with_capacity(paths_so_far.len());
 			for path in paths_so_far {
 				// After a `**` walk this probes a path under every directory.
-				ensure_not_cancelled(options.cancel.as_ref())?;
+				walk_checkpoint(options.cancel.as_ref()).await?;
 				let probe = probe_path(fs, &path);
 				// `*/` follows symlinks like bash (a link to a directory
 				// matches); a named suffix only has to exist, dangling or not.
@@ -593,8 +605,8 @@ impl Pattern {
 	/// `**` or `**/`, only a base for components that follow.
 	///
 	/// Returns [`error::ErrorKind::Interrupted`] once `cancel` is cancelled: the
-	/// reads below are synchronous on the native route, so the walk never
-	/// yields and nothing else can stop it.
+	/// reads below are synchronous on the native route, so the walk only yields
+	/// where [`walk_checkpoint`] makes it.
 	async fn expand_globstar(
 		fs: &pi_vfs::Fs,
 		bases: Vec<std::path::PathBuf>,
@@ -608,7 +620,7 @@ impl Pattern {
 		for base in bases {
 			// Each base costs a synchronous probe on the native route, and a
 			// base that is not a directory never reaches the walk's check below.
-			ensure_not_cancelled(cancel)?;
+			walk_checkpoint(cancel).await?;
 			if !fs.is_dir(probe_path(fs, &base)).await {
 				continue;
 			}
@@ -629,7 +641,7 @@ impl Pattern {
 
 			let mut pending = vec![base];
 			while let Some(dir) = pending.pop() {
-				ensure_not_cancelled(cancel)?;
+				walk_checkpoint(cancel).await?;
 				let Ok(listing) = fs.read_dir(probe_path(fs, &dir)).await else {
 					continue;
 				};
@@ -637,7 +649,7 @@ impl Pattern {
 					// A single directory can hold millions of entries, and on the
 					// native route nothing below yields, so a timeout arriving
 					// during this loop is only seen if it is read here.
-					ensure_not_cancelled(cancel)?;
+					walk_checkpoint(cancel).await?;
 					let file_name = entry.file_name();
 					if !allow_dot_files && file_name.to_string_lossy().starts_with('.') {
 						continue;

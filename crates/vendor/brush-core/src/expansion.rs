@@ -8,7 +8,7 @@ use itertools::Itertools;
 use crate::{
 	ExecutionParameters, arithmetic,
 	arithmetic::ExpandAndEvaluate,
-	braceexpansion, commands, env, error, escape, extensions, patterns, prompt,
+	braceexpansion, commands, env, error, escape, extensions, interp, patterns, prompt,
 	shell::Shell,
 	sys, trace_categories,
 	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
@@ -645,6 +645,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// space so downstream field splitting yields one field per element.
 		let mut expansions = vec![];
 		for (index, element) in brace_expanded_words.iter().enumerate() {
+			// A brace range sets this count, not the script: `{1..3000000}` is
+			// one word in, three million out, and every step below is ready on
+			// a native filesystem.
+			interp::loop_checkpoint(self.params).await?;
 			if index > 0 {
 				expansions.push(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
 			}
@@ -775,6 +779,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// Now expand pathnames if necessary. This also unquotes as a side effect.
 		let mut result = Vec::new();
 		for field in fields {
+			// One field per brace element, so the same count as above.
+			interp::loop_checkpoint(self.params).await?;
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
 				result.push(String::from(field));
 			} else {

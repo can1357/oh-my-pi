@@ -1216,7 +1216,7 @@ async fn run_substitution_command(
 	if let Ok(program) = &parse_result {
 		if let Some(redir) = try_unwrap_bare_input_redir_program(program) {
 			interp::setup_redirect(&mut shell, &mut params, redir).await?;
-			openfiles::copy_async(&mut params.stdin(&shell), &mut params.stdout(&shell)).await?;
+			openfiles::copy_async(params.stdin(&shell), params.stdout(&shell)).await?;
 			return Ok(ExecutionResult::new(0));
 		}
 	}

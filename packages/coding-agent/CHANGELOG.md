@@ -21,6 +21,8 @@
 - Fixed `read` showing a zip, tar, asar or ISO archive's old contents after a same-size rewrite within milliseconds of its previous write, on filesystems with coarse timestamps such as Linux ext4 ([#17389](https://github.com/can1357/oh-my-pi/pull/17389) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `fill` in Chrome replaces the text of rich-text editors such as Slate (Discord) and Lexical instead of leaving the old text in place or breaking the editor, and an empty fill clears them ([#17417](https://github.com/can1357/oh-my-pi/pull/17417) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an endless shell loop in one bash command taking the shell from every later command in the session; such a command is now cancelled by its own deadline, and `kill %N` reaches it ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `value=$(<file)` on a file larger than a pipe buffer taking the shell from every later command in the session ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a `*` or `**` glob over a large directory tree ignoring the bash command's own timeout ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

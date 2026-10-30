@@ -6577,6 +6577,31 @@ mod tests {
 		assert_eq!(output, "3000\n");
 	}
 
+	/// `$(<file)` takes a shortcut that copies the file straight into the
+	/// substitution pipe, with no interpreter step in between. Every handle in
+	/// that copy reads and writes with blocking `std::io`, and the task that
+	/// drains the pipe waits on the same runtime: once the file outgrew the
+	/// pipe's capacity the copy parked the only worker inside `write`, the
+	/// drain could never run, and the backend never answered again.
+	#[cfg(unix)]
+	#[test]
+	fn bare_input_redirection_substitution_outgrows_the_pipe() {
+		const FILE_BYTES: usize = 1024 * 1024;
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("big.txt"), vec![b'a'; FILE_BYTES]).expect("create file");
+
+		let (result, output) = capture_on_runtime(
+			"value=$(<big.txt); printf '%s\\n' \"${#value}\"",
+			Some(dir.path().to_path_buf()),
+			512,
+		)
+		.expect("the substitution pipe copy must not hold the runtime's only worker");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, format!("{FILE_BYTES}\n"));
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {

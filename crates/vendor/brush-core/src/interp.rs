@@ -447,7 +447,7 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 /// all wait for a yield that never comes. One task per worker is therefore
 /// enough to take the whole runtime, with no way back short of ending the
 /// process. Spending the cooperative budget restores all three.
-async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
 	// After the cooperative yield, so a cancellation raised while this task was
 	// parked is seen on the step that follows it.
@@ -1481,7 +1481,7 @@ impl Execute for ast::CaseClauseCommand {
 		let mut force_execute_next_case = false;
 
 		for case in &self.cases {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if force_execute_next_case {
 				force_execute_next_case = false;
 			} else {
