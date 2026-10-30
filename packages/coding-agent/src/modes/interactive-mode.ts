@@ -2611,8 +2611,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
-		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		// Brand first: the run-state setter emits, and an unbranded opt-out must never flash `π`.
 		setTerminalTitleBrand(cfgTuiTitleBrand.get(this.settings));
+		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
