@@ -13,6 +13,7 @@ import {
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
 	isReplayable,
+	type PromptCacheChange,
 } from "../src/session/cache-warmer";
 
 const SHORT_DELAY_MS = 4.5 * 60_000; // 90% of the 300s short tier
@@ -163,8 +164,13 @@ async function drain(): Promise<void> {
 	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
+/** The conversation change the warmer sees once a test marks its context stale. */
+function change(h: Harness): PromptCacheChange | undefined {
+	return h.current ? undefined : { kind: "history" };
+}
+
 function start(h: Harness, options: SimpleStreamOptions = {}): void {
-	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => h.current);
+	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
 }
 
 async function advance(ms: number): Promise<void> {
@@ -461,11 +467,11 @@ describe("cache warmer lifecycle", () => {
 			model: model.id,
 		});
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 
 		// Long retention on an upstream that writes 5m entries keeps the 5m schedule.
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
@@ -479,7 +485,7 @@ describe("cache warmer lifecycle", () => {
 		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
 		model.promptCache = { short: 300 };
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		h.warmer.onResponse({
 			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
@@ -498,13 +504,13 @@ describe("cache warmer lifecycle", () => {
 			model: model.id,
 		});
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 
 		// An upstream that wrote a 5m entry has no declared lifetime: stop.
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
 	});
@@ -512,7 +518,7 @@ describe("cache warmer lifecycle", () => {
 	test("adopts the tier a Factory Droid server-side fallback response reports", () => {
 		const model = factoryModel("claude-fable-5", ["anthropic"]);
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		// The refused request retried on claude-opus-5; the response carries the served id.
 		h.warmer.onResponse({

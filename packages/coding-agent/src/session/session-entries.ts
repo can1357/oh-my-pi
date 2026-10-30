@@ -127,6 +127,8 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** Epoch ms the call was sent; recorded for cache-warm refreshes, whose hit restarts the cache lifetime at send. */
+	sentAt?: number;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
