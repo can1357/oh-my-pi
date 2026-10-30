@@ -1313,6 +1313,11 @@ export class AgentSession implements SettingsScope {
 	 *  {@link #settleOwedAgentEnd}, which re-asks whether a continuation is still owed rather than
 	 *  settling it blind. */
 	#agentEndOwedTerminal: AgentSessionEvent | undefined;
+	/** Records drained from the IRC queue and being folded right now, counted until each one is in
+	 *  the transcript. The third owner alongside the queues and the two carrier counters: a fold
+	 *  emits synchronously, so one record's subscribers run while the rest of its batch is still
+	 *  undelivered. See {@link #recordWithoutTurn}. */
+	#foldingIrcRecords = 0;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
@@ -1537,16 +1542,34 @@ export class AgentSession implements SettingsScope {
 
 	/** Append messages to the transcript without starting a turn; the next turn sends them to the
 	 *  model. Used for stranded IRC/extension asides (the plan-mode and post-interrupt fold branches
-	 *  of #resumeStrandedIrcAsides), advisor cards, and messages an interrupt records. All records
+	 *  of #resumeStrandedIrcAsides), advisor cards, messages an interrupt records, and
+	 *  `IrcBridge.flushPending()`, which routes here rather than emitting its own loop. All records
 	 *  (custom and non-custom alike) route through emitExternalEvent so message_end both appends to
 	 *  context and notifies event listeners — #persistMessageEnd handles custom-role persistence
 	 *  (sessionManager.appendCustomMessageEntry) from that event, and a displayable custom aside that
 	 *  went stranded mid-stream gets the message_end its sender's rebuild-skip decision expects
-	 *  (extension-ui-controller's #applyCustomMessageDisplay), matching IrcBridge.flushPending(). */
+	 *  (extension-ui-controller's #applyCustomMessageDisplay).
+	 *
+	 *  The batch is an owner of its own records while it runs: emission is synchronous, so a
+	 *  subscriber of one record's `message_end` can release an IRC hold or dispose the session and
+	 *  reach #settleOwedAgentEnd while later records of the same batch are still outside the
+	 *  transcript. {@link #foldingIrcRecords} keeps those counted, so the terminal `agent_end` is
+	 *  never published to a subscriber whose transcript snapshot is missing an accepted record. */
 	#recordWithoutTurn(records: readonly AgentMessage[]): void {
-		for (const record of records) {
-			this.agent.emitExternalEvent({ type: "message_start", message: record });
-			this.agent.emitExternalEvent({ type: "message_end", message: record });
+		let outstanding = records.length;
+		this.#foldingIrcRecords += outstanding;
+		try {
+			for (const record of records) {
+				this.agent.emitExternalEvent({ type: "message_start", message: record });
+				// `message_end` appends before it notifies, so this record stops being outstanding
+				// just before its own subscribers run: they already see it in the transcript.
+				this.#foldingIrcRecords--;
+				outstanding--;
+				this.agent.emitExternalEvent({ type: "message_end", message: record });
+			}
+		} finally {
+			// A throw out of the loop leaves the rest undelivered with nothing to deliver them.
+			this.#foldingIrcRecords -= outstanding;
 		}
 	}
 
@@ -1907,23 +1930,30 @@ export class AgentSession implements SettingsScope {
 	/** Publishes the terminal `agent_end` that a downgraded one withheld, once the tail work it
 	 *  promised a continuation for is gone. Called by every path that consumes that work without
 	 *  starting a turn — the stranded-aside folds, a prompt that folded it and then bailed,
-	 *  {@link beginDispose}'s final flush — and again by every release of a carrier, since the
-	 *  attempt made while a carrier still held the record was refused and nothing else retries it.
-	 *  Asks before settling, and asks about every owner, not just the queues. */
-	#settleOwedAgentEnd(): void {
+	 *  {@link beginDispose}'s final flush — and again by every release of an owner, since the
+	 *  attempt made while that owner still held the record was refused and nothing else retries it.
+	 *  Asks before settling, and asks about every owner, not just the queues.
+	 *
+	 *  `final` is the disposal teardown: the subscribers are about to be detached, so a promise
+	 *  still outstanding then can never be kept. Publish it whoever still holds a record — none of
+	 *  them can start a turn on a disposed session, so no continuation is coming for it either. */
+	#settleOwedAgentEnd(options?: { final?: boolean }): void {
 		const owed = this.#agentEndOwedTerminal;
 		if (!owed) return;
-		// A record can also exist in no queue at all, carried by a closure waiting out an idle
-		// compaction (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), where
-		// `#irc.hasPending()` cannot see it and its promised continuation has not started. Those two
+		// A record can also exist in no queue at all: carried by a closure waiting out an idle
+		// compaction (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), or
+		// inside a fold batch that is still emitting (#recordWithoutTurn). None of those are visible
+		// to `#irc.hasPending()`, and in each the promised continuation has not finished. These
 		// counters, not {@link ircWakesPending}: that getter also reports a {@link holdIrcWakes}
 		// hold, and a hold is a restriction on when wakes may run, not evidence that a record is
 		// waiting — `task/executor.ts` holds one across a whole driven run with nothing queued.
 		if (
-			this.isStreaming ||
-			this.#hasTailContinuationWork() ||
-			this.#ircWakesAwaitingIdleCompaction > 0 ||
-			this.#deliveriesAwaitingSessionTransition > 0
+			!options?.final &&
+			(this.isStreaming ||
+				this.#hasTailContinuationWork() ||
+				this.#ircWakesAwaitingIdleCompaction > 0 ||
+				this.#deliveriesAwaitingSessionTransition > 0 ||
+				this.#foldingIrcRecords > 0)
 		) {
 			return;
 		}
@@ -2066,6 +2096,7 @@ export class AgentSession implements SettingsScope {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
+			recordWithoutTurn: records => this.#recordWithoutTurn(records),
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
@@ -6483,6 +6514,10 @@ export class AgentSession implements SettingsScope {
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
+		// Last moment a published promise can still be kept: a carrier that releases after this
+		// line retries settlement into an empty listener list. Nothing it could do would start a
+		// turn on a disposed session either, so the run is over whoever still holds a record.
+		this.#settleOwedAgentEnd({ final: true });
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
@@ -10031,7 +10066,17 @@ export class AgentSession implements SettingsScope {
 			// Probe the synchronous prefix the way turn-recovery's #promptAgentWithIdleRetry does: an
 			// already-rejected promise's reaction job is queued ahead of the await below, so one
 			// microtask turn settles `claimFailed`. The handler rethrows, so the error still surfaces
-			// at `await run`.
+			// at `await run` with its identity and stack intact.
+			//
+			// The boundary this depends on, for whoever wraps `Agent` next: every way `prompt` can
+			// refuse the record must reject within one microtask of the call. That holds for the
+			// built-in agent — the busy and missing-model checks run before its first await
+			// (packages/agent/src/agent.ts), and the success path claims streaming synchronously —
+			// so a refusal is always an already-rejected promise here. An implementation that
+			// instead refuses after deeper awaits, or schedules its rejection with `queueMicrotask`,
+			// would be read as acceptance and its record would be discarded rather than requeued.
+			// Such a wrapper must either keep refusals in the synchronous prefix or publish an
+			// explicit acceptance signal for this to release on.
 			let claimFailed = false;
 			const run = this.agent.prompt(message).then(undefined, (error: unknown) => {
 				claimFailed = true;

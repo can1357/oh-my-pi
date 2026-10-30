@@ -210,7 +210,7 @@ describe("AgentSession settles what it promised", () => {
 	/** A pooled yield contract parks a stranded aside instead of waking a turn for it
 	 *  (#resumeStrandedIrcAsides), so the record is still queued — and still holding its
 	 *  run's `agent_end` open — when the next prompt reaches IrcBridge.flushPending(). */
-	async function startPooledRunWithStrandedAside(): Promise<{
+	async function startPooledRunWithStrandedAside(bodies = ["STRANDED_TRIGGER_ASIDE"]): Promise<{
 		settles: Array<boolean | undefined>;
 		modelRegistry: ModelRegistry;
 		mock: MockModel;
@@ -231,10 +231,12 @@ describe("AgentSession settles what it promised", () => {
 				pi.on("session_stop", async () => {
 					if (asideSent) return;
 					asideSent = true;
-					await session?.sendCustomMessage(
-						{ customType: "ext-aside", content: "STRANDED_TRIGGER_ASIDE", display: false, attribution: "agent" },
-						{ deliverAs: "aside", triggerTurn: true },
-					);
+					for (const body of bodies) {
+						await session?.sendCustomMessage(
+							{ customType: "ext-aside", content: body, display: false, attribution: "agent" },
+							{ deliverAs: "aside", triggerTurn: true },
+						);
+					}
 				});
 			},
 			tempDir.path(),
@@ -270,7 +272,7 @@ describe("AgentSession settles what it promised", () => {
 
 		// The run promised a continuation for the aside it could not deliver.
 		expect(settles.at(-1)).toBe(false);
-		expect(JSON.stringify(session.agent.state.messages)).not.toContain("STRANDED_TRIGGER_ASIDE");
+		for (const body of bodies) expect(JSON.stringify(session.agent.state.messages)).not.toContain(body);
 		return { settles, modelRegistry, mock };
 	}
 
@@ -743,5 +745,73 @@ describe("AgentSession settles what it promised", () => {
 			release.resolve();
 			compactionSpy.mockRestore();
 		}
+	}, 20_000);
+
+	it("keeps its published promise when disposal outruns the carrier holding the record", async () => {
+		const { settles } = await startPooledRunWithStrandedAside();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return { continuationScheduled: false };
+		});
+		try {
+			const compaction = session?.runIdleCompaction();
+			await started.promise;
+			await session?.setWorkPoolYieldItems([]);
+			// Disposal finishes first, so the carrier's own retry would publish into a detached
+			// listener list. A promise can only be kept while its subscribers are still there.
+			await session?.dispose();
+			expect(settles).toEqual([false, true]);
+
+			release.resolve();
+			await compaction;
+			for (let i = 0; i < 5; i++) await setImmediate();
+			// The late carrier release must not publish a second end.
+			expect(settles).toEqual([false, true]);
+		} finally {
+			release.resolve();
+			compactionSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("folds a whole drained batch into the transcript before closing the run", async () => {
+		// Two records strand together, so the fold below emits a batch rather than one message.
+		const { settles } = await startPooledRunWithStrandedAside(["BATCH_FIRST_ASIDE", "BATCH_SECOND_ASIDE"]);
+		const releaseHold = session?.holdIrcWakes();
+		session?.suppressAutoResumeUntilPrompt();
+
+		const snapshotsAtTerminal: string[][] = [];
+		const unsubscribe = session?.subscribe(event => {
+			if (event.type === "agent_end" && event.isTerminal !== false) {
+				snapshotsAtTerminal.push(
+					(session?.messages ?? []).flatMap(m =>
+						m.role === "custom" && typeof m.content === "string" ? [m.content] : [],
+					),
+				);
+			}
+		});
+		const releaseFromFold = session?.agent.subscribe(async (event: AgentEvent) => {
+			// Reentry from inside the batch: the first record's own subscriber releases the hold,
+			// which reaches settlement while the second record is still outside the transcript.
+			if (event.type === "message_end" && JSON.stringify(event.message).includes("BATCH_FIRST_ASIDE")) {
+				releaseHold?.();
+			}
+		});
+		try {
+			await session?.setWorkPoolYieldItems([]);
+			await session?.waitForIdle();
+		} finally {
+			releaseFromFold?.();
+			unsubscribe?.();
+			releaseHold?.();
+		}
+
+		expect(settles).toEqual([false, true]);
+		// The terminal subscriber's transcript must already contain every record of the batch.
+		expect(snapshotsAtTerminal).toHaveLength(1);
+		expect(snapshotsAtTerminal[0]).toContain("BATCH_FIRST_ASIDE");
+		expect(snapshotsAtTerminal[0]).toContain("BATCH_SECOND_ASIDE");
 	}, 20_000);
 });

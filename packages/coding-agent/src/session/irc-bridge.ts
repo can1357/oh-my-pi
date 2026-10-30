@@ -18,6 +18,10 @@ export interface IrcBridgeHost {
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
+	/** Folds records into the transcript without starting a turn; see
+	 *  `AgentSession.#recordWithoutTurn`. The session keeps the batch accounted while it is
+	 *  being emitted, so this must not be open-coded here. */
+	recordWithoutTurn(records: readonly AgentMessage[]): void;
 }
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
@@ -325,9 +329,6 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
-			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
-			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
-		}
+		this.#host.recordWithoutTurn(this.drainPending());
 	}
 }
