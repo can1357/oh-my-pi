@@ -11,7 +11,7 @@ import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { emptyUsage } from "../images/shared";
 import { getCodexAttestationHeader } from "../providers/openai-codex-attestation";
-import { normalizeCodexBaseUrl } from "../usage/openai-codex-base-url";
+import { isChatGptBaseUrl, normalizeCodexBaseUrl } from "../usage/openai-codex-base-url";
 import { type TranscriptionOptions, transcriptionResponseError } from "./openai-transcriptions";
 import { TRANSCRIPTION_AUDIO_MIME_TYPES, type TranscriptionRequest, type TranscriptionResult } from "./types";
 
@@ -32,15 +32,23 @@ const DECODABLE_EXTENSIONS: Readonly<Record<string, true>> = {
 /** MIME spellings browsers report for containers the table names differently. */
 const MIME_ALIASES: Readonly<Record<string, string>> = {
 	"audio/m4a": "audio/mp4",
+	"audio/mp3": "audio/mpeg",
 	"audio/opus": "audio/ogg",
 };
+
+/** The table's first extension for `mimeType`: its canonical name for that container. */
+function containerExtension(mimeType: string | undefined): string | undefined {
+	return mimeType
+		? Object.entries(TRANSCRIPTION_AUDIO_MIME_TYPES).find(([, mime]) => mime === mimeType)?.[0]
+		: undefined;
+}
 
 /**
  * The endpoint picks its decoder from the upload's file extension and answers `500 Error in ASR API` when the
  * extension is missing or unknown (`voice.oga`, `audio`), even for audio it can decode. Keep a decodable name
  * whose container agrees with the MIME type (`mp3`/`mpeg`, `m4a`/`mp4` share one MIME type); otherwise name the
- * file after the container the MIME type declares, and fall back to the caller's name when the MIME type is
- * unknown too.
+ * file after the container the MIME type declares. A generic or empty MIME type declares nothing, so a known
+ * suffix names the container instead (`voice.oga` → `audio.ogg`); with neither, the caller's name is kept.
  */
 function uploadFileName(request: TranscriptionRequest): string {
 	const name = request.fileName?.trim() || "audio";
@@ -48,29 +56,37 @@ function uploadFileName(request: TranscriptionRequest): string {
 	const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 	const rawMime = request.mimeType.split(";", 1)[0]?.trim().toLowerCase().replace("audio/x-", "audio/") ?? "";
 	const mimeType = MIME_ALIASES[rawMime] ?? rawMime;
-	const declared = Object.entries(TRANSCRIPTION_AUDIO_MIME_TYPES).find(([, mime]) => mime === mimeType)?.[0];
+	const declared = containerExtension(mimeType);
 	if (
 		DECODABLE_EXTENSIONS[extension] === true &&
 		(!declared || TRANSCRIPTION_AUDIO_MIME_TYPES[extension] === mimeType)
 	) {
 		return name;
 	}
-	return declared ? `audio.${declared}` : name;
+	const container = declared ?? containerExtension(TRANSCRIPTION_AUDIO_MIME_TYPES[extension]);
+	return container ? `audio.${container}` : name;
 }
 
 /**
  * Transcribe through the ChatGPT backend dictation endpoint (`POST /transcribe`) with a Codex OAuth bearer.
  *
  * The endpoint takes only `file` and `language` and reports no usage or segments, so prompt, temperature,
- * response format and timestamp options are not forwarded and the result carries text with zero usage. A
- * `baseUrl` override that is not a chatgpt.com origin is ignored ({@link normalizeCodexBaseUrl}), so the
- * Codex bearer is never sent to another host.
+ * response format and timestamp options are not forwarded and the result carries text with zero usage.
+ *
+ * A `baseUrl` that is not on the ChatGPT origin is refused: it means `providers.openai-codex` points at a relay,
+ * and the key configured for that relay outranks the stored OAuth login, so sending it to chatgpt.com would
+ * disclose it and fail anyway.
  */
 export async function transcribeOpenAICodex(
 	model: Model<Api>,
 	request: TranscriptionRequest,
 	options: TranscriptionOptions,
 ): Promise<TranscriptionResult> {
+	if (model.baseUrl?.trim() && !isChatGptBaseUrl(model.baseUrl)) {
+		throw new AIError.ConfigurationError(
+			`${model.provider}/${model.id} only runs on chatgpt.com, but its base URL is ${model.baseUrl}; remove the providers.${model.provider}.baseUrl override or pick another speech-to-text model`,
+		);
+	}
 	const form = new FormData();
 	form.append("file", new File([request.audio], uploadFileName(request), { type: request.mimeType }));
 	if (request.language !== undefined) form.append("language", request.language);

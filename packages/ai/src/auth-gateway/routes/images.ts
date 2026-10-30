@@ -14,16 +14,7 @@ import {
 	resolveGatewayApiKey,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
-
-function isGatewayImageApi(api: string): boolean {
-	return (
-		api === "openai-images" ||
-		api === "openrouter-images" ||
-		api === "google-generative-ai" ||
-		api === "google-gemini-cli" ||
-		api === "factory-droid-agent"
-	);
-}
+import { gatewayRouteAccepts } from "../routable";
 
 async function handleImages(
 	bootOpts: AuthGatewayRouteOptions,
@@ -69,7 +60,7 @@ async function handleImages(
 			`Model ${parsed.modelId} requires a hosted image carrier, which the auth gateway cannot resolve`,
 		);
 	}
-	if (!isGatewayImageApi(model.api)) {
+	if (!gatewayRouteAccepts("image", model.api)) {
 		return codedErrorResponse(
 			400,
 			"invalid_request_error",

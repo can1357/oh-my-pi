@@ -163,6 +163,8 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(listed.some(model => model.provider === "openai" && modelKind(model) === "stt")).toBe(false);
 		// Always-available on-device runners (local/whisper-*, local/kokoro) would always answer 400.
 		expect(listed.some(model => model.api === "local-inference")).toBe(false);
+		// `/v1/images/*` refuses the hosted Responses image model, so a Codex login must not advertise it.
+		expect(listed.some(model => model.provider === "openai-codex" && model.id === "gpt-image-2")).toBe(false);
 	});
 });
 
