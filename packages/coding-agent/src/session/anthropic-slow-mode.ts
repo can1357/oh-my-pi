@@ -29,8 +29,13 @@ import type {
 	AnthropicSlowModeSignal,
 	Model,
 } from "@oh-my-pi/pi-ai";
+import { resolveDirectAnthropicBaseUrl } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
+import { cfgProvidersAnthropicSlowMode, cfgRetryPreferSlowMode, cfgRetryUsageReservePolicy } from "./settings";
 import type { UsageLimitState } from "./usage-limit";
 
 /** Why an active slow-mode window ended. */
@@ -538,6 +543,24 @@ export class AnthropicSlowModeLanes {
 
 /** The process-wide lane registry shared by every session in this process. */
 export const anthropicSlowModeLanes = new AnthropicSlowModeLanes();
+
+/**
+ * Whether usage-aware fallback leaves `model` alone (`retry.preferSlowMode`):
+ * `/slow` is on and the model's slow mode keeps serving past usage limits.
+ * A limit the lane cannot serve still fails the request, and error-driven
+ * fallback moves the turn.
+ */
+export function prefersSlowModeOverUsageFallback(model: Model, settings: Settings): boolean {
+	return (
+		cfgRetryPreferSlowMode.get(settings) &&
+		cfgRetryUsageReservePolicy.get(settings) !== "fail-closed" &&
+		// Custom aliases inherit catalog policy but do not install subscription hooks.
+		(model.providerType === undefined || model.providerType === model.provider) &&
+		resolveCatalogPolicy(model).subscriptionSlowMode === true &&
+		cfgProvidersAnthropicSlowMode.get(settings) === "auto" &&
+		isOfficialAnthropicApiUrl(resolveDirectAnthropicBaseUrl(model))
+	);
+}
 
 /**
  * Auto-accept gate: take the slow lane only when no sibling Claude OAuth

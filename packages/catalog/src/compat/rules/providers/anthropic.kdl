@@ -98,6 +98,9 @@ provider "anthropic" {
 	// "The request body is not valid JSON" (live, 2026-10-17).
 	request-encodings "gzip"
 	request-encoding-rejection "request_body_encoding_invalid|Unsupported Content-Encoding|request body is not valid JSON"
+	// Subscription OAuth requests may continue on the offered low-priority lane
+	// after the 5-hour wall. Runtime still requires /slow on and account eligibility.
+	subscription-slow-mode #true
 	class "anthropic" {
 		revision "<4.6" {
 			official-image-count-budget 100
