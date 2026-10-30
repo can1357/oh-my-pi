@@ -31,6 +31,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionRequestContext,
 	Context,
+	DispatchHold,
 	FetchImpl,
 	Model,
 	ProviderSessionState,
@@ -59,6 +60,7 @@ import {
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
+import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
@@ -1924,7 +1926,7 @@ async function openCodexWebSocketTransport(
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
 	const eventStream = websocketConnection.streamRequest(
-		{ send: websocketRequest },
+		{ send: websocketRequest, hold: options?.beforeDispatch },
 		timeouts,
 		requestSetup.requestSignal,
 		onSseEvent,
@@ -3810,8 +3812,16 @@ interface CodexWebSocketRequestTimeouts {
 
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
-	| { send: Record<string, unknown> }
-	/** Read the successor the server creates from accepted steering; nothing is sent. */
+	/**
+	 * Send this request. `hold` is the caller's dispatch hold, awaited after the
+	 * handshake and the request-debug dump — the two awaits a `/pause` used to
+	 * slip through — and immediately before the payload goes out.
+	 */
+	| { send: Record<string, unknown>; hold?: DispatchHold }
+	/**
+	 * Read the successor the server creates from accepted steering; nothing is
+	 * sent, so nothing is held: that response is already running and paid for.
+	 */
 	| { attachSteerIds: readonly string[] };
 
 interface CodexSteerWaiter {
@@ -4128,6 +4138,10 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
+				// The last await before the payload goes out. The handshake above and
+				// the debug dump just before it both outlast a `/pause` engaged while
+				// they run, and this socket send is what the provider bills.
+				await holdBeforeDispatch(exchange.hold, signal);
 				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
