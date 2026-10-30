@@ -80,6 +80,7 @@ import {
 	createAdditionalContextMessage,
 	isNonBlankContext,
 	joinAdditionalContext,
+	runInToolCall,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 } from "./tool-context";
@@ -3661,22 +3662,27 @@ async function executeToolCalls(
 						// nothing may await or call host code after this final check.
 						if (abortBeforeToolExecution()) return;
 						executionStarted = true;
-						rawResult = await tool.execute(
-							toolCall.id,
-							executionArgs,
-							record.signal,
-							partialResult => {
-								const event: Extract<AgentEvent, { type: "tool_execution_update" }> = {
-									type: "tool_execution_update",
-									toolCallId: toolCall.id,
-									toolName: toolCall.name,
-									args: executionArgs,
-									partialResult: coerceToolResult(partialResult).result,
-								};
-								if (stream.done) config.onDetachedToolUpdate?.(event);
-								else stream.push(event);
-							},
-							toolContext,
+						// Bind the call to the async context of its own execution: work it
+						// starts (a dialog it raises) is attributable to this call without
+						// being handed the id.
+						rawResult = await runInToolCall(toolCall.id, () =>
+							tool.execute(
+								toolCall.id,
+								executionArgs,
+								record.signal,
+								partialResult => {
+									const event: Extract<AgentEvent, { type: "tool_execution_update" }> = {
+										type: "tool_execution_update",
+										toolCallId: toolCall.id,
+										toolName: toolCall.name,
+										args: executionArgs,
+										partialResult: coerceToolResult(partialResult).result,
+									};
+									if (stream.done) config.onDetachedToolUpdate?.(event);
+									else stream.push(event);
+								},
+								toolContext,
+							),
 						);
 					} finally {
 						await streamSession?.discard("outer tool completed without committing stream speculation");

@@ -233,6 +233,13 @@ export class EventController {
 	 */
 	#waitingToolCalls = new Set<string>();
 	/**
+	 * Calls whose dialog was answered before their `tool_execution_start` reached this view: the
+	 * session publishes a wait as soon as the dialog opens, which can be ahead of the start the
+	 * loop emits for the same call. Their prompt is already answered, so the start must not record
+	 * one. Cleared with the call's own end and at turn end.
+	 */
+	#answeredBeforeStart = new Set<string>();
+	/**
 	 * The session-level dialog (`user_wait_start`) waiting on a person, if one
 	 * is open. It outlives a run: a dialog can open with no run behind it (an
 	 * MCP sign-in) and stay open while a run starts, ends and is cleaned up, so
@@ -1079,7 +1086,12 @@ export class EventController {
 	#syncWaitingToolCalls(toolCalls: readonly string[] | undefined): void {
 		const waiting = new Set(toolCalls ?? []);
 		for (const toolCallId of this.#waitingToolCalls) {
-			if (!waiting.has(toolCallId)) this.#blockingPrompts.delete(toolCallId);
+			if (waiting.has(toolCallId)) continue;
+			// The call may not have reached this view yet: a dialog is published
+			// when it opens, which can precede the loop's `tool_execution_start`
+			// for the same call. Remember the answer so that start records no
+			// prompt instead of resurrecting one.
+			if (!this.#blockingPrompts.delete(toolCallId)) this.#answeredBeforeStart.add(toolCallId);
 		}
 		this.#waitingToolCalls = waiting;
 	}
@@ -1113,6 +1125,7 @@ export class EventController {
 		this.#settledBeforeReturn.clear();
 		this.#blockingPrompts.clear();
 		this.#waitingToolCalls.clear();
+		this.#answeredBeforeStart.clear();
 		// The dialog belongs to the session being left behind.
 		this.#sessionUserWait = undefined;
 		this.#readToolCallArgs.clear();
@@ -2056,13 +2069,17 @@ export class EventController {
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
 		const blocked = this.#blockingPrompt(renderToolName, event.args);
-		if (blocked) {
+		if (blocked && this.#answeredBeforeStart.delete(event.toolCallId)) {
+			// This call's dialog opened and was answered before its start reached
+			// the view. The person owes it nothing; the call is running.
+			setRunStatus(this.#reportedStatus());
+		} else if (blocked) {
 			this.#blockingPrompts.set(event.toolCallId, blocked);
 			// The dialog this call raises names the call itself in the frame the
-			// session publishes next; nothing is correlated here.
-			// An open dialog outranks this call's own prompt, which has not been
-			// raised yet: the person owes that dialog the answer, and the title
-			// and OSC record must name it.
+			// session publishes next; nothing is correlated here. An open dialog
+			// outranks this call's own prompt, which has not been raised yet: the
+			// person owes that dialog the answer, and the title and OSC record
+			// must name it.
 			setRunStatus(this.#reportedStatus(blocked));
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
@@ -2307,6 +2324,7 @@ export class EventController {
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
 		this.#waitingToolCalls.delete(event.toolCallId);
+		this.#answeredBeforeStart.delete(event.toolCallId);
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
 			// An open dialog outranks the remaining records here too.
 			setRunStatus(this.#reportedStatus());
@@ -2659,6 +2677,7 @@ export class EventController {
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
 		this.#waitingToolCalls.clear();
+		this.#answeredBeforeStart.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

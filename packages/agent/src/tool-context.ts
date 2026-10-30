@@ -1,5 +1,23 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "./types";
+
+const executingToolCall = new AsyncLocalStorage<string>();
+
+/**
+ * Run a tool call's execution with its id on the async context, so work the tool starts — however
+ * deep, and across awaits — can be attributed to the call it belongs to without the tool passing
+ * the id down by hand. Work started outside any `execute` (a host's own background handler, a
+ * dialog raised by the surface) sees nothing.
+ */
+export function runInToolCall<T>(toolCallId: string, run: () => T): T {
+	return executingToolCall.run(toolCallId, run);
+}
+
+/** The tool call whose execution the current async context belongs to, or undefined outside one. */
+export function executingToolCallId(): string | undefined {
+	return executingToolCall.getStore();
+}
 
 /**
  * Symbol-keyed carrier for passive context reported by a tool executed outside

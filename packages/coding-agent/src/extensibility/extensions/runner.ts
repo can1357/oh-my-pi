@@ -517,6 +517,10 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
+	/** The host's own `ui`, before tracking: a per-call wrapper is built from this. */
+	#rawUiContext: ExtensionUIContext | undefined;
+	/** The last per-call wrapper handed out, so repeated contexts for one call share it. */
+	#callUiContext: { toolCallId: string; ui: ExtensionUIContext } | undefined;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -876,6 +880,8 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
+		this.#rawUiContext = uiContext;
+		this.#callUiContext = undefined;
 		this.#uiContext =
 			uiContext && this.#trackUserWait
 				? trackUserWaits(uiContext, this.#trackUserWait)
@@ -1037,6 +1043,20 @@ export class ExtensionRunner {
 
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
+	}
+
+	/**
+	 * The `ui` a tool call's own context gets: dialogs it raises name that call, so the wait each
+	 * one opens says whose it is and a surface tracking the call sees its own dialog settle. A
+	 * context built for no particular call keeps the session-wide wrapper, which names none.
+	 */
+	#uiForCall(toolCallId: string | undefined): ExtensionUIContext {
+		const raw = this.#rawUiContext;
+		if (!raw || !this.#trackUserWait || toolCallId === undefined) return this.#uiContext;
+		if (this.#callUiContext?.toolCallId !== toolCallId) {
+			this.#callUiContext = { toolCallId, ui: trackUserWaits(raw, this.#trackUserWait, toolCallId) };
+		}
+		return this.#callUiContext.ui;
 	}
 
 	hasUI(): boolean {
@@ -1588,6 +1608,8 @@ export class ExtensionRunner {
 			context?: AgentToolContext;
 			signal?: AbortSignal;
 			onUpdate?: AgentToolUpdateCallback;
+			/** The call this context executes, so dialogs it raises name that call. */
+			toolCallId?: string;
 		},
 		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
@@ -1598,7 +1620,7 @@ export class ExtensionRunner {
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
 		return {
-			ui: this.#uiContext,
+			ui: this.#uiForCall(delegation?.toolCallId),
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),

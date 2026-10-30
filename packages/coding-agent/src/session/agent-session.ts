@@ -38,6 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	executingToolCallId,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -1253,6 +1254,18 @@ export class AgentSession implements SettingsScope {
 	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
+	/**
+	 * Tool calls this session has finished, from the `tool_execution_end` it emits: a dialog opened
+	 * on the async context of a finished call — work it left running behind it — belongs to nobody
+	 * still waiting, so it names no call.
+	 */
+	#endedToolCalls = new Set<string>();
+	/** True while a `user_wait_start` frame is being delivered, so a dialog a listener opens
+	 *  republishes after the frame in flight rather than inside it — a later listener must never
+	 *  see an older snapshot last. */
+	#publishingUserWait = false;
+	/** A publication that arrived while one was being delivered, to be recomputed after it. */
+	#userWaitPublishPending = false;
 	#inFlightEpoch = 0;
 	#abortInProgress = false;
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
@@ -1417,7 +1430,7 @@ export class AgentSession implements SettingsScope {
 		this.#openUserWaits.set(waitId, {
 			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
 			...(options?.kind ? { kind: options.kind } : {}),
-			...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
+			...(this.#owningToolCall(options?.toolCallId) ?? {}),
 		});
 		this.#publishOpenUserWait();
 		try {
@@ -1441,6 +1454,24 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * The call a dialog belongs to: the one its opener named, else the call whose execution raised
+	 * it, read from the async context the loop binds around `tool.execute`. A host that opens its
+	 * own approval through the plain `waitForUser` therefore still says which call owes the answer,
+	 * without naming it and without anyone reading its words.
+	 *
+	 * A call whose end this session has already emitted claims nothing: work a tool left running
+	 * behind it keeps that call on its async context, and a dialog it raises later belongs to
+	 * nobody who is still waiting. The call being executed need not have been announced yet — the
+	 * loop buffers `tool_execution_start` while `execute` already runs, which is how a host's own
+	 * approval opens before its call is announced.
+	 */
+	#owningToolCall(named: string | undefined): { toolCallId: string } | undefined {
+		if (named) return { toolCallId: named };
+		const executing = executingToolCallId();
+		return executing !== undefined && !this.#endedToolCalls.has(executing) ? { toolCallId: executing } : undefined;
+	}
+
+	/**
 	 * Publish the oldest open dialog as the session's wait, beside every tool call whose dialog is
 	 * open, unless the same question over the same calls is already published. A second dialog
 	 * opening behind the first does not change what is asked, but it does change which calls are
@@ -1448,8 +1479,17 @@ export class AgentSession implements SettingsScope {
 	 * without the oldest dialog's words ever changing. The first settling behind a second
 	 * republishes too, so no surface keeps reporting a dialog that is gone, a classification that
 	 * belongs to one, or a call whose own wait has ended.
+	 *
+	 * Delivery is one frame at a time. A listener that opens a dialog while handling a frame would
+	 * otherwise have the newer snapshot delivered inside the older one, leaving every listener
+	 * after it reading a list that omits a call still open — which says that call was answered.
+	 * Such a publication is recomputed and delivered after the frame in flight.
 	 */
 	#publishOpenUserWait(): void {
+		if (this.#publishingUserWait) {
+			this.#userWaitPublishPending = true;
+			return;
+		}
 		const frame = this.#openUserWaits.values().next().value;
 		if (frame === undefined) return;
 		const toolCalls = [...this.#openUserWaits.values()]
@@ -1467,7 +1507,16 @@ export class AgentSession implements SettingsScope {
 			...(frame.kind ? { kind: frame.kind } : {}),
 			...(toolCalls.length > 0 ? { toolCalls } : {}),
 		};
-		this.#emit(this.#openUserWait);
+		this.#publishingUserWait = true;
+		try {
+			this.#emit(this.#openUserWait);
+		} finally {
+			this.#publishingUserWait = false;
+		}
+		if (this.#userWaitPublishPending) {
+			this.#userWaitPublishPending = false;
+			this.#publishOpenUserWait();
+		}
 	}
 
 	/**
@@ -3778,6 +3827,8 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
+		// A finished call claims no dialog ({@link #owningToolCall}).
+		if (event.type === "tool_execution_end") this.#endedToolCalls.add(event.toolCallId);
 		// Listener array is copy-on-write (see `subscribe`), so iterating the
 		// current array is safe against (un)subscribes made by a listener.
 		for (const l of this.#eventListeners) {

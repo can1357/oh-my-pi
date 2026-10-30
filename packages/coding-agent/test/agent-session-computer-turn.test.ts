@@ -326,6 +326,62 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(target.activeUserWait()).toBeUndefined();
 	});
 
+	it("names the call a tool's own dialog belongs to, without the tool naming it", async () => {
+		// A host that opens its own dialog through the plain `waitForUser` — the
+		// existing API, no call named — still says which call owes the answer:
+		// the dialog is raised inside that call's execution. Nothing reads its
+		// words to decide this.
+		const target = createSession([
+			{ content: [{ type: "toolCall", name: "question", arguments: {} }], stopReason: "toolUse" },
+			{ content: ["done"] },
+		]);
+		const frames: Array<string[] | undefined> = [];
+		let startedCallId: string | undefined;
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "tool_execution_start") startedCallId = event.toolCallId;
+			if (event.type === "user_wait_start") frames.push(event.toolCalls);
+		});
+		const running = target.prompt("ask me");
+		await asked.promise;
+		const openCalls = target.activeUserWait()?.toolCalls;
+		answered.resolve("yes");
+		await running;
+		unsubscribe();
+
+		expect(startedCallId).toBeDefined();
+		expect(openCalls).toEqual([startedCallId!]);
+		expect(frames).toEqual([[startedCallId!]]);
+	});
+
+	it("delivers the newer snapshot last when a listener opens a dialog inside a frame", async () => {
+		// A listener that opens its own dialog while handling a frame would
+		// otherwise have the newer snapshot delivered inside the older one, and
+		// every listener after it would read a list missing a call that is open
+		// — which says that call was answered.
+		const target = createSession([{ content: ["done"] }]);
+		const second = Promise.withResolvers<void>();
+		let secondWait: Promise<void> | undefined;
+		const seen: Array<string[] | undefined> = [];
+		const opener = target.subscribe(event => {
+			if (event.type !== "user_wait_start" || secondWait) return;
+			secondWait = target.waitForUser(() => second.promise, "second", { toolCallId: "call-b" });
+		});
+		const observer = target.subscribe(event => {
+			if (event.type === "user_wait_start") seen.push(event.toolCalls);
+		});
+		const first = Promise.withResolvers<void>();
+		const firstWait = target.waitForUser(() => first.promise, "first", { toolCallId: "call-a" });
+
+		expect(seen.at(-1)).toEqual(["call-a", "call-b"]);
+		expect(target.activeUserWait()?.toolCalls).toEqual(["call-a", "call-b"]);
+
+		first.resolve();
+		second.resolve();
+		await Promise.all([firstWait, secondWait]);
+		opener();
+		observer();
+	});
+
 	it("republishes the approval still open when an overlapping one is answered", async () => {
 		// Two tool approvals overlap. Each publishes its own compact prompt and
 		// `permission`, so answering the first emits a replacement frame naming

@@ -134,6 +134,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 				context,
 				signal,
 				onUpdate,
+				toolCallId,
 			}),
 		);
 	}

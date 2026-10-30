@@ -31,6 +31,7 @@ import type {
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import type { UserWaitFrame } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -160,6 +161,62 @@ describe("ExtensionRunner", () => {
 
 		runner.initialize(actions, contextActions, undefined, undefined, "tui");
 		expect(runner.createContext().mode).toBe("tui");
+	});
+
+	it("gives a tool call's context a ui whose dialogs name that call", async () => {
+		// A registered tool's own `ctx.ui` is the session's host UI, shared by
+		// everything: the dialog it raises has to say which call it belongs to,
+		// or a surface tracking that call never learns its wait ended.
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const frames: UserWaitFrame[] = [];
+		runner.setUserWaitTracker((dialog, frame) => {
+			frames.push(frame);
+			return dialog();
+		});
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+			undefined,
+			{ select: async () => "yes", notify: () => {} } as unknown as ExtensionUIContext,
+		);
+
+		await runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui.select("Proceed?", ["yes"]);
+		await runner.createContext().ui.select("Unrelated?", ["yes"]);
+
+		expect(frames).toEqual([
+			{ prompt: "Proceed?", kind: "question", toolCallId: "call-1" },
+			{ prompt: "Unrelated?", kind: "question" },
+		]);
 	});
 
 	it("uses required context actions when command actions are unavailable", async () => {
