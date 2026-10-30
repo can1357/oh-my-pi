@@ -3948,11 +3948,16 @@ export class AgentSession implements SettingsScope {
 
 	#queuedExtensionEvents: AgentSessionEvent[] = [];
 	#drainingExtensionEvents = false;
+	/** Settles when the current notification drain ends. Queued notifications are extension work
+	 *  that has not started yet: a caller that waits only on running handlers would return in the
+	 *  gap between two of them. */
+	#extensionEventsDrained: PromiseWithResolvers<void> | undefined;
 
 	#queueExtensionEvent(event: AgentSessionEvent): void {
 		this.#queuedExtensionEvents.push(event);
 		if (this.#drainingExtensionEvents) return;
 		this.#drainingExtensionEvents = true;
+		this.#extensionEventsDrained ??= Promise.withResolvers<void>();
 		queueMicrotask(() => void this.#drainExtensionEvents());
 	}
 
@@ -3971,7 +3976,15 @@ export class AgentSession implements SettingsScope {
 			}
 		} finally {
 			this.#drainingExtensionEvents = false;
+			const drained = this.#extensionEventsDrained;
+			this.#extensionEventsDrained = undefined;
+			drained?.resolve();
 		}
+	}
+
+	/** Resolves once no extension notification is queued or being delivered. */
+	async #drainExtensionNotifications(): Promise<void> {
+		while (this.#drainingExtensionEvents) await this.#extensionEventsDrained?.promise;
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
@@ -6634,7 +6647,7 @@ export class AgentSession implements SettingsScope {
 				// dispatch that returned says nothing about its callback. `drained` gates the account
 				// pool release, so it asks about both — without waiting on them here, where the cost
 				// would be a full window of disposal latency for work the deferred pass can outlast.
-				drained = this.#queuedPreparations.size === 0 && this.#extensionRunner?.hasPendingHandlerWork() !== true;
+				drained = !this.#hasLiveSessionWork();
 			} catch (error) {
 				logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 			}
@@ -6660,6 +6673,11 @@ export class AgentSession implements SettingsScope {
 		// graph shed its heavy payloads even while the lifecycle adoption record's
 		// reviver closure still references the session object. Fixes #8003.
 		this.#releaseRetainedSessionMemory();
+		// `drained` was sampled before the seal, the close and the reset above, and the reset is
+		// itself a producer: `Agent.reset()` notifies queue-change observers synchronously, and a
+		// host observer can dispatch an extension event from there. Ask again after the last step
+		// that can start work, so the verdict covers everything up to the moment it is used.
+		if (drained && this.#hasLiveSessionWork()) drained = false;
 		// A run past the deadline may still resolve keys, so the account pools
 		// are lifted only once the run has settled: here when it drained,
 		// otherwise in the deferred pass below. Each lease lifts only the
@@ -6675,7 +6693,7 @@ export class AgentSession implements SettingsScope {
 		// must never race that writer) — so re-run only the in-memory reset,
 		// and lift the account pools, once the pipeline genuinely settles.
 		//
-		// "Genuinely" rules out two signals that look like completion and are not.
+		// "Genuinely" rules out signals that look like completion and are not.
 		// `agent.waitForIdle()` alone is one: the reset above resolves the agent's
 		// running prompt whenever a queue claim is held, so asking the agent after
 		// it answers "idle" because we made it so — queued preparation is tracked
@@ -6685,16 +6703,38 @@ export class AgentSession implements SettingsScope {
 		// resolve a credential. Waiting on the callback itself leaves this pass
 		// unbounded when an extension never returns; that is deliberate, since the
 		// alternative is lifting a restriction out from under live work.
+		//
+		// The waits run in a loop because each one can start the next producer: a
+		// handler can queue another notification, a notification can run another
+		// handler, and a handler that resolves a credential does so between the
+		// two. One pass that finds nothing new is the only honest stopping point.
 		if (!drained) {
 			void (async () => {
-				await this.agent.waitForIdle();
-				await this.#drainQueuedPreparations();
-				await this.#drainInFlightEventHandlers();
-				await this.#extensionRunner?.waitForPendingHandlerWork();
+				do {
+					await this.agent.waitForIdle();
+					await this.#drainQueuedPreparations();
+					await this.#drainInFlightEventHandlers();
+					await this.#drainExtensionNotifications();
+					await this.#extensionRunner?.waitForPendingHandlerWork();
+				} while (this.#hasLiveSessionWork());
 				this.#releaseRetainedSessionMemory();
 				this.#accountPoolScope?.release();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
+	}
+
+	/** Whether any work that could still touch this session, its transcript or its credentials is
+	 *  outstanding: a run, a queued-message preparation, an event handler, a queued extension
+	 *  notification, or an extension callback — including one whose dispatch has already given up
+	 *  waiting for it. */
+	#hasLiveSessionWork(): boolean {
+		return (
+			this.agent.state.isStreaming ||
+			this.#queuedPreparations.size > 0 ||
+			this.#inFlightEventHandlers.size > 0 ||
+			this.#drainingExtensionEvents ||
+			this.#extensionRunner?.hasPendingHandlerWork() === true
+		);
 	}
 
 	/** Drop the in-memory conversation state after the terminal dispose flush. */

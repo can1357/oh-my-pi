@@ -1741,29 +1741,46 @@ export class ExtensionRunner {
 	 *  needs the extension work itself to be over waits on {@link waitForPendingHandlerWork},
 	 *  never on the dispatch. */
 	#pendingHandlerWork = new Set<Promise<unknown>>();
+	/** Broadcasts still fanning out. A broadcast runs its handlers one after another, so between
+	 *  two of them nothing is executing while work that is already registered has not started.
+	 *  {@link hasPendingHandlerWork} reports that gap; the wait deliberately does not block on it,
+	 *  or a caller waiting from inside one handler would wait for its own siblings. */
+	#pendingDispatches = new Set<Promise<unknown>>();
 
-	#trackHandlerWork(handlerWork: Promise<unknown>): void {
-		const tracked: Promise<void> = handlerWork.then(
+	#track(set: Set<Promise<unknown>>, work: Promise<unknown>): void {
+		const tracked: Promise<void> = work.then(
 			() => undefined,
 			() => undefined,
 		);
-		this.#pendingHandlerWork.add(tracked);
-		void tracked.finally(() => this.#pendingHandlerWork.delete(tracked));
+		set.add(tracked);
+		void tracked.finally(() => set.delete(tracked));
 	}
 
-	/** Whether any handler callback is still executing. Cheap check for a caller that must not
-	 *  declare itself settled while extension work runs, but cannot afford to wait for it. */
+	#trackHandlerWork(handlerWork: Promise<unknown>): void {
+		this.#track(this.#pendingHandlerWork, handlerWork);
+	}
+
+	#trackDispatch(dispatch: Promise<unknown>): void {
+		this.#track(this.#pendingDispatches, dispatch);
+	}
+
+	/** Whether extension work is outstanding: a callback executing, or a broadcast between two of
+	 *  its handlers. Cheap check for a caller that must not declare itself settled while extension
+	 *  work runs, but cannot afford to wait for it. */
 	hasPendingHandlerWork(): boolean {
-		return this.#pendingHandlerWork.size > 0;
+		return this.#pendingHandlerWork.size > 0 || this.#pendingDispatches.size > 0;
 	}
 
-	/** Resolves once every handler callback dispatched so far has returned, including ones whose
+	/** Resolves once every handler callback that is executing has returned, including ones whose
 	 *  dispatch already gave up on them. Unbounded by design: a handler that never returns keeps
-	 *  whatever its caller is holding, which is safer than releasing under it. */
+	 *  whatever its caller is holding, which is safer than releasing under it. A broadcast with no
+	 *  callback executing is given one turn of the event loop to start its next handler, so a
+	 *  caller that loops on {@link hasPendingHandlerWork} converges instead of spinning. */
 	async waitForPendingHandlerWork(): Promise<void> {
 		while (this.#pendingHandlerWork.size > 0) {
 			await Promise.all([...this.#pendingHandlerWork]);
 		}
+		if (this.#pendingDispatches.size > 0) await Bun.sleep(0);
 	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
@@ -1863,7 +1880,19 @@ export class ExtensionRunner {
 		return result;
 	}
 
-	async #emitTo<TEvent extends RunnerEmitEvent>(
+	/** Tracked as one unit: a broadcast runs its handlers one after another, so a caller that waits
+	 *  only on the callbacks currently executing can return in the gap between two of them and miss
+	 *  a handler that was registered before it ever asked. */
+	#emitTo<TEvent extends RunnerEmitEvent>(
+		extensions: readonly Extension[],
+		event: TEvent,
+	): Promise<RunnerEmitResult<TEvent>> {
+		const broadcast = this.#emitToHandlers(extensions, event);
+		this.#trackDispatch(broadcast);
+		return broadcast;
+	}
+
+	async #emitToHandlers<TEvent extends RunnerEmitEvent>(
 		extensions: readonly Extension[],
 		event: TEvent,
 	): Promise<RunnerEmitResult<TEvent>> {

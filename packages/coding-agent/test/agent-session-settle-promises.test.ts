@@ -12,6 +12,7 @@ import {
 	ExtensionRunner,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { RpcPromptResults } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -223,6 +224,8 @@ describe("AgentSession settles what it promised", () => {
 		/** Observes `before_agent_start`, which runs inside the agent's queued-message dequeue hook:
 		 *  holding one holds a queued-message preparation. */
 		onBeforeAgentStart?: (event: { prompt: string }) => Promise<void>,
+		/** Registers anything else on the same extension, e.g. two handlers for one event. */
+		register?: ExtensionFactory,
 	): Promise<{
 		settles: Array<boolean | undefined>;
 		modelRegistry: ModelRegistry;
@@ -253,6 +256,7 @@ describe("AgentSession settles what it promised", () => {
 				});
 				if (onMessageEnd) pi.on("message_end", onMessageEnd);
 				if (onBeforeAgentStart) pi.on("before_agent_start", onBeforeAgentStart);
+				register?.(pi);
 			},
 			tempDir.path(),
 			new EventBus(),
@@ -1146,6 +1150,96 @@ describe("AgentSession settles what it promised", () => {
 			await command;
 			unhook?.();
 			off?.();
+		}
+	}, 20_000);
+
+	it("does not finish disposal in the gap between two handlers of one broadcast", async () => {
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		let armed = false;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			// Two handlers for one event: the broadcast runs them one after another, so between
+			// them nothing is executing while work that was registered all along has not started.
+			pi.on("agent_start", async () => {
+				if (!armed) return;
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			});
+			pi.on("agent_start", async () => {
+				if (!armed) return;
+				secondEntered.resolve();
+				await releaseSecond.promise;
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let broadcast: Promise<unknown> | undefined;
+		try {
+			armed = true;
+			broadcast = session?.extensionRunner?.emit({ type: "agent_start" });
+			await withTimeout(firstEntered.promise, 5_000, "first handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			releaseFirst.resolve();
+			await withTimeout(secondEntered.promise, 5_000, "second handler never entered");
+			for (let i = 0; i < 20; i++) await setImmediate();
+			// The finalizer must not have run in the gap, nor while the second handler holds.
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			releaseSecond.resolve();
+			await broadcast;
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			releaseFirst.resolve();
+			releaseSecond.resolve();
+			await broadcast;
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("re-asks for live work after the reset its own disposal performs", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let armed = false;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.on("agent_start", async () => {
+				if (!armed) return;
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		// `Agent.reset()` notifies queue-change observers synchronously, and disposal performs that
+		// reset after it has sampled whether anything is live. A host observer that dispatches from
+		// there starts extension work the sample cannot have seen.
+		let dispatched: Promise<unknown> | undefined;
+		let sent = false;
+		const offQueueChange = session?.agent.onQueueChange(() => {
+			if (sent || session?.isDisposed !== true) return;
+			sent = true;
+			armed = true;
+			dispatched = session?.extensionRunner?.emit({ type: "agent_start" });
+		});
+		try {
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			await withTimeout(entered.promise, 5_000, "reset observer never dispatched");
+			for (let i = 0; i < 20; i++) await setImmediate();
+			// Disposal must have deferred rather than declared itself settled over this work.
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			await dispatched;
+			for (let i = 0; i < 20; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			await dispatched;
+			offQueueChange?.();
+			resetSpy.mockRestore();
 		}
 	}, 20_000);
 });
