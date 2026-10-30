@@ -13,6 +13,8 @@
 //! fall through unchanged (RTK's defensive default), so xdist `[gwN]`
 //! prefixes and custom reporters never cause data loss.
 
+use std::fmt::NumBuffer;
+
 use super::lint;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -173,13 +175,13 @@ fn filter_pytest(input: &str, exit_code: i32) -> String {
 	let error_overflow = error_blocks.saturating_sub(MAX_PYTEST_FAILURES);
 	if error_overflow > 0 {
 		out.push_str("[…");
-		out.push_str(&error_overflow.to_string());
+		out.push_str(error_overflow.format_into(&mut NumBuffer::new()));
 		out.push_str(" errors elided…]\n");
 	}
 	let overflow = failure_blocks.saturating_sub(MAX_PYTEST_FAILURES);
 	if overflow > 0 {
 		out.push_str("[…");
-		out.push_str(&overflow.to_string());
+		out.push_str(overflow.format_into(&mut NumBuffer::new()));
 		out.push_str(" failures elided…]\n");
 	}
 

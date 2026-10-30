@@ -178,7 +178,16 @@ export function buildProviderCards(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const label = formatLimitTitle(limit);
-				const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
+				// Distinct buckets can share a label and window (Antigravity's Gemini
+				// vs Gemini (Argon) weekly) and must not average into one row, so the
+				// id joins the key. The label and window stay in it too: some
+				// providers build ids positionally or per plan (kimi's `${index}`,
+				// copilot's allowance), where ids differ across accounts for the
+				// same quota, so an id-only key would split those accounts apart.
+				// `sharedGroup` already names the routing copies of one shared bucket.
+				const key =
+					limit.scope.sharedGroup ??
+					`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
 				const entry = buckets.get(key) ?? { label, limits: [] };
 				entry.limits.push(limit);
 				buckets.set(key, entry);
@@ -426,22 +435,15 @@ function clockTime(date: Date): string {
 }
 
 /**
- * When a window resets, relative to `nowMs`: `resets 18:00` today, `resets
- * Tue 18:00` within the week, `resets 3 Oct` beyond; the title carries the
- * absolute date and the countdown.
+ * When a window resets, `resetMs` from `nowMs`: the countdown (`resets in
+ * 2h30m`), which reads the same in every time zone; the title carries the
+ * local date and time.
  */
 function resetLabel(nowMs: number, resetMs: number): { text: string; title: string } {
 	const at = new Date(nowMs + resetMs);
-	const now = new Date(nowMs);
-	const sameDay = at.toDateString() === now.toDateString();
-	const text = sameDay
-		? `resets ${clockTime(at)}`
-		: resetMs < 6 * 86_400_000
-			? `resets ${WEEKDAY_NAMES[at.getDay()]} ${clockTime(at)}`
-			: `resets ${at.getDate()} ${MONTH_NAMES[at.getMonth()]}`;
 	return {
-		text,
-		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)} (in ${formatDuration(resetMs)})`,
+		text: `resets in ${formatDuration(resetMs)}`,
+		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)}`,
 	};
 }
 
@@ -1678,7 +1680,11 @@ export class UsageDashboardComponent implements Component {
 			for (const [index, report] of reports.entries()) {
 				for (const limit of report.limits) {
 					const label = sanitizeDisplayLine(formatLimitTitle(limit));
-					const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
+					// Same hybrid key as the cards: distinct buckets that share a
+					// label and window (Gemini vs Gemini (Argon) weekly) stay separate.
+					const key =
+						limit.scope.sharedGroup ??
+						`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
 					let bucket = buckets.get(key);
 					if (!bucket) {
 						bucket = { label, window: detailWindowLabel(label, limit), rows: [] };

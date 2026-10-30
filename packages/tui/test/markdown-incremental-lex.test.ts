@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { clearRenderCache, Markdown, type MarkdownTheme } from "@oh-my-pi/pi-tui/components/markdown";
 import { getMarkdownTheme, getMarkdownThemeWithLinkTargets, theme } from "@oh-my-pi/pi-tui/theme";
 import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import * as latexBlock from "@oh-my-pi/pi-tui/latex-block";
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
@@ -953,35 +954,61 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 		streamAgainstOneShot(`${open}$$\n\nAfter the math.\n`, 40);
 	});
 
-	/** Wall time of streaming `doc` through one transient instance in `step`-character frames. */
-	function streamTime(doc: string, step: number): number {
+	/** Work done while streaming: characters handed to the block lexer and display-math blocks rendered. */
+	interface StreamWork {
+		lexed: number;
+		mathRendered: number;
+	}
+
+	/** Count the work `frames` does on its Markdown instance(s). */
+	function countWork(frames: () => void): StreamWork {
+		const work: StreamWork = { lexed: 0, mathRendered: 0 };
+		const blockTokens = Lexer.prototype.blockTokens;
+		vi.spyOn(Lexer.prototype, "blockTokens").mockImplementation(function (this: Lexer, source, tokens) {
+			work.lexed += source.length;
+			return blockTokens.call(this, source, tokens);
+		});
+		const toBlock = latexBlock.latexToBlock;
+		vi.spyOn(latexBlock, "latexToBlock").mockImplementation(text => {
+			work.mathRendered++;
+			return toBlock(text);
+		});
+		try {
+			frames();
+		} finally {
+			vi.restoreAllMocks();
+		}
+		return work;
+	}
+
+	/** Work of streaming `doc` through one transient instance in `step`-character frames. */
+	function streamWork(doc: string, step: number): StreamWork {
+		clearRenderCache();
 		const streaming = new Markdown("", 0, 0, THEME);
 		streaming.transientRenderCache = true;
-		const start = Bun.nanoseconds();
-		for (let len = step; len < doc.length + step; len += step) {
-			streaming.setText(doc.slice(0, len));
-			streaming.render(100);
-		}
-		return Bun.nanoseconds() - start;
+		return countWork(() => {
+			for (let len = step; len < doc.length + step; len += step) {
+				streaming.setText(doc.slice(0, len));
+				streaming.render(100);
+			}
+		});
 	}
 
-	/** Streaming `doc` costs less than three times streaming `baseline`, best of up to three runs. */
-	function expectStreamsAsFast(doc: string, baseline: string, step: number): void {
-		clearRenderCache();
-		const base = Math.min(streamTime(baseline, step), streamTime(baseline, step));
-		let cost = Number.POSITIVE_INFINITY;
-		for (let run = 0; run < 3 && cost >= 3 * base; run++) cost = Math.min(cost, streamTime(doc, step));
-		expect(cost).toBeLessThan(3 * base);
-	}
+	// Streaming lexes each character about once, so a stream within a small
+	// factor of its baseline's work is linear. A frame that redoes the text after
+	// a held-open opener costs the whole message per frame instead, which grows
+	// with the frame count far past the factor.
 
-	it("streams past an own-line $$ that never closes as fast as without it", () => {
+	it("streams past an own-line $$ that never closes lexing within a constant factor of the stream without it", () => {
 		// The opener stays open to the end, so a frozen prefix that stopped in
 		// front of it left every frame re-lexing the whole message.
 		const body = paragraphs(750);
-		expectStreamsAsFast(`Intro.\n\n$$\nx = 1\n\n${body}\n`, `Intro.\n\nx = 1\n\n${body}\n`, 64);
+		const cost = streamWork(`Intro.\n\n$$\nx = 1\n\n${body}\n`, 64);
+		const base = streamWork(`Intro.\n\nx = 1\n\n${body}\n`, 64);
+		expect(cost.lexed).toBeLessThan(3 * base.lexed);
 	});
 
-	it("streams $$ blocks around blank lines below an open \\[ as fast as $$ blocks without them", () => {
+	it("streams $$ blocks around blank lines below an open \\[ lexing and rendering math within a constant factor of $$ blocks without them", () => {
 		// A `$$` block with a blank line inside is frozen open until its closer
 		// arrives, and the closer turns only the text from its own opener on
 		// into a math block. So the prefix goes back to the boundary in front of
@@ -994,7 +1021,10 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 			blankInside += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\n\nc_{${i}} = d\n$$\n\n`;
 			noBlank += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\nc_{${i}} = d\n$$\n\n`;
 		}
-		expectStreamsAsFast(blankInside, noBlank, 16);
+		const cost = streamWork(blankInside, 16);
+		const base = streamWork(noBlank, 16);
+		expect(cost.lexed).toBeLessThan(3 * base.lexed);
+		expect(cost.mathRendered).toBeLessThan(3 * base.mathRendered);
 	});
 
 	it("renders the frame after a last line that only read as a closer from the prefix frozen before it", () => {
@@ -1003,24 +1033,19 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 		// text, the prefix frozen before it is right again, so the next frame
 		// lexes only the new text instead of everything after the opener.
 		const doc = `Intro.\n\n$$\nx = 1\n\n${paragraphs(1500)}\n\n`;
-		const frameTime = (streaming: Markdown, text: string): number => {
-			const start = Bun.nanoseconds();
-			streaming.setText(text);
-			streaming.render(100);
-			return Bun.nanoseconds() - start;
-		};
-		let closing = 0;
-		let after = Number.POSITIVE_INFINITY;
-		for (let run = 0; run < 3 && after >= closing / 4; run++) {
-			clearRenderCache();
-			const streaming = new Markdown("", 0, 0, THEME);
-			streaming.transientRenderCache = true;
-			for (let len = 4096; len < doc.length; len += 4096) frameTime(streaming, doc.slice(0, len));
-			frameTime(streaming, doc);
-			closing = frameTime(streaming, `${doc}$$`);
-			after = frameTime(streaming, `${doc}$$ E = mc^2 $$ holds.`);
-		}
-		expect(after).toBeLessThan(closing / 4);
+		clearRenderCache();
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		const frameWork = (text: string): StreamWork =>
+			countWork(() => {
+				streaming.setText(text);
+				streaming.render(100);
+			});
+		for (let len = 4096; len < doc.length; len += 4096) frameWork(doc.slice(0, len));
+		frameWork(doc);
+		const closing = frameWork(`${doc}$$`);
+		const after = frameWork(`${doc}$$ E = mc^2 $$ holds.`);
+		expect(after.lexed).toBeLessThan(closing.lexed / 4);
 	});
 });
 

@@ -890,3 +890,68 @@ async fn cross_device_mv_keeps_a_symlink_it_could_not_copy() {
 	assert_eq!(fs::read_link(tree.join("link")).expect("source link kept"), Path::new("file"));
 	assert!(tree.join("file").is_file());
 }
+
+/// A provider file whose reads never complete, as a stalled provider's.
+#[derive(Debug)]
+struct StalledFile;
+
+#[async_trait]
+impl FileHandle for StalledFile {
+	async fn read(&self, _buffer: &mut [u8]) -> io::Result<usize> {
+		std::future::pending().await
+	}
+
+	async fn write(&self, buffer: &[u8]) -> io::Result<usize> {
+		Ok(buffer.len())
+	}
+
+	async fn seek(&self, _position: SeekFrom) -> io::Result<u64> {
+		Err(pi_vfs::unsupported("seeking"))
+	}
+
+	async fn metadata(&self) -> io::Result<Metadata> {
+		Err(pi_vfs::unsupported("metadata"))
+	}
+}
+
+/// Provider-backed stdin has no descriptor to poll, and its file observes the
+/// cancellation of the command that opened it, not of the `timeout` operand
+/// reading it, so the limit did not stop a read the provider never completed
+/// and `timeout` never returned.
+///
+/// The run gets a runtime of its own on another thread, which this test leaves
+/// behind when it ends: a read the limit does not stop holds a blocking task
+/// forever, and dropping its runtime would wait for that task.
+#[test]
+fn timeout_stops_a_utility_reading_stalled_provider_stdin() {
+	let (sender, result) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("test runtime");
+		let ran = runtime.block_on(async {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			let output = tempfile::tempfile().expect("captured stdout");
+			let error = tempfile::tempfile().expect("captured stderr");
+			let mut shell = virtual_shell(directory.path()).await;
+			for (name, builtin) in pi_builtins::process_builtins() {
+				shell.register_builtin(name, builtin);
+			}
+			let mut parameters = capture_parameters(&shell, &output, &error);
+			parameters.set_fd(OpenFiles::STDIN_FD, OpenFile::from(File::from_handle(StalledFile)));
+			let result = shell
+				.run_string("timeout 0.2 cat", &SourceInfo::from("stalled-stdin"), &parameters)
+				.await
+				.expect("run the command");
+			(u8::from(result.exit_code), captured_text(&error))
+		});
+		let _ = sender.send(ran);
+		runtime.shutdown_background();
+	});
+
+	let (status, stderr) = result
+		.recv_timeout(Duration::from_secs(5))
+		.expect("`timeout` waited for the stalled read");
+	assert_eq!(status, 124, "{stderr}");
+}

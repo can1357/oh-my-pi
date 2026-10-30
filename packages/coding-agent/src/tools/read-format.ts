@@ -42,6 +42,20 @@ export function toReadTruncationStats(result: TruncationResult): ReadTruncationS
 	return stats;
 }
 
+/** Keep descriptive diagnostics out of raw source text while retaining them in the result. */
+export function appendReadNotice(text: string, notice: string, details: ReadToolDetails, separator = "\n"): string {
+	if (details.raw) {
+		(details.notes ??= []).push(notice);
+		return text;
+	}
+	return text ? `${text}${separator}${notice}` : notice;
+}
+
+/** Carry raw mode through readers that pass suffix-resolution metadata to the shared prefix emitter. */
+export function markRawSuffixResolution(resolution: ReadToolDetails["suffixResolution"], raw: boolean): void {
+	if (resolution && raw) resolution.raw = true;
+}
+
 function prependLineNumbers(text: string, startNum: number): string {
 	const textLines = text.split("\n");
 	return textLines.map((line, i) => `${startNum + i}|${line}`).join("\n");
@@ -73,10 +87,16 @@ function recordFullHashlineContext(
 	absolutePath: string | undefined,
 	displayPath: string,
 	fullText: string,
+	sourceStartLine?: number,
 ): HashlineHeaderContext | undefined {
 	if (!absolutePath || !path.isAbsolute(absolutePath)) return undefined;
-	const normalized = normalizeToLF(fullText);
-	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized);
+	// An excerpt must never replace the backing file's full edit snapshot.
+	const normalized = sourceStartLine === undefined ? normalizeToLF(fullText) : undefined;
+	const tag =
+		normalized === undefined
+			? getEditStore(session).recordSnapshotFile(absolutePath)
+			: getEditStore(session).recordSnapshot(absolutePath, normalized);
+	if (!tag) return undefined;
 	return {
 		header: formatReadHashlineHeader(displayPath, tag),
 		tag,
@@ -203,9 +223,17 @@ function recordInMemorySeenLines(
 	absolutePath: string | undefined,
 	fullText: string,
 	seenLines: readonly number[] | undefined,
+	sourceStartLine?: number,
 ): void {
 	if (!absolutePath || !path.isAbsolute(absolutePath) || !seenLines || seenLines.length === 0) return;
-	getEditStore(session).recordSnapshot(absolutePath, normalizeToLF(fullText), [...seenLines]);
+	if (sourceStartLine !== undefined) {
+		getEditStore(session).recordSnapshotFile(
+			absolutePath,
+			seenLines.map(line => line + sourceStartLine - 1),
+		);
+	} else {
+		getEditStore(session).recordSnapshot(absolutePath, normalizeToLF(fullText), [...seenLines]);
+	}
 }
 
 function lineNumbersFromEntries(entries: readonly LineEntry[]): number[] {
@@ -282,6 +310,8 @@ function expandRangeWithContext(
 export interface InMemoryTextOptions {
 	details?: ReadToolDetails;
 	sourcePath?: string;
+	/** Excerpt provenance: input line 1 maps to this backing-file line. */
+	sourceStartLine?: number;
 	sourceUrl?: string;
 	sourceInternal?: string;
 	entityLabel: string;
@@ -322,6 +352,7 @@ export async function buildInMemoryTextResult(
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const rawDisplay = options.raw === true;
+	if (rawDisplay) details.raw = true;
 	// Raw mode addresses verbatim `\n` segments and shows no block context, so it
 	// slices the window straight out of `text`; only addressable reads need every line.
 	const allLines = rawDisplay ? undefined : splitAddressableFileLines(text);
@@ -363,11 +394,8 @@ export async function buildInMemoryTextResult(
 			totalLines === 0
 				? `The ${options.entityLabel} is empty.`
 				: `Use :1 to read from the start, or :${totalLines} to read the last line.`;
-		return resultBuilder
-			.text(
-				`Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`,
-			)
-			.done();
+		const notice = `Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`;
+		return resultBuilder.text(appendReadNotice("", notice, details)).done();
 	}
 
 	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
@@ -403,6 +431,7 @@ export async function buildInMemoryTextResult(
 	if (
 		!rawDisplay &&
 		options.sourcePath &&
+		options.sourceStartLine === undefined &&
 		!truncation.firstLineExceedsLimit &&
 		(startLine > 0 || endLine < totalLines || truncation.truncated)
 	) {
@@ -419,12 +448,14 @@ export async function buildInMemoryTextResult(
 					options.sourcePath,
 					formatPathRelativeToCwd(options.sourcePath, session.cwd),
 					text,
+					options.sourceStartLine,
 				)
 			: undefined;
 	let emittedHashlineHeader = false;
 	let seenLines: number[] | undefined;
 	let rawSeenLines: number[] | undefined;
 	const formatText = (content: string, startNum: number): string => {
+		startNum += (options.sourceStartLine ?? 1) - 1;
 		const lineCount = countTextLines(content);
 		details.displayContent = {
 			text: content,
@@ -438,6 +469,13 @@ export async function buildInMemoryTextResult(
 		return prependHashlineHeader(formatted, hashContext);
 	};
 	const formatLineEntries = (entries: readonly LineEntry[], startNum: number): string => {
+		const sourceOffset = (options.sourceStartLine ?? 1) - 1;
+		if (sourceOffset !== 0) {
+			entries = entries.map(entry =>
+				entry.kind === "line" ? { ...entry, lineNumber: entry.lineNumber + sourceOffset } : entry,
+			);
+		}
+		startNum += sourceOffset;
 		const firstLine = entries.find(entry => entry.kind === "line");
 		details.displayContent = {
 			text: lineEntriesToPlainText(entries, BRACKET_CONTEXT_ELLIPSIS),
@@ -452,7 +490,7 @@ export async function buildInMemoryTextResult(
 	};
 	const buildLineEntries = (lines: readonly string[], endLineDisplay: number): LineEntry[] =>
 		buildLineEntriesWithBlockContext(lines, [{ startLine: startLineDisplay, endLine: endLineDisplay }], {
-			path: options.sourcePath,
+			path: options.sourceStartLine === undefined ? options.sourcePath : undefined,
 			text,
 		});
 
@@ -527,7 +565,7 @@ export async function buildInMemoryTextResult(
 		getEditStore(session).recordSeenLines(options.sourcePath, hashContext.tag, seenLines);
 	}
 	if (options.raw === true && options.sourcePath && options.immutable !== true && rawSeenLines) {
-		recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines);
+		recordInMemorySeenLines(session, options.sourcePath, text, rawSeenLines, options.sourceStartLine);
 	}
 	resultBuilder.text(outputText);
 	if (truncationInfo) {
@@ -551,6 +589,7 @@ export async function buildInMemoryMultiRangeResult(
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
+	if (options.raw) details.raw = true;
 	// Raw mode only emits the requested windows, so it never splits the whole text.
 	const allLines = options.raw === true ? undefined : splitAddressableFileLines(text);
 	const totalLines = allLines ? allLines.length : countRawLines(text);
@@ -565,6 +604,7 @@ export async function buildInMemoryMultiRangeResult(
 					options.sourcePath,
 					formatPathRelativeToCwd(options.sourcePath, session.cwd),
 					text,
+					options.sourceStartLine,
 				)
 			: undefined;
 	let emittedHashlineHeader = false;
@@ -602,12 +642,25 @@ export async function buildInMemoryMultiRangeResult(
 
 	let outputText = "";
 	if (!allLines) {
-		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
+		outputText = rawParts.join("\n");
 	} else if (visibleSpans.length > 0) {
-		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
+		if (
+			options.sourcePath &&
+			options.sourceStartLine === undefined &&
+			!spansCoverEveryLine(visibleSpans, totalLines)
+		) {
 			await warmBlockContext({ path: options.sourcePath, text });
 		}
-		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath, text });
+		let entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, {
+			path: options.sourceStartLine === undefined ? options.sourcePath : undefined,
+			text,
+		});
+		const sourceOffset = (options.sourceStartLine ?? 1) - 1;
+		if (sourceOffset !== 0) {
+			entries = entries.map(entry =>
+				entry.kind === "line" ? { ...entry, lineNumber: entry.lineNumber + sourceOffset } : entry,
+			);
+		}
 		if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
 		const firstLine = entries.find(entry => entry.kind === "line");
 		if (firstLine?.kind === "line") {
@@ -626,13 +679,18 @@ export async function buildInMemoryMultiRangeResult(
 		const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
 		notices.push(`[Range ${bound} is beyond end of ${options.entityLabel} (${totalLines} lines total); skipped]`);
 	}
-	const finalText =
-		notices.length > 0 ? (outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n")) : outputText;
+	const finalText = notices.length > 0 ? appendReadNotice(outputText, notices.join("\n"), details) : outputText;
 	if (hashContext?.tag && options.sourcePath && seenLines) {
 		getEditStore(session).recordSeenLines(options.sourcePath, hashContext.tag, seenLines);
 	}
 	if (options.raw === true && options.sourcePath && options.immutable !== true && visibleSpans.length > 0) {
-		recordInMemorySeenLines(session, options.sourcePath, text, lineNumbersFromSpans(visibleSpans));
+		recordInMemorySeenLines(
+			session,
+			options.sourcePath,
+			text,
+			lineNumbersFromSpans(visibleSpans),
+			options.sourceStartLine,
+		);
 	}
 	resultBuilder.text(finalText);
 	return resultBuilder.done();
@@ -647,8 +705,11 @@ export function decodeUtf8Text(bytes: Uint8Array): string | null {
 	}
 }
 
-export function prependSuffixResolutionNotice(text: string, suffixResolution?: { from: string; to: string }): string {
-	if (!suffixResolution) return text;
+export function prependSuffixResolutionNotice(
+	text: string,
+	suffixResolution?: ReadToolDetails["suffixResolution"],
+): string {
+	if (!suffixResolution || suffixResolution.raw) return text;
 
 	const notice = `[Path '${suffixResolution.from}' not found; resolved to '${suffixResolution.to}' via suffix match]`;
 	return text ? `${notice}\n${text}` : notice;

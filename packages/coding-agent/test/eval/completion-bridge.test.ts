@@ -23,6 +23,8 @@ import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { CostGate } from "../../src/session/cost-gate";
+import { rejectionOf } from "../helpers/rejection";
 
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -241,6 +243,20 @@ describe("runEvalCompletion", () => {
 			return `${model.provider}/${model.id}`;
 		});
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
+	});
+
+	it("counts each completion against the session's cost cap and refuses at it", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.cost.total = 1.2;
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const session = { ...makeSession(), costGate } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		expect(costGate.spent).toBe(1.2);
+		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
+		expect(String(refused)).toContain("Cost cap reached");
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("prefers the session active model for the default tier, falling back to @default", async () => {

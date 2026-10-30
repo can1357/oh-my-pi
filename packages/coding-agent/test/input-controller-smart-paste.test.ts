@@ -159,3 +159,21 @@ describe("InputController.handleClipboardTextRawPaste", () => {
 		expect(spies.showStatus).toHaveBeenCalledWith("No text in clipboard to paste raw");
 	});
 });
+
+describe("InputController paste over SSH", () => {
+	it("never pastes the SSH host's clipboard when the terminal forwards the paste key", async () => {
+		const { ctx, spies } = createContext();
+		const readImage = vi.fn(async () => null);
+		const readText = vi.fn(async () => "server clipboard");
+		const controller = new InputController(ctx, { readImage, readText, isTerminalLocal: () => false });
+
+		expect(await controller.handleImagePaste()).toBe(false);
+		await controller.handleClipboardTextRawPaste();
+
+		expect(readImage).not.toHaveBeenCalled();
+		expect(readText).not.toHaveBeenCalled();
+		expect(spies.pasteText).not.toHaveBeenCalled();
+		expect(spies.insertText).not.toHaveBeenCalled();
+		expect(spies.showStatus).toHaveBeenCalledTimes(2);
+	});
+});

@@ -7126,6 +7126,43 @@ describe("agentLoop passive additionalContext", () => {
 		expect(finalMessage.stopReason).toBe("aborted");
 		expect(finalMessage.errorMessage).toBe("Deadline exceeded");
 	});
+
+	it("does not abort the turn when the deadline lies beyond the 32-bit timer range", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createMockModel().model,
+			convertToLlm: identityConverter,
+			// `--max-time 600h`: a single setTimeout of this length overflows and fires in ~1 ms
+			deadline: Date.now() + 600 * 60 * 60 * 1000,
+		};
+		let providerSignalAborted = false;
+		const stream = agentLoop([createUserMessage("Wait")], context, config, undefined, (_model, _context, options) => {
+			options?.signal?.addEventListener("abort", () => {
+				providerSignalAborted = true;
+			});
+			const events = new AssistantMessageEventStream();
+			// Real delay on purpose: the overflowed platform timer must get the chance to fire first.
+			void Bun.sleep(50).then(() => {
+				events.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return events;
+		});
+
+		const messages = await stream.result();
+
+		expect(providerSignalAborted).toBe(false);
+		const finalMessage = messages[messages.length - 1];
+		if (finalMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(finalMessage.stopReason).toBe("stop");
+	});
 });
 
 describe("agentLoop streaming snapshots", () => {
@@ -7343,8 +7380,8 @@ describe("agentLoop streaming snapshots", () => {
 		// partial immediately before its push (the mutate-then-push stream
 		// contract). The producer advances in lockstep with the consumer — one
 		// step per observed assistant event — so each snapshot sees exactly the
-		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
-		// free-running timer producer would race ahead during that sleep.
+		// deltas delivered so far; a free-running timer producer could race
+		// ahead of the consumer.
 		const partial = createAssistantMessage([], "stop");
 		let advance = (): void => {};
 		const streamFn = () => {

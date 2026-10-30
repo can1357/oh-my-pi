@@ -75,12 +75,64 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		return { bridge: new IrcBridge(host), steered };
 	}
 
-	it("never counts a parent's broadcast steer as a parent request", async () => {
+	it("never steers a parent's broadcast leg; only a direct parent message is a parent request", async () => {
 		const { bridge, steered } = makeStreamingChild();
 		await bridge.deliver({ id: "b1", from: "Main", to: "Child", body: "everyone: status", ts: 1, broadcast: true });
 		await bridge.deliver({ id: "d1", from: "Main", to: "Child", body: "you: status", ts: 2 });
 
-		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([false, true]);
+		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true]);
+		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
+			{ id: "b1", broadcast: true },
+		]);
+	});
+
+	it("leaves non-parent messages queued at a stop boundary and drains them after work", async () => {
+		const { bridge } = makeStreamingChild();
+		await bridge.deliver({ id: "p1", from: "Peer", to: "Child", body: "question?", ts: 3 });
+		await bridge.deliver({ id: "b3", from: "Main", to: "Child", body: "everyone: status", ts: 4, broadcast: true });
+		bridge.queueAside([{ role: "custom", customType: "note", content: "aside", display: false, timestamp: 5 }]);
+
+		expect(bridge.drainPending({ keepPeerMessages: true }).map(record => record.timestamp)).toEqual([5]);
+		expect(bridge.drainPending().map(record => record.timestamp)).toEqual([3, 4]);
+	});
+
+	it("drains a message from the recipient's own descendant at a stop boundary, since its run may wait on it", async () => {
+		const { bridge } = makeStreamingChild();
+		AgentRegistry.global().register({
+			id: "Child.Kid",
+			displayName: "kid",
+			kind: "sub",
+			parentId: "Child",
+			session: null,
+		});
+		AgentRegistry.global().register({
+			id: "Child.Kid.Grand",
+			displayName: "grand",
+			kind: "sub",
+			parentId: "Child.Kid",
+			session: null,
+		});
+		await bridge.deliver({ id: "k1", from: "Child.Kid", to: "Child", body: "question?", ts: 6 });
+		await bridge.deliver({ id: "g1", from: "Child.Kid.Grand", to: "Child", body: "question?", ts: 7 });
+
+		expect(bridge.drainPending({ keepPeerMessages: true }).map(record => record.timestamp)).toEqual([6, 7]);
+	});
+
+	it("counts only queued IRC messages as a sender's question still waiting for a turn", async () => {
+		const { bridge } = makeStreamingChild();
+		bridge.queueAside([
+			{
+				role: "custom",
+				customType: "note",
+				content: "aside",
+				display: false,
+				details: { from: "Peer" },
+				timestamp: 8,
+			},
+		]);
+		expect(bridge.hasQueuedFrom("Peer")).toBe(false);
+		await bridge.deliver({ id: "p2", from: "Peer", to: "Child", body: "question?", ts: 9 });
+		expect(bridge.hasQueuedFrom("Peer")).toBe(true);
 	});
 
 	it("keeps the broadcast flag on a message drained from the inbox", async () => {

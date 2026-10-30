@@ -616,6 +616,58 @@ describe("SQLite tool support", () => {
 			}),
 		).rejects.toThrow(/no column named 'bogus'/i);
 	});
+
+	it("enforces the schema's declared foreign keys on SQLite writes", async () => {
+		const dbPath = path.join(tmpDir, "write-foreign-keys.sqlite");
+		const setup = new Database(dbPath);
+		try {
+			setup.run(`
+				PRAGMA foreign_keys = ON;
+				CREATE TABLE parents (id INTEGER PRIMARY KEY);
+				CREATE TABLE children (
+					id INTEGER PRIMARY KEY,
+					parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE
+				);
+				CREATE TABLE pins (
+					id INTEGER PRIMARY KEY,
+					parent_id INTEGER REFERENCES parents(id) ON DELETE RESTRICT
+				);
+				INSERT INTO parents VALUES (1), (2);
+				INSERT INTO children VALUES (1, 1), (2, 2);
+				INSERT INTO pins VALUES (1, 2);
+			`);
+		} finally {
+			setup.close();
+		}
+
+		await expect(
+			writeTool.execute("sqlite-write-fk-orphan", {
+				path: `${dbPath}:children`,
+				content: "{ id: 3, parent_id: 999 }",
+			}),
+		).rejects.toThrow(/FOREIGN KEY constraint failed/);
+		await expect(
+			writeTool.execute("sqlite-write-fk-restrict", {
+				path: `${dbPath}:parents:2`,
+				content: "",
+			}),
+		).rejects.toThrow(/FOREIGN KEY constraint failed/);
+		await writeTool.execute("sqlite-write-fk-cascade", {
+			path: `${dbPath}:parents:1`,
+			content: "",
+		});
+
+		const check = new Database(dbPath, { readonly: true });
+		try {
+			expect(check.prepare("SELECT id, parent_id FROM children ORDER BY id").all()).toEqual([
+				{ id: 2, parent_id: 2 },
+			]);
+			expect(check.prepare("SELECT id FROM parents ORDER BY id").all()).toEqual([{ id: 2 }]);
+			expect(check.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+		} finally {
+			check.close();
+		}
+	});
 });
 
 describe("SQLite table listing row counts", () => {

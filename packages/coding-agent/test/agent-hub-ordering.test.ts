@@ -242,6 +242,70 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("keeps rows still while saved agents load; found agents rank in place, new generations go on top", async () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		setSystemTime(1000);
+		agents.register({ id: "A", displayName: "Alpha", kind: "sub", session: {} as AgentSession });
+		setSystemTime(2000);
+		agents.register({ id: "B", displayName: "Beta", kind: "sub", session: {} as AgentSession });
+		const killed = agents.register({
+			id: "Killed",
+			displayName: "Killed",
+			kind: "sub",
+			session: null,
+			status: "aborted",
+		});
+		setSystemTime(3000);
+		const load = Promise.withResolvers<void>();
+		const hub = makeHub(agents, { sessionFile: "/tmp/hub/session.jsonl", loadPersisted: () => load.promise });
+		try {
+			expect(renderedAgentIds(hub)).toEqual(["B", "A", "Killed"]);
+			hub.handleInput("j");
+			expect(selectedAgentId(hub)).toBe("A");
+
+			// A heartbeat during the scan must not move the rows.
+			setSystemTime(4000);
+			agents.setActivity("A", "still running");
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["B", "A", "Killed"]);
+			expect(selectedAgentId(hub)).toBe("A");
+
+			// An agent the scan finds takes its place in the ranking; a spawn, still without
+			// its session, goes on top.
+			setSystemTime(5000);
+			agents.register({
+				id: "Saved",
+				displayName: "Saved",
+				kind: "sub",
+				session: null,
+				status: "parked",
+				lastActivity: 900,
+			});
+			agents.register({ id: "Fresh", displayName: "Fresh", kind: "sub", session: null, status: "running" });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["Fresh", "B", "A", "Saved", "Killed"]);
+			expect(selectedAgentId(hub)).toBe("A");
+
+			// A killed agent reopened during the scan is a new generation, not a saved one.
+			expect(agents.reopen("Killed", killed)).toBeDefined();
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["Killed", "Fresh", "B", "A", "Saved"]);
+
+			load.resolve();
+			await hub.persistedSubagentsReady;
+			expect(renderedAgentIds(hub)).toEqual(["Killed", "Fresh", "B", "A", "Saved"]);
+
+			// Once the scan is over, a parked agent that appears is a spawn that already finished.
+			agents.register({ id: "Late", displayName: "Late", kind: "sub", session: null, status: "parked" });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["Late", "Killed", "Fresh", "B", "A", "Saved"]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("filters agents with a fuzzy query and clears on Escape", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;

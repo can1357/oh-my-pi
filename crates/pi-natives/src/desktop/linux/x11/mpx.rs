@@ -526,15 +526,13 @@ impl Mpx {
 		} else {
 			Raw::KeyRelease(last.keycode)
 		};
-		if control::cleanup(|| self.wait_raw(slave, raw, 1))? {
-			Ok(())
-		} else {
-			Err(DesktopError::input_failed(format!(
+		control::cleanup(|| self.wait_raw(slave, raw, 1))?.ok_or_else(|| {
+			DesktopError::input_failed(format!(
 				"the X server did not confirm the virtual keyboard's last key within {}ms; the keys \
 				 may not have been delivered",
 				KEY_CONFIRM_TIMEOUT.as_millis()
-			)))
-		}
+			))
+		})
 	}
 
 	/// Points the virtual keyboard's own focus at `window`; the core focus is
@@ -770,9 +768,9 @@ fn relative_steps(path: &[(i16, i16)]) -> Vec<(i32, i32)> {
 		return steps;
 	};
 	let (mut last_x, mut last_y) = (i32::from(start_x), i32::from(start_y));
-	for segment in path.windows(2) {
-		let (from_x, from_y) = (f64::from(segment[0].0), f64::from(segment[0].1));
-		let (to_x, to_y) = (f64::from(segment[1].0), f64::from(segment[1].1));
+	for &[(from_x, from_y), (to_x, to_y)] in path.array_windows() {
+		let (from_x, from_y) = (f64::from(from_x), f64::from(from_y));
+		let (to_x, to_y) = (f64::from(to_x), f64::from(to_y));
 		let length = (to_x - from_x).hypot(to_y - from_y);
 		let count = (length / DRAG_STEP_MAX_PX).ceil().max(1.0) as u32;
 		for index in 1..=count {
@@ -1072,10 +1070,7 @@ impl Owner {
 	}
 
 	fn from_pointer_name(name: &str) -> Option<Self> {
-		let mut parts = name
-			.strip_prefix(OWNER_PREFIX)?
-			.strip_suffix(" pointer")?
-			.split('.');
+		let mut parts = name.strip_circumfix(OWNER_PREFIX, " pointer")?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;

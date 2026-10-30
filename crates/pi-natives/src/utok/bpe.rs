@@ -48,14 +48,13 @@ impl Hasher for FxHasher {
 	fn write(&mut self, bytes: &[u8]) {
 		const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 		let mut h = self.0;
-		let mut b = bytes;
-		while let Some(chunk) = b.first_chunk::<8>() {
-			h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
-			b = &b[8..];
+		let (words, mut b) = bytes.as_chunks::<8>();
+		for &chunk in words {
+			h = (h.rotate_left(5) ^ u64::from_le_bytes(chunk)).wrapping_mul(SEED);
 		}
-		if let Some(chunk) = b.first_chunk::<4>() {
-			h = (h.rotate_left(5) ^ u64::from(u32::from_le_bytes(*chunk))).wrapping_mul(SEED);
-			b = &b[4..];
+		if let Some((&chunk, rest)) = b.split_first_chunk::<4>() {
+			h = (h.rotate_left(5) ^ u64::from(u32::from_le_bytes(chunk))).wrapping_mul(SEED);
+			b = rest;
 		}
 		for &byte in b {
 			h = (h.rotate_left(5) ^ u64::from(byte)).wrapping_mul(SEED);
@@ -225,9 +224,9 @@ impl RankTable {
 		let raw = zstd::decode_all(zst).expect("utoken: zstd decode failed");
 		let mut p = &raw[..];
 		assert_eq!(&p[..6], b"UTOK1\n", "utoken: bad magic");
-		p = &p[6..];
-		let n = u32::from_le_bytes(p[..4].try_into().unwrap()) as usize;
-		p = &p[4..];
+		let (&n, rest) = p[6..].split_first_chunk::<4>().unwrap();
+		let n = u32::from_le_bytes(n) as usize;
+		p = rest;
 		// Size `short` to its real population: dead slots and pair/long
 		// tokens would otherwise round a sparse table up a power of two. A
 		// sparse subset table (Jev's base set: 49k short tokens over 200k
@@ -353,8 +352,8 @@ impl RankTable {
 		// the rank of the pair formed after a merge at the end.
 		let mut parts: Vec<(usize, u32)> = Vec::with_capacity(piece.len() + 1);
 		let mut min_rank: (u32, usize) = (u32::MAX, usize::MAX);
-		for i in 0..piece.len() - 1 {
-			let rank = rank_of(&piece[i..i + 2]);
+		for (i, pair) in piece.array_windows::<2>().enumerate() {
+			let rank = rank_of(pair);
 			if rank < min_rank.0 {
 				min_rank = (rank, i);
 			}
@@ -389,8 +388,8 @@ impl RankTable {
 				}
 			}
 		}
-		for w in parts.windows(2) {
-			emit(w[0].0, w[1].0);
+		for &[(start, _), (end, _)] in parts.array_windows() {
+			emit(start, end);
 		}
 	}
 
@@ -410,10 +409,10 @@ impl RankTable {
 		let mut prev: Vec<usize> = (0..len).map(|s| s.checked_sub(1).unwrap_or(NONE)).collect();
 		let mut rank = vec![u32::MAX; len];
 		let mut heap = BinaryHeap::with_capacity(len);
-		for s in 0..len - 1 {
-			rank[s] = rank_of(&piece[s..s + 2]);
-			if rank[s] != u32::MAX {
-				heap.push(Reverse((rank[s], s)));
+		for ((s, pair), slot) in piece.array_windows::<2>().enumerate().zip(&mut rank) {
+			*slot = rank_of(pair);
+			if *slot != u32::MAX {
+				heap.push(Reverse((*slot, s)));
 			}
 		}
 		let pair_rank = |next: &[usize], s: usize| -> u32 {
@@ -458,17 +457,14 @@ fn read_token<'a>(p: &mut &'a [u8]) -> &'a [u8] {
 	let mut len = 0usize;
 	let mut shift = 0;
 	loop {
-		let b = p[0];
-		*p = &p[1..];
+		let &b = p.split_off_first().unwrap();
 		len |= ((b & 0x7f) as usize) << shift;
 		if b < 0x80 {
 			break;
 		}
 		shift += 7;
 	}
-	let (key, rest) = p.split_at(len);
-	*p = rest;
-	key
+	p.split_off(..len).unwrap()
 }
 
 /// A full BPE tokenizer: piece splitter + rank table + family flags.
@@ -566,7 +562,7 @@ fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
 		} else {
 			let (c, n) = U::decode(piece, i);
 			i += n;
-			let mut tmp = [0u8; 4];
+			let mut tmp = [0u8; char::MAX_LEN_UTF8];
 			buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
 		}
 	}

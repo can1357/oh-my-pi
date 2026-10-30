@@ -331,6 +331,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "live_connect",
+				"doc": "Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.",
+				"params": "LiveConnectParams",
+				"result": "LiveConnectResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "live_stop",
 				"doc": "Stop the live voice session, if any.",
 				"params": null,
@@ -349,6 +360,28 @@
 				"nullable": false,
 				"unwrap": "muted",
 				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "dictation_start",
+				"doc": "Start draft-only speech-to-text; resolves once the microphone is recording.",
+				"params": "DictationStartParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "dictation_stop",
+				"doc": "Stop and flush draft-only dictation, returning the accumulated text.",
+				"params": null,
+				"result": "DictationStopResult",
+				"nullable": false,
+				"unwrap": "text",
+				"timeoutMs": 600000,
 				"completion": null,
 				"clientOmit": []
 			},
@@ -577,6 +610,39 @@
 				"doc": "Fork into a new session file: history through `entryId`, or the whole session.",
 				"params": "ForkParams",
 				"result": "CancellationResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "navigate_tree",
+				"doc": "Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy.",
+				"params": "NavigateTreeParams",
+				"result": "NavigateTreeResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "abort_branch_summary",
+				"doc": "Stop a running `navigate_tree` branch summary; the navigation is cancelled.",
+				"params": null,
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_label",
+				"doc": "Set or clear (omit `label`) an entry's label.",
+				"params": "SetLabelParams",
+				"result": null,
 				"nullable": false,
 				"unwrap": null,
 				"timeoutMs": null,
@@ -2190,7 +2256,7 @@
 				"delta"
 			],
 			"type": "string",
-			"description": "`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`."
+			"description": "`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches."
 		},
 		"TodoStatus": {
 			"enum": [
@@ -2958,6 +3024,25 @@
 				"cancelled"
 			]
 		},
+		"NavigateTreeResult": {
+			"type": "object",
+			"properties": {
+				"cancelled": {
+					"type": "boolean"
+				},
+				"aborted": {
+					"type": "boolean",
+					"description": "Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved."
+				},
+				"editorText": {
+					"type": "string",
+					"description": "The target was a user message: its text, for the editor; the leaf moved to its parent."
+				}
+			},
+			"required": [
+				"cancelled"
+			]
+		},
 		"TokenUsage": {
 			"type": "object",
 			"properties": {
@@ -3050,6 +3135,14 @@
 					"additionalProperties": {
 						"type": "number"
 					}
+				},
+				"editRejections": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {
+						"type": "number"
+					},
+					"description": "Failed edits by the engine's `errorKind`."
 				},
 				"contextUsage": {
 					"$ref": "#/$defs/ContextUsage"
@@ -3326,6 +3419,13 @@
 				"updatedAt": {
 					"type": "integer"
 				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "Images attached to the question."
+				},
 				"error": {
 					"type": "string"
 				}
@@ -3369,6 +3469,13 @@
 							"type": "null"
 						}
 					]
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "Images attached to the question."
 				},
 				"error": {
 					"type": "string"
@@ -3806,6 +3913,50 @@
 				"willRetry"
 			]
 		},
+		"ManualCompactionStartEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_start"
+				},
+				"mode": {
+					"type": "string",
+					"description": "The `/compact <mode>` subcommand, when one was given."
+				}
+			},
+			"required": [
+				"type"
+			],
+			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+		},
+		"ManualCompactionEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_end"
+				},
+				"aborted": {
+					"type": "boolean",
+					"description": "The compaction was cancelled (abort, or a `session_before_compact` hook)."
+				},
+				"result": {
+					"$ref": "#/$defs/CompactionResult",
+					"description": "Present when the compaction committed."
+				},
+				"skipped": {
+					"type": "boolean",
+					"description": "There was nothing to compact; `errorMessage` says why."
+				},
+				"errorMessage": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"aborted"
+			],
+			"description": "Outcome of the compaction announced by the matching `manual_compaction_start`."
+		},
 		"AutoRetryStartEvent": {
 			"type": "object",
 			"properties": {
@@ -4035,7 +4186,8 @@
 			"required": [
 				"type",
 				"rules"
-			]
+			],
+			"description": "Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`."
 		},
 		"TodoReminderEvent": {
 			"type": "object",
@@ -4233,6 +4385,12 @@
 					"$ref": "#/$defs/AutoCompactionEndEvent"
 				},
 				{
+					"$ref": "#/$defs/ManualCompactionStartEvent"
+				},
+				{
+					"$ref": "#/$defs/ManualCompactionEndEvent"
+				},
+				{
 					"$ref": "#/$defs/AutoRetryStartEvent"
 				},
 				{
@@ -4342,6 +4500,10 @@
 				},
 				"httpStatus": {
 					"type": "integer"
+				},
+				"code": {
+					"const": "cost_cap",
+					"description": "`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request."
 				}
 			},
 			"required": [
@@ -4686,6 +4848,74 @@
 			],
 			"description": "Sent exactly once when a live session ends; `error` carries the failure cause."
 		},
+		"DictationStateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_state"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"state": {
+					"enum": [
+						"starting",
+						"recording",
+						"transcribing"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"state"
+			],
+			"description": "State of one draft-only microphone capture."
+		},
+		"DictationTranscriptEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_transcript"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Full accumulated draft preview; replaces the previous preview for this capture."
+		},
+		"DictationEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_end"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Exactly one terminal frame per capture; text is the accumulated result."
+		},
 		"BtwDeltaEvent": {
 			"type": "object",
 			"properties": {
@@ -4951,6 +5181,9 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"secret": {
+					"type": "boolean"
 				}
 			},
 			"required": [
@@ -5754,6 +5987,15 @@
 					"$ref": "#/$defs/LiveEndEvent"
 				},
 				{
+					"$ref": "#/$defs/DictationStateEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationTranscriptEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationEndEvent"
+				},
+				{
 					"$ref": "#/$defs/BtwDeltaEvent"
 				},
 				{
@@ -6274,6 +6516,38 @@
 				"voice"
 			]
 		},
+		"LiveConnectParams": {
+			"type": "object",
+			"properties": {
+				"sdpOffer": {
+					"type": "string"
+				},
+				"voice": {
+					"type": "string"
+				},
+				"instructions": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"sdpOffer"
+			]
+		},
+		"LiveConnectResult": {
+			"type": "object",
+			"properties": {
+				"voice": {
+					"type": "string"
+				},
+				"sdpAnswer": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"voice",
+				"sdpAnswer"
+			]
+		},
 		"LiveMuteParams": {
 			"type": "object",
 			"properties": {
@@ -6291,6 +6565,28 @@
 			},
 			"required": [
 				"muted"
+			]
+		},
+		"DictationStartParams": {
+			"type": "object",
+			"properties": {
+				"captureId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"captureId"
+			]
+		},
+		"DictationStopResult": {
+			"type": "object",
+			"properties": {
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"text"
 			]
 		},
 		"SetModelParams": {
@@ -6497,6 +6793,39 @@
 					"type": "string"
 				}
 			}
+		},
+		"NavigateTreeParams": {
+			"type": "object",
+			"properties": {
+				"entryId": {
+					"type": "string"
+				},
+				"summarize": {
+					"type": "boolean",
+					"description": "Summarize the abandoned branch at the target."
+				},
+				"customInstructions": {
+					"type": "string",
+					"description": "Instructions for the summarizer."
+				}
+			},
+			"required": [
+				"entryId"
+			]
+		},
+		"SetLabelParams": {
+			"type": "object",
+			"properties": {
+				"entryId": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"entryId"
+			]
 		},
 		"GetBranchMessagesResult": {
 			"type": "object",

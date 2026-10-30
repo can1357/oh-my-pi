@@ -228,12 +228,12 @@ Label edits in tree UI call `appendLabelChange(targetId, label)`.
 
 ## `/tree` vs adjacent operations
 
-| Operation | Scope                                            | Result                                                                                                                                                   |
-| --------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/tree`   | Current session file                             | Moves leaf to selected point (same file)                                                                                                                 |
-| `/branch` (alias `/rewind`) | Current session file | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
-| `/fork`   | Whole current session                            | Duplicates session into a new persisted session file                                                                                                     |
-| `/resume` | Session list                                     | Switches to another session file                                                                                                                         |
+| Operation                   | Scope                 | Result                                                                            |
+| --------------------------- | --------------------- | --------------------------------------------------------------------------------- |
+| `/tree`                     | Current session file  | Moves leaf to selected point (same file)                                          |
+| `/branch` (alias `/rewind`) | Current session file  | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
+| `/fork`                     | Whole current session | Duplicates session into a new persisted session file                              |
+| `/resume`                   | Session list          | Switches to another session file                                                  |
 
 Key distinction: `/tree` and `/branch` navigate inside one session file. `/fork` duplicates the file; `/resume` switches files. The programmatic `AgentSession.branch()` API still creates a separate branched session.
 

@@ -42,6 +42,7 @@ import type {
 	TspPickerGroup,
 	TspPickerItem,
 	TspPickerMark,
+	TspPickerProps,
 	TspSpan,
 	TspText,
 } from "@oh-my-pi/pi-wire";
@@ -917,6 +918,22 @@ export interface ModelPickerCatalogue {
 	readonly itemsAdd?: readonly TspPickerItem[];
 	readonly itemsDel?: readonly string[];
 }
+
+/** The search, fact-column and row props every model `picker` sheet sends ({@link ModelBrowser.pickerRows}). */
+export type ModelPickerRows = Pick<
+	TspPickerProps,
+	| "query"
+	| "cursor"
+	| "columns"
+	| "items"
+	| "itemsAdd"
+	| "itemsDel"
+	| "order"
+	| "hits"
+	| "selected"
+	| "current"
+	| "total"
+>;
 
 /** How {@link ModelBrowser.pickerOrder} heads its rows. */
 export interface ModelPickerGrouping {
@@ -1931,6 +1948,26 @@ export class ModelBrowser implements Component {
 	get pickerSelected(): string | null {
 		const selected = this.getSelected();
 		return selected && !this.#isDisabled(selected) ? selected.selector : null;
+	}
+
+	/**
+	 * A model picker's search field, fact columns and rows: `catalogue` (from
+	 * {@link pickerItems}) in `view` order (from {@link pickerOrder}), the
+	 * selection, and `current` checked. Memoize hosts on its inputs plus
+	 * {@link query}, {@link cursor} and {@link pickerSelected}.
+	 */
+	pickerRows(catalogue: ModelPickerCatalogue, view: ModelPickerOrder, current: string | undefined): ModelPickerRows {
+		return {
+			query: this.query,
+			cursor: this.cursor,
+			columns: MODEL_PICKER_COLUMNS,
+			...catalogue,
+			order: view.order,
+			...(view.hits ? { hits: view.hits } : {}),
+			selected: this.pickerSelected,
+			...(current ? { current: [current] } : {}),
+			total: this.baseCount,
+		};
 	}
 
 	/**

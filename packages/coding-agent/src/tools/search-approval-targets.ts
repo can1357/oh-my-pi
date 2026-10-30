@@ -20,7 +20,7 @@ import { approvalTargetKey, approvalTreeSearchKey, isApprovalPublicUrl } from ".
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
 
 /** List delimiters the execution-side path parser splits a root on. */
-const ROOT_DELIMITERS = /[;,\s]+/;
+export const APPROVAL_ROOT_DELIMITERS = /[;,\s]+/;
 
 /**
  * Roots to key for one raw entry: the entry itself plus its list parts. Execution fans `a;b`, `a,b`
@@ -28,8 +28,8 @@ const ROOT_DELIMITERS = /[;,\s]+/;
  * search really walks — and a search that reports no keys is auto-allowed. Parts that do not resolve
  * are dropped below, so naming them here can only add keys that really exist.
  */
-function approvalRootCandidates(rawRoot: string): string[] {
-	const parts = rawRoot.split(ROOT_DELIMITERS).filter(part => part.length > 0);
+export function approvalRootCandidates(rawRoot: string): string[] {
+	const parts = rawRoot.split(APPROVAL_ROOT_DELIMITERS).filter(part => part.length > 0);
 	return parts.length <= 1 ? [rawRoot] : [rawRoot, ...parts];
 }
 
@@ -54,6 +54,7 @@ export function searchApprovalCacheTargets(
 	cwd: string,
 	splitBase: (root: string) => string,
 	isRecursive: (root: string) => boolean = () => true,
+	skipCandidate?: (candidate: string, wholeList: boolean) => boolean,
 ): readonly string[] | undefined {
 	const keys = new Set<string>();
 	// Both tools search `.` when no path argument was supplied, so the fallback
@@ -61,7 +62,10 @@ export function searchApprovalCacheTargets(
 	for (const rawRoot of roots.length > 0 ? roots : ["."]) {
 		const root = normalizePathLikeInput(rawRoot);
 		if (root.length === 0) continue;
-		for (const candidate of approvalRootCandidates(root)) {
+		const candidates = approvalRootCandidates(root);
+		for (const [index, candidate] of candidates.entries()) {
+			// A caller's own list syntax (grep's `!glob` exclusions) names parts that search nothing.
+			if (skipCandidate?.(candidate, candidates.length > 1 && index === 0)) continue;
 			const base = normalizePathLikeInput(splitBase(candidate));
 			const key = searchRootApprovalKey(base, cwd, isRecursive(candidate));
 			if (key !== undefined) keys.add(key);

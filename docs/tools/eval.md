@@ -5,6 +5,7 @@
 > **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, rich `print` rendering, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
 
 ## Source
+
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
@@ -20,26 +21,26 @@
 
 The params object is one cell. There is no `cells` array, header parser, language sniffing, or implicit fallback. Run incremental steps as separate tool calls; each language keeps its own state.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `language` | `"py" \| "js"` | Yes | Explicit backend token. Normally the live schema includes only enabled runtimes. |
-| `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. |
-| `title` | `string` | No | Short transcript label. |
-| `timeout` | `number` | No | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. Paused host waits resume with a fresh window, not the unused remainder. |
-| `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
+| Field      | Type           | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------- | -------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `language` | `"py" \| "js"` | Yes      | Explicit backend token. Normally the live schema includes only enabled runtimes.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `code`     | `string`       | Yes      | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command.                                                                                                                                                                                                                                                                                                                                                              |
+| `title`    | `string`       | No       | Short transcript label.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `timeout`  | `number`       | No       | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. A supplied value that changes is disclosed as requested → effective at admission, in progress, and in the final result and `details.notice`. The schema and description include the configured ceiling. Paused host waits resume with a fresh window, not the unused remainder. |
+| `reset`    | `boolean`      | No       | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`.                                                                                                                                                                                                                                                                                                                                                   |
 
 Example across three calls:
 
 ```json
-{"language":"py","title":"imports","code":"import json\nfrom pathlib import Path"}
+{ "language": "py", "title": "imports", "code": "import json\nfrom pathlib import Path" }
 ```
 
 ```json
-{"language":"py","title":"load config","code":"data = json.loads(read('package.json'))\nprint(data)"}
+{ "language": "py", "title": "load config", "code": "data = json.loads(read('package.json'))\nprint(data)" }
 ```
 
 ```json
-{"language":"py","title":"reuse state","code":"print(sorted(data['dependencies']))"}
+{ "language": "py", "title": "reuse state", "code": "print(sorted(data['dependencies']))" }
 ```
 
 ## Scripts and dependencies
@@ -47,7 +48,7 @@ Example across three calls:
 Save reusable setup in a file, then load it once:
 
 ```json
-{"language":"py","code":"%load ./analysis.py"}
+{ "language": "py", "code": "%load ./analysis.py" }
 ```
 
 Later cells reuse its definitions. Calling `%load` again executes the current file again; editing it alone does not reload it. The host reads the file (quote paths containing spaces; `local://` files are supported) and runs it with its filename: Python sets `__file__`, puts the script directory on `sys.path`, and reports tracebacks against the script; JavaScript/TypeScript resolves relative imports from the script while eval keeps its working directory.
@@ -66,12 +67,14 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 `resolveEvalBackends(...)` combines settings with environment overrides:
 
-| Token | Runtime | Setting/default | Environment override | Additional prerequisite |
-| --- | --- | --- | --- | --- |
-| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | usable configured Python interpreter/kernel |
-| `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
+| Token | Runtime                              | Setting/default | Environment override | Additional prerequisite                                             |
+| ----- | ------------------------------------ | --------------- | -------------------- | ------------------------------------------------------------------- |
+| `py`  | retained IPython-style Python kernel | `eval.py=true`  | `PI_PY`              | working Python 3.8+ on PATH or configured with `python.interpreter` |
+| `js`  | retained Bun worker VM               | `eval.js=true`  | `PI_JS`              | bundled JS runtime                                                  |
 
-When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed Python probe, the next schema, description, and prelude also omit `py`; synchronous schema reads never run a probe. A successful explicit availability refresh restores Python, while changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes, so a repaired interpreter can be picked up without restarting.
+
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
@@ -154,6 +157,10 @@ All enabled runtimes expose equivalent helpers where the language permits:
 
 JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
+The prelude lists accepted session tool names, including unambiguous wire aliases such as `tool.apply_patch({ input: "..." })` for an enabled `edit` tool in apply-patch mode. Exact registered names shadow aliases; ambiguous aliases are unavailable. Both canonical and wire calls check the resolved tool's enablement and use its ordinary approval/ACP gate.
+
+Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. Aliases of `checkpoint` and `rewind` are omitted and rejected because those tools need direct result events; aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
+
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
 Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
@@ -165,7 +172,6 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
 The full helper reference is `xd://eval/judge`.
-
 
 ### MCP structured results
 

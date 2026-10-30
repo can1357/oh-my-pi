@@ -98,6 +98,24 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(false);
 	});
 
+	it("can keep the current-folder picker isolated while all-projects still reaches other worktrees", async () => {
+		const moved = await sessionMovedByWt("wt/scoped");
+		const stayed = await answeredSession(repo);
+		await stayed.close();
+
+		const directoryIds = async (cwd: string) =>
+			(await SessionManager.listForPicker(cwd, undefined, undefined, "directory")).map(session => session.id);
+		expect(await directoryIds(repo)).toEqual([stayed.getSessionId()]);
+		expect(await directoryIds(moved.worktree)).toEqual([moved.id]);
+		expect((await SessionManager.listAllForPicker()).map(session => session.id).sort()).toEqual(
+			[moved.id, stayed.getSessionId()].sort(),
+		);
+		// Choosing a narrower listing never changes relocation of a deleted worktree session.
+		await $`git worktree remove --force ${moved.worktree} && git worktree prune`.cwd(repo).quiet();
+		const listed = (await SessionManager.listAllForPicker()).find(session => session.id === moved.id)!;
+		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(true);
+	});
+
 	it("keeps a removed worktree's session listed and relocates it into the checkout on resume", async () => {
 		const moved = await sessionMovedByWt("wt/gone");
 		// `omp worktree clear` removes and prunes: git no longer knows the worktree.

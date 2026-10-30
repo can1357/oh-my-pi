@@ -18,7 +18,7 @@ import type {
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
@@ -26,7 +26,7 @@ import {
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
-import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getModelCacheWriteStats, readModelCache, retainModelCacheConnection } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	fingerprintStaticModels,
@@ -337,6 +337,25 @@ export class ModelRegistry {
 	#implicitProviderEndpointEnv: Map<string, string> = new Map();
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
+	/**
+	 * Last `mergeDiscoveredModel` result per discovered row. Every refresh
+	 * re-resolves each built-in provider, and offline (or unchanged online)
+	 * passes hand back the same bundled/cached row objects against the same
+	 * references, so re-running the full model build for thousands of rows is
+	 * pure repetition. A changed reference or provider override misses, and so
+	 * does reaching the next dated price card the build would select. Held per
+	 * registry (not tagged onto the rows): bundled rows outlive every registry,
+	 * so their merges must be collected with the registry.
+	 */
+	#discoveredMergeMemo = new WeakMap<
+		Model<Api>,
+		{
+			reference: Model<Api> | undefined;
+			override: ProviderOverride | undefined;
+			merged: Model<Api>;
+			validUntil: number;
+		}
+	>();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	// `provider/id:kind` of modelOverrides kinds already reported as unserved, so
 	// every rebuild does not log the same ignored override again.
@@ -1353,6 +1372,7 @@ export class ModelRegistry {
 	} {
 		const modelsByProvider = new Map<string, Model<Api>[]>();
 		const authoritativeFreshProviders = new Set<string>();
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
@@ -1522,6 +1542,7 @@ export class ModelRegistry {
 
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerConfig of this.#discoverableProviders) {
 			const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
@@ -1874,6 +1895,9 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<void> {
+		// One cache connection for the whole pass: every provider manager reads
+		// (and may write) its row, which would otherwise reopen the database each time.
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
 			providerFilter
@@ -1918,7 +1942,7 @@ export class ModelRegistry {
 		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
-				mergeDiscoveredModel(
+				this.#mergeDiscoveredModelMemoized(
 					model,
 					resolveProviderModelReference(model.provider, model.id, referenceModels),
 					this.#providerOverrides.get(model.provider),
@@ -1971,6 +1995,23 @@ export class ModelRegistry {
 		this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 	}
 
+	#mergeDiscoveredModelMemoized(
+		model: Model<Api>,
+		reference: Model<Api> | undefined,
+		override: ProviderOverride | undefined,
+	): Model<Api> {
+		const now = Date.now();
+		const memo = this.#discoveredMergeMemo.get(model);
+		if (memo && memo.reference === reference && memo.override === override && now < memo.validUntil) {
+			return memo.merged;
+		}
+		const merged = mergeDiscoveredModel(model, reference, override);
+		// Measured before the build: a card falling due mid-build expires the memo at once.
+		const validUntil = nextBuildPriceChange(model.cost, now);
+		this.#discoveredMergeMemo.set(model, { reference, override, merged, validUntil });
+		return merged;
+	}
+
 	/**
 	 * Share a configured provider's discovery request between concurrent full
 	 * and provider-scoped refreshes using the same cache/network strategy.
@@ -1997,6 +2038,15 @@ export class ModelRegistry {
 		return discovery;
 	}
 
+	/**
+	 * Namespace suffix for the `discovery.advertisedReasoning` opt-out. Rows built
+	 * under one mode must never satisfy the other's cache read: under the
+	 * `offline` strategy nothing else refetches them.
+	 */
+	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
+		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
+	}
+
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
@@ -2009,18 +2059,37 @@ export class ModelRegistry {
 			// `top_provider.max_completion_tokens` was read; warm v3 rows kept
 			// the bundled reference's larger output limit and the provider
 			// rejected every request.
+			// context-v5 invalidates rows cached before a row's advertised
+			// reasoning ladder outranked the bundled reference; warm v4 rows kept
+			// `reasoning: false` (ids absent from the catalog) or an inherited
+			// `omitReasoningEffort`, so no effort dial appeared until a refresh.
+			// context-v6 invalidates rows cached before a row's advertised
+			// `reasoning_effort_map` / `reasoning_required` were kept on the
+			// model; warm v5 rows stayed without the aliases, so an unsupported
+			// requested effort kept clamping to the tier below and a thinking-off
+			// request could reach a route that rejects it.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-context-v4`
-				: `${providerConfig.provider}:openai-models-list-context-v4`;
+				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}`
+				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+		}
+		if (providerConfig.discovery.type === "proxy") {
+			// proxy-v2 invalidates rows cached before a proxy row's advertised
+			// reasoning ladder was read; warm v1 rows (stored under the bare
+			// provider id) pinned gateway ids at `reasoning: false`. The opt-out
+			// gets its own namespace for the same reason it does above: under the
+			// `offline` strategy nothing else would refetch the other mode's rows.
+			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v5 invalidates rows written before discovery filtered known
-			// non-conversational modes. Keep this in lockstep with the catalog
-			// package's `litellm:rich-vN` namespace whenever mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v5`;
+			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
+			// pagination. rich-v6 moved decisions-mode groups to the Decisions
+			// runner; rich-v5 filtered known non-conversational modes. Bump this
+			// namespace alongside the catalog package's `litellm:rich-vN` when
+			// discovery behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v7`;
 		}
 		return providerConfig.provider;
 	}
@@ -2331,6 +2400,7 @@ export class ModelRegistry {
 								accounts?.map(account => ({
 									accessToken: account.accessToken,
 									accountKey: oauthAccountKey(account),
+									projectId: account.projectId,
 								})) ?? null
 							);
 						},
@@ -3058,6 +3128,15 @@ export class ModelRegistry {
 				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
 			),
 		);
+		// Reuse the same provider snapshot as find()/getProviderModels(). The
+		// availability gate above stays live, while catalog invalidation remains
+		// owned by refresh, discovery and runtime provider registration. Whole-
+		// catalog modifiers can inspect live credentials, so keep reprojecting
+		// those rather than extending the lifetime of their output.
+		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
+			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
+			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
+		}
 		const models = this.#composeStaticModels(availableProviders);
 		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
 	}
@@ -3346,6 +3425,7 @@ export class ModelRegistry {
 			accountIds: accountAccess && Object.keys(accountAccess),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
+			rejectedAccessToken: options?.rejectedAccessToken,
 			signal: options?.signal,
 		});
 	}
@@ -3413,25 +3493,32 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Remove custom API/OAuth registrations for a specific extension source.
+	 * Remove custom API/OAuth registrations for one or more extension sources.
+	 * The model catalog is rebuilt once, however many sources are cleared.
 	 */
-	clearSourceRegistrations(sourceId: string): void {
-		unregisterCustomApis(sourceId);
-		unregisterOAuthProviders(sourceId);
-		const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-		if (!sourceProviders || sourceProviders.size === 0) {
-			return;
-		}
-		this.#ensureFullSnapshot();
-		this.#runtimeProvidersBySource.delete(sourceId);
-		for (const providerName of sourceProviders) {
-			if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
+	clearSourceRegistrations(sourceIds: string | Iterable<string>): void {
+		let cleared = false;
+		for (const sourceId of typeof sourceIds === "string" ? [sourceIds] : sourceIds) {
+			unregisterCustomApis(sourceId);
+			unregisterOAuthProviders(sourceId);
+			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
+			if (!sourceProviders || sourceProviders.size === 0) {
 				continue;
 			}
-			this.#runtimeProviderSourceByName.delete(providerName);
-			this.#clearRuntimeProviderState(providerName);
+			this.#ensureFullSnapshot();
+			this.#runtimeProvidersBySource.delete(sourceId);
+			for (const providerName of sourceProviders) {
+				if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
+					continue;
+				}
+				this.#runtimeProviderSourceByName.delete(providerName);
+				this.#clearRuntimeProviderState(providerName);
+			}
+			cleared = true;
 		}
-		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		if (cleared) {
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		}
 	}
 
 	/**
@@ -3458,11 +3545,9 @@ export class ModelRegistry {
 	 */
 	syncExtensionSources(activeSourceIds: string[]): void {
 		const activeSources = new Set(activeSourceIds);
-		for (const sourceId of this.#registeredProviderSources) {
-			if (activeSources.has(sourceId)) {
-				continue;
-			}
-			this.clearSourceRegistrations(sourceId);
+		const inactiveSources = [...this.#registeredProviderSources].filter(sourceId => !activeSources.has(sourceId));
+		this.clearSourceRegistrations(inactiveSources);
+		for (const sourceId of inactiveSources) {
 			this.#registeredProviderSources.delete(sourceId);
 		}
 	}

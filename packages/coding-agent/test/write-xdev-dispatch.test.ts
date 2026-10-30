@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
+import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -14,6 +15,7 @@ import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type WriteRenderContext, writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	dispatchXdevTool,
 	listXdevTools,
@@ -796,7 +798,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			// Filesystem writes are rejected before any handler or guard runs.
 			await expect(
 				write!.execute("write-device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 
 			// Device dispatch still flows: an unknown device reaches the router and
 			// fails there, not at the transport guard.
@@ -850,6 +852,75 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
+	// With both a local:// root and `yield`, the refusal used to name two
+	// competing deliverables ("give that path" immediately followed by "return
+	// the content in `yield` instead"), which reads as "do not hand over the
+	// path". The path and `yield` must be one route.
+	it("offers the local:// path through yield rather than against it", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-yield-local-"));
+		try {
+			const activeNames = new Set(["read", "grep"]);
+			const getSessionId = () => "device-only-yield-local";
+			const session = xdevSession(tempDir, {
+				requireYieldTool: true,
+				getSessionId,
+				getArtifactsDir: () => path.join(tempDir, "artifacts"),
+				isToolActive: name => activeNames.has(name),
+				setActiveToolNames: names => {
+					for (const name of names) activeNames.add(name);
+				},
+			});
+			const tools = await createTools(session, ["read", "grep"]);
+			const write = tools.find(entry => entry.name === "write");
+			expect(write).toBeDefined();
+			expect(session.isToolActive?.("yield")).toBe(true);
+
+			const err = await write!
+				.execute("write-device-only-yield-local", { path: path.join(tempDir, "findings.md"), content: "x" })
+				.then(
+					() => null,
+					(caught: unknown) => caught,
+				);
+			const message = err instanceof Error ? err.message : String(err);
+			expect(message).toContain(shortenPath(path.join(tempDir, "artifacts", "local", "<name>")));
+			expect(message).toContain("`yield`");
+			expect(message).not.toContain("instead");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	// The refusal reaches transcripts and exports, so the hint carries the
+	// home-relative form, not the user's home directory.
+	it("names the local:// root home-relative when it sits under the home directory", async () => {
+		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-home-"));
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(homeDir);
+		const tempDir = path.join(homeDir, "work");
+		try {
+			await fs.mkdir(tempDir, { recursive: true });
+			const session = xdevSession(tempDir, {
+				getSessionId: () => "device-only-home",
+				getArtifactsDir: () => path.join(homeDir, ".omp", "artifacts"),
+			});
+			const tools = await createTools(session, ["read"]);
+			const write = tools.find(entry => entry.name === "write");
+			expect(write).toBeDefined();
+
+			const err = await write!
+				.execute("write-device-only-home", { path: path.join(tempDir, "nope.txt"), content: "x" })
+				.then(
+					() => null,
+					(caught: unknown) => caught,
+				);
+			const message = err instanceof Error ? err.message : String(err);
+			expect(message).toContain("~/.omp/artifacts/local/<name>");
+			expect(message).not.toContain(homeDir);
+		} finally {
+			homedirSpy.mockRestore();
+			await removeWithRetries(homeDir);
+		}
+	});
+
 	// Negative branch. Without `yield` the suggestion would not work, so the
 	// rejection must still refuse the filesystem write without naming a
 	// channel the session does not have.
@@ -898,7 +969,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			expect(write!.description).not.toBe(restrictedDescription);
 			await expect(
 				write!.execute("write-pending-full-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 			expect(await Bun.file(path.join(tempDir, "nope.txt")).exists()).toBe(false);
 
 			session.pendingFullWriteDescription = undefined;
@@ -911,13 +982,15 @@ describe("device-only write transport for explicit lists omitting write", () => 
 	it("allows the local sandbox outside plan mode while other targets stay rejected", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-local-sandbox-"));
 		try {
-			const getArtifactsDir = () => path.join(tempDir, "artifacts");
+			// A subagent pins its parent's local:// root, which differs from its own
+			// artifacts dir; files land under the pinned root.
+			const getArtifactsDir = () => path.join(tempDir, "own-artifacts");
 			const getSessionId = () => "device-only-local";
 			const session = xdevSession(tempDir, {
 				enableLsp: false,
 				getArtifactsDir,
 				getSessionId,
-				localProtocolOptions: { getArtifactsDir, getSessionId },
+				localProtocolOptions: { getArtifactsDir: () => path.join(tempDir, "parent-artifacts"), getSessionId },
 			});
 			const tools = await createTools(session, ["read"]);
 			const read = tools.find(entry => entry.name === "read");
@@ -935,9 +1008,13 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			});
 			expect(reportRead.content.find(entry => entry.type === "text")?.text).toContain("report draft");
 
-			await expect(
-				write!.execute("write-device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Filesystem writes are not available");
+			// The refusal names the on-disk location of local:// files, so the
+			// agent can hand its caller a real path; the file written above is there.
+			const localRoot = path.join(tempDir, "parent-artifacts", "local");
+			const refusal = write!.execute("write-device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" });
+			await expect(refusal).rejects.toThrow("Other filesystem paths are refused");
+			await expect(refusal).rejects.toThrow(shortenPath(path.join(localRoot, "<name>")));
+			expect(await Bun.file(path.join(localRoot, "report.md")).text()).toBe("report draft\n");
 
 			// conflict:// resolves to a recorded working-tree file. Device-only
 			// access must reject it before the conflict resolver can mutate it.
@@ -946,8 +1023,37 @@ describe("device-only write transport for explicit lists omitting write", () => 
 					path: "conflict://1",
 					content: "@ours",
 				}),
-			).rejects.toThrow("Filesystem writes are not available");
+			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("names the override root when the session itself has no local:// mapping", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-local-override-"));
+		LocalProtocolHandler.setOverride({
+			getArtifactsDir: () => path.join(tempDir, "override-artifacts"),
+			getSessionId: () => "override-session",
+		});
+		try {
+			const session = xdevSession(tempDir, { enableLsp: false, getSessionId: () => "own-session" });
+			const tools = await createTools(session, ["read"]);
+			const write = tools.find(entry => entry.name === "write");
+			expect(write).toBeDefined();
+
+			const reportWrite = await write!.execute("write-override-local", {
+				path: "local://report.md",
+				content: "report draft\n",
+			});
+			expect(reportWrite.isError).toBeUndefined();
+
+			const localRoot = path.join(tempDir, "override-artifacts", "local");
+			await expect(
+				write!.execute("write-override-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow(shortenPath(path.join(localRoot, "<name>")));
+			expect(await Bun.file(path.join(localRoot, "report.md")).text()).toBe("report draft\n");
+		} finally {
+			LocalProtocolHandler.resetOverrideForTests();
 			await removeWithRetries(tempDir);
 		}
 	});

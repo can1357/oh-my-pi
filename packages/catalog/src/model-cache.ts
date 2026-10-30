@@ -10,7 +10,9 @@ import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
-// arbitrary provider-defined header names can carry credentials. v13 replaces
+// arbitrary provider-defined header names can carry credentials. v14
+// invalidates Antigravity rows predating per-SKU `antigravityWireProfiles`
+// (model_enum label, output cap, SKU thinking). v13 replaces
 // sparse ModelSpec rows with materialized rows and records the exact app/rules/
 // builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
@@ -25,7 +27,7 @@ import type { Api, Model } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 13;
+const CACHE_SCHEMA_VERSION = 14;
 /** Oldest schema whose rows are guaranteed never to carry request headers. */
 const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;
@@ -171,6 +173,14 @@ export interface CacheEntry<TApi extends Api = Api> {
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
 
+/** Connection to a non-default cache path, held open while any retain is outstanding. */
+interface PinnedDb {
+	db: Database | null;
+	refs: number;
+}
+
+const pinnedDbs = new Map<string, PinnedDb>();
+
 interface ReadRowCacheEntry {
 	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
 	dataVersion: number | null;
@@ -284,16 +294,54 @@ export function closeModelCache(): void {
 	closeSharedDb();
 }
 
+/**
+ * Keeps one connection to a non-default cache path open until the returned
+ * handle is disposed. The default `models.db` already shares a long-lived
+ * connection; other paths otherwise open, initialize and close the database on
+ * every read and write, which a refresh pass repeats once per provider.
+ * Retains nest: the connection closes when the last one is disposed.
+ */
+export function retainModelCacheConnection(dbPath: string | undefined): Disposable {
+	const { resolvedPath, shared } = resolveCacheDb(dbPath);
+	if (shared) return { [Symbol.dispose]() {} };
+	let pin = pinnedDbs.get(resolvedPath);
+	if (!pin) {
+		pin = { db: null, refs: 0 };
+		pinnedDbs.set(resolvedPath, pin);
+	}
+	pin.refs++;
+	const held = pin;
+	let released = false;
+	return {
+		[Symbol.dispose]() {
+			if (released) return;
+			released = true;
+			held.refs--;
+			if (held.refs > 0) return;
+			pinnedDbs.delete(resolvedPath);
+			held.db?.close();
+			held.db = null;
+		},
+	};
+}
+
 function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
 	if (shared && sharedDb && sharedDbPath !== resolvedPath) closeSharedDb();
-	if (shared && sharedDb) {
+	const pin = shared ? undefined : pinnedDbs.get(resolvedPath);
+	const heldDb = shared ? sharedDb : pin?.db;
+	if (heldDb) {
 		try {
-			return useDb(sharedDb);
+			return useDb(heldDb);
 		} catch (error) {
 			if (!isSqliteCorruptionError(error)) throw error;
 			// The opener owns recovery for new handles. Drop this stale handle
 			// first so its WAL cannot remain attached to the replacement.
-			closeSharedDb();
+			if (pin) {
+				heldDb.close();
+				pin.db = null;
+			} else {
+				closeSharedDb();
+			}
 			invalidateReadPath(resolvedPath);
 			return runModelCacheDb(resolvedPath, shared, useDb);
 		}
@@ -307,6 +355,8 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 			if (shared) {
 				sharedDb = db;
 				sharedDbPath = resolvedPath;
+			} else if (pin) {
+				pin.db = db;
 			} else {
 				db.close();
 			}
