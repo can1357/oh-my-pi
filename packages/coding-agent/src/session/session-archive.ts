@@ -1663,6 +1663,8 @@ async function recordCopyAt(at: string, bytes: Buffer, finish: boolean): Promise
  * provided nothing removes the record from the ledger in between: a gc run
  * whose archive phase applies drops a record whose directory is gone from
  * its tree, and a quarantine whose directory has moved leaves such a record.
+ * A retry that then finds no record but a destination holding something
+ * names what is there and what to do with it, instead of only "no record".
  *
  * The caller holds the gc lock, so no run is staging into the directory while
  * it moves; the advice that names this command asks for activity on the
@@ -1697,7 +1699,8 @@ export async function quarantineStagingRecord(
 		// Already moved by an earlier run of this command, or never there. A
 		// finished quarantine leaves the record itself at the destination: a
 		// regular file there that reads as a record, and nothing else.
-		for (const destination of [...roots, undefined].map(quarantineFor)) {
+		const destinations = [...roots, undefined].map(quarantineFor);
+		for (const destination of destinations) {
 			const copy = path.join(destination, path.basename(record));
 			try {
 				if (!(await fs.lstat(copy)).isFile()) continue;
@@ -1708,6 +1711,23 @@ export async function quarantineStagingRecord(
 			result.quarantine = destination;
 			result.moved = true;
 			return result;
+		}
+		// A quarantine stopped after moving the directory, then a gc run whose
+		// archive phase applied: that drops a record whose directory has left
+		// its tree. The directory is still in the destination, and nothing
+		// else will ever point anyone at it, so this says where it is.
+		for (const destination of destinations) {
+			const held = await fs.readdir(destination).catch(() => []);
+			if (held.length === 0) continue;
+			result.quarantine = destination;
+			return refuse(
+				`${record} is not in ${ledger}, but ${destination} holds ${held.map(name => path.join(destination, name)).join(", ")}, ` +
+					`where a quarantine of this record puts the staging directory it moves. If this command moved it there, ` +
+					`a gc run that applied its archive phase has since dropped the record, because the directory had left its tree; ` +
+					`what the directory holds is what the killed gc run had staged, and nothing reads it there: a restore of the session ` +
+					`no longer waits on it, nor brings it home. Look at what it holds, copy out anything you want to keep, ` +
+					`and remove it when you are done`,
+			);
 		}
 		return refuse(`${record} is not a staging record in ${ledger}`);
 	}

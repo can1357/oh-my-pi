@@ -4119,6 +4119,30 @@ test("quarantine refuses a ledger record that is a symlink, which no gc run writ
 	expect(await fs.stat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
 });
 
+test("a quarantine retry whose record an archive run dropped says where the moved directory is and what to do with it", async () => {
+	const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	const stranded = path.join(destination, path.basename(ground.dir));
+	// A quarantine killed right after moving the directory, then an archive
+	// run, which drops a record whose directory has left its tree.
+	await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+	await fs.rename(ground.dir, stranded);
+	await archiveOnly();
+	expect(await Bun.file(ground.record).exists()).toBe(false);
+
+	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	const told = retried.quarantine?.errors.join("\n") ?? "";
+	expect(told).toContain(stranded);
+	expect(told).toContain("copy out anything you want to keep");
+	expect(retried.quarantine?.moved).toBe(false);
+	expect(retried.quarantine?.quarantine).toBe(destination);
+	expect(await Bun.file(path.join(stranded, "b.log")).text()).toBe("PARTIAL STAGE");
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	expect(restored.restore?.errors).toEqual([]);
+	expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+});
+
 /**
  * The ledger on one filesystem and the quarantine on another, as the review
  * measured them: the record cannot go across by name, by `rename` or by
