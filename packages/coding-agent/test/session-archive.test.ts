@@ -4034,3 +4034,200 @@ for (const shape of [
 		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 	});
 }
+
+/** Where `gc --quarantine` puts a record and its stage: beside the archived tree, named for the record. */
+function quarantineDestination(record: string): string {
+	return path.join(root, "archive", "gc-quarantine", path.basename(record, ".json"));
+}
+
+// The review's occupied-destination fixtures: something at the very name the
+// record takes in its quarantine, which no quarantine of this record put
+// there. The name being the expected one says nothing about whose it is.
+const occupants: [string, (at: string, fixture: { wanted: string; record: string }) => Promise<unknown>][] = [
+	["a file of somebody's notes", async at => await Bun.write(at, "ONLY COPY OF UNRELATED QUARANTINE NOTES")],
+	["a symlink", async (at, { wanted }) => await fs.symlink(wanted, at)],
+	["a FIFO", async at => expect(await Bun.spawn(["mkfifo", at]).exited).toBe(0)],
+	["a directory", async at => await Bun.write(path.join(at, "wanted"), "UNRELATED UNIQUE DATA")],
+	[
+		"the start of the record that another name holds as well",
+		async (at, { record }) => {
+			await fs.writeFile(at, (await Bun.file(record).bytes()).subarray(0, 10), { mode: 0o600 });
+			await fs.link(at, path.join(root, "also-wanted"));
+		},
+	],
+];
+for (const [shape, occupy] of occupants) {
+	test(`quarantine refuses, in its preview as in applying, when ${shape} has the record's name in the destination`, async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const destination = quarantineDestination(record);
+		await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+		const wanted = path.join(root, "wanted");
+		await Bun.write(wanted, "UNRELATED UNIQUE DATA");
+		const occupant = path.join(destination, record);
+		await occupy(occupant, { wanted, record: ground.record });
+		const before = await fs.lstat(occupant);
+		const held = before.isFile() ? await Bun.file(occupant).bytes() : undefined;
+
+		const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+		const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+		expect(preview.quarantine?.errors.join("\n")).toContain(occupant);
+		expect(applied.quarantine?.errors.join("\n")).toContain(occupant);
+		expect(applied.quarantine?.moved).toBe(false);
+		// Refused before anything moved: the stage and its record are where
+		// the killed run left them.
+		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+		expect(await Bun.file(ground.record).exists()).toBe(true);
+		expect(await fs.readdir(destination)).toEqual([record]);
+		// And whatever had the name still has it, as it was.
+		const after = await fs.lstat(occupant);
+		expect([after.ino, after.mode, after.nlink]).toEqual([before.ino, before.mode, before.nlink]);
+		if (held) expect(await Bun.file(occupant).bytes()).toEqual(held);
+		if (shape === "a directory")
+			expect(await Bun.file(path.join(occupant, "wanted")).text()).toBe("UNRELATED UNIQUE DATA");
+		expect(await Bun.file(wanted).text()).toBe("UNRELATED UNIQUE DATA");
+	});
+}
+
+test("a quarantine whose record is gone reports it moved only when its destination holds that record", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	await Bun.write(path.join(destination, record), "ONLY COPY OF UNRELATED QUARANTINE NOTES");
+	await fs.unlink(ground.record);
+
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	expect(applied.quarantine?.moved).toBe(false);
+	expect(applied.quarantine?.errors.length).toBeGreaterThan(0);
+	expect(await Bun.file(path.join(destination, record)).text()).toBe("ONLY COPY OF UNRELATED QUARANTINE NOTES");
+});
+
+test("quarantine refuses a ledger record that is a symlink, which no gc run writes", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const elsewhere = path.join(root, "record-elsewhere.json");
+	await fs.rename(ground.record, elsewhere);
+	await fs.symlink(elsewhere, ground.record);
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	expect(preview.quarantine?.errors.join("\n")).toContain("not a regular file");
+	expect(applied.quarantine?.errors.join("\n")).toContain("not a regular file");
+	expect(applied.quarantine?.moved).toBe(false);
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect((await fs.lstat(ground.record)).isSymbolicLink()).toBe(true);
+	expect(await fs.stat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
+});
+
+/**
+ * The ledger on one filesystem and the quarantine on another, as the review
+ * measured them: the record cannot go across by name, by `rename` or by
+ * `link`, and has to be copied.
+ */
+function recordAcrossFilesystems(record: string): { restore(): void } {
+	const spies = (["rename", "link"] as const).map(name => {
+		const real = fs[name];
+		return spyOn(fs, name).mockImplementation(async (from, to) => {
+			if (String(from) === record && String(to).includes(`${path.sep}gc-quarantine${path.sep}`)) {
+				throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+			}
+			return await real(from, to);
+		});
+	});
+	return {
+		restore() {
+			for (const spy of spies) spy.mockRestore();
+		},
+	};
+}
+
+for (const filesystems of ["across filesystems", "on one filesystem"] as const) {
+	test(`a quarantine ${filesystems} killed once its record is in the destination finishes when run again`, async () => {
+		const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+		const original = await Bun.file(ground.record).bytes();
+		const destination = quarantineDestination(record);
+		const across = filesystems === "across filesystems" ? recordAcrossFilesystems(ground.record) : undefined;
+		try {
+			// The review's kill point: the record is whole in the destination
+			// and its ledger entry not yet removed.
+			const realUnlink = fs.unlink;
+			let killed = false;
+			const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+				if (!killed && String(target) === ground.record) {
+					killed = true;
+					throw Object.assign(new Error("killed before the ledger entry went"), { code: "EINTR" });
+				}
+				return await realUnlink(target);
+			});
+			let first: GcResult;
+			try {
+				first = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			} finally {
+				unlink.mockRestore();
+			}
+			expect(killed).toBe(true);
+			expect(first.quarantine?.moved).toBe(false);
+			expect(await Bun.file(path.join(destination, record)).bytes()).toEqual(original);
+			expect(await Bun.file(ground.record).bytes()).toEqual(original);
+
+			const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+			const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			const repeated = await runGcCommand({
+				flags: { agentDir: root, quarantine: record, apply: true, json: true },
+			});
+
+			expect(preview.quarantine?.errors).toEqual([]);
+			expect(retried.quarantine?.errors).toEqual([]);
+			expect(retried.quarantine?.moved).toBe(true);
+			expect(repeated.quarantine?.errors).toEqual([]);
+			expect(repeated.quarantine?.moved).toBe(true);
+		} finally {
+			across?.restore();
+		}
+		expect(await Bun.file(path.join(destination, record)).bytes()).toEqual(original);
+		expect(await Bun.file(ground.record).exists()).toBe(false);
+		expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+		const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		expect(restored.restore?.errors).toEqual([]);
+		expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	});
+}
+
+for (const written of ["nothing", "half"] as const) {
+	test(`a quarantine across filesystems stopped with ${written} of its record copied finishes when run again`, async () => {
+		const { ground, record, liveArtifacts } = await archivedWithKilledStage();
+		const original = await Bun.file(ground.record).bytes();
+		const destination = quarantineDestination(record);
+		// What a kill inside the copy leaves: the stage already moved, as the
+		// command moves it first, and the copy created and part written.
+		await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+		await fs.rename(ground.dir, path.join(destination, path.basename(ground.dir)));
+		const copied = written === "nothing" ? 0 : Math.floor(original.length / 2);
+		await fs.writeFile(path.join(destination, record), original.subarray(0, copied), { mode: 0o600 });
+		const before = await fs.stat(path.join(destination, record));
+
+		const across = recordAcrossFilesystems(ground.record);
+		let preview: GcResult;
+		let retried: GcResult;
+		let repeated: GcResult;
+		try {
+			preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+			retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+			repeated = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		} finally {
+			across.restore();
+		}
+
+		expect(preview.quarantine?.errors).toEqual([]);
+		expect(retried.quarantine?.errors).toEqual([]);
+		expect(retried.quarantine?.moved).toBe(true);
+		expect(repeated.quarantine?.moved).toBe(true);
+		// Finished in the file the copy began, not in one put over it.
+		expect((await fs.stat(path.join(destination, record))).ino).toBe(before.ino);
+		expect(await Bun.file(path.join(destination, record)).bytes()).toEqual(original);
+		expect(await Bun.file(ground.record).exists()).toBe(false);
+		const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		expect(restored.restore?.errors).toEqual([]);
+		expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+	});
+}
