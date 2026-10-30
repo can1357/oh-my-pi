@@ -1035,6 +1035,8 @@ export interface UserWaitStartEvent {
 	type: "user_wait_start";
 	/** What the session is asking a person to decide. */
 	prompt: string;
+	/** Whether the dialog approves an operation or asks a question; absent when its opener named no classification. */
+	kind?: "permission" | "question";
 }
 
 /** The last dialog waiting on a person settled; the turn goes on. */

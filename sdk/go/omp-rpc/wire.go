@@ -4510,6 +4510,8 @@ func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 type UserWaitStartEvent struct {
 	// What the session is asking a person to decide.
 	Prompt string `json:"prompt"`
+	// Whether the dialog approves an operation or asks a question; absent when its opener named no classification.
+	Kind *UserWaitStartEventKind `json:"kind,omitempty"`
 }
 
 func (v *UserWaitStartEvent) UnmarshalJSON(data []byte) error {
@@ -4521,6 +4523,7 @@ func (v *UserWaitStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "UserWaitStartEvent"}
 	d.constant("type", "user_wait_start")
 	d.required("prompt", &out.Prompt)
+	d.optional("kind", &out.Kind)
 	if d.err != nil {
 		return d.err
 	}
@@ -4531,6 +4534,26 @@ func (v *UserWaitStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 func (v UserWaitStartEvent) MarshalJSON() ([]byte, error) {
 	type plain UserWaitStartEvent
 	return encodeObject(plain(v), `"type":"user_wait_start"`, nil)
+}
+
+type UserWaitStartEventKind string
+
+const (
+	UserWaitStartEventKindPermission UserWaitStartEventKind = "permission"
+	UserWaitStartEventKindQuestion   UserWaitStartEventKind = "question"
+)
+
+func (v *UserWaitStartEventKind) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "UserWaitStartEventKind")
+	if err != nil {
+		return err
+	}
+	switch value := UserWaitStartEventKind(s); value {
+	case UserWaitStartEventKindPermission, UserWaitStartEventKindQuestion:
+		*v = value
+		return nil
+	}
+	return unknownValue("UserWaitStartEventKind", s)
 }
 
 // The last dialog waiting on a person settled; the turn goes on.

@@ -194,7 +194,14 @@ export const eventDefs = {
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
 	UserWaitStartEvent: doc(
-		{ type: "'user_wait_start'", prompt: doc("string", "What the session is asking a person to decide.") },
+		{
+			type: "'user_wait_start'",
+			prompt: doc("string", "What the session is asking a person to decide."),
+			"kind?": doc(
+				"'permission' | 'question'",
+				"Whether the dialog approves an operation or asks a question; absent when its opener named no classification.",
+			),
+		},
 		"The session opened a dialog only a person can answer and the turn is held until it settles.",
 	),
 	UserWaitEndEvent: doc({ type: "'user_wait_end'" }, "The last dialog waiting on a person settled; the turn goes on."),

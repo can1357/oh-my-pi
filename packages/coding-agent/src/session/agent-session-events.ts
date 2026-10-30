@@ -9,6 +9,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
+import type { BlockedKind } from "../utils/run-status";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
@@ -113,8 +114,20 @@ export type AgentSessionEvent =
 	// asked and is emitted when the first one opens; `end` when the last one
 	// settles. Without these a surface showing run state cannot tell a session
 	// that is working from one that has been waiting for a person for hours.
-	| { type: "user_wait_start"; prompt: string }
+	// `prompt` and `kind` are the dialog's own words and classification, so a
+	// surface that attaches mid-wait (a focus rebuild, a reconnecting RPC
+	// client) reports the operation being approved rather than a generic label
+	// it has no way to refine.
+	| ({ type: "user_wait_start" } & UserWaitFrame)
 	| { type: "user_wait_end" };
+
+/** What one dialog waiting on a person asks, and how a surface that reports run state classifies it. */
+export interface UserWaitFrame {
+	/** The dialog's own words: the operation it asks to approve, or the question it asks. */
+	prompt: string;
+	/** Absent when the opener named no classification; such a wait reads as a question. */
+	kind?: BlockedKind;
+}
 
 /**
  * What `user_wait_start` carries when the caller named nothing: an SDK caller

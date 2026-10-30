@@ -4352,6 +4352,14 @@
 				"prompt": {
 					"type": "string",
 					"description": "What the session is asking a person to decide."
+				},
+				"kind": {
+					"enum": [
+						"permission",
+						"question"
+					],
+					"type": "string",
+					"description": "Whether the dialog approves an operation or asks a question; absent when its opener named no classification."
 				}
 			},
 			"required": [

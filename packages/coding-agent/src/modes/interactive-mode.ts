@@ -2405,7 +2405,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// guarantees the decision persists even when the prompt is triggered
 		// from a subagent whose own `Settings` is an in-memory snapshot.
 		setAutoQaConsentHandler(
-			() => this.session.waitForUser(() => this.#promptAutoQaConsent(), "auto-QA consent"),
+			() => this.session.waitForUser(() => this.#promptAutoQaConsent(), "auto-QA consent", { kind: "permission" }),
 			Settings.instance,
 		);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
@@ -2421,6 +2421,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					? this.session.waitForUser(
 							() => this.#promptCfgChange(request, options?.signal),
 							`a cfg:// write of ${request.path}`,
+							{ kind: "permission" },
 						)
 					: this.#promptCfgChange(request, options?.signal),
 			applied: change => {

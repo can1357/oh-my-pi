@@ -431,13 +431,14 @@ export class EventController {
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			user_wait_start: async event => {
-				this.#sessionUserWait = { state: "blocked", kind: "question", msg: event.prompt };
+				this.#sessionUserWait = { state: "blocked", kind: event.kind ?? "question", msg: event.prompt };
 				// A tool's own dialog opens this bracket too, through the extension
-				// UI tracker, and the label it carries is generic ("an extension
-				// approve dialog"). The prompt already recorded for that tool call
-				// names the actual question and its `permission` kind, so it stays
-				// the one reported; the session wait is what is left when no tool
-				// prompt is waiting.
+				// UI tracker; the frame it publishes carries that dialog's own
+				// words and kind. The prompt recorded for the tool call is the
+				// same wait seen from the run's side, so either names the
+				// operation; it stays the one reported, and the session wait is
+				// what is left when no tool prompt is waiting — a dialog with no
+				// run behind it, or one replayed onto a rebuilt view.
 				setRunStatus(this.#blockingPrompts.values().next().value ?? this.#sessionUserWait);
 				this.ctx.ui.requestRender();
 			},

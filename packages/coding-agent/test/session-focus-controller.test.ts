@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -20,6 +20,11 @@ import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
+import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 
 interface SessionStub {
 	session: AgentSession;
@@ -868,6 +873,65 @@ describe("SessionFocusController", () => {
 		await firstFocus;
 		expect(h.controller.target).toBe(newer.session);
 		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer view stays active");
+	});
+
+	it("restores an unanswered approval's kind and operation when focus returns to it", async () => {
+		// The attach wipes the controller's per-call approval records, so the
+		// replayed `user_wait_start` is the only thing left that knows a person
+		// owes an approval. A frame that named only the wrapper's dialog method
+		// left the OSC 7501 record reporting a generic question, hiding which
+		// operation is being approved.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const live = createLiveSession();
+		const ctx = createInteractiveModeContext({ session: live });
+		const events = new EventController(ctx);
+		ctx.eventController = events;
+		const registry = new AgentRegistry();
+		const worker = createInteractiveModeContext({
+			session: {
+				settleInFlightMessagePersistence: async () => {},
+				activeToolExecutionUpdates: () => [],
+				activeUserWait: () => undefined,
+			},
+		}).session;
+		registerSub(registry, "Worker", worker, MAIN_AGENT_ID);
+		const lifecycle = new AgentLifecycleManager(registry);
+		const focus = new SessionFocusController(ctx, registry, () => lifecycle);
+		Object.defineProperty(ctx, "viewSession", { get: () => focus.target ?? ctx.session, configurable: true });
+		const answered = Promise.withResolvers<"once">();
+		const ui = trackUserWaits({ approve: () => answered.promise } as unknown as ExtensionUIContext, (dialog, frame) =>
+			live.waitForUser(dialog, frame.prompt, { kind: frame.kind }),
+		);
+
+		try {
+			const approval = ui.approve?.({
+				full: "Allow tool: bash\nCommand: echo first",
+				compact: "Allow tool: bash — echo first",
+			});
+			// What the live subscription delivers while the dialog is open.
+			await events.handleEvent({ type: "agent_start" });
+			await events.handleEvent(live.activeUserWait()!);
+			expect(report).toHaveBeenLastCalledWith({
+				state: "blocked",
+				kind: "permission",
+				msg: "Allow tool: bash — echo first",
+			});
+
+			await focus.focusAgent("Worker");
+			await focus.unfocus();
+			expect(report).toHaveBeenLastCalledWith({
+				state: "blocked",
+				kind: "permission",
+				msg: "Allow tool: bash — echo first",
+			});
+
+			answered.resolve("once");
+			await approval;
+		} finally {
+			focus.dispose();
+			report.mockRestore();
+			await live.dispose();
+		}
 	});
 });
 

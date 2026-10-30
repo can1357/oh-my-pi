@@ -8,7 +8,8 @@
 
 ### Fixed
 
-- Fixed a session that reached its coding-plan reserve waiting forever on the "Coding-plan reserve reached" prompt while its terminal title still showed a working run: a dialog only a person can answer (this prompt, an MCP sign-in, a `cfg://` write, a plan approval, an ACP permission request) now reports the run as blocked, so the title a tmux pane shows carries the `π !` attention separator and the OSC 7501 record says `state=blocked:kind=question` ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a session that reached its coding-plan reserve waiting forever on the "Coding-plan reserve reached" prompt while its terminal title still showed a working run: a dialog only a person can answer (this prompt, an MCP sign-in, a `cfg://` write, a plan approval, a tool or ACP permission request) now reports the run as blocked, so the title a tmux pane shows carries the `π !` attention separator and the OSC 7501 record says `state=blocked` with that dialog's own words and kind — `permission` for an approval, `question` otherwise — kept while a second approval waits behind it and after the view returns from another agent ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an SDK session built without an agent id spinning its settle watch at full speed while a background job owned by another agent ran, starving terminal input and background-completion callbacks ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

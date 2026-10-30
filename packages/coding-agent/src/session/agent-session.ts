@@ -288,10 +288,12 @@ import {
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import type { BlockedKind } from "../utils/run-status";
 import {
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
 	UNNAMED_USER_WAIT_PROMPT,
+	type UserWaitFrame,
 } from "./agent-session-events";
 import type {
 	AgentSessionConfig,
@@ -1241,7 +1243,7 @@ export class AgentSession implements SettingsScope {
 	 * while others are still open, the next one is published in its place, so no
 	 * surface keeps naming a dialog that is gone.
 	 */
-	#openUserWaits = new Map<number, string>();
+	#openUserWaits = new Map<number, UserWaitFrame>();
 	#userWaitSeq = 0;
 	/**
 	 * The `user_wait_start` frame currently published for the open dialogs, kept
@@ -1391,22 +1393,27 @@ export class AgentSession implements SettingsScope {
 	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
 	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
 	 *
-	 * `prompt` names what is being asked. The bracket is published as
+	 * `prompt` names what is being asked and `options.kind` classifies it (an
+	 * approval of an operation, or a question). The bracket is published as
 	 * `user_wait_start`/`user_wait_end` so every surface that shows run state —
 	 * the terminal title a tmux pane shows, the OSC 7501 record, an RPC host —
-	 * reports a session waiting for a person instead of one still working.
-	 * It is optional because this method is public API: an SDK caller written
+	 * reports a session waiting for a person instead of one still working, and
+	 * names what it waits on even when it attached after the dialog opened.
+	 * Both are optional because this method is public API: an SDK caller written
 	 * against the one-argument signature keeps compiling, and its wait is
 	 * published under {@link UNNAMED_USER_WAIT_PROMPT} rather than as a frame
 	 * with no `prompt`, which a strict wire decoder would reject.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>, prompt?: string): Promise<T> {
+	async waitForUser<T>(dialog: () => Promise<T>, prompt?: string, options?: { kind?: BlockedKind }): Promise<T> {
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
 		}
-		this.#openUserWaits.set(waitId, prompt ?? UNNAMED_USER_WAIT_PROMPT);
+		this.#openUserWaits.set(waitId, {
+			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
+			...(options?.kind ? { kind: options.kind } : {}),
+		});
 		this.#publishOpenUserWait();
 		try {
 			return await dialog();
@@ -1428,14 +1435,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Publish the oldest open dialog as the session's wait, if it is not the one
-	 * already published. A second dialog opening behind the first changes
-	 * nothing; the first one settling behind a second republishes.
+	 * Publish the oldest open dialog as the session's wait, unless the same
+	 * question is already published. A second dialog opening behind the first
+	 * changes nothing; the first one settling behind a second republishes, so
+	 * no surface keeps reporting a dialog that is gone or a classification that
+	 * belongs to one.
 	 */
 	#publishOpenUserWait(): void {
-		const prompt = this.#openUserWaits.values().next().value;
-		if (prompt === undefined || prompt === this.#openUserWait?.prompt) return;
-		this.#openUserWait = { type: "user_wait_start", prompt };
+		const frame = this.#openUserWaits.values().next().value;
+		if (frame === undefined) return;
+		if (frame.prompt === this.#openUserWait?.prompt && frame.kind === this.#openUserWait?.kind) return;
+		this.#openUserWait = { type: "user_wait_start", ...frame };
 		this.#emit(this.#openUserWait);
 	}
 
@@ -2468,7 +2478,7 @@ export class AgentSession implements SettingsScope {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: (dialog, prompt) => this.waitForUser(dialog, prompt),
+			waitForUser: (dialog, prompt, options) => this.waitForUser(dialog, prompt, options),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3233,7 +3243,7 @@ export class AgentSession implements SettingsScope {
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
 		this.#planProposalHandler = handler
-			? title => this.waitForUser(() => handler(title), "a plan approval")
+			? title => this.waitForUser(() => handler(title), "a plan approval", { kind: "permission" })
 			: undefined;
 	}
 

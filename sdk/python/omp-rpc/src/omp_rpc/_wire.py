@@ -1244,6 +1244,8 @@ class UserWaitStartEvent:
     type: Literal["user_wait_start"] = "user_wait_start"
     prompt: str
     """What the session is asking a person to decide."""
+    kind: Literal["permission", "question"] | None = None
+    """Whether the dialog approves an operation or asks a question; absent when its opener named no classification."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2682,6 +2684,7 @@ def parse_user_wait_start_event(value: object, path: str = "UserWaitStartEvent")
     required(payload, "type", cast('Decoder[Literal["user_wait_start"]]', literal(frozenset({"user_wait_start"}))), path)
     return UserWaitStartEvent(
         prompt=required(payload, "prompt", decode_str, path),
+        kind=optional(payload, "kind", cast('Decoder[Literal["permission", "question"]]', literal(frozenset({"permission", "question"}))), path),
     )
 
 

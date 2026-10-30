@@ -298,4 +298,39 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
+
+	it("keeps the permission kind and names the approval still waiting when an overlapping one ends", async () => {
+		// Two approvals overlap. The session publishes the oldest open dialog as
+		// its wait, with that dialog's own words and kind, and republishes the
+		// next one when it settles. Both the tool-start of the second approval
+		// and the tool-end of the first report through the session wait, so a
+		// frame that lost its classification would leave the OSC 7501 consumer
+		// reading `question` with no idea which operation is being approved.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = {
+			name: "bash",
+			label: "Bash",
+			formatApprovalDetails: (args: { command: string }) => [`Command: ${args.command}`],
+		} as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const firstDialog = "Allow tool: bash\nCommand: echo first";
+		const secondDialog = "Allow tool: bash\nCommand: echo second";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo first" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: firstDialog, kind: "permission" });
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "echo second" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: firstDialog });
+
+		// The first dialog is answered: the session republishes the one still
+		// open, and only then does the first tool call end.
+		await controller.handleEvent({ type: "user_wait_start", prompt: secondDialog, kind: "permission" });
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: secondDialog });
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		await controller.handleEvent(toolEnd("bash-2", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
 });

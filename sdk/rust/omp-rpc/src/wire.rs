@@ -3916,6 +3916,9 @@ pub struct QueueUpdateEvent {
 pub struct UserWaitStartEvent {
 	/// What the session is asking a person to decide.
 	pub prompt: String,
+	/// Whether the dialog approves an operation or asks a question; absent when its opener named no classification.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub kind: Option<UserWaitStartEventKind>,
 }
 
 /// The last dialog waiting on a person settled; the turn goes on.
@@ -5895,6 +5898,24 @@ impl LogoutAccountType {
 		match self {
 			Self::ApiKey => "api_key",
 			Self::Oauth => "oauth",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserWaitStartEventKind {
+	#[serde(rename = "permission")]
+	Permission,
+	#[serde(rename = "question")]
+	Question,
+}
+
+impl UserWaitStartEventKind {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Permission => "permission",
+			Self::Question => "question",
 		}
 	}
 }
