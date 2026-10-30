@@ -15,7 +15,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import {
+	ExtensionRuntime,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
@@ -25,7 +29,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	Extension,
+	ExtensionContext,
 	ExtensionError,
+	ExtensionFactory,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
@@ -33,6 +39,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1845,6 +1852,311 @@ describe("ExtensionRunner", () => {
 				uiContext,
 			);
 		};
+
+		const runnerFromFactory = async (factory: ExtensionFactory): Promise<ExtensionRunner> => {
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				factory,
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"test://handler-options",
+			);
+			return new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		it("overrides only the registered handler and event, keeping sibling deadlines unchanged", async () => {
+			testSetExtensionHandlerTimeoutMs(10);
+			const release = Promise.withResolvers<void>();
+			const sessionStarted = Promise.withResolvers<void>();
+			const siblingStarted = Promise.withResolvers<void>();
+			const agentStarted = Promise.withResolvers<void>();
+			const completed: string[] = [];
+			const runner = await runnerFromFactory(pi => {
+				const slow = async (event: { type: string }, ctx: ExtensionContext) => {
+					if (event.type === "session_start") {
+						sessionStarted.resolve();
+						await release.promise;
+						completed.push(event.type);
+					} else {
+						agentStarted.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+					}
+				};
+				pi.on("session_start", slow, { timeoutMs: 1000 });
+				pi.on("session_start", async (_event, ctx) => {
+					siblingStarted.resolve();
+					await new Promise<void>(resolve => {
+						ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+					});
+				});
+				pi.on("agent_start", slow);
+			});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			vi.useFakeTimers();
+			try {
+				const pending = runner.emit({ type: "session_start" });
+				await sessionStarted.promise;
+				vi.advanceTimersByTime(30);
+				release.resolve();
+				await siblingStarted.promise;
+				vi.advanceTimersByTime(10);
+				await pending;
+				const otherEvent = runner.emit({ type: "agent_start" });
+				await agentStarted.promise;
+				vi.advanceTimersByTime(10);
+				await otherEvent;
+				expect(completed).toEqual(["session_start"]);
+				expect(errors.map(error => [error.event, error.error])).toEqual([
+					["session_start", "handler timed out after 10ms"],
+					["agent_start", "handler timed out after 10ms"],
+				]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it.each([0, 65_000])(
+			"honors timeoutMs %i on input and assistant_message special dispatch paths",
+			async timeoutMs => {
+				testSetExtensionHandlerTimeoutMs(10);
+				const releaseInput = Promise.withResolvers<void>();
+				const releaseAssistant = Promise.withResolvers<void>();
+				const inputStarted = Promise.withResolvers<void>();
+				const assistantStarted = Promise.withResolvers<void>();
+				const runner = await runnerFromFactory(pi => {
+					pi.on(
+						"input",
+						async event => {
+							inputStarted.resolve();
+							await releaseInput.promise;
+							return { text: `${event.text} translated` };
+						},
+						{ timeoutMs },
+					);
+					pi.on(
+						"assistant_message",
+						async () => {
+							assistantStarted.resolve();
+							await releaseAssistant.promise;
+							return { content: [{ type: "text", text: "translated response" }] };
+						},
+						{ timeoutMs },
+					);
+				});
+				const errors: ExtensionError[] = [];
+				runner.onError(error => errors.push(error));
+				vi.useFakeTimers();
+				try {
+					const pendingInput = runner.emitInput("hello", undefined, "interactive");
+					await inputStarted.promise;
+					vi.advanceTimersByTime(60_000);
+					releaseInput.resolve();
+					expect(await pendingInput).toEqual({ text: "hello translated" });
+					const message = createAssistantMessage("original response");
+					const pendingAssistant = runner.emitAssistantMessage(message);
+					await assistantStarted.promise;
+					vi.advanceTimersByTime(60_000);
+					releaseAssistant.resolve();
+					expect(await pendingAssistant).toEqual([{ type: "text", text: "translated response" }]);
+					expect(message.content).toEqual([{ type: "text", text: "original response" }]);
+					expect(errors).toEqual([]);
+				} finally {
+					vi.useRealTimers();
+				}
+			},
+		);
+
+		it("rejects input when its override expires without forwarding a late transform", async () => {
+			const started = Promise.withResolvers<void>();
+			const runner = await runnerFromFactory(pi => {
+				pi.on(
+					"input",
+					async (_event, ctx) => {
+						started.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+						return { text: "late translation" };
+					},
+					{ timeoutMs: 10 },
+				);
+			});
+			vi.useFakeTimers();
+			try {
+				const pending = runner.emitInput("original", undefined, "interactive");
+				await started.promise;
+				vi.advanceTimersByTime(10);
+				expect(await pending).toEqual({ reject: "handler timed out after 10ms" });
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("reports the effective tool_call override and remains fail-closed", async () => {
+			testSetExtensionHandlerTimeoutMs(1000);
+			const started = Promise.withResolvers<void>();
+			const runner = await runnerFromFactory(pi => {
+				pi.on(
+					"tool_call",
+					async (_event, ctx) => {
+						started.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+					},
+					{ timeoutMs: 10 },
+				);
+			});
+			vi.useFakeTimers();
+			try {
+				const pending = runner.emitToolCall({
+					type: "tool_call",
+					toolName: "guarded",
+					toolCallId: "override-call",
+					input: {},
+				});
+				await started.promise;
+				vi.advanceTimersByTime(10);
+				expect(await pending).toEqual({
+					block: true,
+					reason: "Extension test://handler-options timed out after 10ms",
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it.each([0, 65_000])("cancels a handler with timeoutMs %i externally after a queued wait", async timeoutMs => {
+			const started = Promise.withResolvers<void>();
+			let handlerSignal: AbortSignal | undefined;
+			const runner = await runnerFromFactory(pi => {
+				pi.on(
+					"session_stop",
+					async (_event, ctx) => {
+						handlerSignal = ctx.abortSignal;
+						started.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+					},
+					{ timeoutMs },
+				);
+			});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const controller = new AbortController();
+			vi.useFakeTimers();
+			try {
+				const pending = runner.emitSessionStop({
+					messages: [],
+					turn_id: 0,
+					session_id: "test",
+					stop_hook_active: false,
+					signal: controller.signal,
+				});
+				await started.promise;
+				vi.advanceTimersByTime(31_000);
+				expect(handlerSignal?.aborted).toBe(false);
+				controller.abort();
+				await pending;
+				expect(handlerSignal?.aborted).toBe(true);
+				expect(errors).toEqual([]);
+			} finally {
+				controller.abort();
+				vi.useRealTimers();
+			}
+		});
+
+		it.each([0, 65_000])("keeps concurrent assistant handlers independently cancellable with timeoutMs %i", async timeoutMs => {
+			const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const handlerSignals: AbortSignal[] = [];
+			const runner = await runnerFromFactory(pi => {
+				pi.on(
+					"assistant_message",
+					async (_event, ctx) => {
+						const index = handlerSignals.length;
+						handlerSignals.push(ctx.abortSignal!);
+						started[index]!.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+					},
+					{ timeoutMs },
+				);
+			});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const first = new AbortController();
+			const second = new AbortController();
+			vi.useFakeTimers();
+			try {
+				const firstPending = runner.emitAssistantMessage(createAssistantMessage("first"), first.signal);
+				await started[0]!.promise;
+				const secondPending = runner.emitAssistantMessage(createAssistantMessage("second"), second.signal);
+				await started[1]!.promise;
+				vi.advanceTimersByTime(60_000);
+				expect(handlerSignals.map(signal => signal.aborted)).toEqual([false, false]);
+				first.abort();
+				await firstPending;
+				expect(handlerSignals.map(signal => signal.aborted)).toEqual([true, false]);
+				second.abort();
+				await secondPending;
+				expect(handlerSignals.map(signal => signal.aborted)).toEqual([true, true]);
+				expect(errors).toEqual([]);
+			} finally {
+				first.abort();
+				second.abort();
+				vi.useRealTimers();
+			}
+		});
+
+		it.each([0, 65_000])("caps shutdown timeoutMs %i at the dedicated shutdown deadline", async timeoutMs => {
+			testSetSessionShutdownHandlerTimeoutMs(10);
+			const started = Promise.withResolvers<void>();
+			let handlerSignal: AbortSignal | undefined;
+			const runner = await runnerFromFactory(pi => {
+				pi.on(
+					"session_shutdown",
+					async (_event, ctx) => {
+						handlerSignal = ctx.abortSignal;
+						started.resolve();
+						await new Promise<void>(resolve => {
+							ctx.abortSignal!.addEventListener("abort", () => resolve(), { once: true });
+						});
+					},
+					{ timeoutMs },
+				);
+			});
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			vi.useFakeTimers();
+			try {
+				const pending = runner.emit({ type: "session_shutdown" });
+				await started.promise;
+				vi.advanceTimersByTime(9);
+				expect(handlerSignal?.aborted).toBe(false);
+				vi.advanceTimersByTime(1);
+				await pending;
+				expect(handlerSignal?.aborted).toBe(true);
+				expect(errors.map(error => error.error)).toEqual(["handler timed out after 10ms"]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("rejects negative, nonfinite, and oversized deadlines at registration", async () => {
+			for (const timeoutMs of [-1, Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, 2_147_483_648]) {
+				await expect(
+					runnerFromFactory(pi => {
+						pi.on("input", () => {}, { timeoutMs });
+					}),
+				).rejects.toThrow("Handler timeoutMs must be finite, nonnegative, and at most 2147483647");
+			}
+		});
 
 		it("times out session_start handlers, emits an error, and continues to sibling extensions", async () => {
 			const hangExtensionPath = path.join(tempDir.path(), "hang-session-start.ts");
@@ -4759,6 +5071,7 @@ describe("ExtensionRunner", () => {
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextDisplayRenderers: [],
 				assistantTextRenderers: [],
 				linkSchemes: [],
 				fileWriteFallbackHandlers: [],

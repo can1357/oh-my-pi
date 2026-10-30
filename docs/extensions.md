@@ -572,6 +572,12 @@ prompt-template expansion, and queue insertion:
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
 and `images: []` removes attachments. Replacement text is trimmed before dispatch.
+`reject: "reason"` rejects the submission before command interpretation or model
+dispatch and restores its original text and attachments alongside any newer draft.
+Rejection takes precedence over `handled`, `text`, and `images`. Handler exceptions
+and timeouts also reject instead of forwarding untranslated or partially transformed
+input. Results from a previous session or focus are discarded without modifying the
+new session's editor.
 `handled: true` stops the remaining handlers and normal dispatch. Empty text with
 no remaining images also stops normal dispatch. Work explicitly scheduled by a
 handler through `sendUserMessage` or `sendMessage` is not discarded.
@@ -585,9 +591,11 @@ Print and ACP input are outside this interception contract.
 
 Ctrl+Enter detaches the submitted draft before awaiting native handlers, so
 another submission cannot reuse it and ordinary later typing remains a new draft.
-Handled/empty input consumes only the detached submission. Dispatch failures
-restore its text and attachments alongside any newer draft. This does not make
-the established interactive input-handler chain cancellable by Esc.
+Handled/empty input consumes only the detached submission. Rejected input restores
+the original, pre-transform draft; dispatch failures restore the dispatched text
+and attachments alongside any newer draft. The input-handler chain is not globally
+cancellable by Esc; an extension may use `ui.onTerminalInput` to abort its own
+request and return `reject`, and must remove that listener when the request settles.
 Builtin submission cleanup also preserves the newer draft, including `/clear`
 and `/new`. Commands retain their explicit prefill and session-transition actions.
 
@@ -1364,8 +1372,8 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 ## Constraints and pitfalls
 
 - Session actions are unavailable during extension load; registration methods, `getFlag`, and `exec` are available.
-- `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
-- Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
+- `tool_call` errors and timeouts block execution (fail-closed). Its default budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
+- `pi.on(event, handler, { timeoutMs })` overrides only that handler's budget for that event, including `input`, `assistant_message`, and `message_end`. The value must be finite, nonnegative, and at most 2,147,483,647 ms. Zero disables the deadline for handlers managing their own cancellable waits; it does not disable cancellation through `ctx.abortSignal`. Without an override, most handlers retain their 30-second budget. `session_shutdown` handlers run concurrently and remain capped at 2 seconds, including when zero or a larger override is requested. Input failures reject the submission; tool-call failures block execution. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
 - Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
 - Treat `ctx.reload()` as terminal for the current command handler frame.

@@ -1,7 +1,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
+import {
+	matchSessionPinAccounts,
+	toSessionPinAccounts,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
 
 beforeAll(async () => {
 	await initTheme();
@@ -49,5 +52,8 @@ describe("SessionAccountSelectorComponent", () => {
 		);
 		ctrlCComponent.handleInput("\x03");
 		expect(cancellations).toBe(2);
+	});
+	it("matches a unique email local-part for slash-command account selection", () => {
+		expect(matchSessionPinAccounts(accounts, "sec").map(account => account.credentialId)).toEqual([12]);
 	});
 });

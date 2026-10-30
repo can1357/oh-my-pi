@@ -51,4 +51,23 @@ describe("narration returned as thinking", () => {
 	it("keeps unmarked thinking hidden", () => {
 		expect(rendered(turn(false))).not.toContain(NARRATION);
 	});
+
+	it("projects narration as answer prose on redraw without changing signed replay content", () => {
+		const source = turn(true);
+		const snapshot = JSON.stringify(source);
+		for (const block of source.content) Object.freeze(block);
+		Object.freeze(source.content);
+		Object.freeze(source);
+		const component = new AssistantMessageComponent(source, true, undefined, [], undefined, true, undefined, [
+			text => (text === NARRATION ? { text: "构建仍在运行。" } : undefined),
+		]);
+		for (let redraw = 0; redraw < 2; redraw++) {
+			component.updateContent(source);
+			const output = Bun.stripANSI(component.render(100).join("\n"));
+			expect(output).toContain("构建仍在运行。");
+			expect(output).not.toContain(NARRATION);
+			expect(output).not.toContain(REASONING);
+			expect(JSON.stringify(source)).toBe(snapshot);
+		}
+	});
 });

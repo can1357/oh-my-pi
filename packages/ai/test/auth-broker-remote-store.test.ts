@@ -79,6 +79,74 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		}
 	});
 
+	test("filtered cache-prefix deletion preserves selected rows and unrelated prefixes", () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({ client });
+		const expiresAtSec = Math.floor(Date.now() / 1000) + 60;
+		const strict = JSON.stringify({ strict: true });
+		remote.setCache("session:sticky:strict", strict, expiresAtSec);
+		remote.setCache("session:sticky:ordinary", "drop", expiresAtSec);
+		remote.setCache("other:ordinary", "drop", expiresAtSec);
+
+		remote.deleteCachePrefix("session:sticky:", value => value === "drop");
+		expect(remote.getCache("session:sticky:strict")).toBe(strict);
+		expect(remote.getCache("session:sticky:ordinary")).toBeNull();
+		expect(remote.getCache("other:ordinary")).toBe("drop");
+		remote.deleteCachePrefix("session:sticky:");
+		expect(remote.getCache("session:sticky:strict")).toBeNull();
+	});
+
+	test("filtered cache deletion frees capacity without evicting retained rows", () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({ client });
+		const expiresAtSec = Math.floor(Date.now() / 1000) + 60;
+		remote.setCache("sticky:strict", "keep", expiresAtSec);
+		remote.setCache("sticky:ordinary", "x".repeat(3 * 1024 * 1024), expiresAtSec);
+		remote.deleteCachePrefix("sticky:", value => value !== "keep");
+		const replacement = "y".repeat(2 * 1024 * 1024);
+		remote.setCache("other:replacement", replacement, expiresAtSec);
+		expect(remote.getCache("sticky:ordinary")).toBeNull();
+		expect(remote.getCache("sticky:strict")).toBe("keep");
+		expect(remote.getCache("other:replacement")).toBe(replacement);
+	});
+
+	test.each(["entries", "characters"] as const)(
+		"strict broker pins survive affinity eviction and %s cache pressure",
+		async pressure => {
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("a", Date.now() + 3_600_000));
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 3_600_000));
+			remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+			await waitUntil(() => remote!.snapshot.credentials.length === 2);
+			const routed = new AuthStorage(remote);
+			try {
+				await routed.credentials.reload();
+				const [target, sibling] = routed.oauth.accounts("anthropic");
+				if (!target || !sibling) throw new Error("expected two broker accounts");
+				const sessionId = "strict-idle";
+				expect(routed.sessions.pin("anthropic", sessionId, target.credentialId, { strict: true })).toBe(true);
+				for (let index = 0; index < 300; index++) {
+					routed.sessions.pin("anthropic", `ordinary-${index}`, sibling.credentialId);
+				}
+				const expiry = Math.floor(Date.now() / 1000) + 60;
+				if (pressure === "entries") {
+					for (let index = 0; index < 4200; index++) remote.setCache(`usage:${index}`, "cached", expiry);
+				} else {
+					const value = "x".repeat(3 * 1024 * 1024);
+					remote.setCache("usage:large-a", value, expiry);
+					remote.setCache("usage:large-b", value, expiry);
+				}
+				expect(routed.sessions.mode("anthropic", sessionId)).toBe("strict");
+				expect(await routed.keys.get("anthropic", sessionId)).toBe("access-a");
+
+				expect(routed.sessions.pin("anthropic", sessionId, sibling.credentialId)).toBe(true);
+				expect(routed.sessions.mode("anthropic", sessionId)).toBe("pinned");
+				expect(await routed.keys.get("anthropic", sessionId)).toBe("access-b");
+			} finally {
+				routed.close();
+			}
+		},
+	);
+
 	test("consumes initial snapshot, upsert, and removal over SSE without manual refresh", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		remote = new RemoteAuthCredentialStore({ client });

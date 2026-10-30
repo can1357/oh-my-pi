@@ -8,6 +8,9 @@
 
 ### Fixed
 
+- Preserved filtered deletion of broker session-affinity caches with bounded-cache accounting, so clearing ordinary affinity keeps strict pins and releases the deleted rows' capacity.
+- Strict account locks now survive gateway authentication invalidation and broker cache pressure; ordinary broker cache rows remain bounded while strict locks expire or are explicitly cleared.
+
 - Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); each call now reaches the client as one of its own tools and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 30 minutes; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 
@@ -452,6 +455,8 @@
 
 ### Added
 
+- Added strict per-session OAuth account pins: `SessionsApi.pin({ strict: true })` prevents all credential fallback (sibling OAuth accounts, login keys, env vars) when the pinned account is blocked or unavailable; strict pins survive credential deletion, `/fresh`, and subagent inheritance. Added `SessionsApi.mode()` and `SessionsApi.automatic()` for routing-mode introspection and explicit opt-out.
+- Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
 - Auth gateway route option `excludeProviders` leaves those providers' accounts out of `/v1/usage` and `/v1/credentials/check` ([#14755](https://github.com/can1357/oh-my-pi/pull/14755) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
