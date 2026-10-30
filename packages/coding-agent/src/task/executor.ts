@@ -3650,7 +3650,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	const adopted = AgentLifecycleManager.global().adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -3659,6 +3659,11 @@ export async function finalizeSubagentLifecycle(args: {
 		},
 		ref,
 	);
+	// Exactly one of the two happens on every path out of this function: the
+	// lifecycle takes the agent and what the caller holds for it, or this runs
+	// the release. A manager tearing down refuses the adoption, and the hold it
+	// declined would otherwise belong to nobody.
+	if (!adopted) await releaseOwnedResources();
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */

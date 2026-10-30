@@ -5,6 +5,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createReleaseHold } from "@oh-my-pi/pi-coding-agent/utils/release-hold";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
@@ -523,6 +524,78 @@ describe("AgentLifecycleManager", () => {
 		expect(releaseResource).toHaveBeenCalledTimes(1);
 		expect(lifecycle.has("Removed-Sub")).toBe(false);
 		expect(lifecycle.owesRelease("Removed-Sub")).toBe(false);
+	});
+
+	it("keeps a release in flight visible to the manager that replaces the one that owes it", async () => {
+		// Teardown past its deadline leaves the discharge running and hands the
+		// global slot on. The replacement must still refuse the id: the old
+		// release can tear down what the id names — its isolation workspace,
+		// its kernel — long after this manager is unreachable.
+		const gate = deferred();
+		const releaseResource = vi.fn(async () => {
+			await gate.promise;
+		});
+		const ref = registerIdleSub("Late-Sub", null);
+		registry.setStatus("Late-Sub", "parked", ref);
+		lifecycle.adopt("Late-Sub", { idleTtlMs: 0, onRelease: releaseResource });
+		const releasing = lifecycle.release("Late-Sub", ref);
+		await flushAsync();
+		await lifecycle.dispose(Date.now());
+
+		const replacement = AgentLifecycleManager.global();
+		expect(replacement).not.toBe(lifecycle);
+		expect(replacement.owesRelease("Late-Sub")).toBe(true);
+		expect(await replacement.reclaimDeadCorpse("Late-Sub", ref)).toBe(false);
+
+		gate.resolve();
+		await releasing;
+		expect(replacement.owesRelease("Late-Sub")).toBe(false);
+	});
+
+	it("waits for an in-flight park to finish disposing before a removed ref's release runs", async () => {
+		// "Removed" is not "disposal finished": a persisted-roster scan can
+		// replace a parked ref while its park is still disposing the child, and
+		// that unregister is what reaches the lifecycle.
+		const gate = deferred();
+		const stub = makeSessionStub(() => gate.promise);
+		const releaseResource = vi.fn(async () => {});
+		const ref = registerIdleSub("Parking-Sub", stub.session);
+		lifecycle.adopt("Parking-Sub", { idleTtlMs: 0, onRelease: releaseResource });
+		const parking = lifecycle.park("Parking-Sub");
+		await flushAsync();
+		expect(stub.disposeCalls()).toBe(1);
+
+		registry.unregister("Parking-Sub", ref);
+		await flushAsync();
+		expect(releaseResource).not.toHaveBeenCalled();
+		expect(lifecycle.owesRelease("Parking-Sub")).toBe(true);
+
+		gate.resolve();
+		await parking;
+		await flushAsync();
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+		expect(lifecycle.owesRelease("Parking-Sub")).toBe(false);
+	});
+
+	it("refuses adoption once teardown has started and leaves the hold owed", async () => {
+		// Teardown has already snapshotted what it will discharge, so a later
+		// arrival would be forgotten. Refusing leaves the hold where it was,
+		// with its original owner still answerable for it.
+		const gate = deferred();
+		const blocker = makeSessionStub(() => gate.promise);
+		registerIdleSub("Blocker-Sub", blocker.session);
+		lifecycle.adopt("Blocker-Sub", { idleTtlMs: 0 });
+		const disposing = lifecycle.dispose(Date.now() + 1000);
+		await flushAsync();
+
+		const hold = createReleaseHold(async () => {});
+		const ref = registerIdleSub("Late-Arrival", makeSessionStub().session);
+		expect(lifecycle.adopt("Late-Arrival", { idleTtlMs: 0, onRelease: hold }, ref)).toBe(false);
+		expect(hold.isOwed()).toBe(true);
+		expect(lifecycle.owesRelease("Late-Arrival")).toBe(false);
+
+		gate.resolve();
+		await disposing;
 	});
 
 	it("does not let one stuck adopted agent block sibling disposal", async () => {

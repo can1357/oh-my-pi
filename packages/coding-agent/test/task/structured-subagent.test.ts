@@ -1427,6 +1427,67 @@ describe("structured subagent primitive", () => {
 		expect(released).toBe(1);
 	});
 
+	it("releases the caller hold when the lifecycle refuses the adoption mid-teardown", async () => {
+		// A finalizer that lands while the manager is tearing down must not hand
+		// the hold to something that has already decided what it will discharge.
+		// The adoption is refused, so the release falls to the finalizer itself.
+		mockDiscovery();
+		const childSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		const blockerDisposing = Promise.withResolvers<void>();
+		const finishTeardown = Promise.withResolvers<void>();
+		const blocker = AgentRegistry.global().register({
+			id: "Teardown-Blocker",
+			displayName: "blocker",
+			kind: "sub",
+			session: {
+				dispose: async () => {
+					blockerDisposing.resolve();
+					await finishTeardown.promise;
+				},
+			} as unknown as AgentSession,
+			sessionFile: null,
+			status: "idle",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.adopt("Teardown-Blocker", { idleTtlMs: 0 }, blocker);
+		// Teardown is under way and parked in the blocker's disposal, so this is
+		// still the manager a finalizer reaches.
+		const tearingDown = lifecycle.dispose(Date.now() + 1000);
+		await blockerDisposing.promise;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: childSession,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: childSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: false,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => childSession,
+				onRelease: options.onRelease,
+			});
+			return { ...result(), id: options.id };
+		});
+		let released = 0;
+
+		await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
+
+		expect(released).toBe(1);
+		finishTeardown.resolve();
+		await tearingDown;
+	});
+
 	it("runs the caller hold's release when the spawn fails before any child exists", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess");

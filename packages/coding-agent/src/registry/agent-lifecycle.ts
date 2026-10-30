@@ -111,10 +111,31 @@ interface ReopeningAgent {
 	promise: Promise<AgentRef>;
 }
 
-/** One discharge this manager started: the id it owes, and when that discharge settles. */
+/** One discharge a manager started: the id it owes, when that discharge settles, and who owns it. */
 interface ReleaseInFlight {
 	id: string;
 	settled: Promise<void>;
+	owner: AgentLifecycleManager;
+}
+
+/**
+ * Every discharge still running, across every manager instance.
+ *
+ * A debt outlives the manager that took it on: teardown past its deadline
+ * leaves the discharge running and hands the global slot to a fresh manager,
+ * and that manager must not hand the id to a new spawn while the old release
+ * can still tear down what the id names — its isolation workspace, its
+ * kernel. Instance state cannot answer that question, so this one is
+ * process-wide; each record is removed only by the operation that added it.
+ */
+const releasesInFlight = new Set<ReleaseInFlight>();
+
+/** Whether any manager still owes a discharge for `id`. */
+function anyReleaseInFlight(id: string): boolean {
+	for (const release of releasesInFlight) {
+		if (release.id === id) return true;
+	}
+	return false;
 }
 
 export class AgentLifecycleManager {
@@ -213,13 +234,23 @@ export class AgentLifecycleManager {
 	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
 	 * When `expected` is given, the adoption is refused if the id no longer
 	 * resolves to that ref (or that ref's session).
+	 *
+	 * Returns whether this manager took the agent — and with it
+	 * {@link AdoptOptions.onRelease}. A refusal leaves that hold exactly where
+	 * it was, still owed by whoever offered it, because a manager that is
+	 * tearing down has already snapshotted what it will discharge and would
+	 * simply forget a later arrival.
 	 */
-	adopt(id: string, opts: AdoptOptions, expected?: AgentRefExpectation): void {
-		if (id === MAIN_AGENT_ID) return;
+	adopt(id: string, opts: AdoptOptions, expected?: AgentRefExpectation): boolean {
+		if (id === MAIN_AGENT_ID) return false;
+		if (this.#disposed) {
+			logger.warn("AgentLifecycleManager.adopt: refused by a manager that is tearing down", { id });
+			return false;
+		}
 		const ref = this.#registry.get(id);
 		if (!ref || (expected !== undefined && ref !== expected && ref.session !== expected)) {
 			logger.warn("AgentLifecycleManager.adopt: unknown or replaced agent id", { id });
-			return;
+			return false;
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
@@ -235,6 +266,7 @@ export class AgentLifecycleManager {
 		// so the boundary that created it never has to find this manager again.
 		asReleaseHold(opts.onRelease)?.claim();
 		this.#armTimer(id, adopted);
+		return true;
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
@@ -246,21 +278,21 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * True while this manager owes the child's release: it is adopted, or a
-	 * discharge this manager started has not finished.
+	 * True while a child's release is still owed: this manager has it adopted,
+	 * or a discharge — this manager's or that of one it has handed the global
+	 * slot to — has not finished.
 	 *
 	 * {@link has} cannot answer that — a release drops the adoption before it
 	 * awaits the child's disposal and runs what it captured only afterwards —
-	 * and neither can either map alone. The authority for a hold's ownership is
-	 * the {@link ReleaseHold} itself; this reports the same fact from the
-	 * manager's side, for teardown and for callers holding only an id.
+	 * and neither can this manager's own state, because a teardown past its
+	 * deadline leaves the discharge running under a manager nobody can reach.
+	 * The authority for a hold's ownership is the {@link ReleaseHold} itself;
+	 * this reports the same fact for callers holding only an id, which is what
+	 * {@link reclaimDeadCorpse} needs to refuse an id whose resources a late
+	 * release can still tear down.
 	 */
 	owesRelease(id: string): boolean {
-		if (this.#adopted.has(id)) return true;
-		for (const release of this.#releasing) {
-			if (release.id === id) return true;
-		}
-		return false;
+		return this.#adopted.has(id) || anyReleaseInFlight(id);
 	}
 
 	/**
@@ -594,8 +626,9 @@ export class AgentLifecycleManager {
 			// concurrent release that took nothing over cannot clear it.
 			const settled = Promise.withResolvers<void>();
 			settleInFlight = settled.resolve;
-			inFlight = { id, settled: settled.promise };
+			inFlight = { id, settled: settled.promise, owner: this };
 			this.#releasing.add(inFlight);
+			releasesInFlight.add(inFlight);
 		}
 
 		const park = this.#parks.get(id);
@@ -643,7 +676,10 @@ export class AgentLifecycleManager {
 					error: String(error),
 				});
 			} finally {
-				if (inFlight) this.#releasing.delete(inFlight);
+				if (inFlight) {
+					this.#releasing.delete(inFlight);
+					releasesInFlight.delete(inFlight);
+				}
 				settleInFlight?.();
 			}
 		}
@@ -795,10 +831,18 @@ export class AgentLifecycleManager {
 		const release = adopted.onRelease;
 		if (!release) return;
 		const settled = Promise.withResolvers<void>();
-		const inFlight: ReleaseInFlight = { id, settled: settled.promise };
+		const inFlight: ReleaseInFlight = { id, settled: settled.promise, owner: this };
 		this.#releasing.add(inFlight);
+		releasesInFlight.add(inFlight);
 		void (async () => {
 			try {
+				// "Removed" says the ref left the registry, not that the child is
+				// down. A park in flight on that same ref is still disposing it —
+				// a persisted-roster scan replacing a parked ref mid-park emits
+				// exactly this — and releasing before it finishes hands back a
+				// kernel the child is still running on.
+				const park = this.#parks.get(id);
+				if (park?.ref === adopted.ref) await park.promise.catch(() => undefined);
 				await release();
 			} catch (error) {
 				logger.warn("AgentLifecycleManager: owned resource cleanup failed after the agent was removed", {
@@ -807,6 +851,7 @@ export class AgentLifecycleManager {
 				});
 			} finally {
 				this.#releasing.delete(inFlight);
+				releasesInFlight.delete(inFlight);
 				settled.resolve();
 			}
 		})();

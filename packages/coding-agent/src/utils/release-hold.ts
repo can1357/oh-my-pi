@@ -32,7 +32,24 @@ export interface ReleaseHold {
 export function createReleaseHold(release: () => void | Promise<void>, onClaim?: () => void): ReleaseHold {
 	let discharge: Promise<void> | undefined;
 	let claimed = false;
-	const hold = ((): Promise<void> => (discharge ??= (async () => await release())())) as ReleaseHold;
+	const hold = ((): Promise<void> => {
+		if (discharge) return discharge;
+		// Published before `release` runs, not after it resolves: a release that
+		// calls the hold again on its own synchronous path — a kernel shutdown
+		// whose teardown hook reaches the same borrow — would otherwise find no
+		// discharge in progress and start a second one.
+		const settled = Promise.withResolvers<void>();
+		discharge = settled.promise;
+		void (async () => {
+			try {
+				await release();
+				settled.resolve();
+			} catch (error) {
+				settled.reject(error);
+			}
+		})();
+		return discharge;
+	}) as ReleaseHold;
 	hold.claim = (): void => {
 		if (claimed) return;
 		claimed = true;
