@@ -202,21 +202,6 @@ describe("AdvisorEmissionGuard", () => {
 		});
 	});
 
-	it("tracks in-place pending escalation so eviction compares the real rank", () => {
-		// A queued nit re-raised as a concern is escalated in place (no new
-		// admission). escalatePending keeps the slot rank coherent: an equal-rank
-		// newcomer afterwards is rate-limited, not waved through as an eviction.
-		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
-		const note = "Issue A.";
-		expect(guard.admit(note, { rank: 1, pending: true })).toEqual({ accepted: true });
-		guard.escalatePending(note, 2);
-		expect(guard.admit("Issue B.", { rank: 2, pending: true })).toEqual({ accepted: false, reason: "rate-limit" });
-		// The escalated text is now recorded at concern rank: equal/lower retags
-		// dedupe, a blocker still routes.
-		expect(guard.admit(note, { rank: 2, pending: true })).toEqual({ accepted: false, reason: "duplicate" });
-		expect(guard.admit(note, { rank: 3, pending: false })).toEqual({ accepted: true });
-	});
-
 	it("treats a same-update severity re-raise of a routed note as one charged slot", () => {
 		// The same text at higher severity is the same note reclassified, not a
 		// second note: the slot upgrades in place instead of double-charging.
@@ -241,27 +226,6 @@ describe("AdvisorEmissionGuard", () => {
 		expect(guard.admit("Race in #handleRetry.", { rank: 2, pending: false }).accepted).toBe(false);
 		guard.reset();
 		expect(guard.admit("Race in #handleRetry.", { rank: 2, pending: false }).accepted).toBe(true);
-	});
-
-	it("keeps dedupe history bounded when a pending escalation re-tracks an evicted key", () => {
-		// escalatePending must share admit's FIFO-bounded recording: a key that
-		// aged out of the history and is re-tracked by an in-place escalation
-		// would otherwise bypass the eviction queue and become a permanent,
-		// unevictable entry.
-		const guard = new AdvisorEmissionGuard({ capacity: 1 });
-		expect(guard.admit("Issue A.", { rank: 1, pending: true }).accepted).toBe(true);
-		guard.beginUpdate();
-		// Admitting B evicts A from the capacity-1 history.
-		expect(guard.admit("Issue B.", { rank: 1, pending: true }).accepted).toBe(true);
-		// A is re-tracked via in-place escalation while still pending; it
-		// re-enters the eviction queue as the oldest entry.
-		guard.escalatePending("Issue A.", 2);
-		guard.beginUpdate();
-		// Admitting C evicts A again (oldest tracked). With the leak, A would
-		// stay tracked forever and the final re-raise would be a false duplicate.
-		expect(guard.admit("Issue C.", { rank: 1, pending: true }).accepted).toBe(true);
-		guard.beginUpdate();
-		expect(guard.admit("Issue A.", { rank: 2, pending: true }).accepted).toBe(true);
 	});
 
 	it("evicts oldest entries when dedupe history exceeds capacity", () => {

@@ -1367,6 +1367,7 @@ export class AgentSession implements SettingsScope {
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
+		this.#advisors.preserveQueuedAdvice();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
@@ -2620,6 +2621,7 @@ export class AgentSession implements SettingsScope {
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
+			isAgentConnected: () => this.#unsubscribeAgent !== undefined,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
@@ -6042,6 +6044,9 @@ export class AgentSession implements SettingsScope {
 		this.#disconnectedMessageCount = undefined;
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		// An aside queued before the disconnect (e.g. a `/compact` boundary) has no
+		// subscriber until this line runs; re-record it now that events flow again.
+		this.#advisors.preserveQueuedAdvice();
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
@@ -11230,10 +11235,12 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		// Pull the agent work an editor-restoring interrupt withdrew (clearQueue({ forInterrupt:
-		// true })), and on a user interrupt advisor concerns, out of the steer/follow-up queues
-		// before any await so the post-abort stranded-message drain can't auto-resume the run on
-		// them. They are recorded in the transcript once the agent settles (below).
+		// true })), and on a user interrupt advisor concerns and queued advisor asides, out of the
+		// steer/follow-up and yield queues before any await so the post-abort stranded-message drain
+		// can't auto-resume the run on them. They are recorded in the transcript once the agent
+		// settles (below).
 		const strandedMessages = this.#extractInterruptedQueuedMessages(userInterrupt);
+		if (userInterrupt) strandedMessages.push(...this.#advisors.drainQueuedAdvice());
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.
@@ -11289,45 +11296,52 @@ export class AgentSession implements SettingsScope {
 			await manualCompactionCleanup;
 			await this.#drainAutolearnCapture();
 			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
-			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
-			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
-			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
-			this.#resetInFlight();
-			this.#resetSessionStopContinuationState();
-			this.#clearPendingSessionStopContinuations();
-			// Safety net: if the agent loop aborted without producing an assistant
-			// message (e.g. failed before the first stream), the in-flight yield was
-			// never resolved or rejected by the normal message_end path. Reject it now
-			// so any requeue callback still fires and the queue stays consistent.
-			if (this.#toolChoiceQueue.hasInFlight) {
-				this.#toolChoiceQueue.reject("aborted");
-			}
-			// Record the queued messages the interrupt took out of the queues as persisted
-			// transcript entries without triggering a turn, plus any advisor cards that
-			// arrived via AdviseTool routing mid-abort and were parked hidden in
-			// #pendingNextTurnMessages while the turn was still tearing down. Other deferred
-			// next-turn context (non-advisor) stays queued, in order. A turn another source
-			// started during the awaits above (an idle triggerTurn send, an IRC wake) that is
-			// already streaming must not get them spliced into its live stream: they ride that
-			// turn as follow-ups instead. A prompt still in its setup has sent nothing yet, so
-			// recording them now puts them ahead of it, as for any later prompt.
-			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
-			if (parkedAdvisorCards.length > 0) {
-				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
-			}
-			for (const message of [...strandedMessages, ...parkedAdvisorCards]) {
-				if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
-				else if (this.agent.state.isStreaming) {
-					// Requeued as ordinary work: a later abort must not take it out again.
-					this.#interruptWithdrawnMessages.delete(message);
-					this.agent.followUp(message);
-				} else this.#recordWithoutTurn([message]);
-			}
 		} finally {
-			this.#abortInProgress = false;
-			this.#drainStrandedQueuedMessages();
-			this.#abortUnwinds.delete(unwind.promise);
-			unwind.resolve();
+			// Settle in a rejection-safe path: if any cleanup await above throws
+			// (a goal/compaction/autolearn handler rejecting), the queued advisor
+			// asides this interrupt took out of the queues must still be recorded,
+			// and prompt-in-flight state must still be cleared.
+			try {
+				// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
+				// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
+				// a subsequent prompt() can incorrectly observe the session as busy after an abort.
+				this.#resetInFlight();
+				this.#resetSessionStopContinuationState();
+				this.#clearPendingSessionStopContinuations();
+				// Safety net: if the agent loop aborted without producing an assistant
+				// message (e.g. failed before the first stream), the in-flight yield was
+				// never resolved or rejected by the normal message_end path. Reject it now
+				// so any requeue callback still fires and the queue stays consistent.
+				if (this.#toolChoiceQueue.hasInFlight) {
+					this.#toolChoiceQueue.reject("aborted");
+				}
+				// Record the queued messages the interrupt took out of the queues as persisted
+				// transcript entries without triggering a turn, plus any advisor cards that
+				// arrived via AdviseTool routing mid-abort and were parked hidden in
+				// #pendingNextTurnMessages while the turn was still tearing down. Other deferred
+				// next-turn context (non-advisor) stays queued, in order. A turn another source
+				// started during the awaits above (an idle triggerTurn send, an IRC wake) that is
+				// already streaming must not get them spliced into its live stream: they ride that
+				// turn as follow-ups instead. A prompt still in its setup has sent nothing yet, so
+				// recording them now puts them ahead of it, as for any later prompt.
+				const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
+				if (parkedAdvisorCards.length > 0) {
+					this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
+				}
+				for (const message of [...strandedMessages, ...parkedAdvisorCards]) {
+					if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
+					else if (this.agent.state.isStreaming) {
+						// Requeued as ordinary work: a later abort must not take it out again.
+						this.#interruptWithdrawnMessages.delete(message);
+						this.agent.followUp(message);
+					} else this.#recordWithoutTurn([message]);
+				}
+			} finally {
+				this.#abortInProgress = false;
+				this.#drainStrandedQueuedMessages();
+				this.#abortUnwinds.delete(unwind.promise);
+				unwind.resolve();
+			}
 		}
 	}
 

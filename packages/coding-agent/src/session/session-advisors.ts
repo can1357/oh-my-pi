@@ -484,6 +484,7 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
+	isAgentConnected(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -965,6 +966,21 @@ export class SessionAdvisors {
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
 		await Promise.allSettled(this.#pendingAdvisorCardEvents);
+	}
+
+	/** Remove every queued advisor aside, built into one card, for a caller that preserves it itself (the user-interrupt abort). */
+	drainQueuedAdvice(): CustomMessage[] {
+		const card = this.#host.yieldQueue.drainKind("advisor");
+		return card && isAdvisorCard(card) ? [card] : [];
+	}
+
+	/** Re-record advisor asides that missed the loop's last poll as visible cards.
+	 *  No-op while the loop still runs, while an abort is tearing it down, or while
+	 *  the session is disconnected from agent events (`/compact`), because a card
+	 *  emitted then has no subscriber to persist it. */
+	preserveQueuedAdvice(): void {
+		if (this.#host.agent.state.isStreaming || this.#host.abortInProgress() || !this.#host.isAgentConnected()) return;
+		for (const card of this.drainQueuedAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 
 	// Advisor runtime lifecycle
@@ -1690,7 +1706,7 @@ export class SessionAdvisors {
 		}
 
 		// One shared non-blocking aside channel for all advisors; the build callback
-		// aggregates every advisor's queued nits into one card (each entry already
+		// aggregates every advisor's queued nits and concerns into one card (each entry already
 		// carries its own `advisor` name).
 		if (this.#advisors.length > 0 && !this.#advisorYieldQueueUnsubscribe) {
 			this.#advisorYieldQueueUnsubscribe = this.#host.yieldQueue.register<AdvisorNote>("advisor", {

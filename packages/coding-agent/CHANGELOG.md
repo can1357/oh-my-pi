@@ -21,6 +21,11 @@
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).
 - Fixed `read` showing a zip, tar, asar or ISO archive's old contents after a same-size rewrite within milliseconds of its previous write, on filesystems with coarse timestamps such as Linux ext4 ([#17389](https://github.com/can1357/oh-my-pi/pull/17389) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `fill` in Chrome replaces the text of rich-text editors such as Slate (Discord) and Lexical instead of leaving the old text in place or breaking the editor, and an empty fill clears them ([#17417](https://github.com/can1357/oh-my-pi/pull/17417) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed advisor notes lingering invisibly until the next prompt when they arrived after the agent's last step or while it was idle; they are now shown as advisor cards ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
+
+### Changed
+
+- Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 
 ## [18.14.0] - 2026-10-29
 
