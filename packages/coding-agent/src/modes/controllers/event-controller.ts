@@ -41,6 +41,7 @@ import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import { UNNAMED_USER_WAIT_PROMPT } from "../../session/agent-session-events";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -109,6 +110,36 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
 const MAX_LIVE_IRC_CARDS = 4;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
+
+/**
+ * Whether an open dialog's frame is the one a tool call's own blocked record predicted, which is
+ * what says the call raised its prompt through that dialog and will be answered when it settles.
+ * Both are rendered from the same approval: the record carries the full prompt and a frame carries
+ * either that or the compact rendering, so the test is their shared opening line — `Allow tool:
+ * <name>`, or an `ask` call's questions — taken at a word boundary, so one tool's name cannot
+ * swallow a longer one's. A classification they do not share rules it out, which is what keeps an
+ * unrelated question opening over a waiting approval from claiming it.
+ *
+ * A caller that named nothing at all ({@link UNNAMED_USER_WAIT_PROMPT}, a host that drives its own
+ * approval UI through the one-argument `waitForUser`) leaves only its classification to go on, and
+ * a waiting call of that kind is what it is taken to be: the alternative is a dialog nobody can
+ * ever retire, holding its call at `blocked` for the rest of the run. A dialog the wrapper labelled
+ * from its method name does name something of its own and is not this case.
+ *
+ * Two waits of the same operation and kind outstanding at once are indistinguishable this way.
+ * Nothing else is available: a dialog raised outside the call carries no call identity, and the
+ * record is itself a prediction rebuilt from the tool and its arguments.
+ */
+function namesWaitingCall(frame: RunStatus, record: RunStatus): boolean {
+	if (frame.state !== "blocked" || record.state !== "blocked" || frame.kind !== record.kind) return false;
+	if (frame.msg === undefined || record.msg === undefined) return false;
+	if (frame.msg === UNNAMED_USER_WAIT_PROMPT) return true;
+	const [asked] = frame.msg.split("\n");
+	const [predicted] = record.msg.split("\n");
+	if (asked === undefined || predicted === undefined || asked.length === 0 || predicted.length === 0) return false;
+	const [shorter, longer] = asked.length <= predicted.length ? [asked, predicted] : [predicted, asked];
+	return longer.startsWith(shorter) && (longer.length === shorter.length || longer[shorter.length] === " ");
+}
 
 function hasNestedTodo(details: unknown): boolean {
 	return (
@@ -222,6 +253,15 @@ export class EventController {
 	 *  `blocked` status each reports; cleared at their tool_execution_end so the
 	 *  run returns to `working` once none is left. */
 	#blockingPrompts = new Map<string, RunStatus>();
+	/**
+	 * The {@link #blockingPrompts} keys a session dialog has named
+	 * ({@link namesWaitingCall}) since it opened: those calls raised their
+	 * prompt through the wait bracket, so the bracket's end is also the end of
+	 * their wait. A record no dialog named belongs to a call that asked
+	 * somewhere this session cannot see (a host whose tool UI is untracked),
+	 * and only its own `tool_execution_end` retires it.
+	 */
+	#dialogNamedPrompts = new Set<string>();
 	/**
 	 * The session-level dialog (`user_wait_start`) waiting on a person, if one
 	 * is open. It outlives a run: a dialog can open with no run behind it (an
@@ -432,19 +472,22 @@ export class EventController {
 			irc_message: e => this.#handleIrcMessage(e),
 			user_wait_start: async event => {
 				this.#sessionUserWait = { state: "blocked", kind: event.kind ?? "question", msg: event.prompt };
+				this.#noteDialogNamedPrompts();
 				setRunStatus(this.#reportedStatus());
 				this.ctx.ui.requestRender();
 			},
 			user_wait_end: async () => {
 				if (!this.#sessionUserWait) return;
 				this.#sessionUserWait = undefined;
-				// No dialog waits on a person any more, so no tool call does
-				// either: every prompt a call raises opens this bracket. What is
-				// left in the map is the approval record of a call that was
-				// answered and is now executing — its execution is not its
-				// approval, and keeping it would hold the run at `blocked` for
-				// the rest of a long command.
-				this.#blockingPrompts.clear();
+				// Every call that raised its prompt through this bracket has been
+				// answered: its record outlives the answer, since it is dropped at
+				// `tool_execution_end`, and keeping it would hold the run at
+				// `blocked` for the rest of a long approved command. A record no
+				// dialog here ever named asked somewhere this session cannot see
+				// (a host whose tool UI is untracked) and is still owed an answer,
+				// so it stays.
+				for (const toolCallId of this.#dialogNamedPrompts) this.#blockingPrompts.delete(toolCallId);
+				this.#dialogNamedPrompts.clear();
 				const status = this.#reportedStatus();
 				setRunStatus(status);
 				// A run that handed control to background work keeps the OSC `working`
@@ -1063,6 +1106,27 @@ export class EventController {
 	}
 
 	/**
+	 * Record which calls the open dialog names, so {@link #blockingPrompts} can
+	 * tell a call whose prompt this bracket carries from one that asked
+	 * elsewhere. Run whenever either side appears: a dialog opening over an
+	 * existing record, and a record created while a dialog already stands (the
+	 * answer-before-start ordering, where the frame is published before the
+	 * call's `tool_execution_start` reaches the view).
+	 */
+	#noteDialogNamedPrompts(toolCallId?: string): void {
+		const wait = this.#sessionUserWait;
+		if (!wait) return;
+		if (toolCallId !== undefined) {
+			const prompt = this.#blockingPrompts.get(toolCallId);
+			if (prompt && namesWaitingCall(wait, prompt)) this.#dialogNamedPrompts.add(toolCallId);
+			return;
+		}
+		for (const [id, prompt] of this.#blockingPrompts) {
+			if (namesWaitingCall(wait, prompt)) this.#dialogNamedPrompts.add(id);
+		}
+	}
+
+	/**
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
 	 * components, timers, and stream-reveal state all reference the previous
@@ -1090,6 +1154,7 @@ export class EventController {
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
 		this.#blockingPrompts.clear();
+		this.#dialogNamedPrompts.clear();
 		// The dialog belongs to the session being left behind.
 		this.#sessionUserWait = undefined;
 		this.#readToolCallArgs.clear();
@@ -2035,6 +2100,7 @@ export class EventController {
 		const blocked = this.#blockingPrompt(renderToolName, event.args);
 		if (blocked) {
 			this.#blockingPrompts.set(event.toolCallId, blocked);
+			this.#noteDialogNamedPrompts(event.toolCallId);
 			// An open dialog outranks this call's own prompt, which has not been
 			// raised yet: the person owes that dialog the answer, and the title
 			// and OSC record must name it.
@@ -2281,6 +2347,7 @@ export class EventController {
 		// waits — the run reports that prompt instead. `ask` ids are in the map too
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
+		this.#dialogNamedPrompts.delete(event.toolCallId);
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
 			// An open dialog outranks the remaining records here too.
 			setRunStatus(this.#reportedStatus());
@@ -2632,6 +2699,7 @@ export class EventController {
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
+		this.#dialogNamedPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

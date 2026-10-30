@@ -9,6 +9,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { UNNAMED_USER_WAIT_PROMPT } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
@@ -307,12 +308,106 @@ describe("EventController run status while prompts wait on the user", () => {
 			msg: "a dialog waiting for you",
 		});
 
-		// Nothing is being asked once it settles, even though the approved call
-		// runs on until its own end.
+		// Neither dialog ever named the approval, so answering them leaves the
+		// call's own prompt standing: a person still owes it an answer.
 		await controller.handleEvent({ type: "user_wait_end" });
-		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("keeps a legacy host's untracked approval while an unrelated dialog is answered", async () => {
+		// A host that drives its own approval UI raises no wait bracket for it,
+		// so the call's own record is the only evidence a person owes an answer.
+		// An unrelated session question opening and settling over it says nothing
+		// about that approval, and must not retire its record — the terminal
+		// would lose its blocked indication for as long as the tool stays
+		// suspended.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = {
+			name: "bash",
+			label: "Bash",
+			formatApprovalDetails: () => ["Command: publish-release"],
+		} as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const untracked = "Allow tool: bash\nCommand: publish-release";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: untracked });
+
+		await controller.handleEvent({ type: "user_wait_start", prompt: "Unrelated extension question" });
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: untracked });
+
+		// The approval is answered where this session cannot see it; the call
+		// ends, and only then is nobody owed anything.
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("retires only the records the answered dialog named", async () => {
+		// One approval is raised through the wait bracket and another is not.
+		// Answering the bracketed one returns its call to `working`, and leaves
+		// the untracked call reported as the approval it still is.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt", deploy: "prompt" });
+		const tools: Record<string, AgentTool> = {
+			bash: {
+				name: "bash",
+				label: "Bash",
+				formatApprovalDetails: (args: { command: string }) => [`Command: ${args.command}`],
+			} as unknown as AgentTool,
+			deploy: { name: "deploy", label: "Deploy" } as unknown as AgentTool,
+		};
+		const controller = new EventController(
+			createInteractiveModeContext({ session: { getToolByName: (name: string) => tools[name] } }),
+		);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("deploy-1", "deploy", {}));
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo one" }));
+		// Only `bash` asks through the bracket, under the compact rendering.
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: "Allow tool: bash — echo one",
+			kind: "permission",
+		});
+		await controller.handleEvent({ type: "user_wait_end" });
+
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: deploy" });
+
+		await controller.handleEvent(toolEnd("deploy-1", "deploy"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
+	it("retires an approval whose bracket named nothing but its classification", async () => {
+		// A host that drives its own approval UI can open the bracket through the
+		// one-argument `waitForUser`: the frame has no words, only `permission`.
+		// That is all there is to go on, and a call waiting for an approval is
+		// what it is taken to be — otherwise nothing could ever retire it and the
+		// call would read `blocked` for the rest of its run.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo dangerous" }));
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: UNNAMED_USER_WAIT_PROMPT,
+			kind: "permission",
+		});
+		expect(report).toHaveBeenLastCalledWith({
+			state: "blocked",
+			kind: "permission",
+			msg: UNNAMED_USER_WAIT_PROMPT,
+		});
+
+		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
