@@ -1,13 +1,14 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
+- Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
 ### Breaking Changes
 
 - `SentToolDefinitions.inactiveFor(messages, tools)` is replaced by `withInactiveTools(context)`, which also clears a stale `inactiveTools`; `transformProviderContext` now receives the request's `inactiveTools` ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
