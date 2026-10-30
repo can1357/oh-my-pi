@@ -30,6 +30,14 @@ async function untilSentOrIdle(sent: readonly unknown[], turns = 50): Promise<vo
 	for (let i = 0; i < turns && sent.length === 0; i++) await tick();
 }
 
+/** Runs `fn` `depth` microtasks from now. */
+function afterMicrotasks(depth: number, fn: () => void): void {
+	queueMicrotask(() => (depth <= 1 ? fn() : afterMicrotasks(depth - 1, fn)));
+}
+
+/** Deep enough to reach past every microtask between the gate's hold answering and the send. */
+const MAX_DEPTH = 24;
+
 // Speech synthesis and image generation take a `fetch` but no
 // `beforeDispatch`, so the `tts` and `generate_image` tools sent their
 // requests while `/pause` was engaged.
@@ -51,6 +59,30 @@ describe("pauseHeldFetch", () => {
 		expect(sent).toEqual([false]);
 	});
 
+	// Resuming answers the parked hold, and the request reached the wire some
+	// microtasks later: a pause that returned in between went unseen and the
+	// request went out while `/pause` was engaged. Each depth lands that
+	// pause one microtask further on.
+	test("never sends while a pause that returned during the resume is engaged", async () => {
+		const sentWhilePaused: number[] = [];
+		let sent = 0;
+		for (let depth = 1; depth <= MAX_DEPTH; depth++) {
+			agentPauseGate.pause();
+			const pending = pauseHeldFetch(async () => {
+				sent++;
+				if (agentPauseGate.paused) sentWhilePaused.push(depth);
+				return new Response("ok");
+			})("https://images.example.test/v1/images/generations", { method: "POST" });
+			agentPauseGate.resume();
+			afterMicrotasks(depth, () => agentPauseGate.pause());
+			await tick();
+			agentPauseGate.resume();
+			await pending;
+		}
+		expect(sentWhilePaused).toEqual([]);
+		expect(sent).toBe(MAX_DEPTH);
+	});
+
 	test("a request's own abort ends the hold without sending", async () => {
 		const sent: boolean[] = [];
 		const fetch = pauseHeldFetch(async () => {
@@ -58,13 +90,48 @@ describe("pauseHeldFetch", () => {
 			return new Response("ok");
 		});
 		const abort = new AbortController();
+		const reason = new Error("tool cancelled");
 
 		agentPauseGate.pause();
 		const pending = fetch("https://speech.example.test/v1/audio/speech", { signal: abort.signal });
 		await tick();
-		abort.abort(new Error("tool cancelled"));
-		await expect(pending).rejects.toThrow("tool cancelled");
+		abort.abort(reason);
+		await expect(pending).rejects.toBe(reason);
 		expect(sent).toEqual([]);
+	});
+
+	// A pause that returns during the resume sends the request back to wait;
+	// that wait is still the caller's to end. Whatever the depth, a request
+	// either went out with the gate open before the pause returned, or it is
+	// waiting and fails with the caller's own reason — never sent paused, and
+	// never left parked.
+	test("a request's own abort ends the wait a returning pause sent it back to", async () => {
+		const sentWhilePaused: number[] = [];
+		const cancelled: number[] = [];
+		for (let depth = 1; depth <= MAX_DEPTH; depth++) {
+			let sent = false;
+			const abort = new AbortController();
+			const reason = new Error(`tool cancelled at depth ${depth}`);
+			agentPauseGate.pause();
+			const pending = pauseHeldFetch(async () => {
+				sent = true;
+				if (agentPauseGate.paused) sentWhilePaused.push(depth);
+				return new Response("ok");
+			})("https://speech.example.test/v1/audio/speech", { signal: abort.signal });
+			agentPauseGate.resume();
+			afterMicrotasks(depth, () => agentPauseGate.pause());
+			await tick();
+			abort.abort(reason);
+			if (sent) {
+				expect(await (await pending).text()).toBe("ok");
+			} else {
+				await expect(pending).rejects.toBe(reason);
+				cancelled.push(depth);
+			}
+			agentPauseGate.resume();
+		}
+		expect(sentWhilePaused).toEqual([]);
+		expect(cancelled).toContain(1);
 	});
 });
 
