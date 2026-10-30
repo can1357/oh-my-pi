@@ -840,12 +840,14 @@ export class FileSessionStorage implements SessionStorage {
 	 * suspension and SIGKILL cannot strand it as stealable.
 	 */
 	#acquireOsPublishLock(fpath: string, gatePath: string): NativeFileLock {
-		const deadline = Date.now() + SESSION_PUBLISH_LOCK_WAIT_MS;
+		// A wait is a duration, so it is measured on the monotonic clock: a wall
+		// clock stepped back would stretch it by the size of the step.
+		const deadline = performance.now() + SESSION_PUBLISH_LOCK_WAIT_MS;
 		for (;;) {
 			const gate = NativeFileLock.tryAcquire(gatePath);
 			if (gate.acquired) return gate;
 			gate.release();
-			if (Date.now() >= deadline) {
+			if (performance.now() >= deadline) {
 				throw new SessionLockError(fpath, "another writer holds the publish lock");
 			}
 			sleepSyncMs(SESSION_PUBLISH_LOCK_POLL_MS);
@@ -865,10 +867,10 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	#acquirePublishLock(fpath: string, lockPath: string): void {
-		const deadline = Date.now() + SESSION_PUBLISH_LOCK_WAIT_MS;
+		const deadline = performance.now() + SESSION_PUBLISH_LOCK_WAIT_MS;
 		for (;;) {
 			if (this.#createPublishLock(lockPath)) return;
-			if (Date.now() >= deadline) {
+			if (performance.now() >= deadline) {
 				throw new SessionLockError(fpath, "another writer holds the publish lock");
 			}
 			sleepSyncMs(SESSION_PUBLISH_LOCK_POLL_MS);
@@ -989,6 +991,8 @@ export class FileSessionStorage implements SessionStorage {
 			// Vanished mid-check; the steal path re-verifies before removal.
 			return true;
 		}
+		// The wall clock, because an mtime is a time of day: no monotonic
+		// reading can be compared with one.
 		return Date.now() - mtimeMs > SESSION_PUBLISH_LOCK_WAIT_MS;
 	}
 
