@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "18.12.6",
+  "version": "18.14.0",
   "description": "Local observability dashboard for omp AI usage statistics",
   "homepage": "https://omp.sh",
   "author": {
@@ -55,7 +55,7 @@
     "@types/react-dom": "catalog:"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.4"
   },
   "files": [
     "src",
@@ -76,6 +76,12 @@
       "types": "./src/client/index.tsx",
       "import": "./src/client/index.tsx"
     },
+    "./client/traces": {
+      "types": "./src/client/traces/index.ts",
+      "import": "./src/client/traces/index.ts"
+    },
+    "./client/styles.css": "./src/client/styles.css",
+    "./client/traces/traces.css": "./src/client/traces/traces.css",
     "./client/*": {
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"

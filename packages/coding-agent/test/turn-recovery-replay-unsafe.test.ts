@@ -1253,6 +1253,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
 				"OpenAI responses stream closed before a terminal response event was received",
 				"The socket connection was closed unexpectedly before the response completed",
+				// A gateway/proxy that cuts the upstream stream substitutes an in-band
+				// `error` frame for the missing terminal event; the provider reports it
+				// as the same envelope truncation a dropped connection produces.
+				"Anthropic stream envelope error: error frame received before message_stop (type=server_error code=upstream_stream_truncated): [upstream stream truncated (no completion event; 0 text chars)]",
 			]) {
 				const message = stalledTextTurn(undefined, errorMessage);
 				const { host, continues } = continuationHost(message);

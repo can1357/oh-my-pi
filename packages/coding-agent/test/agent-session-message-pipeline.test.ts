@@ -36,6 +36,7 @@ import {
 import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -127,6 +128,36 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 		return session;
+	}
+
+	function capturingAnthropicSideSession(model: Model) {
+		const bodies: Array<{
+			messages: Array<{ role: string; content: string | Array<{ text?: string; cache_control?: unknown }> }>;
+		}> = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "Fix the issue", timestamp: 1 }, createAssistantMessage("Fixed.")],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (target, context, options) =>
+				streamSimple(target, context, {
+					...options,
+					apiKey: "test-key",
+					fetch: async (_url, init) => {
+						bodies.push(JSON.parse(requestBodyText(init) ?? "{}"));
+						return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+					},
+				}),
+		});
+		sessions.push(session);
+		return { session, bodies };
 	}
 
 	it.each([false, true])("awaits ordered async delivery, final flush=%s", async finalFlush => {
@@ -1204,6 +1235,65 @@ describe("AgentSession message pipeline", () => {
 		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
 	});
 
+	it.each([
+		["sends the image to a vision model", ["text", "image"]],
+		["describes the image for a text-only model", ["text"]],
+	] as const)("ephemeral prompt and history images: %s", async (_label, input) => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValue([{ type: "text", text: "A red square." }]);
+		const model = buildModel({
+			id: "side-stream-model",
+			name: "Side Stream Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: [...input],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const contexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context) => {
+			contexts.push({ ...context, messages: structuredClone(context.messages) });
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
+			return stream;
+		};
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+
+		await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+
+		const request = JSON.stringify(contexts[0]?.messages);
+		expect(contexts[0]?.messages.at(-1)?.content).toContainEqual(expect.objectContaining({ type: "image" }));
+		expect(request.includes("A red square.")).toBe(input.length === 1);
+		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
+
+		// A follow-up replays the image from history with the same handling.
+		await session.runEphemeralTurn({
+			promptText: "And the border?",
+			history: [
+				{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
+				createAssistantMessage("Red"),
+			],
+		});
+		expect(JSON.stringify(contexts[1]?.messages).includes("A red square.")).toBe(input.length === 1);
+		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 2 : 0);
+		expect(agent.state.messages).toEqual([]);
+	});
+
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
 		"encodes the output cap and omits tools in the %s HTTP request",
 		async api => {
@@ -1261,6 +1351,106 @@ describe("AgentSession message pipeline", () => {
 			else expect(bodies[0][api === "anthropic-messages" ? "max_tokens" : "max_output_tokens"]).toBe(321);
 		},
 	);
+
+	it("caches the persisted reply rather than the prediction-only prompt on Anthropic side turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(session.runEphemeralTurn({ promptText: "Predict the next user message." })).rejects.toThrow();
+		expect(bodies).toHaveLength(1);
+		const cached = bodies[0].messages.flatMap((message, index) =>
+			Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+		);
+		// The side-only reminder and prediction prompt are absent from the next real turn.
+		expect(cached.filter(index => index >= 1)).toEqual([1]);
+	});
+
+	it("caches reusable /btw topic history through its latest side question", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(
+			session.runEphemeralTurn({ promptText: "First question", conversationKey: "btw:topic" }),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Follow-up",
+				conversationKey: "btw:topic",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 2 },
+					{ ...createAssistantMessage("First answer"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(bodies).toHaveLength(2);
+		expect(
+			bodies.map(body => {
+				const content = body.messages.at(-1)?.content;
+				return Array.isArray(content) && content.some(block => block.cache_control != null);
+			}),
+		).toEqual([true, true]);
+		const [firstWire, nextWire] = [bodies[0].messages, bodies[1].messages.slice(0, bodies[0].messages.length)].map(
+			messages => JSON.stringify(messages, (key, value) => (key === "cache_control" ? undefined : value)),
+		);
+		expect(nextWire).toEqual(firstWire);
+	});
+
+	it("does not cache keyed side history beyond regenerated image descriptions", async () => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValueOnce([{ type: "text", text: "A red square." }])
+			.mockResolvedValueOnce([{ type: "text", text: "A blue square." }]);
+		const model = buildModel({
+			id: "text-only-side-test",
+			name: "Text Only",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		const image: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const stableHistory: Message[] = [
+			{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 1 },
+			{ ...createAssistantMessage("First answer"), model: model.id },
+		];
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Which color?",
+				promptImages: [image],
+				conversationKey: "btw:topic",
+				history: stableHistory,
+			}),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "What next?",
+				conversationKey: "btw:topic",
+				history: [
+					...stableHistory,
+					{ role: "user", content: [{ type: "text", text: "Which color?" }, image], timestamp: 2 },
+					{ ...createAssistantMessage("Red"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(describe).toHaveBeenCalledTimes(2);
+		expect(bodies).toHaveLength(2);
+		for (const [index, body] of bodies.entries()) {
+			const description = index === 0 ? "A red square." : "A blue square.";
+			const noticeIndex = body.messages.findIndex(message => JSON.stringify(message.content).includes(description));
+			const cached = body.messages.flatMap((message, index) =>
+				Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+			);
+			expect(noticeIndex).toBeGreaterThan(1);
+			expect(cached).toContain(1);
+			expect(cached.some(index => index > 1 && index < noticeIndex)).toBe(true);
+			expect(cached.every(index => index < noticeIndex)).toBe(true);
+		}
+	});
 
 	it.each([
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
@@ -1466,7 +1656,10 @@ describe("AgentSession message pipeline", () => {
 			const history = (body: Record<string, unknown>) =>
 				(body.messages as { role: string; content: unknown }[]).slice(0, 2).map(({ role, content }) => ({
 					role,
-					content: JSON.stringify(content).replaceAll(',"cache_control":{"type":"ephemeral"}', ""),
+					content: JSON.stringify(
+						typeof content === "string" ? [{ type: "text", text: content }] : content,
+						(key, value) => (key === "cache_control" ? undefined : value),
+					),
 				}));
 			// Cache keys: tools, system, thinking, top-level effort, and the history before the side prompt.
 			for (const key of ["tools", "system", "thinking", "output_config"]) expect(minimized[key]).toEqual(plain[key]);

@@ -27,6 +27,7 @@ import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings"
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
 
 import type { ToolSession } from ".";
@@ -36,6 +37,7 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError } from "./tool-errors";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -47,6 +49,9 @@ import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } 
 // =============================================================================
 // Types
 // =============================================================================
+
+/** Returned to a headless fork's model instead of aborting its run. */
+const HEADLESS_FORK_ASK_ERROR = prompt.render(askHeadlessForkMessage);
 
 export const OTHER_OPTION = "Other (type your own)";
 const CHAT_ABOUT_THIS_OPTION = "Chat about this";
@@ -479,7 +484,8 @@ async function askSingleQuestion(
 }
 
 function formatQuestionResult(result: QuestionResult): string {
-	const noteSuffix = result.note ? ` (note: ${result.note})` : "";
+	const noteOn = result.noteOption === undefined ? "" : ` on ${result.noteOption}`;
+	const noteSuffix = result.note ? ` (note${noteOn}: ${result.note})` : "";
 	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
 	if (result.selectedOptions.length === 0) {
 		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
@@ -495,6 +501,7 @@ function formatSingleQuestionResponse(result: {
 	selectedOptions: string[];
 	customInput?: string;
 	note?: string;
+	noteOption?: string;
 	timedOut?: boolean;
 	multi: boolean;
 }): string {
@@ -516,13 +523,14 @@ function formatSingleQuestionResponse(result: {
 		);
 	}
 	if (result.note) {
+		const label = `User added note${result.noteOption === undefined ? "" : ` on ${result.noteOption}`}:`;
 		responseParts.push(
 			result.note.includes("\n")
-				? `User added note:\n${result.note
+				? `${label}\n${result.note
 						.split("\n")
 						.map(line => `  ${line}`)
 						.join("\n")}`
-				: `User added note: ${result.note}`,
+				: `${label} ${result.note}`,
 		);
 	}
 	if (responseParts.length > 0) return responseParts.join("\n");
@@ -619,6 +627,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						activeModelString: this.session.getActiveModelString?.(),
 						telemetryConfig: this.session.getTelemetry?.(),
 						sessionId: this.session.getSessionId?.() ?? undefined,
+						costGate: this.session.costGate,
 					},
 					signal,
 				);
@@ -649,6 +658,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	): Promise<AgentToolResult<AskToolDetails>> {
 		// Headless fallback
 		if (!context?.hasUI || !context.ui) {
+			// A headless fork (`/tan`) keeps `ask` advertised only to share the parent's
+			// prompt-cache prefix. Aborting would end its run with no final answer, and the
+			// parent would receive an empty result; let the model put the question there.
+			if (this.session.advertiseHeadlessAsk) throw new ToolError(HEADLESS_FORK_ASK_ERROR);
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
 		}
@@ -827,6 +840,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							result.note === undefined
 								? undefined
 								: shiftImageMarkers(result.note, noteOffset, result.noteImages?.length ?? 0),
+						noteOption: result.noteOption,
 						timedOut: result.timedOut,
 					});
 				}
@@ -852,6 +866,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						selectedOptions: result.selectedOptions,
 						customInput: result.customInput,
 						note: result.note,
+						noteOption: result.noteOption,
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);

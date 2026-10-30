@@ -24,7 +24,10 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgSpeechEnabled, cfgSpeechMode } from "@oh-my-pi/pi-coding-agent/tts/settings";
+import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import * as fsp from "node:fs/promises";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -551,12 +554,92 @@ describe("collab guest extension lifecycle mirror", () => {
 			resetSettingsForTest();
 		}
 	});
+
+	it("speaks the text of updates the host superseded", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		cfgSpeechEnabled.set(settings, true);
+		cfgSpeechMode.set(settings, "all");
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
+		const spoken: string[] = [];
+		const pushDelta = spyOn(vocalizer, "pushDelta").mockImplementation(text => {
+			spoken.push(text);
+		});
+		const controller = new EventController(createInteractiveModeContext());
+		const handleEvent = spyOn(controller, "handleEvent").mockResolvedValue(undefined);
+		const harness = await makeHarness("lifecycle-mirror-room-12", { eventController: controller });
+		try {
+			const start = makeStreamed([]);
+			harness.hostSocket.send({ t: "event", event: { type: "message_start", message: start } } as CollabFrame);
+			const planned = makeStreamed([{ type: "thinking", thinking: "Plan" }]);
+			harness.hostSocket.send({
+				t: "event",
+				event: {
+					type: "message_update",
+					message: planned,
+					assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Plan", partial: planned },
+				},
+			} as CollabFrame);
+			// The updates carrying " it" and "Hello" were superseded on the host's queue.
+			const answered = makeStreamed([
+				{ type: "thinking", thinking: "Plan it" },
+				{ type: "text", text: "Hello world" },
+			]);
+			harness.hostSocket.send({
+				t: "event",
+				event: {
+					type: "message_update",
+					message: answered,
+					assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: " world", partial: answered },
+				},
+			} as CollabFrame);
+			harness.hostSocket.send({ t: "event", event: { type: "message_end", message: answered } } as CollabFrame);
+			await harness.barrier();
+
+			expect(spoken).toEqual(["Plan", " it", "Hello", " world"]);
+			// Extensions see the same reconstructed stream.
+			const extensionDeltas = harness.emitted.flatMap(event =>
+				event.type === "message_update" && "delta" in event.assistantMessageEvent
+					? [event.assistantMessageEvent.delta]
+					: [],
+			);
+			expect(extensionDeltas).toEqual(["Plan", " it", "Hello", " world"]);
+		} finally {
+			pushDelta.mockRestore();
+			handleEvent.mockRestore();
+			writeSpy.mockRestore();
+			renameSpy.mockRestore();
+			await harness.cleanup();
+			resetSettingsForTest();
+		}
+	});
 });
 
 function makeAssistant(text: string): AgentMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
+		api: "mock",
+		provider: "mock",
+		model: "mock",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
+
+function makeStreamed(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
 		api: "mock",
 		provider: "mock",
 		model: "mock",

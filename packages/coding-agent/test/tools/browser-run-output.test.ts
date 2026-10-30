@@ -51,11 +51,9 @@ describe("browser run output — stream text reaches the tool result", () => {
 // was a live failure.
 describe("browser handle enrichment — fill()", () => {
 	it("adds a fill() that clears the current value before typing", async () => {
-		const calls: string[] = [];
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
-				calls.push("evaluate");
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -67,17 +65,20 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
-			type: async (text: string) => {
-				calls.push("type");
-				node.value += text;
+				}),
+			frame: {
+				page: () => ({
+					keyboard: {
+						type: async (text: string) => {
+							node.value += text;
+						},
+					},
+				}),
 			},
 		} as unknown as ElementHandle;
 
 		await toActionableHandle(stub).fill("fresh");
 
-		expect(calls).toEqual(["evaluate", "evaluate", "type"]);
 		expect(node.focused).toBe(true);
 		expect(node.value).toBe("fresh");
 	});
@@ -233,7 +234,7 @@ describe("browser handle enrichment — guarded actions", () => {
 	it("runs the guarded fill as a single op without re-entering the wrapped type()", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -245,8 +246,7 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			type: async () => {},
 			frame: {
 				page: () => ({

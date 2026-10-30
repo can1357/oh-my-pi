@@ -72,6 +72,7 @@ function makeHarness() {
 		},
 		addAutocompleteProvider,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
@@ -321,6 +322,35 @@ describe("ExtensionUiController editor UI", () => {
 			],
 		});
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+
+	it("lets up/down take the ask from a populated prompt and restores the untouched draft", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed prompt");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] },
+		];
+
+		const pending = harness.controller.showAskDialog(questions);
+		const ask = harness.editorContainer.children[0];
+		expect(ask).toBeInstanceOf(AskDialogComponent);
+		ask?.render?.(80);
+		expect(harness.editor.focused).toBe(true);
+
+		// Down hands the keyboard to the ask without touching the draft; the next
+		// Down moves to "No", and typing/Enter now answer instead of editing.
+		ask?.handleInput?.("\x1b[B");
+		const rendered = stripVTControlCharacters(ask?.render?.(80).join("\n") ?? "");
+		expect(rendered).not.toContain("typing edits your prompt");
+		expect(harness.editor.focused).toBe(false);
+		ask?.handleInput?.("\x1b[B");
+		ask?.handleInput?.("\r");
+		expect(harness.editor.getText()).toBe("half typed prompt");
+		const result = await pending;
+		expect(result?.kind === "submit" ? result.results[0]?.selectedOptions : undefined).toEqual(["No"]);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+		expect(harness.editor.getText()).toBe("half typed prompt");
 	});
 
 	it("does not fire editor-slot shortcuts that would orphan the ask dialog (#6738)", () => {

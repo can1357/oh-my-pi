@@ -25,6 +25,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -388,6 +389,73 @@ describe("task.batch validation", () => {
 		const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
 	});
+
+	// The agent loop validates arguments against the wire schema before execute(),
+	// and that schema deletes undeclared keys. A seance-only field on an ordinary
+	// agent must still be refused by every call form instead of being dropped,
+	// leaving the child on its own model while the caller believes it pinned another.
+	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
+	// generated batch schemas, each with and without `isolated`.
+	it.each([
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "model" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "model" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
+		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
+	])(
+		"refuses $field on an ordinary agent in the $form form with seance $seance (structured: $structured, isolation: $isolation)",
+		async ({ seance, batch, structured, isolation, field }) => {
+			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
+			mockDiscovery(seance === "advertised" ? [taskAgent, bundledSeance] : taskAgent);
+			const run = vi
+				.spyOn(executorModule, "runSubprocess")
+				.mockImplementation(async options => makeResult(options.id ?? "?"));
+			const tool = await TaskTool.create(
+				createSession({
+					settings: {
+						"async.enabled": false,
+						"task.batch": batch,
+						"task.structured": structured,
+						"task.isolation.enabled": isolation,
+					},
+				}),
+			);
+			const item = { name: "Alpha", agent: "task", task: "Do A.", solutionSpace: "c", [field]: "stub/model-b" };
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "tc-model-pin",
+								name: "task",
+								arguments: batch ? { context: "# Goal\nX", tasks: [item] } : item,
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			const agent = new Agent({
+				initialState: {
+					model: mock.model,
+					systemPrompt: ["Test"],
+					tools: [tool as unknown as AgentTool],
+					messages: [],
+				},
+				streamFn: mock.stream,
+			});
+			await agent.prompt("go");
+
+			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
+			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
+			expect(text).toContain(`\`${field}\` is only accepted for the \`seance\` agent.`);
+			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 });
 
 describe("task.batch spawning", () => {

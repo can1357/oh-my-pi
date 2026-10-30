@@ -7,6 +7,7 @@ import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-co
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 
 import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -29,7 +30,10 @@ type FakeEditor = {
 	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	setText(text: string): void;
+	setCollapsedText(text: string): void;
 	getText(): string;
+	getExpandedText(): string;
+	clearDraft(historyText?: string): void;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -80,7 +84,9 @@ function createContext(): {
 		shutdown: Spy;
 		showStatus: Spy;
 		startPendingSubmission: StartPendingSubmissionSpy;
+		stopAwaitingAsyncWork: Spy;
 		updatePendingMessagesDisplay: Spy;
+		isAwaitingAsyncWork: Mock<() => boolean>;
 	};
 	inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined>;
 	sessionListeners: Array<(event: { type: string }) => void>;
@@ -100,7 +106,7 @@ function createContext(): {
 	const showStatus = vi.fn();
 	const inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
 	const sessionListeners: Array<(event: { type: string }) => void> = [];
-	const handleBtwCommand = vi.fn(async () => {});
+	const handleBtwCommand = vi.fn(async () => true);
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
@@ -109,6 +115,8 @@ function createContext(): {
 	const hasActiveCleanse = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
+	const isAwaitingAsyncWork = vi.fn(() => false);
+	const stopAwaitingAsyncWork = vi.fn(async () => {});
 	const startPendingSubmission = vi.fn(
 		(input: { text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] }) => {
 			ensureLoadingAnimation();
@@ -119,8 +127,20 @@ function createContext(): {
 		setText(text: string) {
 			editorText = text;
 		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
 		getText() {
 			return editorText;
+		},
+		getExpandedText() {
+			return editorText;
+		},
+		clearDraft(historyText?: string) {
+			if (historyText !== undefined) this.addToHistory(historyText);
+			editorText = "";
+			this.pendingImages = [];
+			this.pendingImageLinks = [];
 		},
 		addToHistory: vi.fn(),
 		setActionKeys: vi.fn(),
@@ -184,12 +204,19 @@ function createContext(): {
 			abortHandoff,
 			abortRetry: vi.fn(),
 		} as unknown as InteractiveModeContext["viewSession"],
+		eventController: {
+			isAwaitingAsyncWork,
+			stopAwaitingAsyncWork,
+		} as unknown as InteractiveModeContext["eventController"],
 		sessionManager: {
 			getSessionName: () => "existing session",
+			getSessionId: () => "session",
+			getLeafId: () => null,
 			flushSync: vi.fn(),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
 			getKeys: () => [],
+			matches: () => false,
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
 		mcpTestEscapeHandlers: new Set(),
@@ -259,7 +286,9 @@ function createContext(): {
 			showStatus,
 			shutdown: ctx.shutdown as Spy,
 			startPendingSubmission,
+			stopAwaitingAsyncWork,
 			updatePendingMessagesDisplay,
+			isAwaitingAsyncWork,
 		},
 		inputListeners,
 		sessionListeners,
@@ -373,13 +402,256 @@ describe("InputController escape behavior", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupEditorSubmitHandler();
-		editor.setText("/btw why is it doing that?");
 		await editor.onSubmit?.("/btw why is it doing that?");
 
-		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?");
+		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?", undefined);
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
-		expect(editor.getText()).toBe("");
+	});
+
+	describe("side file commands", () => {
+		const sitrep: FileSlashCommand = {
+			name: "sitrep",
+			description: "Situation report",
+			content: "Situation report. Focus: $ARGUMENTS",
+			side: true,
+			source: "via OMP User",
+		};
+		const plain: FileSlashCommand = { ...sitrep, name: "plain", side: undefined };
+
+		type SideCommandHarness = {
+			fileSlashCommands: Set<string>;
+			session: { isStreaming: boolean; slashCommands: FileSlashCommand[]; extensionRunner: unknown };
+		};
+
+		function withFileCommands(ctx: InteractiveModeContext, commands: FileSlashCommand[]): SideCommandHarness {
+			// Test harness installs a mutable fake context and AgentSession; keep the unchecked cast named.
+			const harness = ctx as unknown as SideCommandHarness;
+			harness.fileSlashCommands = new Set(commands.map(cmd => cmd.name));
+			harness.session.slashCommands = commands;
+			return harness;
+		}
+
+		it("answers a bare side command as a /btw side question while a turn streams", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.isStreaming = true;
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			editor.setText("/sitrep");
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", undefined, "/sitrep");
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("passes arguments into the side question", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep the migration");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				undefined,
+				"/sitrep the migration",
+			);
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("sends a file command without side frontmatter to the main session", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [plain]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/plain");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("leaves a non-side command with a malformed template to the main session", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...plain, content: "Report {{#if focus}} unclosed" }]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/plain");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("reports a malformed side template and hands the submission back on Enter and Ctrl+Enter", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, content: "Report {{#if focus}} unclosed" }]);
+			const showError = vi.fn();
+			Object.assign(ctx, { showError });
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep the migration");
+			expect(editor.getText()).toBe("/sitrep the migration");
+
+			editor.setText("/sitrep again");
+			await controller.handleFollowUp();
+			expect(editor.getText()).toBe("/sitrep again");
+
+			expect(showError).toHaveBeenCalledTimes(2);
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+			expect(editor.addToHistory).not.toHaveBeenCalled();
+		});
+
+		it("lets a skill win over a side file command registered under its /skill: name", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, name: "skill:foo" }]);
+			(ctx.skillCommands as Map<string, unknown>).set("skill:foo", {});
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/skill:foo");
+			editor.setText("/skill:foo");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(queueCompactionMessage.mock.calls.map(call => call[0])).toEqual(["/skill:foo", "/skill:foo"]);
+		});
+
+		it("lets an extension command of the same name win over a side file command", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
+				getCommand: (name: string) => (name === "sitrep" ? { name } : undefined),
+				hasHandlers: () => false,
+			};
+			Object.assign(editor, { clearDraft: vi.fn() });
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.prompt).toHaveBeenCalledWith("/sitrep", { images: undefined });
+		});
+
+		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+
+		function compacting(ctx: InteractiveModeContext): Spy {
+			// Test harness installs a mutable fake context and AgentSession; keep the unchecked cast named.
+			const harness = ctx as unknown as { session: { isCompacting: boolean }; queueCompactionMessage: Spy };
+			harness.session.isCompacting = true;
+			harness.queueCompactionMessage = vi.fn();
+			return harness.queueCompactionMessage;
+		}
+
+		it("answers a Ctrl+Enter side command during compaction instead of queueing it as a prompt", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			editor.setText("/sitrep the migration");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				undefined,
+				"/sitrep the migration",
+			);
+			expect(queueCompactionMessage).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe("");
+		});
+
+		it("still queues Ctrl+Enter non-side and builtin-named commands during compaction", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [plain, { ...sitrep, name: "compact" }]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			editor.setText("/plain");
+			await controller.handleFollowUp();
+			editor.setText("/compact");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(queueCompactionMessage.mock.calls.map(call => call[0])).toEqual(["/plain", "/compact"]);
+		});
+
+		it("answers an Enter side command during compaction instead of queueing it", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", undefined, "/sitrep");
+			expect(queueCompactionMessage).not.toHaveBeenCalled();
+		});
+
+		it("routes a namespaced side command by its full name", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, name: "acme:sitrep" }]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/acme:sitrep the migration");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				undefined,
+				"/acme:sitrep the migration",
+			);
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("does not carry an Enter side command's attached image into the next submission", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			editor.pendingImages = [image];
+			editor.pendingImageLinks = [undefined];
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep [Image #1]");
+			expect(spies.handleBtwCommand).toHaveBeenCalledTimes(1);
+			expect(editor.pendingImages).toEqual([]);
+
+			await editor.onSubmit?.("next message");
+			expect(spies.startPendingSubmission).toHaveBeenCalledWith(
+				expect.objectContaining({ text: "next message", images: undefined }),
+				expect.anything(),
+			);
+		});
+
+		it("keeps text typed while an input hook delays a side command", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
+				getCommand: () => undefined,
+				hasHandlers: (event: string) => event === "input",
+				emitInput: vi.fn(async () => {
+					editor.setText("typed while the hook ran");
+					return undefined;
+				}),
+			};
+			editor.pendingImages = [image];
+			editor.pendingImageLinks = [undefined];
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep [Image #1]");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledTimes(1);
+			expect(editor.getText()).toBe("typed while the hook ran");
+			expect(editor.pendingImages).toEqual([]);
+		});
 	});
 
 	it("falls back to aborting the active session when no pending optimistic submission exists", () => {
@@ -427,6 +699,25 @@ describe("InputController escape behavior", () => {
 		expect(pauseLoop).toHaveBeenCalledTimes(1);
 		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("hands a queued compaction back when Esc cancels a loop iteration still in setup", () => {
+		const { ctx, editor } = createContext();
+		ctx.loopModeEnabled = true;
+		ctx.pauseLoop = vi.fn();
+		// Prompt setup: the session counts as streaming, but no agent turn (and so no agent_end) exists yet.
+		mutableSessionState(ctx).isStreaming = true;
+		ctx.yieldCompaction = { text: "/compact", sessionId: "session", leafId: null };
+		ctx.compactionQueuedMessages.push({ text: "held behind it", mode: "followUp" });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(editor.getText()).toContain("/compact");
+		expect(editor.getText()).toContain("held behind it");
 	});
 
 	it("aborts active handoff generation before default Esc handling", () => {
@@ -691,9 +982,17 @@ describe("InputController escape behavior", () => {
 
 		controller.setupKeyHandlers();
 		now.mockReturnValue(2_000);
-		const first = inputListeners[0]("\x1b[D");
+		// Dispatch like the TUI: listeners in registration order until one handles the input.
+		const dispatch = (data: string) => {
+			for (const listener of inputListeners) {
+				const result = listener(data);
+				if (result) return result;
+			}
+			return undefined;
+		};
+		const first = dispatch("\x1b[D");
 		now.mockReturnValue(2_200); // 200ms later — a deliberate second tap
-		const second = inputListeners[0]("\x1b[D");
+		const second = dispatch("\x1b[D");
 
 		// Both taps are consumed; only the second completes the gesture.
 		expect(first).toEqual({ consume: true });
@@ -716,6 +1015,56 @@ describe("InputController escape behavior", () => {
 		// scrollback replay).
 		expect(spies.requestRender).toHaveBeenCalledWith(true);
 		expect(spies.resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("ends a wait on background jobs on the first Esc instead of arming the rewind selector", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.stopAwaitingAsyncWork).toHaveBeenCalledTimes(1);
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+
+		// The wait is over: Esc goes back to its idle meaning, a fresh double-Esc.
+		spies.isAwaitingAsyncWork.mockReturnValue(false);
+		editor.onEscape?.();
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+		editor.onEscape?.();
+		expect(ctx.showUserMessageSelector).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels a prompt submitted during a background-job wait before ending the wait", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		spies.cancelPendingSubmission.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("aborts a running `!` command before ending a background-job wait", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		Object.defineProperty(ctx.session, "isBashRunning", { value: true, configurable: true });
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.abortBash).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {

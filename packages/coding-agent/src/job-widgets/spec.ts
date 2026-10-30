@@ -45,7 +45,10 @@ export const JOB_WIDGET_TONES: readonly TspTone[] = [
  * rules may feed one field.
  */
 export interface JobWidgetRule {
-	/** Source id (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix (`pipe:*`). */
+	/**
+	 * Source id (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix
+	 * (`pipe:*`). Wildcards never cover `tools`; see {@link ruleReadsSource}.
+	 */
 	from: string;
 	/** Rust-regex syntax with named groups, matched per line. */
 	match: string;
@@ -251,8 +254,13 @@ export function jobWidgetSkip(value: unknown): string | undefined {
 	return reason.length > 0 ? reason : undefined;
 }
 
-/** Whether a rule's `from` names the source `id`. */
+/**
+ * Whether a rule's `from` names the source `id`. A subagent's `tools` (file
+ * contents, search hits and command output mixed) is read only by a rule
+ * naming it: a wildcard written for a command's output must not reach it.
+ */
 export function ruleReadsSource(from: string, id: string): boolean {
+	if (id === TOOLS_SOURCE_ID) return from === TOOLS_SOURCE_ID;
 	if (from === "*") return true;
 	if (from.endsWith("*")) return id.startsWith(from.slice(0, -1));
 	return from === id;
@@ -314,7 +322,9 @@ export function parseWidgetValue(text: string): number {
  *
  * With `brief` (the job's command, task and hints) as well, a constant meter
  * `total` or spark `target` must be a number the brief or the samples state:
- * an invented total draws a made-up fraction.
+ * an invented total draws a made-up fraction. A meter may use 100 without a
+ * stated denominator when every numeric feeding rule supplies an observed,
+ * unscaled percentage.
  */
 export function validateJobWidgetSpec(
 	value: unknown,
@@ -332,20 +342,23 @@ export function validateJobWidgetSpec(
 		errors.push(`rules: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	if (matcher && samples && errors.length === 0) {
-		dryRun(spec, matcher, samples, numeric, errors);
-		if (brief !== undefined) checkStatedNumbers(spec, samples, brief, errors);
+		const percentages = dryRun(spec, matcher, samples, numeric, errors);
+		if (brief !== undefined) checkStatedNumbers(spec, samples, brief, percentages, errors);
 	}
 	return errors.length > 0 ? { ok: false, errors } : { ok: true, spec };
 }
 
 /** A number as text writes it: digits with separators, a fraction, a `k`/`M`/`G` suffix. */
 const WRITTEN_NUMBER = /\d[\d,_]*(?:\.\d+)?[kKMG]?/g;
+/** Aggregations that retain the captured percentage's scale and meaning. */
+const PERCENT_AGGS = new Set<JobWidgetAgg>(["last", "first", "min", "max", "mean"]);
 
 /** Rejects constant totals and targets that neither `brief` nor the samples state; see {@link validateJobWidgetSpec}. */
 function checkStatedNumbers(
 	spec: JobWidgetSpec,
 	samples: readonly JobWidgetSampleLines[],
 	brief: string,
+	percentages: ReadonlyMap<string, boolean>,
 	errors: string[],
 ): void {
 	const stated = new Set<number>();
@@ -356,7 +369,12 @@ function checkStatedNumbers(
 	for (const sample of samples) for (const line of sample.lines) collect(line);
 	spec.blocks.forEach((block, index) => {
 		const where = `blocks[${index}] (${block.kind})`;
-		if (block.kind === "meter" && typeof block.total === "number" && !stated.has(block.total)) {
+		if (
+			block.kind === "meter" &&
+			typeof block.total === "number" &&
+			!stated.has(block.total) &&
+			!(block.total === 100 && percentages.get(block.field) === true && PERCENT_AGGS.has(block.agg))
+		) {
 			errors.push(
 				`${where}.total: ${block.total} appears nowhere in the job or its output; read the total from a line (a value ref) or show the value as a stat`,
 			);
@@ -368,20 +386,45 @@ function checkStatedNumbers(
 	});
 }
 
-/** Runs the rules over the samples; see {@link validateJobWidgetSpec}. */
+/** Whether the captured number itself, not another number on the line, carries `%`. */
+function isPercentCapture(captured: string, line: string, end: number): boolean {
+	const compact = captured.trim().replace(/[,_]/g, "");
+	const number = NUMBER_PREFIX.exec(compact);
+	if (!number) return false;
+	const suffix = compact.slice(number[0].length).trim();
+	return suffix === "%" || (suffix === "" && /^\s*%/.test(line.slice(end)));
+}
+
+/** Runs the rules over the samples, requiring percentage evidence from every numeric feeding rule. */
 function dryRun(
 	spec: JobWidgetSpec,
 	matcher: LineMatcher,
 	samples: readonly JobWidgetSampleLines[],
 	numeric: ReadonlyMap<string, string>,
 	errors: string[],
-): void {
+): Map<string, boolean> {
 	const groups = matcher.groupNames();
 	let seen = false;
 	let matches = 0;
 	/** Rules that matched a `» <tool> <intent>` marker line. */
 	const marked = new Set<number>();
 	const numbers = new Set<string>();
+	const percentages = new Map<string, boolean>();
+	/** Numeric feeds still missing an unscaled percentage capture. */
+	const unprovenPercentages = new Map<string, Set<number>>();
+	spec.rules.forEach((rule, index) => {
+		for (const { field, text, count } of ruleFields(rule)) {
+			if (text) continue;
+			// A match count is never a percentage, whether or not the samples hit it.
+			if (count) {
+				percentages.set(field, false);
+				continue;
+			}
+			const feeds = unprovenPercentages.get(field) ?? new Set<number>();
+			feeds.add(index);
+			unprovenPercentages.set(field, feeds);
+		}
+	});
 	/** Field → its first capture that held no number. */
 	const words = new Map<string, string>();
 	for (const sample of samples) {
@@ -401,19 +444,30 @@ function dryRun(
 					const at = offset + position * 2;
 					if (field === rule.key || field === rule.text || hits.spans[at] < 0) return;
 					const captured = line.slice(hits.spans[at], hits.spans[at + 1]);
-					if (Number.isFinite(parseWidgetValue(captured))) numbers.add(field);
-					else if (!words.has(field)) words.set(field, captured);
+					if (Number.isFinite(parseWidgetValue(captured))) {
+						numbers.add(field);
+						const percentage = (rule.scale ?? 1) === 1 && isPercentCapture(captured, line, hits.spans[at + 1]);
+						percentages.set(field, percentages.get(field) !== false && percentage);
+						if (percentage) unprovenPercentages.get(field)?.delete(index);
+					} else if (!words.has(field)) words.set(field, captured);
 				});
 			}
 			offset += names.length * 2;
 		}
 	}
+	for (const [field, feeds] of unprovenPercentages) {
+		if (feeds.size > 0) percentages.set(field, false);
+	}
 	if (seen && matches === 0) {
-		errors.push("no rule matches any sample line; copy the exact text of lines that carry the numbers");
+		const wildcardMissesTools =
+			samples.some(sample => sample.id === TOOLS_SOURCE_ID) && spec.rules.some(rule => rule.from.endsWith("*"));
+		errors.push(
+			`no rule matches any sample line; copy the exact text of lines that carry the numbers${wildcardMissesTools ? ` (a wildcard \`from\` never reads \`${TOOLS_SOURCE_ID}\`: name it)` : ""}`,
+		);
 	}
 	for (const index of marked) {
 		errors.push(
-			`rules[${index}]: matches \`${TOOL_CALL_MARK}<tool> <intent>\` lines, which are omp's markers of the subagent's tool calls, not its output; read the result lines below them, or skip if none show progress`,
+			`rules[${index}]: matches \`${TOOL_CALL_MARK}<tool> <intent>\` lines, which are omp's markers of the subagent's tool calls, not its output; match the literal text of the result lines that report progress, or skip if none do`,
 		);
 	}
 	for (const [field, where] of numeric) {
@@ -423,6 +477,7 @@ function dryRun(
 			`${where}: field "${field}" needs numbers, but its group captured "${truncate(word, 40)}" in the samples; capture only the digits`,
 		);
 	}
+	return percentages;
 }
 
 /** How rules feed a field: whether any feed is a number or keeps text, and the groups splitting it by key. */
@@ -702,7 +757,10 @@ function parseBlock(value: unknown, where: string, errors: string[]): JobWidgetB
 						errors.push(`${where}.tones: at most ${MAX_GRID_TONES} entries`);
 						break;
 					}
-					if (typeof tone === "string" && (JOB_WIDGET_TONES as readonly string[]).includes(tone)) {
+					if (status.trim().length === 0) {
+						// An empty status would match every cell, colouring any text as a status.
+						errors.push(`${where}.tones: an empty status matches every cell; name the status word`);
+					} else if (typeof tone === "string" && (JOB_WIDGET_TONES as readonly string[]).includes(tone)) {
 						tones[status] = tone as TspTone;
 					} else {
 						errors.push(`${where}.tones.${status}: expected one of ${JOB_WIDGET_TONES.join(", ")}`);

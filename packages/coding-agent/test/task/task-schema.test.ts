@@ -8,6 +8,7 @@ import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 let taskSchemaSessionIndex = 0;
 
@@ -39,6 +40,30 @@ describe("task schema (single-spawn)", () => {
 	it("requires task", () => {
 		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
+	});
+
+	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
+		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
+		for (const file of [true, false]) {
+			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
+			const item = { taskFile: "local://assignment.md", solutionSpace: "one defined change" };
+			const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
+			const wire = schema.toJsonSchema();
+			const tasks = isRecord(wire.properties) ? wire.properties.tasks : undefined;
+			const itemWire = batchEnabled && isRecord(tasks) ? tasks.items : wire;
+			if (!isRecord(itemWire)) throw new Error("Expected an object schema for task input");
+			if (file) {
+				if (parsed instanceof type.errors) throw new Error(parsed.summary);
+				expect(parsed).toMatchObject(
+					batchEnabled ? { tasks: [{ taskFile: item.taskFile }] } : { taskFile: item.taskFile },
+				);
+				expect(itemWire.required).not.toContain("task");
+			} else {
+				expect(parsed instanceof type.errors).toBe(true);
+				expect(itemWire.properties).not.toHaveProperty("taskFile");
+				expect(itemWire.required).toContain("task");
+			}
+		}
 	});
 
 	it("removes eval tool names from the wire shape when eval.tools.enabled is off", () => {

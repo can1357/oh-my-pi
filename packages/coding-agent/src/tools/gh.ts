@@ -49,10 +49,12 @@ import { cfgImagesAutoResize } from "../modes/settings";
 export { formatRepoRef, parsePositiveDecimalInt, resolveDefaultRepoMemoized } from "./gh-common";
 export {
 	getOrFetchPrDiff,
+	getPinnedPrDiff,
 	type PrDiffFile,
 	type PrDiffLookupOptions,
 	type PrDiffPayload,
 	parsePrUnifiedDiff,
+	retainPrDiffGeneration,
 } from "./gh-pr-diff";
 export { buildSearchDateQualifier, parseSearchDateBound } from "./gh-search";
 export {

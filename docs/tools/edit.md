@@ -3,6 +3,7 @@
 > Applies source edits. The default `hashline` mode consumes one line-anchored patch string and edits existing files directly.
 
 ## Source
+
 - Entry and mode registration: `packages/coding-agent/src/edit/index.ts`
 - Mode schemas: `packages/coding-agent/src/edit/schemas.ts`
 - Model-facing prompts: `crates/pi-edit/prompts/`; compact hashline variant: `packages/coding-agent/src/edit/hashline-compact.md`
@@ -28,9 +29,9 @@ This page primarily documents hashline. The schema, prompt, examples, renderer, 
 
 ## Input
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `input` | `string` | Yes | One or more `[PATH#TAG]` sections containing hashline operations. The strict custom-tool grammar wraps the sections in `*** Begin Patch` / `*** End Patch`; the normal parser also accepts an unwrapped payload. |
+| Field   | Type     | Required | Description                                                                                                                                                                                                      |
+| ------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input` | `string` | Yes      | One or more `[PATH#TAG]` sections containing hashline operations. The strict custom-tool grammar wraps the sections in `*** Begin Patch` / `*** End Patch`; the normal parser also accepts an unwrapped payload. |
 
 Each section edits one existing file and MUST copy the four-uppercase-hex snapshot tag from the latest anchored `read`, `grep`, or successful `edit` result:
 
@@ -46,19 +47,19 @@ Use `write` to create or wholly overwrite a file. Hashline rejects untagged anch
 
 All line numbers refer to the original tagged snapshot, not to earlier hunks in the same call.
 
-| Form | Effect |
-| --- | --- |
-| `PUT N.=M:` | Replace inclusive original lines `N..M` with the following `+TEXT` rows. |
-| `PUT N*:` | Replace the multi-line syntactic block beginning on line `N`. |
-| `PUT <N:` / `PUT >N:` | Insert body rows immediately before / after line `N`. `PUT <1:` is file head. |
-| `PUT >$:` | Append body rows at file tail. |
-| `PUT >N*:` | Insert after the syntactic block beginning on line `N`. |
-| `CUT N.=M` / `CUT N*` | Delete and capture an inclusive range or resolved block. Add `@name` to write a named register. |
-| `PUT <N` / `PUT >N` / `PUT >$` | Paste the anonymous register into a gap. |
-| `PUT <N @name` / `PUT >N @name` / `PUT >$ @name` | Paste a named register into a gap. |
-| `PUT N.=M @name` / `PUT N* @name` | Replace a range or block with a named register. Named registers are required for span/block paste. |
-| `REM` | Delete the section file. |
-| `MV DEST` | Write the edited file to the destination, then delete the source. Existing destination contents can be overwritten; quote destinations containing spaces. |
+| Form                                             | Effect                                                                                                                                                    |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PUT N.=M:`                                      | Replace inclusive original lines `N..M` with the following `+TEXT` rows.                                                                                  |
+| `PUT N*:`                                        | Replace the multi-line syntactic block beginning on line `N`.                                                                                             |
+| `PUT <N:` / `PUT >N:`                            | Insert body rows immediately before / after line `N`. `PUT <1:` is file head.                                                                             |
+| `PUT >$:`                                        | Append body rows at file tail.                                                                                                                            |
+| `PUT >N*:`                                       | Insert after the syntactic block beginning on line `N`.                                                                                                   |
+| `CUT N.=M` / `CUT N*`                            | Delete and capture an inclusive range or resolved block. Add `@name` to write a named register.                                                           |
+| `PUT <N` / `PUT >N` / `PUT >$`                   | Paste the anonymous register into a gap.                                                                                                                  |
+| `PUT <N @name` / `PUT >N @name` / `PUT >$ @name` | Paste a named register into a gap.                                                                                                                        |
+| `PUT N.=M @name` / `PUT N* @name`                | Replace a range or block with a named register. Named registers are required for span/block paste.                                                        |
+| `REM`                                            | Delete the section file.                                                                                                                                  |
+| `MV DEST`                                        | Write the edited file to the destination, then delete the source. Existing destination contents can be overwritten; quote destinations containing spaces. |
 
 Register names contain ASCII letters, digits, `_`, or `-`. The anonymous register is batch-local and starts empty on every call. Named registers persist for the session and are published only after their writes land. Operations run top-to-bottom across sections, so a cut in an earlier section can feed a later paste. Repeating a paste does not consume its register.
 
@@ -121,16 +122,33 @@ MV lib/welcome.py
 
 ## Other wire contracts
 
-| Mode | Parameters | Edit form |
-| --- | --- | --- |
-| `replace` | `path`, `old_string`, `new_string`, optional `replace_all` | Replace quoted text in one file. |
-| `patch` | `path`, `edits: Array<{ op?: "create" \| "delete" \| "update"; rename?: string; diff?: string }>` | Patch entries all target the top-level `path`; separate calls for different files. |
-| `apply_patch` | `input` | Combined `*** Begin Patch` payload with `*** Add File`, `*** Update File`, `*** Move to`, and `*** Delete File` sections. |
-| `sloppy` | `input` | `*** Edit File: path`, then `*** Find` plus `*** Replace`, `*** Insert Before`, or `*** Insert After`. |
+| Mode          | Parameters                                                                                        | Edit form                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `replace`     | `path`, `old_string`, `new_string`, optional `replace_all`                                        | Replace quoted text in one file.                                                                                          |
+| `patch`       | `path`, `edits: Array<{ op?: "create" \| "delete" \| "update"; rename?: string; diff?: string }>` | Patch entries all target the top-level `path`; separate calls for different files.                                        |
+| `apply_patch` | `input`                                                                                           | Combined `*** Begin Patch` payload with `*** Add File`, `*** Update File`, `*** Move to`, and `*** Delete File` sections. |
+| `sloppy`      | `input`                                                                                           | `*** Edit File: path`, then `*** Find` plus `*** Replace`, `*** Insert Before`, or `*** Insert After`.                    |
 
 `sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless the file header ends in ` all`; bare `*** Edit File:` continues the current target. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. Insert keeps the anchor and treats `…` literally. Every pair addresses the original file; matching/validation failures occur before writes.
 
 The mode prompts in `crates/pi-edit/prompts/` define the full syntax.
+
+`apply_patch` matches complete old/context lines in this order: exact, trailing
+whitespace trimmed, both ends trimmed, then Unicode punctuation normalized.
+It never uses substring or character-similarity matching, regardless of the
+fuzzy settings for other modes. Repeated context binds to the first match at
+or after the previous hunk; unmatched context rejects the entire envelope
+before any writes. Numeric prefixes in old and new lines remain literal text,
+not recovered line-number annotations.
+
+An `*** Update File` followed only by `*** Move to:` renames a UTF-8 file
+without changing its bytes or permissions. An empty update without a move
+still rejects, as do missing sources and occupied destinations.
+
+Envelope sections see the results of earlier sections in order. A move vacates
+its source before a later add, and subsequent updates can target the moved
+file. Preview and application validate this same virtual namespace before
+the first filesystem write; a later invalid section leaves all files unchanged.
 
 ## Output and side effects
 
@@ -138,7 +156,7 @@ Hashline applies in one tool call; it does not use the staged `xd://resolve` / `
 
 A successful hashline section returns a fresh `[path#TAG]` header, optional block-resolution and move lines, a compact post-edit preview when available, and a `Warnings:` block when recovery or normalization produced warnings. `EditToolDetails` can include the unified `diff`, `firstChangedLine`, diagnostics, operation (`update` or `delete` in hashline mode), path/move metadata, `oldText` / `newText`, `snapshotsPruned`, and per-file results. Multi-section input returns one aggregate result. Stored before/after snapshot text is capped at 32,768 characters per file and across a multi-file result; later entries may retain their diff but omit snapshot text.
 
-Native parse/match/application and writer failures return `isError: true` with their diagnostic text; native bridge failures may throw. Updates run through the ACP bridge or LSP writethrough, so configured formatting can change the persisted text. A newly introduced syntax parse failure does not roll back the edit: it produces a warning, or an additional repair note when `edit.autoRepair.enabled` successfully repairs it.
+Native parse/match/application and writer failures return `isError: true` with their diagnostic text and `details.errorKind`, the engine's class of the failure: `unseen_lines`, `stale_tag`, `unknown_tag`, `other_file_tag` (a tag this session issued for another file), `missing_tag`, `header_only`, `out_of_range`, `ambiguous_boundary`, `no_change`, `file_not_found`, `parse`, `no_match`, `invalid_utf8`, `plan_mode`, `unresolved_url`, `io`, `write_failed`, or `apply` for the rest; a file's failure in a multi-file call keeps its own class, and `/session` counts failed edits by it. Native bridge failures may throw. Updates run through the ACP bridge or LSP writethrough, so configured formatting can change the persisted text. A newly introduced syntax parse failure does not roll back the edit: it produces a warning, or an additional repair note when `edit.autoRepair.enabled` successfully repairs it.
 
 The streaming renderer parses complete portions of an in-flight payload and computes read-only diffs. Streaming preview skips transient unresolved blocks, stale tags, and empty pastes rather than presenting partial input as a final failure. Execution re-reads and validates normally.
 

@@ -1,6 +1,9 @@
 //! Cargo build/test output filters.
 
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{
+	collections::BTreeMap,
+	fmt::{NumBuffer, Write as _},
+};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -185,7 +188,7 @@ fn summarize_successful_test_run(input: &str) -> String {
 	let mut out = String::from("cargo test:");
 	if totals.passed > 0 {
 		out.push(' ');
-		out.push_str(&totals.passed.to_string());
+		out.push_str(totals.passed.format_into(&mut NumBuffer::new()));
 		out.push_str(" passed");
 	} else {
 		out.push_str(" ok");

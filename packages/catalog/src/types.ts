@@ -94,6 +94,7 @@ export const IMAGE_GENERATION_APIS = [
 	"google-gemini-cli",
 	"openai-responses",
 	"openai-codex-responses",
+	"factory-droid-agent",
 ] as const;
 export type ImageGenerationApi = (typeof IMAGE_GENERATION_APIS)[number];
 
@@ -103,7 +104,7 @@ const IMAGE_CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny", "image
 /**
  * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
  * transport serves `chat` and `tiny`, plus `image` when `generate_image` runs it
- * (hosted Responses image tool, Gemini image models). `undefined` for
+ * (hosted Responses image tool, Gemini and Factory Droid image models). `undefined` for
  * `local-inference`, which hosts several kinds chosen by the model itself.
  */
 export function servedKinds(api: Api): readonly ModelKind[] | undefined {
@@ -671,6 +672,8 @@ export interface AnthropicCompat {
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
+	/** Whether a `ttl: "1h"` breakpoint on API-key requests adds the `extended-cache-ttl-2025-04-11` beta. Unset: true (Vertex rawPredict URLs never send it). */
+	extendedCacheTtlBeta?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
 	 * `messages` array. When unset, auto-detected from model and deployment policy.
@@ -729,6 +732,21 @@ export interface AnthropicCompat {
 	 * Default: auto-detected from provider/baseUrl and `model.reasoning`.
 	 */
 	replayUnsignedThinking?: boolean;
+	/**
+	 * Whether a thinking-mode history must carry a `thinking` block on EVERY
+	 * assistant turn of the current turn. DeepSeek's Anthropic endpoint rejects
+	 * the whole request (`The content[].thinking in the thinking mode must be
+	 * passed back to the API.`) when any assistant turn after the last user text
+	 * lacks one, including turns another upstream in the same gateway model group
+	 * produced without reasoning. Presence is all it validates (the block text may
+	 * be a placeholder, the signature may be empty), and only `thinking` counts —
+	 * `redacted_thinking` does not, and that endpoint rejects the block outright.
+	 * A model group that may fail over to such an endpoint must set this: the
+	 * stricter member defines the replay contract for the group.
+	 * Default: false (official Anthropic and lax proxies tolerate a turn without
+	 * thinking and the block is not invented for them).
+	 */
+	requiresThinkingPresence?: boolean;
 	/**
 	 * Whether the endpoint requires `thinking.type: "enabled"` whenever the
 	 * model reasons. Use for models that reject omitted or disabled thinking.
@@ -1186,6 +1204,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "thinkingLoopGuard"
 		| "bedrockMessagesApi"
 		| "effortBeta"
+		| "extendedCacheTtlBeta"
 		| "disabledThinking"
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
@@ -1196,6 +1215,8 @@ export type ResolvedAnthropicCompat = Required<
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
 	effortBeta?: AnthropicCompat["effortBeta"];
+	/** Extended-cache-ttl beta opt-out; undefined sends it where a 1h breakpoint needs it. */
+	extendedCacheTtlBeta?: AnthropicCompat["extendedCacheTtlBeta"];
 	/** Disabled-thinking wire form; undefined keeps the direct-provider behavior. */
 	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Effort pinned on `between_tools` turns; undefined leaves effort untouched. */
@@ -1494,6 +1515,13 @@ export interface ModelAccountAccess {
 	 * Absent when the backend reported no program metadata.
 	 */
 	cyberPrograms?: readonly string[];
+	/**
+	 * Antigravity request constants this account's `fetchAvailableModels`
+	 * roster advertised, keyed by upstream SKU id. Takes precedence over
+	 * {@link Model.antigravityWireProfiles}, which keeps only the first
+	 * account's values when multi-account rosters are unioned.
+	 */
+	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */
@@ -1507,6 +1535,21 @@ export interface CursorModelRoute {
 	modelId: string;
 	parameters: readonly CursorModelParameter[];
 	maxMode?: boolean;
+}
+
+/**
+ * Antigravity Cloud Code Assist request constants for one upstream SKU, as the
+ * native client sends them; see {@link Model.antigravityWireProfiles}.
+ */
+export interface AntigravityModelWireProfile {
+	/** Opaque `labels.model_enum` token (`fetchAvailableModels` `model`). */
+	modelEnum?: string;
+	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
+	maxOutputTokens?: number;
+	/** SKU thinking level; the native client sends it in preference to a budget. */
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
+	thinkingBudget?: number;
 }
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
@@ -1622,6 +1665,13 @@ export interface Model<TApi extends Api = Api> {
 	 * their single wire id) and on bundled snapshots that predate discovery.
 	 */
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
+	/**
+	 * Per-wire-id Antigravity request constants recorded from the account's
+	 * `fetchAvailableModels` roster, keyed by upstream SKU id. A collapsed row
+	 * carries one entry per member it routes to; a raw row carries its own.
+	 * Absent on bundled snapshots that predate discovery.
+	 */
+	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
 	/**
 	 * Per-account availability recorded by multi-account discovery: provider
 	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
@@ -1830,3 +1880,15 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }
+
+/**
+ * The model facts the catalog policy cascade reads: the resolve-target inputs
+ * (`providerType ?? provider`, the request adapter, the wire model id, the
+ * reasoning flag) plus the unverified-thinking correction applied before the
+ * cascade. Callers holding a reduced model view — request adapters that only
+ * need policy — supply exactly these instead of asserting a full `Model`.
+ */
+export type CatalogPolicyInputs = Pick<
+	ModelSpec<Api>,
+	"provider" | "providerType" | "api" | "id" | "reasoning" | "requestModelId" | "thinking"
+>;

@@ -194,7 +194,7 @@ mod tests {
 	}
 
 	fn lines_of(batch: Option<LineBatch>) -> Vec<String> {
-		batch.as_ref().map_or_else(Vec::new, lines)
+		batch.as_ref().map_or_default(lines)
 	}
 
 	#[test]

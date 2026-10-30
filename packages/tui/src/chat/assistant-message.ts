@@ -5,6 +5,7 @@ import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,
+	endsInsideOpenFence,
 	holdPartialTableRow,
 	Markdown,
 	type MarkdownTheme,
@@ -14,10 +15,10 @@ import {
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantThinkingRenderer } from "./extension-types";
+import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
@@ -51,6 +52,8 @@ import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from ".
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+/** Text renderers that threw once; each failure is logged once per renderer, not per frame. */
+const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
@@ -246,6 +249,19 @@ function lerpHex(from: string, to: string, t: number): string {
 }
 
 /**
+ * Drop the closing border the renderer draws for a source that ends inside an
+ * open fence. That row is not part of the message yet: the live block reaches
+ * it only when the closer arrives, so publishing it would make the settled
+ * prefix disagree with the block render and freeze mid-stream retirement.
+ */
+function trimFabricatedCloser(rows: readonly string[], source: string): readonly string[] {
+	if (!endsInsideOpenFence(source)) return rows;
+	let last = rows.length;
+	while (last > 0 && rows[last - 1]!.trim() === "") last--;
+	return last > 0 ? rows.slice(0, last - 1) : rows;
+}
+
+/**
  * Renders an assistant message; streaming content remains mutable until the
  * provider finalizes it because later deltas can revise earlier Markdown.
  * The exception is the leading run of visible thinking blocks: raw thinking
@@ -390,8 +406,10 @@ export class AssistantMessageComponent extends Container {
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
-	/** Display form of {@link #lastMessage} (reaction handled) the native description is built from. */
+	/** Display form of {@link #lastMessage} (reaction handled, extension text renderers applied) the native description is built from. */
 	#displayedMessage: AssistantMessage | undefined;
+	/** {@link #displayedMessage} before extension text renderers: the reply as written, which thinking state and the native Copy follow. */
+	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
@@ -523,9 +541,65 @@ export class AssistantMessageComponent extends Container {
 		content[index] = { ...block, text };
 		return { ...message, content };
 	}
+
+	/**
+	 * Display form with the extension text renderers applied, in registration order: each gets the
+	 * previous one's output. A renderer that throws or returns a non-string leaves its input drawn;
+	 * a throw is logged once per renderer. A block whose text and `streaming` flag are unchanged
+	 * since its last render reuses that output: a block sealed at a tool call keeps receiving
+	 * updates while the call's arguments stream. {@link rerenderMessage} and
+	 * {@link setTextRenderers} drop the reused output.
+	 */
+	#renderText(message: AssistantMessage, streaming: boolean): AssistantMessage {
+		const rendering = this.#textRendering;
+		if (!rendering) return message;
+		// Renderers are display-only: hand them a deep copy so no edit, however nested, reaches the stored message.
+		let view: AssistantMessage | undefined;
+		let content: AssistantMessage["content"] | undefined;
+		// Blocks stream in order: only the last one can still grow.
+		const tail = message.content.length - 1;
+		for (let index = 0; index < message.content.length; index++) {
+			const block = message.content[index]!;
+			if (block.type !== "text" || block.text.length === 0) continue;
+			const blockStreaming = streaming && index === tail;
+			const cached = this.#renderedText.get(index);
+			let text: string;
+			if (cached?.input === block.text && cached.streaming === blockStreaming) {
+				text = cached.output;
+			} else {
+				view ??= structuredClone(message);
+				text = block.text;
+				for (const renderer of rendering.renderers) {
+					try {
+						const rendered = renderer({
+							message: view,
+							contentIndex: rendering.contentOffset + index,
+							text,
+							streaming: blockStreaming,
+						});
+						if (typeof rendered === "string") text = rendered;
+					} catch (error) {
+						if (failedTextRenderers.has(renderer)) continue;
+						failedTextRenderers.add(renderer);
+						logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
+					}
+				}
+				this.#renderedText.set(index, { input: block.text, streaming: blockStreaming, output: text });
+			}
+			if (text === block.text) continue;
+			content ??= message.content.slice();
+			content[index] = { ...block, text };
+		}
+		return content ? { ...message, content } : message;
+	}
 	#hideThinkingBlock: boolean;
 	readonly #onImageUpdate?: () => void;
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
+	#textRendering: AssistantTextRendering | undefined;
+	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
+	readonly #textContentOffset: number;
+	/** Last renderer output per content index, reused while the block's input and `streaming` flag hold; see {@link #renderText}. */
+	readonly #renderedText = new Map<number, { input: string; streaming: boolean; output: string }>();
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
@@ -539,11 +613,14 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
+		textRendering?: AssistantTextRendering,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
 		this.#onImageUpdate = onImageUpdate;
 		this.#thinkingRenderers = thinkingRenderers;
+		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
+		this.#textContentOffset = textRendering?.contentOffset ?? 0;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
@@ -792,8 +869,9 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptBlockFinalized;
 	}
 
-	/** Whether a figure still waits for the raster of its final source; the transcript holds retirement meanwhile. */
+	/** Hold image and figure rendering until the completed block can enter immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
+		if (this.#showImages && this.#kittyConversionsAwaited.size > 0) return true;
 		for (const block of this.#figureBlocks.values()) if (block.pending) return true;
 		return false;
 	}
@@ -815,7 +893,7 @@ export class AssistantMessageComponent extends Container {
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const media = cx?.supports("media") === true;
-		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
+		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
 				? Math.round(Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed()) * 10) / 10
@@ -886,13 +964,15 @@ export class AssistantMessageComponent extends Container {
 		let answered = false;
 		if (message) {
 			const live = !this.#transcriptBlockFinalized && this.#lastUpdateTransient;
+			// Which block streams, and whether there is an answer to copy, follow the reply as written:
+			// text renderers change only how it is drawn (one may hide all of it).
+			const answer = this.#answerMessage ?? message;
 			let tailIndex = -1;
-			for (let index = 0; index < message.content.length; index++) {
-				const content = message.content[index]!;
-				if (
-					(content.type === "text" && canonicalizeMessage(content.text)) ||
-					(content.type === "thinking" && canonicalizeMessage(content.thinking))
-				) {
+			for (let index = 0; index < answer.content.length; index++) {
+				const content = answer.content[index]!;
+				const answerText = content.type === "text" && canonicalizeMessage(content.text) !== "";
+				answered ||= answerText;
+				if (answerText || (content.type === "thinking" && canonicalizeMessage(content.thinking))) {
 					tailIndex = index;
 				}
 			}
@@ -900,7 +980,6 @@ export class AssistantMessageComponent extends Container {
 				const content = message.content[index]!;
 				const streaming = live && index === tailIndex;
 				if (content.type === "text" && canonicalizeMessage(content.text)) {
-					answered = true;
 					// A native terminal sizes table columns by every row it gets: send a growing row once
 					// its line ends. Hold before trimming, which would drop the newline ending a finished row.
 					const source = (streaming ? holdPartialTableRow(content.text) : content.text).trim();
@@ -1152,7 +1231,7 @@ export class AssistantMessageComponent extends Container {
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */
 	#answerText(): string {
 		const blocks: string[] = [];
-		for (const content of this.#displayedMessage?.content ?? []) {
+		for (const content of this.#answerMessage?.content ?? []) {
 			if (content.type === "text" && canonicalizeMessage(content.text)) blocks.push(content.text.trim());
 		}
 		return blocks.join("\n\n");
@@ -1214,7 +1293,8 @@ export class AssistantMessageComponent extends Container {
 	 * every guard skips publication and nothing ever retracts it.
 	 */
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
-		if (!this.#midStreamPublication) return;
+		// Extension text renderers may rewrite text they already drew, and published rows never retract.
+		if (!this.#midStreamPublication || this.#textRendering) return;
 		const parts = this.#currentStableSnapshot();
 		if (!parts) return;
 		const last = parts.at(-1);
@@ -1359,12 +1439,12 @@ export class AssistantMessageComponent extends Container {
 		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
 		if (renderer?.index === index && renderer.kind === kind) {
 			renderer.md.setText(trimmed);
-			return renderer.md.render(width);
+			return trimFabricatedCloser(renderer.md.render(width), trimmed);
 		}
 		const md = this.#createMarkdown(kind, trimmed);
 		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
 		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
-		return md.render(width);
+		return trimFabricatedCloser(md.render(width), trimmed);
 	}
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
@@ -1491,17 +1571,48 @@ export class AssistantMessageComponent extends Container {
 		this.#stopThinkingAnimation();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
+		// A sealed block's text is also complete and can retire to scrollback before the
+		// reply's final update reaches it: give the text renderers their final call now
+		// (sealed renders pass `streaming: false`).
+		const sealRenderers = this.#textRendering !== undefined && this.#lastUpdateTransient;
 		if (this.#thinkingDots) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
-			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
+		if ((this.#thinkingDots || sealRenderers) && this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/**
+	 * Swap the extension text renderers (the setting enabling them changed) and redraw with them.
+	 * Enabling them also drops rows already published as stable, since a renderer may rewrite them;
+	 * callers MUST pair this with a scrollback-clearing display reset, as for
+	 * {@link resetTranscriptStableRows}.
+	 */
+	setTextRenderers(renderers: readonly AssistantTextRenderer[]): void {
+		this.#textRendering = renderers.length ? { renderers, contentOffset: this.#textContentOffset } : undefined;
+		this.#renderedText.clear();
+		if (this.#textRendering) this.resetTranscriptStableRows();
+		if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 	}
 
 	applyRetryRecovery(retryRecovery: AssistantMessage["retryRecovery"]): void {
 		if (!this.#lastMessage || !retryRecovery) return;
 		this.setErrorPinned(false);
 		this.updateContent({ ...this.#lastMessage, retryRecovery });
+	}
+
+	/**
+	 * Draw the current message again when it is the reply sent at `timestamp`, re-running the
+	 * extension text renderers; returns whether it was. The caller schedules the frame.
+	 */
+	rerenderMessage(timestamp: number): boolean {
+		if (this.#lastMessage?.timestamp !== timestamp) return false;
+		// The renderers' state may have changed: run them again rather than reuse their last output.
+		this.#renderedText.clear();
+		this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		return true;
 	}
 
 	messagePersistenceKey(): string | undefined {
@@ -1615,6 +1726,7 @@ export class AssistantMessageComponent extends Container {
 				})
 				.catch(() => {
 					this.#kittyConversionsAwaited.delete(key);
+					this.#onImageUpdate?.();
 				});
 		}
 	}
@@ -1806,6 +1918,12 @@ export class AssistantMessageComponent extends Container {
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		// Narration the provider returned as thinking renders as answer text.
 		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
+		this.#answerMessage = message;
+		// A sealed block (closed at a tool call) keeps receiving transient updates; its text is final.
+		// Thinking state below reads `answer`: renderers transform display only, so one that hides the
+		// streaming text must not make the closed thought before it look live again.
+		const answer = message;
+		message = this.#renderText(message, this.#lastUpdateTransient && !this.#transcriptBlockFinalized);
 		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
@@ -1823,7 +1941,7 @@ export class AssistantMessageComponent extends Container {
 		// Native terminals show the live rate on visible thinking too, not only the hidden pulse.
 		const isThinkingNow =
 			this.#lastUpdateTransient &&
-			(isNativeRendering() ? this.#thinkingTailIndex(message) !== undefined : this.#shouldAnimateThinking(message));
+			(isNativeRendering() ? this.#thinkingTailIndex(answer) !== undefined : this.#shouldAnimateThinking(answer));
 		if (isThinkingNow) {
 			const currentTokens = message.usage.reasoningTokens ?? message.usage.output;
 			this.#thinkingTokens = currentTokens;
@@ -1926,7 +2044,7 @@ export class AssistantMessageComponent extends Container {
 			if (this.#figureBlocks.get(index) !== block) block.dispose();
 		}
 
-		if (this.#shouldAnimateThinking(message)) {
+		if (this.#shouldAnimateThinking(answer)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
 			this.#thinkingDots = new Text(this.#thinkingDotsLabel(), 1, 0);
 			this.#contentContainer.addChild(this.#thinkingDots);

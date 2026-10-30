@@ -28,8 +28,9 @@ thread_local! {
 	static BUILTIN_ON_BLOCKING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether the calling builtin runs on a Tokio blocking worker (owned-shell
-/// pipeline stages and async jobs, or virtual-file builtins). Synchronous I/O
+/// Whether the calling builtin runs on a Tokio blocking worker (synchronous
+/// builtins in owned-shell pipeline stages and async jobs, or on virtual
+/// files; `async_io` builtins run as tasks). Synchronous I/O
 /// there cannot starve the async runtime, so a builtin must not offload it to
 /// another blocking worker: holding this one while queueing that can exhaust
 /// a bounded blocking pool and leave every nested read waiting forever.
@@ -640,9 +641,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	}
 
 	async fn execute_via_builtin(
-		self,
+		mut self,
 		builtin: builtins::Registration<SE>,
 	) -> Result<ExecutionSpawnResult, error::Error> {
+		// Only an external command's child can make deferred redirections.
+		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		match self.shell {
 			ShellForCommand::OwnedShell { target, .. } => {
 				Ok(Self::execute_via_builtin_in_owned_shell(
@@ -667,16 +670,34 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		args: Vec<CommandArg>,
 	) -> ExecutionSpawnResult {
 		let last_arg = Self::take_last_arg(&args);
-		let join_handle = tokio::task::spawn_blocking(move || {
-			let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+		// An `async_io` builtin never blocks a worker, so it runs as a plain task.
+		// Every other builtin does synchronous descriptor I/O: it runs on a
+		// blocking worker, driven to completion there, so that I/O cannot starve
+		// the async runtime.
+		let join_handle = if builtin.async_io {
+			tokio::spawn(async move {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
-			// Update $_ after command execution.
-			shell.update_last_arg_variable(last_arg);
+				let result = execute_builtin_command(&builtin, cmd_context, args).await;
 
-			result
-		});
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		} else {
+			tokio::task::spawn_blocking(move || {
+				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+
+				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+
+				// Update $_ after command execution.
+				shell.update_last_arg_variable(last_arg);
+
+				result
+			})
+		};
 
 		ExecutionSpawnResult::StartedTask(join_handle)
 	}
@@ -689,8 +710,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		let mut shell = self.shell;
 		let last_arg = Self::take_last_arg(&self.args);
 
-		let result = if sees_virtual_files {
-			// Builtins do synchronous I/O on their descriptors. A virtual file's
+		let result = if sees_virtual_files && !builtin.async_io {
+			// Synchronous builtins do blocking I/O on their descriptors. A virtual file's
 			// synchronous I/O awaits its provider, which must not happen on an
 			// async runtime thread (a current-thread runtime would have nothing
 			// left to drive the provider). Run the builtin on a blocking worker
@@ -743,9 +764,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	}
 
 	async fn execute_via_function(
-		self,
+		mut self,
 		func_registration: functions::Registration,
 	) -> Result<ExecutionSpawnResult, error::Error> {
+		// Only an external command's child can make deferred redirections.
+		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		let mut params = self.params;
 		params.disable_command_output_marking();
 
@@ -855,10 +878,13 @@ pub(crate) async fn execute_external_command(
 		.collect::<Vec<_>>();
 
 	// Before we lose ownership of the open files, figure out if stdin will be a
-	// terminal.
-	let child_stdin_is_terminal = context
-		.try_fd(openfiles::OpenFiles::STDIN_FD)
-		.is_some_and(|f| f.is_terminal());
+	// terminal. A deferred redirection of fd 0 is made in the child before the
+	// command runs (see `interp::DeferredRedirect`), so what this process holds
+	// there, which can still be its terminal, is not the command's input.
+	let child_stdin_is_terminal = !context.params.sets_deferred(openfiles::OpenFiles::STDIN_FD)
+		&& context
+			.try_fd(openfiles::OpenFiles::STDIN_FD)
+			.is_some_and(|f| f.is_terminal());
 
 	// Figure out if we should be setting up a new process group.
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
@@ -869,14 +895,26 @@ pub(crate) async fn execute_external_command(
 	// command) unless the caller specified an explicit override.
 	let argv0 = argv0_override.unwrap_or(context.command_name.as_str());
 	#[allow(unused_mut, reason = "only mutated on unix platforms")]
-	let mut cmd = compose_std_command(
-		&context,
-		executable_path,
-		argv0,
-		cmd_args.as_slice(),
-		false, /* empty environment? */
-	)
-	.await?;
+	let mut cmd = if context.params.deferred_redirects().is_empty() {
+		compose_std_command(
+			&context,
+			executable_path,
+			argv0,
+			cmd_args.as_slice(),
+			false, /* empty environment? */
+		)
+		.await?
+	} else {
+		// Redirections to a FIFO left for the child (see
+		// `interp::DeferredRedirect`): `/bin/sh` makes them and then execs the
+		// command in place, so the pid the shell tracks is the command's. Its
+		// argv[0] is then the resolved path.
+		let script = interp::deferred_redirect_script(context.params.deferred_redirects());
+		let mut trampoline_args = vec!["-c".to_owned(), script, "sh".to_owned()];
+		trampoline_args.push(executable_path.to_owned());
+		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
+		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
+	};
 	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
 
 

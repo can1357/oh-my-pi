@@ -2588,6 +2588,137 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
         _stop_loop(loop, thread)
 
 
+def test_gh_open_pr_scopes_identity_gate_to_requested_base(db: Database, tmp_path: Path) -> None:
+    """`base` override: only commits beyond `origin/<base>` must be bot-authored.
+
+    Gitflow repo: default `main`, integration branch `develop` carries a
+    maintainer commit. A bot fix on top of `develop` opened with
+    `base="develop"` must push and open the PR against `develop`.
+    """
+    import os
+    import subprocess
+
+    bare = tmp_path / "upstream.git"
+    bare.mkdir()
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "maintainer",
+        "GIT_AUTHOR_EMAIL": "maintainer@x",
+        "GIT_COMMITTER_NAME": "maintainer",
+        "GIT_COMMITTER_EMAIL": "maintainer@x",
+    }
+    subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
+    (seed / "README.md").write_text("init\n")
+    for cmd in (
+        ["git", "-C", str(seed), "add", "."],
+        ["git", "-C", str(seed), "commit", "-m", "init"],
+        ["git", "-C", str(seed), "checkout", "-b", "develop"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True, env=env)
+    (seed / "feature.txt").write_text("integration work\n")
+    for cmd in (
+        ["git", "-C", str(seed), "add", "."],
+        # Literal `\n` escape: the message repair must not rewrite this
+        # already-published integration-branch commit.
+        ["git", "-C", str(seed), "commit", "-m", "feat: develop work\\n\\nbody"],
+        ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
+        ["git", "-C", str(seed), "push", "origin", "main", "develop"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True, env=env)
+    develop_sha = subprocess.run(
+        ["git", "-C", str(seed), "rev-parse", "develop"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    from robomp.sandbox import SandboxManager
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=42,
+        title="gitflow base",
+        clone_url=str(bare),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    bot_env = os.environ | {
+        "GIT_AUTHOR_NAME": "robomp-bot",
+        "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
+        "GIT_COMMITTER_NAME": "robomp-bot",
+        "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
+    }
+    subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "reset", "--hard", "origin/develop"], check=True, capture_output=True
+    )
+    (ws.repo_dir / "fix.txt").write_text("fix\n")
+    subprocess.run(["git", "-C", str(ws.repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "commit", "-m", "fix: x"], check=True, capture_output=True, env=bot_env
+    )
+
+    pr_bases: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pr_bases.append(json.loads(request.content)["base"])
+        return httpx.Response(
+            201,
+            json={
+                "number": 7,
+                "html_url": "https://github.com/octo/widget/pull/7",
+                "head": {"ref": ws.branch},
+                "base": {"ref": "develop"},
+            },
+        )
+
+    github = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    loop, thread = _make_loop_in_background()
+    try:
+        bindings = ToolBindings(
+            db=db,
+            github=github,
+            git_transport=LocalGitTransport(token=None),
+            repo=_stub_repo(),
+            issue=IssueInfo(
+                repo="octo/widget",
+                number=42,
+                title="t",
+                body="",
+                state="open",
+                author="alice",
+                labels=(),
+                is_pull_request=False,
+            ),
+            workspace=ws,
+            loop=loop,
+            author_name="robomp-bot",
+            author_email="robomp-bot@example.invalid",
+        )
+        db.upsert_issue(
+            key=bindings.issue_key,
+            repo="octo/widget",
+            number=42,
+            state="reproducing",
+            branch=ws.branch,
+            session_dir=str(ws.session_dir),
+        )
+        db.set_issue_classification(bindings.issue_key, "bug")
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        tool.execute({"title": "fix: x", "body": body, "base": "develop"}, _ctx())
+        assert pr_bases == ["develop"]
+        pushed_parent = subprocess.run(
+            ["git", "-C", str(bare), "rev-parse", f"refs/heads/{ws.branch}^"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert pushed_parent == develop_sha
+    finally:
+        _stop_loop(loop, thread)
+
+
 def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_path: Path) -> None:
     """A failing git-log author scan is a push rejection, not an empty successful scan."""
     import os

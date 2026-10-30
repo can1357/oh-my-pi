@@ -1,18 +1,19 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 function createRuntime() {
-	const handleBtwCommand = vi.fn(async () => {});
-	const setText = vi.fn();
+	const handleBtwCommand = vi.fn(async (_question: string, _images?: ImageContent[]) => true);
+	const clearDraft = vi.fn();
 	const addToHistory = vi.fn();
 	return {
 		handleBtwCommand,
-		setText,
+		clearDraft,
 		addToHistory,
 		runtime: {
 			ctx: {
-				editor: { setText, addToHistory } as unknown as InteractiveModeContext["editor"],
+				editor: { clearDraft, addToHistory } as unknown as InteractiveModeContext["editor"],
 				handleBtwCommand,
 			} as unknown as InteractiveModeContext,
 		},
@@ -29,7 +30,7 @@ describe("/btw slash command", () => {
 		);
 
 		expect(handled).toBe(true);
-		expect(harness.handleBtwCommand).toHaveBeenCalledWith("explain why the cache reuse matters here");
+		expect(harness.handleBtwCommand).toHaveBeenCalledWith("explain why the cache reuse matters here", undefined);
 	});
 
 	it("handles a blank /btw invocation without error", async () => {
@@ -38,7 +39,7 @@ describe("/btw slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/btw   ", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(harness.setText).toHaveBeenCalledWith("");
-		expect(harness.handleBtwCommand).toHaveBeenCalledWith("");
+		expect(harness.clearDraft).toHaveBeenCalled();
+		expect(harness.handleBtwCommand).toHaveBeenCalledWith("", undefined);
 	});
 });

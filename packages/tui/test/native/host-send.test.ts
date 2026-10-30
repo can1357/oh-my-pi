@@ -154,6 +154,53 @@ describe("TSP send event", () => {
 	});
 });
 
+describe("native PTY input ownership", () => {
+	it("hands native editing back after a PTY command without submitting the preserved draft", async () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		editor.setText("draft before command");
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		harness = await TspHarness.start(tui => {
+			tui.addChild(editor);
+			tui.setFocus(editor);
+		});
+		const h = harness;
+		const id = `${nativeComponentId(editor)}.line/input`;
+		const sf = h.terminal.surface!;
+
+		editor.nativeKeyPassthrough = true;
+		await h.render();
+		expect(h.byId(id)?.p).toMatchObject({ mode: "PTY", sendable: false, text: "draft before command" });
+		h.event({ ev: "send", sf, id, text: "should go to PTY" });
+		expect(submitted).toEqual([]);
+		expect(editor.getText()).toBe("draft before command");
+		const toPty: string[] = [];
+		const detach = h.tui.addInputListener(
+			data => {
+				if (h.tui.getFocused() !== editor) return undefined;
+				toPty.push(data);
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
+		h.terminal.send("y");
+		h.flush();
+		expect(toPty).toEqual(["y"]);
+		expect(editor.getText()).toBe("draft before command");
+		detach();
+
+		editor.nativeKeyPassthrough = false;
+		await h.render();
+		expect(h.byId(id)?.p).toMatchObject({ sendable: true, text: "draft before command" });
+		expect(h.byId(id)?.p).not.toHaveProperty("mode");
+		h.event({ ev: "send", sf, id, text: "next prompt" });
+		expect(submitted).toEqual(["next prompt"]);
+		expect(h.errors).toEqual([]);
+	});
+});
+
 describe("CustomEditor explicit prompt submission", () => {
 	it("bypasses large-paste selection menus and never expands tokens from a displaced draft", () => {
 		const editor = new CustomEditor(defaultEditorTheme);

@@ -172,8 +172,7 @@ impl Utility for Dd {
 		let operands: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(OPERANDS)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let settings = match parse_operands(host, &operands) {
 			Ok(settings) => settings,
 			Err(code) => return code,
@@ -776,13 +775,10 @@ fn try_zeroed(len: usize) -> Option<Vec<u8>> {
 	}
 	let layout = std::alloc::Layout::array::<u8>(len).ok()?;
 	// SAFETY: `layout` has a non-zero size.
-	let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-	if ptr.is_null() {
-		return None;
-	}
+	let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?;
 	// SAFETY: `ptr` came from the global allocator with the layout of `len`
 	// bytes, all initialized (zeroed); capacity equals that allocation.
-	Some(unsafe { Vec::from_raw_parts(ptr, len, len) })
+	Some(unsafe { Vec::from_parts(ptr, len, len) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1754,8 +1750,8 @@ impl Copier<'_> {
 			len -= 1;
 			self.saved_byte = Some(ibuf[from + len]);
 		}
-		for pair in ibuf[from..from + len].chunks_exact_mut(2) {
-			pair.swap(0, 1);
+		for [a, b] in ibuf[from..from + len].as_chunks_mut::<2>().0 {
+			std::mem::swap(a, b);
 		}
 		(from, len)
 	}

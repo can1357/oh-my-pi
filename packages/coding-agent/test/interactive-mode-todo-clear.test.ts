@@ -274,6 +274,9 @@ describe("InteractiveMode todo HUD persistence", () => {
 			},
 		]);
 		const registry = AgentRegistry.global();
+		// Registration schedules a coalesced observer UI flush; own that timer so the
+		// lifecycle event below gets its own flush window.
+		vi.useFakeTimers();
 		const agentId = "FocusedTodoParent";
 		const ref = registry.register({
 			id: agentId,
@@ -286,8 +289,8 @@ describe("InteractiveMode todo HUD persistence", () => {
 		try {
 			await mode.focusAgentSession(agentId);
 			expect(renderTodos(mode)).toContain("apply nested review fixes");
+			vi.advanceTimersByTime(100);
 
-			vi.useFakeTimers();
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 				id: `${agentId}/NestedFixer`,
 				index: 0,

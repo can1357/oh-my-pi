@@ -178,7 +178,7 @@ describe("generate_image tool gating", () => {
 				path: path.join(registryDir, "internal-reapply.txt"),
 				content: "x",
 			}),
-		).rejects.toThrow("Filesystem writes are not available");
+		).rejects.toThrow("Other filesystem paths are refused");
 
 		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "write"]));
 		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
@@ -406,6 +406,6 @@ describe("generate_image tool gating", () => {
 		expect(write).toBeDefined();
 		await expect(
 			write!.execute("device-only-fs", { path: path.join(registryDir, "nope.txt"), content: "x" }),
-		).rejects.toThrow("Filesystem writes are not available");
+		).rejects.toThrow("Other filesystem paths are refused");
 	});
 });

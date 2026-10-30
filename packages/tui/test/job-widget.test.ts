@@ -6,6 +6,7 @@ import {
 	describeJobTile,
 	describeJobWidget,
 	describeJobWidgetsHovercard,
+	jobWidgetGlance,
 	type JobTile,
 	type JobWidgetView,
 	renderJobTileLines,
@@ -162,6 +163,20 @@ describe("describeJobTile", () => {
 		expect(texts(role(described, "omp.job.tile.figure")!)).toBe("passed 71 / 90");
 		const bars = ofKind(role(described, "omp.job.tile.bars")!, "meter");
 		expect(bars.map(meter => prop(meter, "value"))).toEqual([26 / 30, 24 / 30, 21 / 30]);
+	});
+
+	it("reads a meter's whole where the headline repeats only its numerator", () => {
+		const build: JobWidgetView = {
+			title: "flameshot build",
+			headline: { text: "140" },
+			blocks: [{ kind: "meter", label: "steps", value: 140 / 190, text: "140/190" }],
+			state: "live",
+			updatedAt: 0,
+		};
+		expect(jobWidgetGlance(build)?.text).toBe("140/190");
+		expect(texts(role(describeJobTile(tile({ widget: build })), "omp.job.tile.figure")!)).toBe("140 / 190");
+		// A headline of another quantity still wins over the meter's figure.
+		expect(jobWidgetGlance(trialSweep)?.text).toBe("0.842");
 	});
 
 	it("gives a tile with nothing to chart its stage as the body, never a clock for a figure", () => {
