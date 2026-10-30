@@ -444,7 +444,13 @@ export class EventController {
 			user_wait_end: async () => {
 				if (!this.#sessionUserWait) return;
 				this.#sessionUserWait = undefined;
-				setRunStatus(this.#statusWithNoSessionWait());
+				const status = this.#statusWithNoSessionWait();
+				setRunStatus(status);
+				// A run that handed control to background work keeps the OSC `working`
+				// record but an idle title (the async-only policy in #handleAgentEnd).
+				// Ending the dialog must not flip the title back to working for the
+				// rest of the job wait; keep it idle while the async wait stands.
+				if (status.state === "working" && this.#asyncWaitEnd) setTerminalTitleState("idle");
 				this.ctx.ui.requestRender();
 			},
 			notice: e => this.#handleNotice(e),

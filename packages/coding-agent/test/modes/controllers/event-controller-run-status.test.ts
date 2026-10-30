@@ -237,6 +237,47 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
 	});
 
+	it("restores the idle title but keeps the working record when a dialog ends during async work", async () => {
+		// The dialog's answer arrives before the background job ends. The run is
+		// still active, so the OSC record returns to `working` — but the title
+		// must stay idle (the async-only policy), not flip back to working for the
+		// rest of the job wait.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const titleState = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		// The job is still running when the dialog is answered, which is the case
+		// this covers. The settle watch parks on `waitForIdle` meanwhile — a stub
+		// that returns at once would spin that loop — and is let go at the end so
+		// the watch can finish.
+		const jobRunning = Promise.withResolvers<void>();
+		let asyncWorkPending = true;
+		const controller = new EventController(
+			createInteractiveModeContext({
+				session: {
+					hasPendingAsyncWork: () => asyncWorkPending,
+					waitForIdle: () => jobRunning.promise,
+				},
+			}),
+		);
+		const prompt = "an MCP sign-in for linear";
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		await controller.handleEvent({
+			type: "agent_end",
+			messages: [],
+			isTerminal: false,
+			awaitingAsyncWork: true,
+		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
+		await controller.handleEvent({ type: "user_wait_end" });
+
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		expect(titleState).toHaveBeenLastCalledWith("idle");
+
+		asyncWorkPending = false;
+		jobRunning.resolve();
+		for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+	});
+
 	it("keeps a tool's own question when its dialog opens the session wait", async () => {
 		// The tool UI brackets its approval through `trackUserWaits`, whose label
 		// is generic. The prompt recorded for that tool call names the question
