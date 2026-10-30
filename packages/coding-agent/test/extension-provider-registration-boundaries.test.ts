@@ -226,7 +226,12 @@ describe("R17-6: stored methods run on the author's object, read when they are u
 		expect(registry.find(PROVIDER, MODEL.id)?.name).toBe("Projected");
 	});
 
-	test("a modifier replaced after registration is the one that runs", async () => {
+	test("a modifier replaced after registration is not the one that runs", async () => {
+		// Reversed deliberately. This pinned the dynamic per-call read, which was half of one
+		// contract and half of another: the registry snapshots a registration's data, so
+		// snapshotting its data and re-reading its methods meant a getter could answer twice and
+		// differently. A capability is captured at admission like everything else, and
+		// re-registering is how a provider changes one.
 		const { runtime } = owner();
 		let old = 0;
 		let fresh = 0;
@@ -253,7 +258,7 @@ describe("R17-6: stored methods run on the author's object, read when they are u
 		await registry.refresh("offline");
 		registry.getAll();
 
-		expect({ old, fresh: fresh > 0 }).toEqual({ old: 0, fresh: true });
+		expect({ old: old > 0, fresh }).toEqual({ old: true, fresh: 0 });
 	});
 
 	test("discovery written as a class method keeps its receiver", async () => {

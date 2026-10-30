@@ -215,20 +215,23 @@ distinct from the built-in one so processes without the extension (older session
 
 ### What the host keeps, and when
 
-A provider registration belongs to the session that made it, and the host reads the data it
-needs **once**, while that session is still there to answer for it. Two consequences worth
-knowing before you write a provider.
+A provider registration belongs to the session that made it, and the host reads what it needs
+**once**, while that session is still there to answer for it. Every property of what you hand
+over may be a getter, so a read is a call into your extension: the host takes one read and uses
+what it got, never validating one read and then reading the same name again to use it. Two
+consequences worth knowing before you write a provider.
 
-**Data is copied; change it by registering again.** `headers`, `compat`, `remoteCompaction`,
-`transport` and the `models` rows are read and copied when the registry takes the registration.
-Mutating those objects afterwards does not change what later requests send — re-register the
-provider instead, which is also how you replace it. The copy happens when the registry admits
-the registration, which for a queued provider is when the host drains the queue rather than when
-`pi.registerProvider` returns; a mutation in that gap still reaches requests, and is not
-something to rely on. Callbacks are not data and are not copied: `fetchUsage`, `login`,
-`refreshToken`, `getApiKey`, `modifyModels`, `fetchDynamicModels`, `streamSimple` and a
-`resolveHeaders` your `modifyModels` returns stay yours and are called on your object, so a
-class instance keeps its receiver and its private fields.
+**What the host keeps at admission is the data and the callbacks; change either by registering
+again.** `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied,
+and `streamSimple`, `fetchDynamicModels` and `oauth.modifyModels` are captured as the functions
+they were at that moment. Replacing any of them afterwards does not change what later requests
+do — re-register the provider instead, which is also how you replace it. A captured callback is
+still **yours**: it is applied to your own object, so a class instance keeps its receiver and
+its private fields, and `fetchUsage`, `login`, `refreshToken`, `getApiKey` and a
+`resolveHeaders` your `modifyModels` returns behave the same way. The copy and the capture
+happen when the registry admits the registration, which for a queued provider is when the host
+drains the queue rather than when `pi.registerProvider` returns; a change in that gap still
+reaches requests, and is not something to rely on.
 
 **Put values in data fields, not functions.** A function where the host expects data — a
 `toJSON` inside `compat`, a callable `extraBody` — is refused at registration with the field

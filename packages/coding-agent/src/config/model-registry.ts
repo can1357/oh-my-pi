@@ -234,10 +234,12 @@ interface ConfiguredModelDiscoveryResult {
  *  afterwards — validation, overlays, transport overrides, keys, the discovery rows' defaults —
  *  works from the record. The data those fields hold — headers, compat, remote compaction,
  *  transport, the model rows — is {@link registrationData}, taken in the same admission.
- *  The methods are not here: `streamSimple`, `fetchDynamicModels` and `oauth.modifyModels` are
- *  read off the author's object each time they are used, inside the admission of that use, and
- *  run on it, so a method replaced later is the one that runs and its receiver is the object it
- *  was written on. Only their presence is recorded. */
+ *  Its METHODS are read once here too, and the captured function is what every later use
+ *  applies — on the author's own object, so its receiver and private state are the ones it was
+ *  written with. Validating a capability and then reading its name again to call it is two
+ *  reads of one property: a getter answering once made the registry serve a substitute's
+ *  stream, persist a substitute's models, and throw on a capability it had just proved.
+ *  Re-registering is how a provider changes a callback, exactly as it is how it changes data. */
 interface AdmittedProviderConfig {
 	readonly baseUrl: string | undefined;
 	readonly apiKey: string | undefined;
@@ -249,9 +251,12 @@ interface AdmittedProviderConfig {
 	readonly transport: ProviderConfigInput["transport"];
 	readonly usage: UsageProvider | undefined;
 	readonly oauth: ProviderOAuthBlock | undefined;
-	readonly streams: boolean;
-	readonly discovers: boolean;
-	readonly modifies: boolean;
+	/** Captured once; applied on `config`. */
+	readonly streamSimple: ProviderConfigInput["streamSimple"];
+	/** Captured once; applied on `config`. */
+	readonly fetchDynamicModels: ProviderConfigInput["fetchDynamicModels"];
+	/** Captured once; applied on `oauth`, the object it was written on. */
+	readonly modifyModels: ProviderOAuthBlock["modifyModels"];
 	/** Overlays built from `models`; empty when it declared none. */
 	readonly overlays: readonly CustomModelOverlay[];
 	/** `!command` values in its key and headers, so a 401 can re-run them. */
@@ -642,7 +647,9 @@ interface RuntimeProviderRegistration extends GatedRegistration {
 	/** Set once this registration declared models: the OAuth block whose `modifyModels` projects
 	 *  the catalog while it is in force, or none. Unset, it leaves the projection to an earlier
 	 *  registration, as a registration without models always has. */
-	projection: { readonly oauth: ProviderOAuthBlock | undefined } | undefined;
+	projection:
+		| { readonly oauth: ProviderOAuthBlock | undefined; readonly modifyModels: ProviderOAuthBlock["modifyModels"] }
+		| undefined;
 	/** The configuration whose `fetchDynamicModels` discovers while this registration is in force,
 	 *  and the fields its rows default to. */
 	discovery: { readonly config: ProviderConfigInput; readonly fields: AdmittedProviderConfig } | undefined;
@@ -1590,11 +1597,11 @@ export class ModelRegistry {
 	 * The hook in force for a provider is the one declared by its newest live
 	 * registration that declared models. A retired session's projection is not
 	 * applied and no code of its runs; an earlier live registration's applies
-	 * again. The hook is read off the author's OAuth block when it runs, inside
-	 * that registration's admission, and called on the block. What it returns is
-	 * {@link registrationData}, read inside the same admission,
-	 * and a header resolver it put on a row is owned by that registration from
-	 * then on (see `#ownProjectedResolver`).
+	 * again. The hook is the function captured when that registration was
+	 * admitted, applied on the author's OAuth block inside the registration's
+	 * admission. What it returns is {@link registrationData}, read inside the
+	 * same admission, and a header resolver it put on a row is owned by that
+	 * registration from then on (see `#ownProjectedResolver`).
 	 */
 	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
@@ -1602,7 +1609,8 @@ export class ModelRegistry {
 		for (const providerName of this.#runtimeModelModifiers) {
 			const registration = this.#projectionInForce(providerName);
 			const oauth = registration?.projection?.oauth;
-			if (!registration || !oauth) continue;
+			const modifyModels = registration?.projection?.modifyModels;
+			if (!registration || !oauth || !modifyModels) continue;
 			const credential = this.authStorage.credentials.getOAuth(providerName);
 			if (!credential) continue;
 			const { gate } = registration;
@@ -1635,8 +1643,9 @@ export class ModelRegistry {
 				// Rows of other providers pass through untouched; rebuilding a
 				// full catalog on every projection costs more than it can fix.
 				projected = callThroughGate(gate, () => {
-					const authored = oauth.modifyModels?.(snapshot, credential);
-					// A block whose hook was removed since registration projects nothing.
+					// The function captured when this registration was admitted, applied on the
+					// block it was written on.
+					const authored = Reflect.apply(modifyModels, oauth, [snapshot, credential]);
 					if (authored === undefined) return before;
 					const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
 					const site = authorDataSite(providerName, "oauth.modifyModels() result", RETURNING_ADVICE);
@@ -4445,7 +4454,9 @@ export class ModelRegistry {
 		const remoteCompaction = data(authoredRemoteCompaction, "remoteCompaction", REMOTE_COMPACTION);
 		const transport = data(authoredTransport, "transport");
 		const models = data(authoredModels, "models", MODEL_DEFINITIONS);
-		const modifies = Boolean(oauth?.modifyModels);
+		// One read, kept: `Boolean(oauth?.modifyModels)` followed by a second read at projection
+		// time let a getter answer differently and project a substitute's models.
+		const modifyModels = oauth?.modifyModels;
 		if (streamSimple && !api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
@@ -4494,9 +4505,9 @@ export class ModelRegistry {
 			transport,
 			usage,
 			oauth,
-			streams: Boolean(streamSimple),
-			discovers: Boolean(fetchDynamicModels),
-			modifies,
+			streamSimple,
+			fetchDynamicModels,
+			modifyModels,
 			overlays,
 			commandConfigs,
 		};
@@ -4556,7 +4567,7 @@ export class ModelRegistry {
 		// A registration that declares a catalog without discovering leaves the provider's
 		// transport to its model rows.
 		const transportOverride: ProviderOverride | undefined =
-			(fields.overlays.length === 0 || fields.discovers) &&
+			(fields.overlays.length === 0 || fields.fetchDynamicModels !== undefined) &&
 			(fields.baseUrl ||
 				fields.headers ||
 				fields.apiKey ||
@@ -4579,14 +4590,16 @@ export class ModelRegistry {
 		if (fields.overlays.length > 0) fold.overlays = fields.overlays;
 		if (transportOverride) fold.override = this.#mergeProviderOverride(fold.override, transportOverride);
 
-		if (fields.streams && fields.api) {
-			// The author's function is read off the configuration at each call, inside the
-			// gate the custom-API registry runs it through, and called on the configuration.
+		const streamSimple = fields.streamSimple;
+		if (streamSimple && fields.api) {
+			// The function captured at admission, applied on the author's configuration so its
+			// receiver is the object it was written on.
 			registerCustomApi(
 				fields.api,
-				(model, context, options) => config.streamSimple!(model, context, options),
+				(model, context, options) => Reflect.apply(streamSimple, config, [model, context, options]),
 				sourceId,
-				(model, context, options) => config.streamSimple!(model, context, options as SimpleStreamOptions),
+				(model, context, options) =>
+					Reflect.apply(streamSimple, config, [model, context, options as SimpleStreamOptions]),
 				gate,
 			);
 			registration.apis.add(fields.api);
@@ -4633,22 +4646,24 @@ export class ModelRegistry {
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
 			// execution/error reporting by materializing only for this case.
-			if (fields.modifies && !this.#hasFullSnapshot) {
+			if (fields.modifyModels && !this.#hasFullSnapshot) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
-			registration.projection = { oauth: fields.modifies ? fields.oauth : undefined };
+			registration.projection = fields.modifyModels
+				? { oauth: fields.oauth, modifyModels: fields.modifyModels }
+				: { oauth: undefined, modifyModels: undefined };
 			this.#syncRegistrationCallbacks(providerName);
 			if (!this.#hasFullSnapshot) {
 				// Lazy compositions read runtime overlays directly. A whole-catalog
 				// modifier can affect providers beyond its owner, so discard every
 				// provider slice; an ordinary overlay only invalidates its provider.
-				if (fields.modifies) {
+				if (fields.modifyModels) {
 					this.#providerLookupSnapshots.clear();
 					this.#internedStaticModels.clear();
 				} else {
 					this.#invalidateProviderModelCache(providerName);
 				}
-				if (!fields.discovers) return;
+				if (!fields.fetchDynamicModels) return;
 			}
 
 			// Update the unprojected snapshot, then rerun every whole-catalog
@@ -4671,10 +4686,10 @@ export class ModelRegistry {
 
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#invalidateProviderModelCache(providerName);
-			if (!fields.discovers) return;
+			if (!fields.fetchDynamicModels) return;
 		}
 
-		if (fields.discovers) {
+		if (fields.fetchDynamicModels) {
 			registration.discovery = { config, fields };
 			this.#installRuntimeModelManager(providerName, sourceId);
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
@@ -4724,8 +4739,12 @@ export class ModelRegistry {
 		run.producer = producer;
 		const { gate } = registration;
 		const { config, fields } = discovery;
+		const fetchDynamicModels = fields.fetchDynamicModels;
+		if (!fetchDynamicModels) return null;
+		// The function captured when this registration was admitted, applied on the author's
+		// configuration.
 		const authored = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-			callThroughGate(gate, () => config.fetchDynamicModels!(resolvedKey)),
+			callThroughGate(gate, () => Reflect.apply(fetchDynamicModels, config, [resolvedKey])),
 		);
 		if (!this.#runtimeDiscoveryProducerAnswers(providerName, producer)) return null;
 		const rows = callThroughGate(gate, () => {
