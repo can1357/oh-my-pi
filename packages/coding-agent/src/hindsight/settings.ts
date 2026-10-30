@@ -5,6 +5,24 @@
 import { register } from "../config/registry";
 
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+/** Score-floor names Hindsight's recall endpoint accepts; anything else is a config error. */
+const HINDSIGHT_RECALL_MIN_SCORE_FIELDS: ReadonlySet<string> = new Set(["semantic", "keyword", "reranker", "final"]);
+const HINDSIGHT_RECALL_MIN_SCORES_DEFAULT: Readonly<Record<string, number>> = {};
+
+function validateRecallMinScores(raw: unknown): void {
+	if (raw === undefined) return;
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		throw new Error("hindsight.recallMinScores must be an object");
+	}
+	for (const [field, score] of Object.entries(raw)) {
+		if (!HINDSIGHT_RECALL_MIN_SCORE_FIELDS.has(field)) {
+			throw new Error(`hindsight.recallMinScores has unknown field: ${field}`);
+		}
+		if (typeof score !== "number" || !Number.isFinite(score)) {
+			throw new Error(`hindsight.recallMinScores.${field} must be a finite number`);
+		}
+	}
+}
 
 /** Integer `HINDSIGHT_*` variables: base-10 `parseInt` prefix (`5000ms` → 5000, `2.5` → 2); other text is unset. */
 function parseEnvInteger(raw: string): number | undefined {
@@ -204,6 +222,14 @@ export const cfgHindsightRecallTypes = register({
 	id: "hindsight.recallTypes",
 	type: "array",
 	default: HINDSIGHT_RECALL_TYPES_DEFAULT,
+});
+
+/** Optional Hindsight request score floors. Empty means do not send `min_scores`. */
+export const cfgHindsightRecallMinScores = register({
+	id: "hindsight.recallMinScores",
+	type: "record",
+	default: HINDSIGHT_RECALL_MIN_SCORES_DEFAULT,
+	validate: validateRecallMinScores,
 });
 
 export const cfgHindsightDebug = register({
