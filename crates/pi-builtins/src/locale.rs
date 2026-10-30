@@ -34,29 +34,119 @@ pub(crate) fn codeset_is_utf8(name: &str) -> bool {
 	})
 }
 
+/// The categories a locale environment names, with the mask `newlocale`
+/// knows each by: the six POSIX ones and, on Linux, the six glibc adds. A
+/// utility's `setlocale(LC_ALL, "")` has to load every one of them.
+#[cfg(unix)]
+const LOCALE_CATEGORIES: &[(&str, libc::c_int)] = &[
+	("LC_CTYPE", libc::LC_CTYPE_MASK),
+	("LC_NUMERIC", libc::LC_NUMERIC_MASK),
+	("LC_TIME", libc::LC_TIME_MASK),
+	("LC_COLLATE", libc::LC_COLLATE_MASK),
+	("LC_MONETARY", libc::LC_MONETARY_MASK),
+	("LC_MESSAGES", libc::LC_MESSAGES_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_PAPER", libc::LC_PAPER_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_NAME", libc::LC_NAME_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_ADDRESS", libc::LC_ADDRESS_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_TELEPHONE", libc::LC_TELEPHONE_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_MEASUREMENT", libc::LC_MEASUREMENT_MASK),
+	#[cfg(target_os = "linux")]
+	("LC_IDENTIFICATION", libc::LC_IDENTIFICATION_MASK),
+];
+
+/// What a GNU utility's `setlocale(LC_ALL, "")` would make of the shell's
+/// locale environment.
+#[cfg(unix)]
+pub(crate) enum ShellLocale {
+	/// Every category the environment names loads, so the utility runs
+	/// under those rules.
+	Set,
+	/// One of them does not, so `setlocale` fails as a whole and the
+	/// utility stays in the C locale, whatever the names spell.
+	C,
+	/// libc could not be asked. Already reported to the caller's standard
+	/// error; the caller falls back to reading the names, never to claiming
+	/// the C locale.
+	Unasked,
+}
+
+/// Whether the shell's locale environment would initialise the way GNU
+/// coreutils ask it to: `setlocale(LC_ALL, "")`, which fails as a whole
+/// when any one category's data is missing.
+///
+/// This is a different question from rsync's, which loads `LC_CTYPE` alone,
+/// and the difference shows: with `LC_ALL` naming a locale that has only
+/// `LC_CTYPE`, GNU `fold -w1` puts a newline inside `é` because its
+/// `setlocale` failed and left C, while that same name loads perfectly well
+/// for `LC_CTYPE` on its own.
+#[cfg(unix)]
+pub(crate) fn shell_locale_initialises(host: &Host) -> ShellLocale {
+	let all = host.var("LC_ALL").filter(|value| !value.is_empty());
+	let lang = host.var("LANG").filter(|value| !value.is_empty());
+	// Each category takes `LC_ALL`, then its own variable, then `LANG`, then
+	// C — which is in the library and always loads.
+	let mut named: Vec<(&str, libc::c_int)> = Vec::new();
+	for (category, mask) in LOCALE_CATEGORIES {
+		let name = all.or_else(|| host.var(category).filter(|value| !value.is_empty())).or(lang);
+		let Some(name) = name.filter(|name| *name != "C" && *name != "POSIX") else {
+			continue;
+		};
+		match named.iter_mut().find(|(known, _)| *known == name) {
+			Some((_, masks)) => *masks |= mask,
+			None => named.push((name, *mask)),
+		}
+	}
+	for (name, masks) in named {
+		match locale_loadable_in_shell(host, name, masks) {
+			Loadable::Yes => {},
+			Loadable::No => return ShellLocale::C,
+			Loadable::Unasked(why) => {
+				host.warn(format!(
+					"warning: cannot read the locale \"{name}\" the way a command started from this shell \
+					 would: {why}"
+				));
+				return ShellLocale::Unasked;
+			},
+		}
+	}
+	ShellLocale::Set
+}
+
 /// Whether the shell's `LC_CTYPE` is a UTF-8 locale the system can load: the
 /// multibyte character rules GNU utilities switch on after `setlocale`.
 ///
-/// On Unix this is the codeset of the loaded locale read in the shell's own
-/// context ([`loaded_codeset`]), not the one its name spells and not the one
-/// this process's environment would find. The three differ for an alias
-/// carrying no codeset; for a name `newlocale` reads as a composite
-/// (`LC_CTYPE=C.UTF-8;LC_TIME=bad` loads through `newlocale` and not through
-/// the `setlocale` the reference calls, and GNU `fold -w1` keeps `é`
-/// together there where the reference splits it); and for a locale only the
-/// shell's `LOCPATH` can reach, where `fold` disagreed with the reference
-/// for the same reason `rsync` did.
+/// The whole environment has to initialise first
+/// ([`shell_locale_initialises`]), because that is what those utilities do;
+/// then the answer is the codeset of the loaded locale read in the shell's
+/// own context ([`loaded_codeset`]), not the one the name spells and not the
+/// one this process's environment would find. When libc could not be asked,
+/// the name is all there is, and reading it beats claiming the C locale:
+/// that claim put a newline inside a UTF-8 character under `LC_ALL=C.UTF-8`.
 pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 	let Some(name) = shell_locale(host, "LC_CTYPE") else {
 		return false;
 	};
 	#[cfg(unix)]
 	{
+		match shell_locale_initialises(host) {
+			ShellLocale::C => return false,
+			ShellLocale::Unasked => return codeset_is_utf8(name),
+			ShellLocale::Set => {},
+		}
 		let child = host.child_env();
 		let env = |key: &str| host.var(key).map(str::to_owned);
 		return match loaded_codeset(name, &env, Some(&child)) {
 			Codeset::Loaded(codeset) => is_utf8_charset(&codeset),
-			Codeset::Unloadable | Codeset::Unasked(_) => false,
+			Codeset::Unloadable => false,
+			Codeset::Unasked(why) => {
+				host.warn(format!("warning: cannot read the locale \"{name}\": {why}"));
+				codeset_is_utf8(name)
+			},
 		};
 	}
 	#[cfg(not(unix))]
@@ -105,7 +195,9 @@ pub(crate) fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
 pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 	if reads_as_a_composite(locale) {
 		let ours: LocaleEnv = LOCALE_ENV_VARS.map(|name| std::env::var_os(name).filter(|v| !v.is_empty()));
-		return locale_utility_accepts(category_variable(mask), locale, &ours, None);
+		// This entry point answers about this process's own environment, so
+		// a query it cannot put to libc is not a yes.
+		return matches!(locale_utility_accepts(category_variable(mask), locale, &ours, None), Loadable::Yes);
 	}
 	let Ok(locale) = std::ffi::CString::new(locale) else {
 		return false;
@@ -122,6 +214,18 @@ pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 	true
 }
 
+/// Whether the system can load a locale, when libc could be asked at all.
+#[cfg(unix)]
+pub(crate) enum Loadable {
+	/// libc loads it.
+	Yes,
+	/// libc does not.
+	No,
+	/// libc could not be asked, for the reason given. Not a no: reading it
+	/// as one puts the caller in the C locale on no evidence.
+	Unasked(String),
+}
+
 /// Whether the system can load `locale` for the categories in `mask` as a
 /// command the shell starts would: with the shell's locale search path and
 /// working directory, not this process's.
@@ -133,7 +237,7 @@ pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 /// ordinary one, the answer still comes from `newlocale` here and no
 /// process is started.
 #[cfg(unix)]
-pub(crate) fn locale_loadable_in_shell(host: &Host, locale: &str, mask: libc::c_int) -> bool {
+pub(crate) fn locale_loadable_in_shell(host: &Host, locale: &str, mask: libc::c_int) -> Loadable {
 	let shell: LocaleEnv =
 		LOCALE_ENV_VARS.map(|name| host.var(name).filter(|value| !value.is_empty()).map(std::ffi::OsString::from));
 	let ours: LocaleEnv = LOCALE_ENV_VARS.map(|name| std::env::var_os(name).filter(|value| !value.is_empty()));
@@ -142,23 +246,30 @@ pub(crate) fn locale_loadable_in_shell(host: &Host, locale: &str, mask: libc::c_
 	let ours_cwd = std::env::current_dir().ok();
 	let relative = needs_working_directory(&shell) || needs_working_directory(&ours);
 	let same_cwd = !relative || (shell_cwd.is_some() && shell_cwd == ours_cwd.as_deref());
-	if shell == ours && same_cwd {
-		return locale_loadable(locale, mask);
+	if shell == ours && same_cwd && !reads_as_a_composite(locale) {
+		return match locale_loadable(locale, mask) {
+			true => Loadable::Yes,
+			false => Loadable::No,
+		};
 	}
 	let cwd = match needs_working_directory(&shell) {
 		false => None,
-		// A working directory no process can enter leaves the question
-		// unanswerable, and an unanswerable question is not a yes.
 		true => match shell_cwd {
 			Some(cwd) => Some(cwd),
-			None => return false,
+			None => {
+				return Loadable::Unasked(
+					"the shell's locale environment is relative to a working directory no process can name"
+						.to_owned(),
+				);
+			},
 		},
 	};
 	locale_utility_accepts(category_variable(mask), locale, &shell, cwd)
 }
 
 /// Where libc looks for locale data, and for the charset aliases it checks
-/// that data against: `LOCPATH` on glibc and musl, `PATH_LOCALE` on the
+/// that data against: `LOCPATH` on glibc (musl reads `MUSL_LOCPATH`),
+/// `PATH_LOCALE` on the
 /// BSDs, `LOCALE_ARCHIVE` for glibc's archive, and `GCONV_PATH` for the
 /// conversion configuration that `findlocale.c` compares a name's codeset
 /// through (`__gconv_compare_alias`; measured: an alias-only `GCONV_PATH`
@@ -420,9 +531,12 @@ struct Unanswered(String);
 /// reasoning gave wrong answers everywhere else it was tried. One matching
 /// row is not worth six unsound ones.
 ///
-/// A narrower version of that fallback was tried and withdrawn too: cutting
-/// the search path at its first relative entry and asking the prefix, on
-/// the reasoning that libc takes the first directory whose data loads. It
+/// A narrower version of that fallback was tried and withdrawn too — its
+/// withdrawal changed 47 recorded answers, ten prefix cases replayed in
+/// each of three directory conditions plus 15 delta and 2 strict
+/// spellings. It cut the search path at its first relative entry and asked
+/// the prefix, on the reasoning that libc takes the first directory whose
+/// data loads. It
 /// does not — `intl/l10nflist.c` tries each *name* candidate across every
 /// directory before moving to the next candidate, so for `astra@special` a
 /// prefix holding fallback data named `astra` answered `ISO-8859-1` where
@@ -468,9 +582,65 @@ enum Ask {
 /// Whether the utility could set `category` to `locale` — that is, whether
 /// `setlocale(category, "")` would take that name — in the environment
 /// given.
+///
+/// Two things have to hold, and the second is not implied by the first: the
+/// utility said nothing on its standard error, *and* it gave a whole,
+/// well-formed reply. Silence on its own is not an answer — a utility that
+/// exits 0 writing nothing, and one that floods its standard output with
+/// 200,000 bytes and no diagnostic, both pass the quiet test and have
+/// reported nothing. That costs a second query, which is why the codeset
+/// one is only asked once the quiet one has passed.
 #[cfg(unix)]
-fn locale_utility_accepts(category: &str, locale: &str, env: &LocaleEnv, cwd: Option<&std::path::Path>) -> bool {
-	locale_utility_output(category, locale, env, cwd, Ask::Diagnostics).is_ok_and(|said| said.is_empty())
+fn locale_utility_accepts(
+	category: &str,
+	locale: &str,
+	env: &LocaleEnv,
+	cwd: Option<&std::path::Path>,
+) -> Loadable {
+	let program = LOCALE_UTILITIES.iter().copied().find(|at| std::fs::metadata(at).is_ok_and(|m| m.is_file()));
+	let Some(program) = program else {
+		return Loadable::Unasked(format!(
+			"there is no locale utility at {} or {}",
+			LOCALE_UTILITIES[0], LOCALE_UTILITIES[1]
+		));
+	};
+	locale_utility_accepts_at(std::path::Path::new(program), category, locale, env, cwd)
+}
+
+/// [`locale_utility_accepts`] against one named program.
+#[cfg(unix)]
+fn locale_utility_accepts_at(
+	program: &std::path::Path,
+	category: &str,
+	locale: &str,
+	env: &LocaleEnv,
+	cwd: Option<&std::path::Path>,
+) -> Loadable {
+	let said = match locale_utility_output_at(program, category, locale, env, cwd, Ask::Diagnostics) {
+		Ok(said) => said,
+		Err(Unanswered(why)) => return Loadable::Unasked(why),
+	};
+	if !said.is_empty() {
+		return Loadable::No;
+	}
+	let printed = match locale_utility_output_at(program, category, locale, env, cwd, Ask::Codeset) {
+		Ok(printed) => printed,
+		Err(Unanswered(why)) => return Loadable::Unasked(why),
+	};
+	match validated_codeset(&printed) {
+		Some(_) => Loadable::Yes,
+		None => {
+			let shown = String::from_utf8_lossy(&printed[..printed.len().min(40)]).into_owned();
+			Loadable::Unasked(format!("the locale utility reported {shown:?} where one codeset was due"))
+		},
+	}
+}
+
+/// [`locale_utility_accepts_at`] against a utility a test puts in place of
+/// the system's.
+#[cfg(all(unix, test))]
+pub(crate) fn utility_accepts_for_test(program: &std::path::Path, locale: &str) -> Loadable {
+	locale_utility_accepts_at(program, "LC_CTYPE", locale, &LOCALE_ENV_VARS.map(|_| None), None)
 }
 
 /// The locale category `mask` names, for the environment variable the
@@ -497,7 +667,19 @@ fn locale_utility_charmap(
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
 ) -> Result<String, Unanswered> {
-	let printed = locale_utility_output("LC_CTYPE", locale, env, cwd, Ask::Codeset)?;
+	locale_utility_charmap_with("LC_CTYPE", locale, env, cwd)
+}
+
+/// [`locale_utility_charmap`] with `locale` named for some other category,
+/// which is how a loadability query checks that the utility replied at all.
+#[cfg(unix)]
+fn locale_utility_charmap_with(
+	category: &str,
+	locale: &str,
+	env: &LocaleEnv,
+	cwd: Option<&std::path::Path>,
+) -> Result<String, Unanswered> {
+	let printed = locale_utility_output(category, locale, env, cwd, Ask::Codeset)?;
 	validated_codeset(&printed).ok_or_else(|| {
 		let shown = String::from_utf8_lossy(&printed[..printed.len().min(40)]).into_owned();
 		Unanswered(format!("the locale utility reported {shown:?} where one codeset was due"))
@@ -593,8 +775,21 @@ fn locale_utility_output_at(
 			false => report(format!("{named} could not be started: {err}")),
 		})?;
 	// The write end is the child's now; holding it here would keep the read
-	// below from ever seeing the end of the answer.
+	// below from ever seeing the end of the answer — and the descriptor it
+	// frees is the one the handle below takes, so the query still needs only
+	// two.
 	drop(writer);
+	// A number is not an identity. Everything that follows — watching the
+	// child, ending its process group, reaping it — goes through this
+	// handle, which names that one process however the number is recycled.
+	let child = match child_handle(pid) {
+		Ok(child) => child,
+		Err(err) => {
+			// Without a handle nothing may be signalled, and the child is
+			// left for the kernel rather than reached by number.
+			return Err(report(format!("{named} could not be held: {err}")));
+		},
+	};
 
 	let mut answer = Vec::new();
 	let mut timed_out = false;
@@ -639,7 +834,7 @@ fn locale_utility_output_at(
 	}
 	// A child that is still writing, or still running with nothing more to
 	// say, is ended here rather than waited for.
-	let completion = reap_locale_utility(pid, deadline, timed_out || too_much || read_failed.is_some());
+	let completion = reap_locale_utility(&child, deadline, timed_out || too_much || read_failed.is_some());
 	if timed_out {
 		return Err(report(format!("{named} did not answer within {}s", LOCALE_QUERY_TIMEOUT.as_secs())));
 	}
@@ -835,42 +1030,160 @@ enum Completion {
 	Ended(String),
 }
 
-/// Ends the locale utility and everything left in its process group, within
-/// the deadline the answer had, and reaps it.
+/// A handle on the locale utility that names that one process whatever
+/// happens to its number.
 ///
-/// Before every signal the leader is watched with `WNOWAIT`, which reports
-/// whether it is still there — alive or reapable — without consuming it.
-/// Only then is the group swept, because the number is a group number only
-/// while the leader holds it: reaping first, or signalling after a wait
-/// said the child was gone, ends a process group belonging to somebody
-/// else. Both were reproduced three times out of three in a private PID
-/// namespace, the second of them where `SIGCHLD` is `SIG_IGN` or
-/// `SA_NOCLDWAIT` is set and the kernel reaps the leader itself, leaving
-/// `waitid` with `ECHILD` and no child to hold the number. A query is not
-/// started at all under those dispositions ([`children_are_reaped_for_us`]),
-/// and any watch that fails here ends the query without a signal.
+/// A process number is not an identity. `waitid(…, WNOWAIT)` says the child
+/// is there and does not consume it, but it cannot stop another thread's
+/// `waitpid(-1)` from consuming it in the interval before a signal: a
+/// review reproduced exactly that three times out of three in a private PID
+/// namespace, where the released number was reused and
+/// `kill(-pid, SIGKILL)` ended an unrelated process group. No check before
+/// the signal closes that interval, so there is no number in this path at
+/// all. On Linux a pidfd is that handle: it refers to the process, signals
+/// through it fail with `ESRCH` once that process is gone rather than
+/// reaching whoever took the number, and `PIDFD_SIGNAL_PROCESS_GROUP`
+/// resolves the group from the process rather than from an integer.
+///
+/// Where there is no such handle — a kernel without `pidfd_open`, or any
+/// other Unix — a query is not started, because its child could not be
+/// ended safely afterwards.
 #[cfg(unix)]
-fn reap_locale_utility(pid: libc::pid_t, deadline: std::time::Instant, kill_now: bool) -> Completion {
-	let interrupted = || std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+struct ChildHandle(std::os::fd::OwnedFd);
+
+/// `PIDFD_SIGNAL_PROCESS_GROUP`: send to the process group the pidfd's
+/// process leads. Linux 6.9 and later.
+#[cfg(unix)]
+const PIDFD_SIGNAL_PROCESS_GROUP: libc::c_uint = 4;
+
+/// Opens the handle for a child just spawned.
+#[cfg(all(unix, target_os = "linux"))]
+fn child_handle(pid: libc::pid_t) -> std::io::Result<ChildHandle> {
+	use std::os::fd::FromRawFd as _;
+
+	// SAFETY: `pidfd_open` only takes a process number and returns a
+	// descriptor or an error; nothing is dereferenced.
+	let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+	let opened = libc::c_int::try_from(opened).unwrap_or(-1);
+	if opened < 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: a fresh descriptor nothing else owns.
+	Ok(ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(opened) }))
+}
+
+/// Opens the handle for a child just spawned.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn child_handle(_pid: libc::pid_t) -> std::io::Result<ChildHandle> {
+	Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+impl ChildHandle {
+	/// Whether the utility has ended, without consuming it: `Ok(true)`
+	/// reapable, `Ok(false)` running.
+	#[cfg(unix)]
+	fn ended(&self) -> std::io::Result<bool> {
+		use std::os::fd::AsRawFd as _;
+
+		loop {
+			// SAFETY: an all-zero `siginfo_t` is a valid out-parameter, the
+			// descriptor is this handle's, and `WNOWAIT` leaves the child for
+			// the reap that follows. `P_PIDFD` is 3.
+			let mut ended: libc::siginfo_t = unsafe { std::mem::zeroed() };
+			let watched = unsafe {
+				libc::syscall(
+					libc::SYS_waitid,
+					3,
+					self.0.as_raw_fd(),
+					&raw mut ended,
+					libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+					std::ptr::null_mut::<libc::c_void>(),
+				)
+			};
+			if watched >= 0 {
+				return Ok(ended.si_signo != 0);
+			}
+			let err = std::io::Error::last_os_error();
+			if err.kind() != std::io::ErrorKind::Interrupted {
+				return Err(err);
+			}
+		}
+	}
+
+	/// Ends the utility and everything left in its process group.
+	///
+	/// A kernel that does not know `PIDFD_SIGNAL_PROCESS_GROUP` (before
+	/// Linux 6.9) ends the utility alone; a descendant it left in the group
+	/// outlives the query there, which is the one thing this handle buys
+	/// less of than a group signal by number — and a group signal by number
+	/// is what reached somebody else's processes.
+	#[cfg(unix)]
+	fn end_group(&self) {
+		use std::os::fd::AsRawFd as _;
+
+		for flags in [PIDFD_SIGNAL_PROCESS_GROUP, 0] {
+			// SAFETY: the descriptor is this handle's and the siginfo
+			// pointer is null, which asks the kernel to synthesise one.
+			let sent = unsafe {
+				libc::syscall(
+					libc::SYS_pidfd_send_signal,
+					self.0.as_raw_fd(),
+					libc::SIGKILL,
+					std::ptr::null_mut::<libc::siginfo_t>(),
+					flags,
+				)
+			};
+			if sent >= 0 {
+				return;
+			}
+		}
+	}
+
+	/// Reaps the utility and reports how it ended.
+	#[cfg(unix)]
+	fn reap(&self) -> std::io::Result<Completion> {
+		use std::os::fd::AsRawFd as _;
+
+		loop {
+			// SAFETY: as in `ended`, without `WNOHANG` or `WNOWAIT`, so this
+			// consumes the child it names and nothing else.
+			let mut ended: libc::siginfo_t = unsafe { std::mem::zeroed() };
+			let reaped = unsafe {
+				libc::syscall(
+					libc::SYS_waitid,
+					3,
+					self.0.as_raw_fd(),
+					&raw mut ended,
+					libc::WEXITED,
+					std::ptr::null_mut::<libc::c_void>(),
+				)
+			};
+			if reaped >= 0 {
+				return Ok(completion_of(&ended));
+			}
+			let err = std::io::Error::last_os_error();
+			if err.kind() != std::io::ErrorKind::Interrupted {
+				return Err(err);
+			}
+		}
+	}
+}
+
+/// Ends the locale utility and everything left in its process group, within
+/// the deadline the answer had, and reaps it — all through the handle, so
+/// no number of anyone else's can be reached.
+#[cfg(unix)]
+fn reap_locale_utility(child: &ChildHandle, deadline: std::time::Instant, kill_now: bool) -> Completion {
 	let mut finished = false;
 	let mut watch_failed = None;
 	loop {
-		match still_ours(pid) {
-			// Alive, and the number is held: keep waiting, unless the
-			// caller or the deadline says to end it now.
-			Ok(Some(false)) if !kill_now && std::time::Instant::now() < deadline => {
+		match child.ended() {
+			Ok(false) if !kill_now && std::time::Instant::now() < deadline => {
 				std::thread::sleep(std::time::Duration::from_millis(1));
 			},
-			Ok(Some(ended)) => {
+			Ok(ended) => {
 				finished = ended;
 				break;
-			},
-			// Gone without us: nothing of ours holds the number, so nothing
-			// here may signal it.
-			Ok(None) => {
-				return Completion::Ended(
-					"was reaped by something other than this query, which cannot say how it ended".to_owned(),
-				);
 			},
 			Err(err) => {
 				watch_failed = Some(err);
@@ -878,66 +1191,17 @@ fn reap_locale_utility(pid: libc::pid_t, deadline: std::time::Instant, kill_now:
 			},
 		}
 	}
+	child.end_group();
+	let reaped = child.reap();
 	if let Some(err) = watch_failed {
 		return Completion::Ended(format!("could not be waited for: {err}"));
 	}
-	// The watch above found the leader still there and did not consume it,
-	// so its number is still its own and still names its process group.
-	// SAFETY: `pid` leads a process group of this scope's making, and no
-	// wait has released the number.
-	unsafe { libc::kill(-pid, libc::SIGKILL) };
-	let mut status: libc::c_int = 0;
-	let reaped = loop {
-		// SAFETY: as above; the leader is dead or dying, so this returns.
-		let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-		if reaped >= 0 || !interrupted() {
-			break reaped;
-		}
-	};
 	if !finished {
 		return Completion::Ended("was ended before it finished".to_owned());
 	}
-	if reaped < 0 {
-		return Completion::Ended(format!("could not be waited for: {}", std::io::Error::last_os_error()));
-	}
-	completion_of(status)
-}
-
-/// Whether this process still holds the utility's number, and if so whether
-/// the utility has ended: `Some(true)` reapable, `Some(false)` running,
-/// `None` gone — reaped by the kernel or by something else, so the number
-/// is no longer this query's to signal.
-///
-/// `WNOWAIT` is what makes the first two answers usable: it reports the end
-/// without consuming it, so the process number — and with it the process
-/// group number — stays out of circulation.
-#[cfg(unix)]
-fn still_ours(pid: libc::pid_t) -> std::io::Result<Option<bool>> {
-	loop {
-		// SAFETY: an all-zero `siginfo_t` is a valid out-parameter here, and
-		// `WNOWAIT` leaves the child for the `waitpid` that follows.
-		let mut ended: libc::siginfo_t = unsafe { std::mem::zeroed() };
-		let watched = unsafe {
-			libc::waitid(
-				libc::P_PID,
-				libc::id_t::try_from(pid).unwrap_or_default(),
-				&raw mut ended,
-				libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-			)
-		};
-		if watched >= 0 {
-			return Ok(Some(ended.si_signo != 0));
-		}
-		let err = std::io::Error::last_os_error();
-		if err.kind() == std::io::ErrorKind::Interrupted {
-			continue;
-		}
-		// `ECHILD` is the one that matters: the child is not ours to wait
-		// for any more, so its number is not ours to signal either.
-		return match err.raw_os_error() == Some(libc::ECHILD) {
-			true => Ok(None),
-			false => Err(err),
-		};
+	match reaped {
+		Ok(completion) => completion,
+		Err(err) => Completion::Ended(format!("could not be waited for: {err}")),
 	}
 }
 
@@ -961,16 +1225,17 @@ fn children_are_reaped_for_us() -> bool {
 	current.sa_sigaction == libc::SIG_IGN || (current.sa_flags & libc::SA_NOCLDWAIT) != 0
 }
 
-/// A reaped `wait` status, read the way [`Completion`] puts it.
+/// A reaped child's `siginfo_t`, read the way [`Completion`] puts it.
 #[cfg(unix)]
-fn completion_of(status: libc::c_int) -> Completion {
-	if libc::WIFEXITED(status) {
-		return Completion::Exited(libc::WEXITSTATUS(status));
+fn completion_of(ended: &libc::siginfo_t) -> Completion {
+	// SAFETY: `si_status` is the status member of a `siginfo_t` a completed
+	// `waitid` filled in, which is what the caller passes.
+	let status = unsafe { ended.si_status() };
+	match ended.si_code {
+		libc::CLD_EXITED => Completion::Exited(status),
+		libc::CLD_KILLED | libc::CLD_DUMPED => Completion::Ended(format!("ended on signal {status}")),
+		code => Completion::Ended(format!("ended with wait code {code}")),
 	}
-	if libc::WIFSIGNALED(status) {
-		return Completion::Ended(format!("ended on signal {}", libc::WTERMSIG(status)));
-	}
-	Completion::Ended(format!("ended with wait status {status}"))
 }
 
 /// Single-byte decimal point and thousands separator of a numeric locale.
@@ -1000,7 +1265,10 @@ pub(crate) fn numeric_symbols(host: &Host) -> NumericSymbols {
 		return NumericSymbols::C;
 	};
 	#[cfg(unix)]
-	if !locale_loadable_in_shell(host, name, libc::LC_NUMERIC_MASK) {
+	// GNU utilities take their numerics from `setlocale(LC_ALL, "")`, so a
+	// locale environment that does not initialise leaves C's. One libc
+	// could not be asked about is reported there and the names stand.
+	if matches!(shell_locale_initialises(host), ShellLocale::C) {
 		return NumericSymbols::C;
 	}
 	let data_locale = DataLocale::from(&locale);

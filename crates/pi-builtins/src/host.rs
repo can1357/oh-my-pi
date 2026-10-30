@@ -796,6 +796,16 @@ impl Host {
 		self.fail(code);
 	}
 
+	/// Writes `<name>: <message>` to stderr and leaves the exit status alone:
+	/// a disclosure, not a failure.
+	///
+	/// Written through a duplicate of the stream, so a caller holding the
+	/// host immutably can report something it could not determine.
+	pub fn warn(&self, message: impl std::fmt::Display) {
+		let mut stderr = self.stderr_clone();
+		let _ = writeln!(stderr, "{}: {message}", self.name);
+	}
+
 	/// Writes `<name>: <message>` followed by GNU's `Try '<name> --help' for
 	/// more information.`, records exit status `code`, and returns it.
 	///

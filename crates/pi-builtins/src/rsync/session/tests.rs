@@ -396,6 +396,162 @@ fn a_process_whose_children_are_reaped_for_it_asks_nothing() {
 	assert!(why.contains("reap its children"), "{why}");
 }
 
+/// A loadability answer needs a whole reply, not only silence.
+///
+/// A utility that exits 0 writing nothing, and one that floods its output
+/// with no diagnostic at all, both pass the quiet test and have reported
+/// nothing — and both used to affirm that a locale with no data anywhere
+/// loads.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_silent_or_flooding_utility_affirms_nothing() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let cases: [(&str, &str, bool); 3] = [
+		("quiet", "printf 'ISO-8859-1\\n'\n", true),
+		("silent", "exit 0\n", false),
+		("flood", "dd if=/dev/zero bs=1024 count=200 2>/dev/null | tr '\\\\0' 'X'\n", false),
+	];
+	for (name, body, accepts) in cases {
+		let program = dir.path().join(name);
+		fs::write(&program, format!("#!/bin/sh\n{body}")).unwrap();
+		fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+		let answer = crate::locale::utility_accepts_for_test(&program, "de_DE@absent;bogus");
+		match (&answer, accepts) {
+			(crate::locale::Loadable::Yes, true) | (crate::locale::Loadable::Unasked(_), false) => {},
+			_ => panic!("{name}: {}", matches!(answer, crate::locale::Loadable::No)),
+		}
+	}
+}
+
+/// A query libc could not be asked is not an observation of the C locale.
+///
+/// Under `SIGCHLD=SIG_IGN` no query runs at all, and reading that refusal
+/// as "not a UTF-8 locale" put a newline inside `é`: GNU `fold -w1` on
+/// `LC_ALL=C.UTF-8` gives `c3 a9`, and so must this.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_query_falls_back_to_the_name_and_says_so() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let (host, capture) = crate::host::Host::for_test("fold", "", dir.path());
+	let mut host = host;
+	host.set_test_var("LC_ALL", "C.UTF-8");
+	host.set_test_var("LOCPATH", locales.to_str().unwrap());
+	// SAFETY: nextest gives this test its own process, which starts no other
+	// child; the disposition is put back below.
+	let kept = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+	let utf8 = crate::locale::ctype_is_utf8(&host);
+	// SAFETY: as above.
+	unsafe { libc::signal(libc::SIGCHLD, kept) };
+	assert!(utf8, "a refusal is not an observation of the C locale");
+	assert!(
+		String::from_utf8_lossy(&capture.stderr()).contains("cannot read the locale"),
+		"{}",
+		String::from_utf8_lossy(&capture.stderr())
+	);
+}
+
+/// GNU utilities initialise with `setlocale(LC_ALL, "")`, which fails as a
+/// whole when one category's data is missing — and then they run in C.
+///
+/// Measured against GNU fold 9.12 and sort 9.4: with `LC_ALL` naming a
+/// locale that holds only `LC_CTYPE`, `fold -w1` splits `é`; with one that
+/// holds only `LC_NUMERIC`, `sort -sn` uses the C decimal point.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let partial = |name: &str, keep: &str| {
+		let built = Command::new("localedef")
+			.args(["-i", "de_DE", "-f", "UTF-8"])
+			.arg(locales.join(name))
+			.output()
+			.is_ok_and(|built| built.status.success());
+		if !built {
+			return false;
+		}
+		for left in fs::read_dir(locales.join(name)).unwrap() {
+			let left = left.unwrap();
+			if left.file_name() == keep {
+				continue;
+			}
+			match left.file_type().unwrap().is_dir() {
+				true => fs::remove_dir_all(left.path()).unwrap(),
+				false => fs::remove_file(left.path()).unwrap(),
+			}
+		}
+		true
+	};
+	if !partial("de_DE@partial;ctype", "LC_CTYPE") || !partial("de_DE@partial;numeric", "LC_NUMERIC") {
+		return;
+	}
+	let shell = |name: &str| {
+		let (host, _) = crate::host::Host::for_test("fold", "", dir.path());
+		let mut host = host;
+		host.set_test_var("LC_ALL", name);
+		host.set_test_var("LOCPATH", locales.to_str().unwrap());
+		host
+	};
+	let ctype = shell("de_DE@partial;ctype");
+	assert!(!crate::locale::ctype_is_utf8(&ctype), "a locale with no LC_NUMERIC leaves fold in C");
+	let numeric = shell("de_DE@partial;numeric");
+	assert_eq!(
+		crate::locale::numeric_symbols(&numeric),
+		crate::locale::NumericSymbols::C,
+		"a locale with no LC_CTYPE leaves sort in C"
+	);
+	// The control: the same generation with every category kept does
+	// initialise, and its numerics are the locale's.
+	let whole = "de_DE@whole;valid";
+	let built = Command::new("localedef")
+		.args(["-i", "de_DE", "-f", "UTF-8"])
+		.arg(locales.join(whole))
+		.output()
+		.is_ok_and(|built| built.status.success());
+	if built {
+		assert_ne!(crate::locale::numeric_symbols(&shell(whole)), crate::locale::NumericSymbols::C, "{whole}");
+	}
+}
+
+/// Another reaper in this process must not turn the query into a signal
+/// aimed at whoever took the utility's number.
+///
+/// The query holds the child by a handle rather than by number, so a
+/// competing `waitpid(-1)` can take the child away from it — the query then
+/// reports — but nothing it does afterwards reaches a recycled number.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_competing_reaper_does_not_turn_the_query_into_a_stray_signal() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let shell_path = locales.to_str().unwrap().to_owned();
+	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+	let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let reaper = {
+		let stop = std::sync::Arc::clone(&stop);
+		std::thread::spawn(move || {
+			while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+				// SAFETY: a non-blocking wait for any child of this process.
+				unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+			}
+		})
+	};
+	let answers: Vec<_> =
+		(0..20).map(|_| crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None)).collect();
+	stop.store(true, std::sync::atomic::Ordering::Relaxed);
+	reaper.join().unwrap();
+	for answer in &answers {
+		assert!(
+			matches!(answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1")
+				|| matches!(answer, crate::locale::Codeset::Unasked(_)),
+			"{answer:?}"
+		);
+	}
+}
+
 /// Every caller of [`crate::locale::locale_loadable`] models
 /// `setlocale(CATEGORY, "")`, which takes a name whole where `newlocale`
 /// splits one carrying a `;` per category — and asks about the category it
