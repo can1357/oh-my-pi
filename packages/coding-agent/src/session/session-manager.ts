@@ -198,6 +198,12 @@ export interface ArtifactCopyTally {
  * `errorOnExist` is what turns that skip into an answer, so the tally measures
  * the copy rather than the source.
  *
+ * A source directory is only ever reproduced into a real directory. Anything
+ * else already at that name — a file, or a symlink, which `mkdir -p` would
+ * accept and then write *through*, landing the subtree outside the destination
+ * artifacts directory — keeps the destination's version, exactly as a
+ * colliding file does.
+ *
  * An entry the source lost while the walk ran (its session reaped it, a tool
  * replaced it) is skipped with a debug line, so one vanished file cannot cost
  * the destination everything after it — which a single recursive `cp` of a
@@ -212,7 +218,16 @@ async function reproduceArtifactEntry(
 	const source = path.join(from, entry.name);
 	const destination = path.join(to, entry.name);
 	try {
-		if (entry.isDirectory()) return await reproduceArtifactTree(source, destination, counted);
+		if (entry.isDirectory()) {
+			if (await destinationBlocksDirectory(destination)) {
+				logger.debug("Session artifact directory collides with a destination entry; not copied", {
+					source,
+					destination,
+				});
+				return 0;
+			}
+			return await reproduceArtifactTree(source, destination, counted);
+		}
 		const bytes = entry.isFile() ? (await fs.promises.stat(source)).size : 0;
 		// `cp` of one entry, not a tree: it also carries symlinks and anything
 		// else a session's artifacts directory may hold.
@@ -227,6 +242,16 @@ async function reproduceArtifactEntry(
 		if (!isEnoent(error)) throw error;
 		logger.debug("Session artifact vanished while it was being copied", { source, destination });
 		return 0;
+	}
+}
+
+/** Whether something that is not a directory already holds `destination`, symlinks included. */
+async function destinationBlocksDirectory(destination: string): Promise<boolean> {
+	try {
+		return !(await fs.promises.lstat(destination)).isDirectory();
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
 	}
 }
 
@@ -863,6 +888,12 @@ interface SessionManagerStateSnapshot {
 	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
+	/**
+	 * The ownership claim held when the snapshot was taken, by reference. A
+	 * rollback reinstates it, so the session it names stays this process's for
+	 * the whole switch instead of being released and raced for again.
+	 */
+	sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
 }
 
 interface DiskQueueOptions {
@@ -968,18 +999,45 @@ export interface SessionPersistenceNotice {
 export interface ResumedSessionFork {
 	/**
 	 * `"owned-elsewhere"`: another live omp process holds the session's
-	 * ownership lease, so the id and the file stay with it. `"source-replaced"`:
-	 * the file no longer reads as the session loaded from it — a different
-	 * session's journal is there now — so the loaded conversation goes on in a
-	 * file of its own and that journal is left untouched.
+	 * ownership lease, so the id and the file stay with it. `"departed"`: the
+	 * transcript says this copy was handed to another machine, so it is stale
+	 * whoever holds its lease.
 	 */
-	reason: "owned-elsewhere" | "source-replaced";
+	reason: "owned-elsewhere" | "departed";
 	/** The id of the session that was loaded, which this process no longer answers to. */
 	sessionId: string;
 	/** The file it was loaded from. */
 	sessionFile: string;
-	/** Under `"source-replaced"`, the id of the session that holds `sessionFile` now. */
-	foundSessionId?: string;
+}
+
+/**
+ * A resume refused because the file it loaded from no longer holds that
+ * session: a different journal is there now.
+ *
+ * Continuing is not offered. The transcript in memory could be written to a
+ * file of its own, but nothing beside that path can still be attributed —
+ * the artifacts directory next to it is whatever the replacement left there,
+ * and a transcript whose `artifact://` references silently resolve to another
+ * conversation's files no longer means what it says. A refusal naming both
+ * sessions leaves that judgement with the person resuming.
+ */
+export class SessionSourceReplacedError extends Error {
+	/** The path that was resumed. */
+	readonly sessionFile: string;
+	/** The session that was loaded from it. */
+	readonly requestedSessionId: string;
+	/** The session whose journal holds that path now. */
+	readonly foundSessionId: string;
+
+	constructor(sessionFile: string, requestedSessionId: string, foundSessionId: string) {
+		super(
+			`Cannot resume session "${requestedSessionId}" from "${sessionFile}": that file now holds session "${foundSessionId}". Nothing was changed; resume the session you want by its own file.`,
+		);
+		this.name = "SessionSourceReplacedError";
+		this.sessionFile = sessionFile;
+		this.requestedSessionId = requestedSessionId;
+		this.foundSessionId = foundSessionId;
+	}
 }
 
 /**
@@ -1145,6 +1203,17 @@ export class SessionManager {
 	 * after {@link close} gave the claim up.
 	 */
 	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	/**
+	 * The claim held on the session this manager was switching *away* from,
+	 * kept alive across {@link setSessionFile} until the switch either commits
+	 * ({@link commitSessionSwitch}) or rolls back ({@link restoreState}).
+	 *
+	 * Releasing it at the switch and taking it again on rollback is a race: a
+	 * second process can claim the source in that window, and both end up on
+	 * one session id. The switch keeps ownership of both files until it knows
+	 * which one it lives in.
+	 */
+	#supersededClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
 	/**
 	 * The background artifact copy a move or branch to `sessionFile` started (see
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
@@ -1391,45 +1460,47 @@ export class SessionManager {
 	 * ownership claim and keeps it, so a later resume elsewhere meets an owner
 	 * rather than a free lease.
 	 *
-	 * The two answers are not interchangeable and the lease alone cannot tell
-	 * them apart: `claimSession` refuses both a live owner and a path that now
-	 * holds a different session's journal. The journal is asked first, because
-	 * a session that is no longer at this path may still be running somewhere
-	 * else under the lease this would otherwise take.
+	 * The lease alone cannot answer this: `claimSession` refuses both a live
+	 * owner and a path that now holds a different session's journal. The
+	 * journal is asked first, because a session that is no longer at this path
+	 * may still be running somewhere else under the lease this would otherwise
+	 * take — and because a journal that was replaced is not a fork candidate at
+	 * all but a refusal (see {@link SessionSourceReplacedError}).
 	 */
-	async #resumedSessionContention(): Promise<
-		{ reason: ResumedSessionFork["reason"]; foundSessionId?: string } | undefined
-	> {
+	async #resumedSessionContention(staleCopy: boolean): Promise<ResumedSessionFork["reason"] | undefined> {
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile) return undefined;
 		const onDisk = await readSessionHeaderId(sessionFile);
 		if (onDisk !== undefined && onDisk !== this.#sessionId) {
-			return { reason: "source-replaced", foundSessionId: onDisk };
+			throw new SessionSourceReplacedError(sessionFile, this.#sessionId, onDisk);
 		}
-		return this.#sessionOwnedElsewhere() ? { reason: "owned-elsewhere" } : undefined;
+		if (staleCopy) return "departed";
+		return this.#sessionOwnedElsewhere() ? "owned-elsewhere" : undefined;
 	}
 
 	/**
 	 * Leave the session just loaded where it is — with the live process that
-	 * owns it, or with the journal that replaced it — and carry on as a fork of
-	 * it: a new id in a sibling file whose header points back through
-	 * `parentSession` only. No `continuationOf`, unlike
-	 * {@link #moveOffSessionFile}: the session left behind is still running
-	 * under its own id, or is not the one that was loaded, so a later resume of
-	 * that file must land on it and not follow this copy.
+	 * owns it, or as the stale copy of a conversation that moved away — and
+	 * carry on as a fork of it: a new id in a sibling file whose header points
+	 * back through `parentSession` only. No `continuationOf`, unlike
+	 * {@link #moveOffSessionFile}: the session left behind may still be running
+	 * under its own id, so a later resume of that file must land on it and not
+	 * follow this copy.
 	 *
 	 * The fork carries the transcript that was loaded, never a re-read of the
-	 * file: under `source-replaced` the file holds someone else's conversation,
-	 * and resuming that one instead is what this guard exists to prevent.
+	 * file. The caller has already established that the file still holds this
+	 * session, so its artifacts are this session's to copy.
+	 *
+	 * An unfinished tool call at the tip is paired with a result that says the
+	 * outcome is unknown, as an explicit fork does: the session this forked
+	 * from may be running that tool right now, and a dangling call would
+	 * otherwise be stripped from the model's context without a trace.
 	 *
 	 * Called while the transcript is being adopted, before anything has
 	 * published the loaded id, so nothing outside ever sees this process answer
 	 * to the owner's session. Returns what was left behind.
 	 */
-	#adoptLoadedSessionAsFork(
-		contention: { reason: ResumedSessionFork["reason"]; foundSessionId?: string },
-		sessionDir?: string,
-	): ResumedSessionFork {
+	#adoptLoadedSessionAsFork(reason: ResumedSessionFork["reason"], sessionDir?: string): ResumedSessionFork {
 		const from = this.#sessionFile as string;
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
@@ -1455,6 +1526,8 @@ export class SessionManager {
 			...carried,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 		};
+		SessionManager.#repairForkedInterruptedTail(this.#entries, this.#index.pathTo());
+		this.#index.rebuild(this.#entries);
 		this.#closeWriterEventually();
 		this.#sessionFile = to;
 		this.#expectedDiskSize = null;
@@ -1467,12 +1540,12 @@ export class SessionManager {
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
 		logger.info(
-			contention.reason === "owned-elsewhere"
+			reason === "owned-elsewhere"
 				? "Resumed a session another omp process owns; continuing in a fork"
-				: "Resumed a session whose file now holds another session; continuing in a fork",
-			{ source: from, sessionId: previousSessionId, foundSessionId: contention.foundSessionId, fork: to },
+				: "Resumed a copy of a session that moved away; continuing in a fork",
+			{ source: from, sessionId: previousSessionId, fork: to },
 		);
-		return { ...contention, sessionId: previousSessionId, sessionFile: from };
+		return { reason, sessionId: previousSessionId, sessionFile: from };
 	}
 
 	/**
@@ -2476,7 +2549,22 @@ export class SessionManager {
 			// a rollback observe the move it is undoing.
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
+			// By reference and never released here: a rollback puts this very
+			// claim back, so the session being left is still this process's for
+			// the whole switch.
+			sessionClaim: this.#sessionClaim,
 		};
+	}
+
+	/**
+	 * The switch that {@link setSessionFile} started is final: give up the
+	 * claim on the session left behind. Until this is called a rollback through
+	 * {@link restoreState} can still take that session back, so no other
+	 * process may have it.
+	 */
+	commitSessionSwitch(): void {
+		if (this.#supersededClaim !== this.#sessionClaim) this.#supersededClaim?.release?.();
+		this.#supersededClaim = undefined;
 	}
 
 	/**
@@ -2489,7 +2577,9 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		clone.restoreState(this.captureState());
+		// A clone is a second manager over the same session, not a transfer of
+		// ownership: it takes no claim here and claims on its own first write.
+		clone.restoreState({ ...this.captureState(), sessionClaim: undefined });
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#expectedDiskSize = null;
@@ -2504,6 +2594,14 @@ export class SessionManager {
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
+		// Ownership rolls back with everything else: the claim taken on the
+		// session being switched to is dropped, and the one held on the session
+		// this manager is returning to — never released, only set aside — is
+		// reinstated. Reacquiring it here instead would leave a window in which
+		// another process could take the session this one still lives in.
+		if (this.#sessionClaim && this.#sessionClaim !== snapshot.sessionClaim) this.#sessionClaim.release?.();
+		this.#sessionClaim = snapshot.sessionClaim;
+		this.#supersededClaim = undefined;
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
@@ -2571,11 +2669,11 @@ export class SessionManager {
 	/**
 	 * Switch to a different session file (resume / branch).
 	 *
-	 * With `forkIfContested`, a file this process may not continue — another
-	 * live omp process owns it, or a different session's journal is there now —
-	 * is left alone and this session carries on as a fork of what was loaded,
-	 * reported in the result, instead of answering to the loaded id until the
-	 * first write.
+	 * With `forkIfContested`, a file another live omp process owns is left to
+	 * it and this session carries on as a fork of what was loaded, reported in
+	 * the result, instead of answering to the loaded id until the first write.
+	 * A file that no longer holds the session loaded from it refuses with
+	 * {@link SessionSourceReplacedError} and changes nothing.
 	 */
 	async setSessionFile(
 		sessionFile: string,
@@ -2592,9 +2690,12 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
-		// A switch gives up the previous file. Opening claims nothing: the first
-		// write does, so inspecting a session never counts as owning it.
-		this.#sessionClaim?.release?.();
+		// A switch does not give the previous file up yet: the claim on it is
+		// held aside until the switch commits or rolls back (see
+		// {@link #supersededClaim}). Opening claims nothing of its own: the
+		// first write does, so inspecting a session never counts as owning it.
+		if (this.#supersededClaim && this.#supersededClaim !== this.#sessionClaim) this.#supersededClaim.release?.();
+		this.#supersededClaim = this.#sessionClaim;
 		this.#sessionClaim = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
@@ -2678,8 +2779,8 @@ export class SessionManager {
 		// carries the whole adopted state, and when nothing contests the file
 		// this is where this process takes its ownership claim.
 		if (options?.forkIfContested && this.#persist) {
-			const contention = await this.#resumedSessionContention();
-			if (contention) return { forkedFrom: this.#adoptLoadedSessionAsFork(contention) };
+			const reason = await this.#resumedSessionContention(false);
+			if (reason) return { forkedFrom: this.#adoptLoadedSessionAsFork(reason) };
 		}
 		return {};
 	}
@@ -2691,6 +2792,13 @@ export class SessionManager {
 	 * on as a fork of what was loaded (in `sessionDir`, default: beside the
 	 * file it was loaded from).
 	 *
+	 * `staleCopy` says the transcript itself disqualifies this copy — its last
+	 * transfer marker hands the conversation to another machine — which forks
+	 * whoever holds the lease. That decision belongs to the caller that reads
+	 * transfer markers; everything about ownership belongs here. Both run in
+	 * one gate so the journal is verified once, before anything is forked or
+	 * any artifacts are copied.
+	 *
 	 * The claim is what makes a startup adoption exclusive. Probing the lease
 	 * and dropping it again answers only "nobody had written this yet": two
 	 * processes that both resume before either writes then both carry the same
@@ -2699,14 +2807,20 @@ export class SessionManager {
 	 * session that is still running. Holding the claim from the resume onwards
 	 * makes the loser fork here, where it still costs nothing.
 	 *
+	 * Throws {@link SessionSourceReplacedError} when the file no longer holds
+	 * the session that was loaded from it, leaving this manager untouched.
+	 *
 	 * Only the resume guard calls this. Opening a session to read it — `omp
 	 * sessions`, `--export`, `render`, the picker's previews — never does, so
 	 * inspecting a session still never takes it from its owner.
 	 */
-	async claimResumedSessionOrFork(sessionDir?: string): Promise<ResumedSessionFork | undefined> {
+	async claimResumedSessionOrFork(options?: {
+		sessionDir?: string;
+		staleCopy?: boolean;
+	}): Promise<ResumedSessionFork | undefined> {
 		if (!this.#persist || !this.#sessionFile) return undefined;
-		const contention = await this.#resumedSessionContention();
-		return contention ? this.#adoptLoadedSessionAsFork(contention, sessionDir) : undefined;
+		const reason = await this.#resumedSessionContention(options?.staleCopy === true);
+		return reason ? this.#adoptLoadedSessionAsFork(reason, options?.sessionDir) : undefined;
 	}
 
 	/**
@@ -3213,6 +3327,8 @@ export class SessionManager {
 	async close(): Promise<void> {
 		if (!this.#persist) return;
 		// Closing gives up this process's ownership claim; a later write reclaims it.
+		// A switch that never reached its commit or its rollback gives up both.
+		this.commitSessionSwitch();
 		const claim = this.#sessionClaim;
 		claim?.release?.();
 		if (claim) claim.release = undefined;

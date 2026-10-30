@@ -126,7 +126,12 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import {
+	ForkSourceNotFoundError,
+	SessionManager,
+	SessionMoveRefusedError,
+	SessionSourceReplacedError,
+} from "./session/session-manager";
 import { adoptResumedSession } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -1235,6 +1240,21 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 const SESSION_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
+/**
+ * {@link adoptResumedSession}, with the one resume it refuses — the file no
+ * longer holds the session that was loaded from it — reported as a clean
+ * session-resolution failure instead of an unhandled error.
+ */
+async function adoptResumedSessionOrExplain(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+	try {
+		return await adoptResumedSession(manager, sessionDir);
+	} catch (error) {
+		if (error instanceof SessionSourceReplacedError)
+			throw new SessionResolutionError(error.message, SESSION_NOT_FOUND_HINT);
+		throw error;
+	}
+}
+
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
 	if (!parsed.noSession) return;
 	if (parsed.resume !== undefined) {
@@ -1328,7 +1348,7 @@ export async function createSessionManager(
 			}
 			// A copy whose conversation moved to another machine, or whose session
 			// another live omp process owns, continues as a fork.
-			return await adoptResumedSession(manager, parsed.sessionDir);
+			return await adoptResumedSessionOrExplain(manager, parsed.sessionDir);
 		}
 		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
 		if (!target) {
@@ -1344,15 +1364,18 @@ export async function createSessionManager(
 			askToMoveSession,
 		);
 		if (moveResult.status === "moved") {
-			return await adoptResumedSession(moveResult.manager, parsed.sessionDir);
+			return await adoptResumedSessionOrExplain(moveResult.manager, parsed.sessionDir);
 		}
 		if (moveResult.status === "declined") {
 			return undefined;
 		}
-		return await adoptResumedSession(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await adoptResumedSessionOrExplain(
+			await SessionManager.open(session.path, parsed.sessionDir),
+			parsed.sessionDir,
+		);
 	}
 	if (parsed.continue) {
-		return await adoptResumedSession(
+		return await adoptResumedSessionOrExplain(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -1370,7 +1393,7 @@ export async function createSessionManager(
 	// overriding them with CLI defaults.
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
 	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
-		const manager = await adoptResumedSession(
+		const manager = await adoptResumedSessionOrExplain(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -2281,7 +2304,7 @@ export async function runRootCommand(
 			if (continuation) resumedContinuations.push(continuation);
 			const chosen = continuation?.session ?? selected;
 			try {
-				sessionManager = await adoptResumedSession(
+				sessionManager = await adoptResumedSessionOrExplain(
 					(await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
 						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
 						: await SessionManager.open(chosen.path),
@@ -2445,6 +2468,15 @@ export async function runRootCommand(
 				rawArgs,
 				createSession,
 			});
+			// ACP builds its own manager per `session/new` and overrides
+			// `baseOptions.sessionManager` with it, so the session startup
+			// resumed here is never used — and the ownership claim the resume
+			// took would otherwise be held for the life of the server, keeping
+			// that session away from the process that does resume it.
+			if (sessionManager) {
+				await sessionManager.close();
+				sessionManager = undefined;
+			}
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 			scheduleMarketplaceAutoUpdate(marketplaceAutoUpdateOptions);
@@ -2610,6 +2642,10 @@ export async function runRootCommand(
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
+					// The session never reached a live AgentSession, so nothing will
+					// close it: the resume's ownership claim has to be given back
+					// here or it outlives the failure.
+					await sessionManager?.close();
 					throw error;
 				}
 				await sessionManager.close();

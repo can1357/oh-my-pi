@@ -9,6 +9,7 @@ import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mod
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type Client,
@@ -246,6 +247,62 @@ describe("ACP lazy startup", () => {
 			bashAutoBackground: true,
 			bashAutoBackgroundThresholdMs: 60000,
 		});
+	});
+
+	it("hands back the ownership of a session it resumed but never uses", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-acp-resume-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		const stopMessage = "stop test ACP mode";
+		let leaseFreeInAcpMode: boolean | undefined;
+		// Resuming a session enters its project directory process-wide; this
+		// one goes away with the temp dir, so put the process back afterwards.
+		const launchCwd = process.cwd();
+		try {
+			await runRootCommand(
+				{
+					mode: "acp",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					unrecognizedFlags: [],
+					invalidFlagValues: [],
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					resume: sessionFile,
+					sessionDir: resumeDir.path(),
+				},
+				[],
+				{
+					discoverAuthStorage: async () => startupAuthStorage,
+					settings: Settings.isolated(),
+					runAcpMode: async () => {
+						// ACP builds a manager per `session/new`; whatever startup
+						// resumed is not one of them, so its ownership must be back
+						// before the server starts answering.
+						const lease = tryAcquireSessionLease(sessionId);
+						leaseFreeInAcpMode = lease !== null;
+						lease?.release();
+						throw new Error(stopMessage);
+					},
+				},
+			);
+		} catch (error) {
+			if (!(error instanceof Error) || error.message !== stopMessage) throw error;
+		} finally {
+			process.chdir(launchCwd);
+		}
+		expect(leaseFreeInAcpMode).toBe(true);
 	});
 
 	it("honors explicit host-defaulted and todo settings for protocol hosts", async () => {

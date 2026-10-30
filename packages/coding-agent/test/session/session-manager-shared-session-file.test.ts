@@ -1,14 +1,25 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { findSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	SessionManager,
+	type SessionPersistenceNotice,
+	SessionSourceReplacedError,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	adoptResumedSession,
 	lastSessionTransfer,
+	markSessionMoved,
 	type SessionTransferDetails,
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -603,49 +614,174 @@ describe("SessionManager on a session file another omp process writes", () => {
 		}
 	}, 30_000);
 
-	it("resumes the conversation it loaded, not the session that took over its file", async () => {
+	it("refuses the resume, and inherits nothing, when another session took over the file", async () => {
 		using tempDir = TempDir.createSync("@omp-shared-session-file-");
 		const requested = await createSession(tempDir);
 		const requestedId = await readSessionHeaderId(requested);
 		const replacement = await createSession(tempDir, "someone else's conversation");
 		const replacementId = await readSessionHeaderId(replacement);
 		if (!requestedId || !replacementId) throw new Error("Expected session headers");
+		// The artifacts beside the path belong to whatever holds it now.
+		const artifacts = requested.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "1.bash.log"), "someone else's artifact");
 
 		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
 			suppressBreadcrumb: true,
 		});
-		// Between the load and the resume guard, another session takes the path
+		// Between the load and the resume guard another session takes the path
 		// (`omp session unpack`, a gc rewrite, a restored backup).
 		fs.renameSync(replacement, requested);
+		const before = sessionFilesIn(tempDir.path());
 
-		const resumed = await adoptResumedSession(manager, tempDir.path());
-		try {
-			expect(resumed.getSessionId()).not.toBe(requestedId);
-			expect(resumed.getSessionFile()).not.toBe(requested);
-			// The transcript is the one that was asked for, read before the file
-			// changed — never a re-read of whatever is at that path now.
-			expect(
-				resumed
-					.getEntries()
-					.flatMap(entry =>
-						entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : [],
-					),
-			).toEqual(["before"]);
-			// And the notice says what actually happened, naming both sessions.
-			expect(lastSessionTransfer(resumed.getEntries())).toEqual({
-				kind: "source-replaced",
-				source: requested,
-				sessionId: requestedId,
-				foundSessionId: replacementId,
-			});
-			const fork = resumed.getSessionFile();
-			if (!fork) throw new Error("Expected the resumed session to have a file");
-			expect((await sessionHeaderIn(fork)).parentSession).toBe(requestedId);
-		} finally {
-			await resumed.close();
-		}
-		// The journal that holds the path kept its session and its content.
+		// Nothing about the loaded transcript can still be attributed to it: a
+		// fork would carry files that belong to another conversation under
+		// `artifact://` ids this one already refers to.
+		await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(SessionSourceReplacedError);
+		await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(
+			new RegExp(`${requestedId}[\\s\\S]*${replacementId}`),
+		);
+
+		await manager.close();
+		// Nothing was written: no fork, and the journal that holds the path kept
+		// its session, its content, and its artifacts.
+		expect(sessionFilesIn(tempDir.path())).toEqual(before);
 		expect(await readSessionHeaderId(requested)).toBe(replacementId);
 		expect(await userTurnsIn(requested, tempDir.path())).toEqual(["someone else's conversation"]);
+		expect(fs.readFileSync(path.join(artifacts, "1.bash.log"), "utf8")).toBe("someone else's artifact");
+	}, 30_000);
+
+	it("refuses a departed copy whose file another session took over, instead of resuming that one", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const requested = await createSession(tempDir);
+		const requestedId = await readSessionHeaderId(requested);
+		if (!requestedId) throw new Error("Expected a session header");
+		// This copy was handed to another machine: the stale-copy guard runs
+		// first, and it used to fork by re-reading the path.
+		await markSessionMoved(requested, "another-machine");
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const replacementId = await readSessionHeaderId(replacement);
+		if (!replacementId) throw new Error("Expected a session header");
+
+		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		fs.renameSync(replacement, requested);
+		const before = sessionFilesIn(tempDir.path());
+
+		await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(SessionSourceReplacedError);
+
+		await manager.close();
+		expect(sessionFilesIn(tempDir.path())).toEqual(before);
+		expect(await userTurnsIn(requested, tempDir.path())).toEqual(["someone else's conversation"]);
+	}, 30_000);
+
+	it("tells the model the outcome of a tool the session it forked from may still be running", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		// A turn that ends in a tool call with no result: the owner is running it.
+		const writer = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		writer.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "deploy.sh" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		await writer.close();
+
+		// The owner resumes it and holds it; the tool call is still unresolved.
+		const { other: owner } = await OtherProcess.adopt(tempDir, original);
+		try {
+			const resumed = await adoptResumedSession(
+				await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				}),
+				tempDir.path(),
+			);
+			try {
+				const results = resumed
+					.getEntries()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : [],
+					);
+				// Without this the dangling call is stripped from the model's
+				// context and the fork may run a side-effecting tool a second time.
+				expect(results).toHaveLength(1);
+				expect(results[0]?.toolCallId).toBe("call-1");
+				expect(JSON.stringify(results[0]?.content)).toContain("may still be running this tool");
+			} finally {
+				await resumed.close();
+			}
+		} finally {
+			await owner.close();
+		}
+	}, 30_000);
+
+	it("keeps the session it lives in when a switch to another one is cancelled", async () => {
+		using sourceDir = TempDir.createSync("@omp-switch-ownership-source-");
+		using targetDir = TempDir.createSync("@omp-switch-ownership-target-");
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected the bundled anthropic model");
+			const sessionManager = SessionManager.create(sourceDir.path(), sourceDir.path(), new FileSessionStorage());
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: new ModelRegistry(authStorage),
+			});
+			try {
+				await sessionManager.ensureOnDisk();
+				sessionManager.appendMessage(userTurn("source"));
+				// The write is what takes this process's claim on the source.
+				await sessionManager.flush();
+				const sourceFile = sessionManager.getSessionFile();
+				const sourceId = sessionManager.getSessionId();
+				if (!sourceFile) throw new Error("Expected a source session file");
+				const target = await createSession(targetDir, "target");
+				const targetId = await readSessionHeaderId(target);
+				if (!targetId) throw new Error("Expected a target session header");
+
+				// `/resume` into another project, with the working-directory
+				// change refused: the switch rolls all the way back.
+				expect(await session.switchSession(target, { onCwdChange: async () => false })).toBe(false);
+				expect(sessionManager.getSessionFile()).toBe(sourceFile);
+				expect(sessionManager.getSessionId()).toBe(sourceId);
+
+				// Ownership rolled back with it: a second live process resuming
+				// the source still has to fork, instead of answering to the id
+				// this session is still living under.
+				const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
+				try {
+					expect(opened.sessionId).not.toBe(sourceId);
+					expect(opened.sessionFile).not.toBe(sourceFile);
+				} finally {
+					await other.close();
+				}
+				// And the target this session never entered is free for its own.
+				const targetLease = tryAcquireSessionLease(targetId);
+				expect(targetLease).not.toBeNull();
+				targetLease?.release();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
 	}, 30_000);
 });

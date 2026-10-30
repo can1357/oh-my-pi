@@ -75,4 +75,25 @@ describe("copying a session's artifacts to another session", () => {
 		// tally reports what the copy cost, not what the source holds.
 		expect(tally).toEqual({ entries: 1, bytes: 40, largest: [{ name: "3.bash.log", bytes: 40 }] });
 	});
+
+	it("does not write a source directory through a destination symlink", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		const outside = path.join(tempDir.path(), "outside");
+		fs.mkdirSync(path.join(sourceArtifacts, "local"), { recursive: true });
+		fs.mkdirSync(destinationArtifacts, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "local", "PLAN.md"), "the plan");
+		// A destination entry that is a symlink to a directory: `mkdir -p`
+		// accepts it, so a copy that only creates the destination would write
+		// the subtree outside the artifacts directory entirely.
+		fs.symlinkSync(outside, path.join(destinationArtifacts, "local"));
+
+		const tally = await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`);
+
+		expect(fs.readdirSync(outside)).toEqual([]);
+		expect(fs.readlinkSync(path.join(destinationArtifacts, "local"))).toBe(outside);
+		expect(tally).toEqual({ entries: 0, bytes: 0, largest: [] });
+	});
 });

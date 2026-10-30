@@ -13296,6 +13296,11 @@ export class AgentSession implements SettingsScope {
 				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
+			// Past the last step a failure could still roll back, so the session
+			// this one came from is no longer ours: give up its ownership claim,
+			// held through every step above so a rollback could take it straight
+			// back instead of racing a second process for it.
+			this.sessionManager.commitSessionSwitch();
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// Keep the old reservations during rollback; the target is committed now,
 			// so the snapshotted old queues can no longer be restored.
