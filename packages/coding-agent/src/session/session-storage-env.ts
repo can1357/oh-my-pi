@@ -6,8 +6,13 @@
  * auto-detected from the URL), so every `SessionManager` in this process
  * resolves against a single warmed index and publish queue. Unset, callers get
  * exactly the pre-existing per-call `FileSessionStorage` behavior.
+ * `OMP_SESSION_PATH_PREFIX_ALIAS` rewrites that storage's row keys between
+ * this machine's home prefix and the canonical one, so a machine mirroring
+ * the same layout under a different absolute root shares rows; unset (or
+ * `SESSIONS_DB_URL` unset) changes nothing.
  */
 import { SQL } from "bun";
+import { parseSessionPathPrefixAlias } from "./session-path-alias";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { SqlSessionStorage } from "./sql-session-storage";
 
@@ -15,6 +20,13 @@ import { SqlSessionStorage } from "./sql-session-storage";
 const SESSIONS_DB_URL_ENV = "SESSIONS_DB_URL";
 /** Overrides the SQL session table name (default: `omp_session_files`). */
 const SESSIONS_DB_TABLE_ENV = "SESSIONS_DB_TABLE";
+/**
+ * `"<localPrefix>=<storagePrefix>"` (first `=` separates the sides), e.g.
+ * `/home/zbornheimer=/Users/zbornheimer`: a machine mirroring the canonical
+ * machine's directory layout under a different home prefix reads and writes
+ * the same SQL session rows. Only read when `SESSIONS_DB_URL` is set.
+ */
+const SESSION_PATH_PREFIX_ALIAS_ENV = "OMP_SESSION_PATH_PREFIX_ALIAS";
 
 let sqlStorage: Promise<SqlSessionStorage> | undefined;
 
@@ -32,7 +44,10 @@ export function resolveSessionStorage(): Promise<SessionStorage> {
 	if (!url) return Promise.resolve(new FileSessionStorage());
 	sqlStorage ??= (async () => {
 		const table = process.env[SESSIONS_DB_TABLE_ENV]?.trim();
-		return SqlSessionStorage.create({ client: new SQL(url), table: table || undefined });
+		// Parsed before the client exists so a malformed alias fails every caller
+		// with the same error instead of keying rows under the wrong prefix.
+		const pathAlias = parseSessionPathPrefixAlias(process.env[SESSION_PATH_PREFIX_ALIAS_ENV]);
+		return SqlSessionStorage.create({ client: new SQL(url), table: table || undefined, pathAlias });
 	})();
 	return sqlStorage;
 }

@@ -11,6 +11,7 @@
 - Steering (or an interrupting peer message) now cancels an in-flight capability `wait` call: the MCP request is aborted and the server receives `notifications/cancelled`. The capability wait stays a top-level tool like the built-in wait it replaces, since a call routed through `write xd://` cannot be steered
 - New `tools.xdevAlwaysOn` setting (glob patterns matched against tool names, default `[]`): a matching enabled tool stays top-level with its own schema instead of mounting under `xd://`, like the harness's built-in always-top-level set. Use it for MCP tools that must be callable directly: in `config.yml`, `tools:` → `xdevAlwaysOn:` → `- "mcp__server_alpha_*"`. Changes apply live
 - Sessions can live in Postgres/MySQL/SQLite instead of local files: setting `SESSIONS_DB_URL` (and optional `SESSIONS_DB_TABLE`) routes every create, resume, fork, and picker path through one shared SQL-backed storage; unset, sessions stay on local files exactly as before. `scripts/import-sessions-to-sql.ts` (`--dry-run`, `--limit N`) imports existing `~/.omp/agent/sessions` JSONL into it
+- SQL sessions can be shared by a machine that mirrors the canonical machine's directory layout under a different home: set `OMP_SESSION_PATH_PREFIX_ALIAS` to `<localPrefix>=<storagePrefix>` (e.g. `/home/zbornheimer=/Users/zbornheimer`) and that machine reads and writes the same rows — list, resume, and fork all work — while every stored key stays untouched
 
 ### Removed
 

@@ -3,6 +3,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
+import { SessionPathAliasBackend, type SessionPathPrefixAlias } from "./session-path-alias";
 import { SessionWriteConflictError } from "./session-storage";
 import { enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
@@ -58,6 +59,13 @@ export interface SqlSessionStorageOptions {
 	 * names).
 	 */
 	table?: string;
+	/**
+	 * Per-machine home-prefix alias (parsed from `OMP_SESSION_PATH_PREFIX_ALIAS`
+	 * by `resolveSessionStorage`): caller paths under `localPrefix` are stored
+	 * under `storagePrefix`, so a machine mirroring the same layout under a
+	 * different absolute root shares row keys. Unset keeps every key verbatim.
+	 */
+	pathAlias?: SessionPathPrefixAlias;
 	/**
 	 * If true, run `CREATE TABLE IF NOT EXISTS` during `create()`.
 	 * Default: true. Disable when the table is owned by an external
@@ -268,7 +276,11 @@ export class SqlSessionStorage extends IndexedSessionStorage {
 	 */
 	static async create(options: SqlSessionStorageOptions): Promise<SqlSessionStorage> {
 		const backend = new SqlSessionStorageBackend(options);
-		const storage = new SqlSessionStorage(backend, backend.adapter, backend.table);
+		const storage = new SqlSessionStorage(
+			options.pathAlias ? new SessionPathAliasBackend(backend, options.pathAlias) : backend,
+			backend.adapter,
+			backend.table,
+		);
 		await storage.initialize();
 		return storage;
 	}
