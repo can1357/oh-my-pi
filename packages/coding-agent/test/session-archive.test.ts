@@ -1475,23 +1475,29 @@ test("archiving into an existing private archive directory does not widen it", a
 
 	expect((await fs.stat(archivedArtifacts)).mode & 0o777).toBe(0o700);
 });
-test("archiving never writes over an archived artifact, even to repair a short one", async () => {
+
+test("a restored session that advances can be archived again", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX");
 	await archiveEverything();
-	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
-	// The live file now holds everything the archived one does and more. There
-	// is no way to replace a name only while it still holds what was examined,
-	// so the archive is left alone and the operator is told how to finish it.
+	// What a restore leaves: both copies, the live one free to carry on. The
+	// live transcript and artifact then grow past the archive, and archiving
+	// has to take the longer copy — the shorter one is inside it — or a
+	// restored session could never be archived again.
+	await restoreArchivedSession(archiveFile, root);
+	await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "later" })}\n`);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-AND-MORE");
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
 
 	const result = await archiveEverything();
 
-	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
-	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("PREFIX");
-	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("PREFIX-AND-MORE");
+	expect(result.archive?.errors).toEqual([]);
+	expect(result.archive?.archived).toBe(1);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("PREFIX-AND-MORE");
+	expect(new TextDecoder().decode(Bun.gunzipSync(await fs.readFile(archiveFile)))).toContain("later");
+	expect(await Bun.file(sessionFile).exists()).toBe(false);
 });
 
 test("the archived transcript is never written over one that appeared at its name", async () => {

@@ -1026,7 +1026,11 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
  * Once the source is gone the archive is the only copy, so from that point
  * on a later failure never removes it.
  */
-async function gzipSessionFile(source: string, destination: string): Promise<{ orphanedTarget?: string }> {
+async function gzipSessionFile(
+	source: string,
+	destination: string,
+	supersedes?: Stats,
+): Promise<{ orphanedTarget?: string }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	// One staging shape across the sessions tree and the archive, so the sweep
 	// that reclaims a killed writer's leftovers recognizes this one too.
@@ -1049,10 +1053,24 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 			createGzip({ level: 9 }),
 			(await fs.open(tempPath, "w")).createWriteStream(),
 		);
-		// `link`, not `rename`: the caller has already established that nothing
-		// of this session's is at the destination, so anything there now is
-		// someone else's, and `EEXIST` says so rather than writing over it.
-		await fs.link(tempPath, destination);
+		if (supersedes) {
+			// The archive holds an earlier part of this very session — proved a
+			// prefix of what is being written — so replacing it loses nothing,
+			// and refusing would make a restored session unarchivable the moment
+			// it takes another turn. The entry is re-identified immediately
+			// before the rename, so a destination that changed since is refused
+			// rather than written over.
+			const standing = await statIfPresent(destination);
+			if (!standing || standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
+				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			}
+			await fs.rename(tempPath, destination);
+		} else {
+			// `link`, not `rename`: the caller has established that nothing of
+			// this session's is at the destination, so anything there now is
+			// someone else's, and `EEXIST` says so rather than writing over it.
+			await fs.link(tempPath, destination);
+		}
 		published = true;
 		const stored = await digestArchivedSessionFile(destination);
 		if (stored.hash !== expected.hash) {
@@ -1064,7 +1082,10 @@ async function gzipSessionFile(source: string, destination: string): Promise<{ o
 		sourceGone = true;
 		return { orphanedTarget: sourceReal === source ? undefined : sourceReal };
 	} catch (error) {
-		if (published && !sourceGone) await fs.rm(destination, { force: true });
+		// A superseding archive holds everything the one it replaced held, so
+		// removing it would give up bytes to recover from a failure that left
+		// the live transcript in place anyway.
+		if (published && !sourceGone && !supersedes) await fs.rm(destination, { force: true });
 		throw error;
 	} finally {
 		await fs.rm(tempPath, { force: true });
@@ -1161,6 +1182,7 @@ async function publishArtifactIntoArchive(
 			await noteCreation(destination, state);
 			return;
 		}
+		let supersedes: Stats | undefined;
 		try {
 			const verified = await archived.stat();
 			if (verified.dev === sourceStat.dev && verified.ino === sourceStat.ino) {
@@ -1171,16 +1193,30 @@ async function publishArtifactIntoArchive(
 			}
 			if (
 				verified.isFile() &&
-				verified.size === (await fs.stat(tempPath)).size &&
 				(await survivesSourceRemoval(destination, sourceRoot)) &&
 				(await archivedHandleIsHeldBy(archived, verified, tempPath))
 			) {
-				// The archive already holds exactly this, in a file of its own.
-				// Nothing to write.
-				return;
+				// The archived copy is held in full by what would be written. If
+				// they are the same length the archive already holds exactly
+				// this and there is nothing to do; if the live one has grown —
+				// what a restore leaves behind, since it keeps its copy — the
+				// longer one replaces the shorter, which loses nothing because
+				// the shorter is inside it.
+				if (verified.size === (await fs.stat(tempPath)).size) return;
+				supersedes = verified;
 			}
 		} finally {
 			await archived.close();
+		}
+		if (supersedes) {
+			// Re-identified immediately before the rename: a destination that
+			// changed since is refused rather than written over.
+			const standing = await statIfPresent(destination);
+			if (!standing || standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
+				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			}
+			await fs.rename(tempPath, destination);
+			return;
 		}
 		const stem = path.basename(sourceRoot);
 		throw new Error(
@@ -1421,7 +1457,19 @@ async function moveSessionWithArtifacts(
 	const destArtifacts = sessionArtifactsPath(destSession);
 	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
 	const alreadyArchived = (await pathExists(destSession)) && (await archiveAlreadyHolds(sourceSession, destSession));
-	if ((await pathExists(destSession)) && !alreadyArchived) {
+	// The archive holding an earlier part of this very session is what a
+	// restore leaves behind: it copies and keeps its copy, so the next turn
+	// makes the live transcript longer than the archive. That is this session
+	// carried on, not a different one, and the archive takes the longer copy
+	// rather than refusing for ever.
+	const supersedes =
+		(await pathExists(destSession)) &&
+		!alreadyArchived &&
+		(await fs.lstat(destSession).catch(() => undefined))?.isFile() &&
+		(await archiveIsPrefixOfLive(destSession, sourceSession))
+			? await statIfPresent(destSession)
+			: undefined;
+	if ((await pathExists(destSession)) && !alreadyArchived && !supersedes) {
 		const stem = path.basename(destSession, ".jsonl.gz");
 		throw new Error(
 			`the archive at ${destSession} holds a different session, so ${sourceSession} was left where it is. ` +
@@ -1447,7 +1495,7 @@ async function moveSessionWithArtifacts(
 			orphanedTarget = link?.isSymbolicLink() ? await fs.realpath(sourceSession).catch(() => undefined) : undefined;
 			await fs.unlink(sourceSession);
 		} else {
-			orphanedTarget = (await gzipSessionFile(sourceSession, destSession)).orphanedTarget;
+			orphanedTarget = (await gzipSessionFile(sourceSession, destSession, supersedes)).orphanedTarget;
 		}
 		moved.push({ source: sourceSession, destination: destSession, compressed: true });
 		if (await pathExists(sourceArtifacts)) {
