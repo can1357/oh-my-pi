@@ -6047,13 +6047,17 @@ export class AgentSession implements SettingsScope {
 	 * Which run of `toolCallId` this session is on, and whether it is over — a mark a surface
 	 * keeps beside anything it records about that call and compares on the way back. The same
 	 * mark means the same run, still open, and nothing else does: a run that ended, a later run
-	 * of the same id, and a disposed session are all different marks. A call this session never
-	 * ran has no mark at all, because nobody else's bookkeeping is its to overrule.
+	 * of the same id, and a disposed session are all different marks.
+	 *
+	 * A call this session never ran has no mark at all, disposed or not. Disposal ends what this
+	 * session was doing, and nothing more: a record some other host is holding for a call that was
+	 * never this session's is still owed an answer, and saying `disposed` about it would retire it
+	 * on a claim this session has no standing to make.
 	 */
 	toolCallRun(toolCallId: string): ToolCallRunMark | undefined {
-		if (this.#settledEverything) return { mark: "disposed", live: false };
 		const run = this.#toolCallRuns.get(toolCallId);
 		if (run === undefined) return undefined;
+		if (this.#settledEverything) return { mark: "disposed", live: false };
 		return { mark: `${run.settled ? "settled" : "run"}:${run.sequence}`, live: !run.settled };
 	}
 
@@ -6064,8 +6068,10 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Whether the current run of `toolCallId` is over, or the session is disposed and nothing it
-	 * was asking will be answered. {@link toolCallRunMark} is what a surface compares across a
-	 * gap; this is the plain question for a caller that only wants to know whether to wait.
+	 * was asking will be answered. This is the plain question for a caller deciding whether to
+	 * wait on this session, so a disposed session answers it for any id. {@link toolCallRun} is
+	 * the narrower one a surface compares across a gap, and it stays silent about a call this
+	 * session never ran, disposed or not: that record is not its to retire.
 	 */
 	hasSettledToolCall(toolCallId: string): boolean {
 		return this.#settledEverything || this.#toolCallRuns.get(toolCallId)?.settled === true;

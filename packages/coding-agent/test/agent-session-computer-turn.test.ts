@@ -353,6 +353,35 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(frames).toEqual([[startedCallId!]]);
 	});
 
+	it("marks its own calls disposed, and says nothing about a call it never ran", async () => {
+		// Disposal ends what this session was doing and nothing more. A surface
+		// holding a record for a call that was never this session's is still owed
+		// an answer: claiming the call is disposed would retire it on a claim
+		// this session has no standing to make.
+		const target = createSession([
+			{ content: [{ type: "toolCall", name: "question", arguments: {} }], stopReason: "toolUse" },
+			{ content: ["done"] },
+		]);
+		let ownCallId: string | undefined;
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "tool_execution_start") ownCallId = event.toolCallId;
+		});
+		const running = target.prompt("ask me");
+		await asked.promise;
+		answered.resolve("yes");
+		await running;
+		unsubscribe();
+		expect(ownCallId).toBeDefined();
+		expect(target.toolCallRun(ownCallId!)).toEqual({ mark: expect.stringMatching(/^settled:\d+$/), live: false });
+		expect(target.toolCallRun("never-ran-here")).toBeUndefined();
+
+		await target.dispose();
+		expect(target.toolCallRun(ownCallId!)).toEqual({ mark: "disposed", live: false });
+		expect(target.toolCallRun("never-ran-here")).toBeUndefined();
+		// The plain question is about this session, so it answers for any id.
+		expect(target.hasSettledToolCall("never-ran-here")).toBe(true);
+	});
+
 	it("claims no dialog raised inside another agent's call of the same id", async () => {
 		// Two sessions can legitimately be executing a call of the same id at
 		// once. A dialog raised inside one agent's execution is that agent's; the
