@@ -16,7 +16,7 @@ const requestSchema = type({
 });
 type RequestBody = typeof requestSchema.infer;
 const requests: RequestBody[] = [];
-const temp = TempDir.createSync("omp-fallback-shake-smoke-");
+const temp = TempDir.createSync("@omp-fallback-shake-smoke-");
 const server = Bun.serve({
 	hostname: "127.0.0.1",
 	port: 0,
