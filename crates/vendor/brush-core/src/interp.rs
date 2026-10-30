@@ -12,7 +12,7 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	ShellFd,
-	arithmetic::{self, ExpandAndEvaluate},
+	arithmetic::ExpandAndEvaluate,
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
@@ -21,7 +21,7 @@ use crate::{
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
-	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellValueUnsetType, ShellVariable},
+	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellVariable},
 };
 
 /// Encapsulates the context of execution in a command pipeline.
@@ -725,7 +725,7 @@ impl ElementBudget {
 
 	/// Call once per step, before it runs, with the bytes that step copies or
 	/// rewrites — zero where it only moves a value it already owns. Returns
-	/// how many checkpoints are due before the step; spend them with
+	/// the checkpoints due before the step; spend them with
 	/// [`loop_checkpoints`].
 	///
 	/// The first step always owes one, so a run already cancelled stops before
@@ -735,37 +735,69 @@ impl ElementBudget {
 	/// yields once per 128 checkpoints spent, so a loop of 64 steps that each
 	/// copy two megabytes would otherwise spend 64 and yield none.
 	#[inline]
-	#[must_use]
-	pub const fn charge(&mut self, bytes: usize) -> usize {
+	pub const fn charge(&mut self, bytes: usize) -> Due {
 		let first = self.steps == 0;
 		self.steps += 1;
 		self.bytes = self.bytes.saturating_add(bytes);
-		let mut due = (first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0) as usize;
+		let placed = first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0;
+		let mut strides = 0;
 		if self.bytes >= BYTE_CHECKPOINT_STRIDE {
-			due += self.bytes / BYTE_CHECKPOINT_STRIDE;
+			strides = self.bytes / BYTE_CHECKPOINT_STRIDE;
 			self.bytes %= BYTE_CHECKPOINT_STRIDE;
 		}
-		due
+		Due { placed, strides }
 	}
 }
 
-/// Spends `count` checkpoints in a row: the ones
-/// [`ElementBudget::charge`] found due.
+/// The checkpoints one step of a loop owes, as [`ElementBudget::charge`]
+/// counts them. It compares with a number as the count of them.
 ///
-/// A step that owes more than one is a stride of work rather than an element
-/// moved — the charge converts bytes to checkpoints at one per
-/// [`BYTE_CHECKPOINT_STRIDE`] — so it reads the clock every time rather than
-/// every sixteenth.
-pub async fn loop_checkpoints(
-	params: &ExecutionParameters,
-	count: usize,
-) -> Result<(), error::Error> {
-	for _ in 0..count {
-		if count > 1 {
-			stride_checkpoint(params).await?;
-		} else {
-			loop_checkpoint(params).await?;
-		}
+/// The two causes are kept apart because they want different clocks. One
+/// owed for the step's place in the loop stands for
+/// [`ELEMENT_CHECKPOINT_STRIDE`] cheap steps, and reads the thread's clock one
+/// time in sixteen like any [`loop_checkpoint`]. One owed for bytes stands for
+/// a whole [`BYTE_CHECKPOINT_STRIDE`] of work and reads it every time, like a
+/// [`stride_checkpoint`]. A count alone could not tell them apart: only a
+/// count above one read the clock every time, so the step that owes exactly
+/// one stride amortised its reading. `read` charges 64 KiB a step and owes
+/// exactly that, and sixteen strides of byte-at-a-time decoding between two
+/// readings held the worker 5.4 ms against a 1 ms bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct Due {
+	/// The first step, or an [`ELEMENT_CHECKPOINT_STRIDE`]-th one.
+	placed:  bool,
+	/// The [`BYTE_CHECKPOINT_STRIDE`]s of bytes the step completed.
+	strides: usize,
+}
+
+impl Due {
+	const fn count(self) -> usize {
+		self.placed as usize + self.strides
+	}
+}
+
+impl PartialEq<usize> for Due {
+	fn eq(&self, other: &usize) -> bool {
+		self.count() == *other
+	}
+}
+
+impl PartialOrd<usize> for Due {
+	fn partial_cmp(&self, other: &usize) -> Option<std::cmp::Ordering> {
+		Some(self.count().cmp(other))
+	}
+}
+
+/// Spends the checkpoints [`ElementBudget::charge`] found due: every one of
+/// them a [`stride_checkpoint`] if the step owed any for its bytes, else the
+/// one [`loop_checkpoint`] its place in the loop owed.
+pub async fn loop_checkpoints(params: &ExecutionParameters, due: Due) -> Result<(), error::Error> {
+	if due.strides == 0 {
+		return if due.placed { loop_checkpoint(params).await } else { Ok(()) };
+	}
+	for _ in 0..due.count() {
+		stride_checkpoint(params).await?;
 	}
 	Ok(())
 }
@@ -964,10 +996,10 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		direct_params.defer_fifo_redirects = true;
 		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
 			Some(job) => job,
-			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params),
+			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params).await?,
 		}
 	} else {
-		spawn_async_ao_list_in_task(ao_list, shell, &async_params)
+		spawn_async_ao_list_in_task(ao_list, shell, &async_params).await?
 	};
 
 	shell.set_last_background_pid(job.last_pid());
@@ -1115,7 +1147,7 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	shell: &Shell<SE>,
 	params: &ExecutionParameters,
 ) -> Result<Option<jobs::Job>, error::Error> {
-	let mut subshell = shell.clone();
+	let mut subshell = shell.clone_divided(params).await?;
 	subshell.options_mut().interactive = false;
 
 	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
@@ -1134,13 +1166,13 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
 }
 
-fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
+async fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	ao_list: &ast::AndOrList,
 	shell: &Shell<SE>,
 	params: &ExecutionParameters,
-) -> jobs::Job {
+) -> Result<jobs::Job, error::Error> {
 	// Clone the inputs.
-	let mut cloned_shell = shell.clone();
+	let mut cloned_shell = shell.clone_divided(params).await?;
 	let mut cloned_params = params.clone();
 	let cloned_ao_list = ao_list.clone();
 
@@ -1165,12 +1197,12 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 			.await
 	});
 
-	jobs::Job::new(
+	Ok(jobs::Job::new(
 		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
-	.with_cancellation(cancellation)
+	.with_cancellation(cancellation))
 }
 
 #[async_trait::async_trait]
@@ -1395,7 +1427,7 @@ async fn spawn_pipeline_processes(
 
 			PipelineExecutionContext {
 				shell: commands::ShellForCommand::OwnedShell {
-					target: Box::new(shell.clone()),
+					target: Box::new(shell.clone_divided(&cmd_params).await?),
 					parent: shell,
 				},
 				process_group_id,
@@ -1629,7 +1661,7 @@ impl Execute for ast::CompoundCommand {
 			Self::Subshell(ast::SubshellCommand { list, .. }) => {
 				// Clone off a new subshell, and run the body of the subshell there.
 				// TODO(source-info): Do we need to reset the line number?
-				let mut subshell = shell.clone();
+				let mut subshell = shell.clone_divided(params).await?;
 
 				// Handle errors within the subshell context to prevent fatal errors
 				// from propagating to the parent shell.
@@ -1700,7 +1732,7 @@ impl Execute for ast::CoprocessCommand {
 		let stdin_fd = shell.open_files_mut().add(stdin_writer.into())?;
 
 		// Crete a subshell that the coprocess will own and run in.
-		let mut child_shell = shell.clone();
+		let mut child_shell = shell.clone_divided(params).await?;
 		child_shell.options_mut().interactive = false;
 
 		// Setup redirection for the coprocess's shell's stdin/stdout.
@@ -2185,7 +2217,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
-						setup_process_substitution(&context.shell, &params, kind, subshell_command)?;
+						setup_process_substitution(&context.shell, &params, kind, subshell_command).await?;
 
 					params
 						.open_files
@@ -2483,8 +2515,11 @@ async fn apply_assignment(
 		},
 	};
 
-	// Expand the values.
-	let new_value = match &assignment.value {
+	// Expand the values. Whether a literal names any subscript is learned
+	// here, element by element, so that a literal with none pays nothing more
+	// for subscripts below.
+	let mut keyed = false;
+	let mut new_value = match &assignment.value {
 		ast::AssignmentValue::Scalar(unexpanded_value) => {
 			let value =
 				expansion::basic_expand_assignment_word(shell, params, unexpanded_value).await?;
@@ -2504,6 +2539,7 @@ async fn apply_assignment(
 				};
 
 				if key.is_some() {
+					keyed = true;
 					let value =
 						expansion::basic_expand_assignment_word(shell, params, unexpanded_value).await?;
 					elements.push((key, value));
@@ -2527,24 +2563,28 @@ async fn apply_assignment(
 			.await;
 	}
 
-	// See if we need to eval an array index.
-	if let Some(idx) = &array_index {
-		let will_be_indexed_array = if let Some((_, existing_value)) = shell.env().get(variable_name)
-		{
-			matches!(
-				existing_value.value(),
-				ShellValue::IndexedArray(_) | ShellValue::Unset(ShellValueUnsetType::IndexedArray)
-			)
-		} else {
-			true
-		};
-
-		if will_be_indexed_array {
-			array_index = Some(
-				arithmetic::expand_and_eval(shell, params, idx.as_str(), false)
-					.await?
-					.to_string(),
-			);
+	// Only an assignment with a subscript asks what its subscripts are. An
+	// element goes into the array as it stands, so its subscript counts back
+	// from there whether or not it appends; a literal replaces the array
+	// unless it appends.
+	let index_start = if array_index.is_some() || keyed {
+		let append = assignment.append || array_index.is_some();
+		assignment_index_start(shell, variable_name, required_scope, append)
+	} else {
+		None
+	};
+	if let Some(start) = index_start {
+		if let Some(idx) = &array_index {
+			let Some(index) =
+				crate::variables::evaluate_index_subscript(shell, params, idx, start).await?
+			else {
+				let word = std::format!("{variable_name}[{idx}]");
+				return Err(error::ErrorKind::BadArraySubscript(word).into());
+			};
+			array_index = Some(index.to_string());
+		} else if let ShellValueLiteral::Array(literal) = new_value {
+			new_value =
+				ShellValueLiteral::Array(literal.evaluate_subscripts(shell, params, start).await?);
 		}
 	}
 
@@ -2590,7 +2630,7 @@ async fn apply_assignment(
 	// If we fell down here, then we need to add it.
 	let new_value = if let Some(array_index) = array_index {
 		match new_value {
-			ShellValueLiteral::Scalar(s) => ShellValue::indexed_array_with_element(&array_index, s),
+			ShellValueLiteral::Scalar(s) => ShellValue::indexed_array_with_element(&array_index, s)?,
 			ShellValueLiteral::Array(_) => {
 				return Err(error::ErrorKind::AssigningListToArrayMember.into());
 			},
@@ -2614,6 +2654,28 @@ async fn apply_assignment(
 	}
 
 	shell.env_mut().add(variable_name, new_var, creation_scope)
+}
+
+/// What an assignment's subscripts are: `None` when the variable it writes is
+/// an associative array, whose subscripts are keys, and otherwise indexes,
+/// counted back from one past the largest index of the array the assignment
+/// starts from ([`ShellVariable::indexed_literal_start`]).
+///
+/// The variable written is the one found, unless the assignment needs a
+/// scope it is not in; then [`apply_assignment`] makes a new one, which
+/// starts empty.
+fn assignment_index_start(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	name: &str,
+	required_scope: Option<EnvironmentScope>,
+	append: bool,
+) -> Option<u64> {
+	match shell.env().get(name) {
+		Some((scope, var)) if required_scope.is_none_or(|required| scope == required) => {
+			var.takes_indexes().then(|| var.indexed_literal_start(append))
+		},
+		_ => Some(0),
+	}
 }
 
 #[expect(clippy::too_many_lines)]
@@ -2862,7 +2924,7 @@ pub(crate) async fn setup_redirect(
 						| ast::IoFileRedirectKind::ReadAndWrite
 						| ast::IoFileRedirectKind::Clobber => {
 							let (substitution_fd, substitution_file) =
-								setup_process_substitution(shell, params, substitution_kind, subshell_cmd)?;
+								setup_process_substitution(shell, params, substitution_kind, subshell_cmd).await?;
 
 							let target_file = substitution_file.try_clone()?;
 							params.open_files.set_fd(substitution_fd, substitution_file);
@@ -3130,7 +3192,7 @@ const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> She
 	}
 }
 
-fn setup_process_substitution(
+async fn setup_process_substitution(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	kind: &ast::ProcessSubstitutionKind,
@@ -3138,7 +3200,7 @@ fn setup_process_substitution(
 ) -> Result<(ShellFd, OpenFile), error::Error> {
 	// TODO(execute): Don't execute synchronously!
 	// Execute in a subshell.
-	let mut subshell = shell.clone();
+	let mut subshell = shell.clone_divided(params).await?;
 
 	// Set up execution parameters for the child execution.
 	let mut child_params = params.clone();

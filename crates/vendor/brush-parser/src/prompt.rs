@@ -158,47 +158,76 @@ pub fn parse(s: &str) -> Result<Vec<PromptPiece>, error::WordParseError> {
     Ok(result)
 }
 
-/// Finds where a run of whole prompt pieces that begins at `from` ends,
-/// covering at least `stride` bytes of `s` unless the spec ends first.
+/// Parses the pieces of `s` that begin at `from`, covering at least `stride`
+/// bytes unless the spec ends first, and returns them with the offset they end
+/// at, which the next call starts from.
 ///
-/// `from` has to begin a piece: zero, or a boundary an earlier call returned.
-/// Parsing `s[from..end]` on its own then yields exactly the pieces that
-/// parsing the whole of `s` yields over that span. A run can only end where a
-/// literal run ends, and a literal run only ends where an escape sequence
-/// starts, so the pieces on either side of a boundary never merge.
+/// `from` has to be zero or an offset an earlier call returned. This is here
+/// so that a caller which must not hold its thread can parse a prompt spec a
+/// stride at a time.
 ///
-/// This is here so that a caller which must not hold its thread can parse a
-/// prompt spec a stride at a time. The grammar above is a PEG that tries every
-/// escape sequence at every character of a literal, which for a spec of 16 MiB
-/// is most of a second in one call; the scan below is a search for the next
-/// backslash.
+/// **Literal text never reaches the grammar.** The grammar above is a PEG
+/// that tries every escape sequence at every character of a literal, and a
+/// literal has no boundary inside it at which a parse could be divided: a
+/// `PS1` of 16 MiB with no backslash in it was one piece, and parsing it held
+/// the worker for 659 ms in one call. A literal runs until the next escape
+/// sequence starts, so it is copied out as it stands, and one longer than
+/// `stride` comes out as consecutive literal pieces, which render to the same
+/// text as the one piece the whole parse makes. Runs of escape sequences go to
+/// the grammar a run at a time, and each run parses to exactly the pieces the
+/// whole parse makes over it, because an escape sequence ends where
+/// [`escape_end`] says and nothing on either side of a run can join it.
 ///
 /// # Arguments
 ///
 /// * `s` - The prompt string being parsed.
-/// * `from` - The byte offset the run starts at, which has to begin a piece.
-/// * `stride` - How many bytes the run should cover, at the least.
-pub fn next_piece_boundary(s: &str, from: usize, stride: usize) -> usize {
-    let target = from.saturating_add(stride).min(s.len());
+/// * `from` - The byte offset to start at.
+/// * `stride` - How many bytes the call should cover, at the least.
+pub fn parse_stride(
+    s: &str,
+    from: usize,
+    stride: usize,
+) -> Result<(Vec<PromptPiece>, usize), error::WordParseError> {
+    let bytes = s.as_bytes();
+    let target = from.saturating_add(stride.max(1)).min(s.len());
+    let mut pieces = Vec::new();
     let mut at = from.min(s.len());
     while at < target {
-        at = piece_end(s, at);
+        let start = at;
+        if starts_escape(bytes, at) {
+            while at < target && starts_escape(bytes, at) {
+                at = escape_end(s, at);
+            }
+        } else {
+            // Only a backslash with a character after it starts an escape
+            // sequence, so a backslash at the very end of the spec is literal.
+            at = match bytes[at..target].iter().position(|byte| *byte == b'\\') {
+                Some(offset) if at + offset + 1 < s.len() => at + offset,
+                _ => {
+                    let mut end = target;
+                    while !s.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    end
+                }
+            };
+        }
+        // Both ends are character boundaries by construction, so this borrows
+        // the spec rather than replacing anything.
+        let span = String::from_utf8_lossy(&bytes[start..at]);
+        if starts_escape(bytes, start) {
+            pieces.extend(parse(&span)?);
+        } else {
+            pieces.push(PromptPiece::Literal(span.into_owned()));
+        }
     }
-    at
+    Ok((pieces, at))
 }
 
-/// Finds where the piece that starts at `at` ends. Mirrors `prompt_piece`.
-fn piece_end(s: &str, at: usize) -> usize {
-    if s.as_bytes()[at] != b'\\' {
-        // A literal runs until an escape sequence starts. Every escape sequence
-        // is a backslash and at least one character after it, so a backslash at
-        // the very end of the spec is literal text and the run takes it.
-        return match s.as_bytes()[at..].iter().position(|byte| *byte == b'\\') {
-            Some(offset) if at + offset + 1 < s.len() => at + offset,
-            _ => s.len(),
-        };
-    }
-    escape_end(s, at)
+/// Whether an escape sequence starts at `at`: a backslash with a character
+/// after it. Mirrors the catch-all at the end of `special_sequence`.
+const fn starts_escape(bytes: &[u8], at: usize) -> bool {
+    bytes[at] == b'\\' && at + 1 < bytes.len()
 }
 
 /// Finds where the escape sequence that starts at the backslash at `at` ends.
@@ -295,28 +324,45 @@ mod tests {
     fn parsing_a_stride_at_a_time_gives_the_same_pieces() -> Result<()> {
         // Every shape a boundary can land near: escapes the grammar names, an
         // octal run longer than three digits, a date format holding a brace
-        // and a backslash, a date format with nothing to close it, a
-        // multi-byte character after a backslash, and a trailing backslash.
-        let spec = "abc\\u@\\h \\D{%a %b\\}x\\\\\\[y\\]\\1012\\8 \\D{unclosed \\é tail\\";
+        // and a backslash, a date format with nothing to close it, multi-byte
+        // characters in a literal and after a backslash, a run of escapes
+        // with nothing between them, and a trailing backslash.
+        let spec = "abc\\u@\\h \\D{%a %b\\}x\\\\\\[y\\]\\1012\\8 ñ€😀\\u\\h\\w\\$ \\D{unclosed \\é tail\\";
 
         let whole = parse(spec)?;
         for stride in 1..=spec.len() {
-            let mut strided = Vec::new();
+            let mut strided: Vec<PromptPiece> = Vec::new();
             let mut at = 0;
             while at < spec.len() {
-                let end = next_piece_boundary(spec, at, stride);
-                // A boundary that split a character, or made no progress,
-                // would be a scanner defect rather than a parse failure.
-                let piece = spec
-                    .get(at..end)
-                    .filter(|piece| !piece.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("stride {stride} stalled or split at {at}"))?;
-                strided.extend(parse(piece)?);
+                let (pieces, end) = parse_stride(spec, at, stride)?;
+                // An end that split a character, or made no progress, would
+                // be a scanner defect rather than a parse failure.
+                anyhow::ensure!(
+                    end > at && spec.is_char_boundary(end),
+                    "stride {stride} stalled or split at {at}"
+                );
+                for piece in pieces {
+                    // A literal longer than the stride comes out in parts,
+                    // which render to the same text as the one piece.
+                    match (strided.last_mut(), piece) {
+                        (Some(PromptPiece::Literal(text)), PromptPiece::Literal(more)) => text.push_str(&more),
+                        (_, piece) => strided.push(piece),
+                    }
+                }
                 at = end;
             }
             assert_eq!(strided, whole, "stride {stride}");
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn a_literal_is_divided_at_the_stride() -> Result<()> {
+        let spec = "h".repeat(10);
+        let (pieces, end) = parse_stride(&spec, 0, 4)?;
+        assert_eq!(end, 4);
+        assert_eq!(pieces, [PromptPiece::Literal("hhhh".to_owned())]);
         Ok(())
     }
 }

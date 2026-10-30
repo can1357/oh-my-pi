@@ -113,6 +113,30 @@ impl ShellEnvironment {
 		}
 	}
 
+	/// A copy of this environment for a subshell, every variable copied with
+	/// [`ShellVariable::clone_divided`] under one budget, so that neither a
+	/// large value nor a great many small ones is copied in one step.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Self, error::Error> {
+		let mut budget = crate::interp::ElementBudget::new();
+		let mut scopes = Vec::with_capacity(self.scopes.len());
+		for (scope, map) in &self.scopes {
+			scopes.push((*scope, map.clone_divided(params, &mut budget).await?));
+		}
+		Ok(Self {
+			scopes,
+			export_variables_on_modification: self.export_variables_on_modification,
+			entry_count: self.entry_count,
+		})
+	}
+
 	/// Pushes a new scope of the given type onto the environment's scope stack.
 	///
 	/// # Arguments
@@ -581,7 +605,7 @@ impl ShellEnvironment {
 			var.assign_at_index(index, value, false)?;
 			updater(var)
 		} else {
-			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value));
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
 			updater(&mut var)?;
 
 			self.add(name, var, scope_if_creating)
@@ -614,7 +638,7 @@ impl ShellEnvironment {
 			var.assign_at_index_divided(index, value, false, params).await?;
 			updater(var)
 		} else {
-			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value));
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
 			updater(&mut var)?;
 
 			self.add(name, var, scope_if_creating)
@@ -682,6 +706,22 @@ impl ShellVariableMap {
 	/// Returns an iterator over all the variables in the map.
 	pub fn iter(&self) -> impl Iterator<Item = (&String, &ShellVariable)> {
 		self.variables.iter()
+	}
+
+	/// [`ShellEnvironment::clone_divided`] for one scope. The copy takes the
+	/// original's hasher, as `HashMap::clone` does.
+	async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+		budget: &mut crate::interp::ElementBudget,
+	) -> Result<Self, error::Error> {
+		let mut variables =
+			HashMap::with_capacity_and_hasher(self.variables.len(), self.variables.hasher().clone());
+		for (name, variable) in &self.variables {
+			let name = crate::variables::clone_charged(params, budget, name).await?;
+			variables.insert(name, variable.clone_divided(params, budget).await?);
+		}
+		Ok(Self { variables })
 	}
 
 	/// Tries to retrieve an immutable reference to the variable with the given

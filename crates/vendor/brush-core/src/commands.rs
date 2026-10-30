@@ -342,8 +342,22 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	// NOTE: Not supported on all platforms.
 	cmd.arg0(argv0);
 
+	// Each argument is scanned for a virtual path and then copied by
+	// `Command::arg` into the string the operating system takes, both in one
+	// step per argument, so the loop between them is charged. The step itself
+	// is left whole on purpose: every platform caps an argument the process
+	// can be started with (Linux `MAX_ARG_STRLEN`, 128 KiB on 4 KiB pages;
+	// macOS `ARG_MAX`, 1 MiB for all of them; Windows, 32,767 characters of
+	// command line), so the only argument whose step is long is one the spawn
+	// will refuse. A 64 MiB argument spent 28.4 ms in `Command::arg` before
+	// that refusal.
+	let mut budget = interp::ElementBudget::new();
 	for arg in args {
 		let arg = arg.as_ref();
+		let due = budget.charge(arg.len());
+		if due > 0 {
+			interp::loop_checkpoints(&context.params, due).await?;
+		}
 		match host_arg(filesystem, arg).await? {
 			Some(rewritten) => cmd.arg(rewritten),
 			None => cmd.arg(arg),
@@ -452,130 +466,135 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	Ok(cmd)
 }
 
-/// Renders `assignment` onto `out` the way its `Display` does, a stride at a
-/// time.
+/// Renders `args` the way `BASH_COMMAND` holds them: joined by spaces, each as
+/// its `Display` writes it.
 ///
-/// `BASH_COMMAND` is built before every command, and an assignment argument
-/// carries an expanded value: `declare x=$huge` spent **48.150 ms** in one
-/// `to_string`. The name and the operator are bounded by the assignment's
-/// own text; the value is not.
-///
-/// # Errors
-///
-/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
-/// way, leaving `out` holding what had been rendered by then.
-async fn push_assignment_in_strides(
+/// **One pass, charged as it goes, with nothing deciding in front of it.**
+/// The rendering runs before every command, and every earlier version chose
+/// between a plain join and a divided one, and every choice was wrong for
+/// some shape. Summing the lengths to choose was itself a pass over every
+/// argument: eight million empty ones spent 20.6 ms deciding. Choosing on the
+/// count and on each argument's own length let 256 arguments of 64 KiB, 16 MiB
+/// in all, take the plain join for 5.5 ms, and 240.1 ms when `BASH_COMMAND`
+/// lowercased what it was given, because the plain write converted in one
+/// step too. No count can be the criterion, since the work is the bytes as
+/// well as the steps. So nothing chooses: every argument and every element of
+/// an array argument is one step of an [`interp::ElementBudget`], charged its
+/// bytes, and a piece longer than a stride is copied in strides. An ordinary
+/// command line owes the one checkpoint of its first step and no other.
+async fn render_command_line(
 	params: &ExecutionParameters,
-	out: &mut String,
-	assignment: &ast::Assignment,
-) -> Result<(), error::Error> {
-	out.push_str(assignment.name.to_string().as_str());
-	if assignment.append {
-		out.push('+');
+	args: &[CommandArg],
+) -> Result<String, error::Error> {
+	let mut line = CommandLine { params, budget: interp::ElementBudget::new(), text: String::new() };
+	for (index, arg) in args.iter().enumerate() {
+		let separator = if index > 0 { " " } else { "" };
+		match arg {
+			CommandArg::String(text) => line.push(&[separator, text]).await?,
+			CommandArg::Assignment(assignment) => {
+				line.push_assignment(separator, assignment).await?;
+			},
+		}
 	}
-	out.push('=');
+	Ok(line.text)
+}
 
-	match &assignment.value {
-		ast::AssignmentValue::Scalar(word) => {
-			interp::push_str_in_strides(params, out, word.value.as_str()).await?;
-		},
-		ast::AssignmentValue::Array(words) => {
-			out.push('(');
-			let mut budget = interp::ElementBudget::new();
-			for (index, (key, value)) in words.iter().enumerate() {
-				if index > 0 {
-					out.push(' ');
-				}
-				let due = budget.charge(value.value.len());
-				if due > 0 {
-					interp::loop_checkpoints(params, due).await?;
-				}
-				if let Some(key) = key {
-					out.push('[');
-					out.push_str(key.to_string().as_str());
-					out.push_str("]=");
-				}
-				interp::push_str_in_strides(params, out, value.value.as_str()).await?;
+/// A command line being rendered by [`render_command_line`].
+struct CommandLine<'a> {
+	params: &'a ExecutionParameters,
+	budget: interp::ElementBudget,
+	text:   String,
+}
+
+impl CommandLine<'_> {
+	/// Appends `parts` as one step: the parts within a stride are charged
+	/// their bytes and copied as they are, and a longer one is copied in
+	/// strides of its own.
+	async fn push(&mut self, parts: &[&str]) -> Result<(), error::Error> {
+		let short = parts
+			.iter()
+			.map(|part| part.len())
+			.filter(|len| *len <= interp::DIVIDE_COPY_ABOVE_BYTES)
+			.sum();
+		let due = self.budget.charge(short);
+		if due > 0 {
+			interp::loop_checkpoints(self.params, due).await?;
+		}
+		for part in parts {
+			if part.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+				interp::push_str_in_strides(self.params, &mut self.text, part).await?;
+			} else {
+				self.text.push_str(part);
 			}
-			out.push(')');
-		},
+		}
+		Ok(())
 	}
 
-	Ok(())
+	/// Appends `assignment` as its `Display` writes it. The name and the
+	/// operator are one step, and so is a scalar value and each element of an
+	/// array value: an element's key, like the subscript of the name, is
+	/// **expanded** text, and `declare a["$huge"]=v` spent 50.6 ms in one
+	/// `to_string` of the name.
+	async fn push_assignment(
+		&mut self,
+		separator: &str,
+		assignment: &ast::Assignment,
+	) -> Result<(), error::Error> {
+		let operator = if assignment.append { "+=" } else { "=" };
+		match &assignment.name {
+			ast::AssignmentName::VariableName(name) => self.push(&[separator, name, operator]).await?,
+			ast::AssignmentName::ArrayElementName(name, index) => {
+				self.push(&[separator, name, "[", index, "]", operator]).await?;
+			},
+		}
+		match &assignment.value {
+			ast::AssignmentValue::Scalar(word) => self.push(&[&word.value]).await,
+			ast::AssignmentValue::Array(words) => {
+				self.push(&["("]).await?;
+				for (index, (key, value)) in words.iter().enumerate() {
+					let separator = if index > 0 { " " } else { "" };
+					match key {
+						Some(key) => self.push(&[separator, "[", &key.value, "]=", &value.value]).await?,
+						None => self.push(&[separator, &value.value]).await?,
+					}
+				}
+				self.text.push(')');
+				Ok(())
+			},
+		}
+	}
+}
+
+/// Renders one argument as its `Display` writes it, copying it in strides
+/// above one stride.
+pub(crate) async fn render_argument(
+	params: &ExecutionParameters,
+	arg: &CommandArg,
+) -> Result<String, error::Error> {
+	match arg {
+		CommandArg::String(text) => interp::clone_in_strides(params, text).await,
+		CommandArg::Assignment(_) => render_command_line(params, std::slice::from_ref(arg)).await,
+	}
 }
 
 pub(crate) async fn on_preexecute(
 	cmd: &mut commands::SimpleCommand<'_, impl extensions::ShellExtensions>,
 ) -> Result<(), error::Error> {
 	// Set BASH_COMMAND before invoking the DEBUG trap (and generally before
-	// executing commands).
-	//
-	// This runs before **every** command, so an ordinary command line takes
-	// the plain path and pays nothing. A generated one can be any size in
-	// two different ways — a few huge arguments or a great many small ones.
-	//
-	// **The choice itself has to be bounded.** An earlier version summed the
-	// argument lengths to decide, which is a pass over every argument: eight
-	// million empty ones spent 20.6 ms in the deciding and never reached the
-	// divided path, because the number that would have chosen it cost 20 ms
-	// to produce. So a long argument list takes the divided path on its
-	// length alone, and only a short list — at most
-	// [`interp::ELEMENT_CHECKPOINT_STRIDE`] arguments — is examined.
-	let divided = cmd.args.len() > interp::ELEMENT_CHECKPOINT_STRIDE
-		|| cmd.args.iter().any(|arg| match arg {
-			CommandArg::String(text) => text.len() > interp::DIVIDE_COPY_ABOVE_BYTES,
-			// An assignment carries an expanded value whose rendered length
-			// is not known without rendering it, so it always takes the
-			// divided path rather than being guessed at.
-			CommandArg::Assignment(_) => true,
-		});
-
-	if divided {
-		let mut full_cmd = String::new();
-		let mut budget = interp::ElementBudget::new();
-		for (index, arg) in cmd.args.iter().enumerate() {
-			if index > 0 {
-				full_cmd.push(' ');
-			}
-			match arg {
-				CommandArg::String(text) => {
-					// Charged by the step as well as the bytes, so a million
-					// empty arguments yield as surely as one huge one.
-					let due = budget.charge(text.len());
-					if due > 0 {
-						interp::loop_checkpoints(&cmd.params, due).await?;
-					}
-					if text.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
-						interp::push_str_in_strides(&cmd.params, &mut full_cmd, text).await?;
-					} else {
-						full_cmd.push_str(text);
-					}
-				},
-				CommandArg::Assignment(assignment) => {
-					push_assignment_in_strides(&cmd.params, &mut full_cmd, assignment).await?;
-				},
-			}
-		}
-		cmd.shell
-			.env_mut()
-			.update_or_add(
-				"BASH_COMMAND",
-				crate::variables::ShellValueLiteral::Scalar(full_cmd),
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-				&cmd.params,
-			)
-			.await?;
-	} else {
-		cmd.shell.env_mut().update_or_add_scalar(
+	// executing commands). The write converts in strides too, for a
+	// `BASH_COMMAND` given a case attribute.
+	let full_cmd = render_command_line(&cmd.params, &cmd.args).await?;
+	cmd.shell
+		.env_mut()
+		.update_or_add(
 			"BASH_COMMAND",
-			cmd.args.iter().map(|arg| arg.to_string()).join(" "),
+			crate::variables::ShellValueLiteral::Scalar(full_cmd),
 			|_| Ok(()),
 			env::EnvironmentLookup::Anywhere,
 			env::EnvironmentScope::Global,
-		)?;
-	}
+			&cmd.params,
+		)
+		.await?;
 
 	// Fire the DEBUG trap if one is registered.
 	if cmd.shell.traps().handles(traps::TrapSignal::Debug) {
@@ -751,8 +770,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	/// The copy is divided, because the last argument is whatever the command
 	/// line expanded to: `noop "${huge[@]}"` with a 64 MiB argument spent
 	/// **47.0 ms** of a 70.8 ms hold in this one `to_string`. An assignment
-	/// argument is rendered rather than copied and is bounded by the
-	/// assignment's own text.
+	/// argument carries an expanded value and is rendered the way
+	/// `BASH_COMMAND` renders it.
 	///
 	/// # Errors
 	///
@@ -764,17 +783,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	) -> Result<Option<String>, error::Error> {
 		match args.last() {
 			None => Ok(None),
-			Some(CommandArg::String(text)) => {
-				Ok(Some(interp::clone_in_strides(params, text).await?))
-			},
-			// An assignment argument carries an **expanded** value, so this
-			// fallback was the same 48 ms synchronous rendering the
-			// `BASH_COMMAND` estimate used to hide.
-			Some(CommandArg::Assignment(assignment)) => {
-				let mut rendered = String::new();
-				push_assignment_in_strides(params, &mut rendered, assignment).await?;
-				Ok(Some(rendered))
-			},
+			Some(arg) => Ok(Some(render_argument(params, arg).await?)),
 		}
 	}
 
@@ -860,7 +869,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			// is discarded when it finishes. A filesystem built with a
 			// cancellation token interrupts the lease's virtual I/O once
 			// cancelled, so the worker returns promptly.
-			let lease = shell.lease();
+			let lease = shell.lease(&self.params).await?;
 			let command_name = self.command_name;
 			let params = self.params;
 			let args = self.args;
@@ -1247,18 +1256,26 @@ pub(crate) async fn invoke_shell_function(
 	// A function's positional parameters are copies of the command's
 	// arguments, and an argument is whatever the command line expanded to:
 	// `f "$huge"` spent **26.113 ms** building this list before the function
-	// body had started. Charged by the step as well as the bytes, so a
-	// function called with a million small arguments yields as surely as one
-	// called with a single huge one.
+	// body had started. Charging the copy is not dividing it, and the charge
+	// used to come after an undivided `to_string`, which kept 25.969 ms of it.
+	// Charged by the step as well as the bytes, so a function called with a
+	// million small arguments yields as surely as one called with a single
+	// huge one.
 	let mut positional_args = Vec::with_capacity(args.len());
 	let mut budget = interp::ElementBudget::new();
 	for arg in args {
-		let text = arg.to_string();
-		let due = budget.charge(text.len());
+		let short = match arg {
+			CommandArg::String(text) if text.len() <= interp::DIVIDE_COPY_ABOVE_BYTES => Some(text),
+			_ => None,
+		};
+		let due = budget.charge(short.map_or(0, String::len));
 		if due > 0 {
 			interp::loop_checkpoints(&context.params, due).await?;
 		}
-		positional_args.push(text);
+		positional_args.push(match short {
+			Some(text) => text.clone(),
+			None => render_argument(&context.params, arg).await?,
+		});
 	}
 	let positional_args = positional_args.into_iter();
 
@@ -1320,7 +1337,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	s: String,
 ) -> Result<String, error::Error> {
 	// Instantiate a subshell to run the command in.
-	let mut subshell = shell.clone();
+	let mut subshell = shell.clone_divided(params).await?;
 
 	// Command substitutions don't inherit errexit by default. Only inherit it when
 	// command_subst_inherits_errexit is enabled, otherwise disable errexit in the

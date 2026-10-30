@@ -261,6 +261,21 @@ fn join_or_push(fields: &mut Vec<WordField>, join: bool, mut pieces: Vec<Expansi
 	}
 }
 
+/// The expansion of one parameter's value: a copy of it, made in strides above
+/// one.
+///
+/// A value is as long as whatever was assigned to it. `"$big"`, `"$1"` and
+/// `"${a[0]}"` each copied a 64 MiB value in one `to_string`, holding the
+/// worker 24.6–25.9 ms, while `"${a[@]}"` already copied the same element in
+/// strides.
+async fn copied_value(params: &ExecutionParameters, value: &str) -> Result<Expansion, error::Error> {
+	Ok(Expansion::from(if value.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+		interp::clone_in_strides(params, value).await?
+	} else {
+		value.to_owned()
+	}))
+}
+
 impl From<WordField> for String {
 	fn from(field: WordField) -> Self {
 		field.0.into_iter().map(Self::from).collect()
@@ -481,6 +496,136 @@ async fn contains_any_in_strides(
 		rest = remaining;
 	}
 	Ok(false)
+}
+
+/// Parses `word` into its pieces a step at a time, spending a checkpoint
+/// before each step.
+///
+/// For a word above [`interp::DIVIDE_COPY_ABOVE_BYTES`]: such a word is not
+/// one anybody typed but one a variable made, a prompt above all, which is
+/// expanded before every command. The word grammar is a PEG that tries every
+/// other kind of piece at every character of a literal, so the whole parse of
+/// a 16 MiB prompt holds the worker for hundreds of milliseconds. A step
+/// covers one byte stride of the word or one element stride of pieces, and
+/// the pieces are the ones the whole parse gives.
+///
+/// The whole-word cache [`brush_parser::word::parse`] keeps is left to the
+/// ordinary word on purpose: its key is the word, so a word this long would be
+/// copied and hashed in one step on every expansion to look it up, and its
+/// pieces cloned out of it on every hit.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
+/// and the error [`brush_parser::word::parse`] gives for a word it cannot
+/// parse.
+async fn parse_word_in_strides(
+	params: &ExecutionParameters,
+	word: &str,
+	options: &brush_parser::ParserOptions,
+) -> Result<Vec<brush_parser::word::WordPieceWithSource>, error::Error> {
+	let mut parse = brush_parser::word::SteppedParse::new(word, options);
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
+			break;
+		}
+	}
+	Ok(parse.finish()?)
+}
+
+/// Parses `word` for brace expansion a step at a time, spending a checkpoint
+/// before each step: [`parse_word_in_strides`] for the brace grammar, which a
+/// long word reaches first whenever it holds a `{` and a `}`. The inner result
+/// is the one [`brush_parser::word::parse_brace_expansions`] gives.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn parse_brace_expansions_in_strides(
+	params: &ExecutionParameters,
+	word: &str,
+	options: &brush_parser::ParserOptions,
+) -> Result<
+	Result<Option<Vec<brush_parser::word::BraceExpressionOrText>>, brush_parser::WordParseError>,
+	error::Error,
+> {
+	let mut parse = brush_parser::word::SteppedBraceParse::new(word, options);
+	loop {
+		interp::stride_checkpoint(params).await?;
+		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
+			break;
+		}
+	}
+	Ok(parse.finish())
+}
+
+/// [`env::valid_variable_name`], spending a checkpoint before each stride of
+/// `name`.
+///
+/// Every character a name may hold is ASCII, so the test is made on bytes: a
+/// byte of a multi-byte character is never a letter, a digit or `_`.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn valid_variable_name_in_strides(
+	params: &ExecutionParameters,
+	name: &str,
+) -> Result<bool, error::Error> {
+	let bytes = name.as_bytes();
+	if !bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_') {
+		return Ok(false);
+	}
+	for stride in bytes.chunks(interp::BYTE_CHECKPOINT_STRIDE) {
+		interp::stride_checkpoint(params).await?;
+		if !stride.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+			return Ok(false);
+		}
+	}
+	Ok(true)
+}
+
+/// The variable [`env::ShellEnvironment::get`] finds for `name`, for a name
+/// above [`interp::DIVIDE_COPY_ABOVE_BYTES`].
+///
+/// `get` hashes the name once for every scope it looks in, which for a name of
+/// 16 MiB is milliseconds in one step. The names of the variables visible are
+/// compared with it instead: a name of another length is passed over without
+/// reading it, and one of the same length is compared a stride at a time.
+/// Visible means the innermost scope's variable of each name, which is the one
+/// `get` returns.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn variable_by_long_name<'e>(
+	params: &ExecutionParameters,
+	environment: &'e env::ShellEnvironment,
+	name: &str,
+) -> Result<Option<&'e crate::variables::ShellVariable>, error::Error> {
+	let candidates: Vec<_> = environment
+		.iter()
+		.filter(|(candidate, _)| candidate.len() == name.len())
+		.collect();
+	for (candidate, var) in candidates {
+		let mut same = true;
+		for (ours, theirs) in candidate
+			.as_bytes()
+			.chunks(interp::BYTE_CHECKPOINT_STRIDE)
+			.zip(name.as_bytes().chunks(interp::BYTE_CHECKPOINT_STRIDE))
+		{
+			interp::stride_checkpoint(params).await?;
+			if ours != theirs {
+				same = false;
+				break;
+			}
+		}
+		if same {
+			return Ok(Some(var));
+		}
+	}
+	Ok(None)
 }
 
 /// Apply tilde-expansion, parameter expansion, command substitution, and
@@ -804,6 +949,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				self.heredoc_mode = false;
 
 				brush_parser::word::parse_heredoc(element.as_ref(), &self.parser_options)?
+			} else if element.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+				parse_word_in_strides(self.params, element.as_ref(), &self.parser_options).await?
 			} else {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
@@ -868,14 +1015,24 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// We perform a non-authoritative check to see if the string *may* contain
 		// braces to expand. There may be false positives, but must be no false
 		// negatives.
-		if self.disable_brace_expansion
-			|| !self.shell.options().perform_brace_expansion
-			|| !may_contain_braces_to_expand(word)
-		{
+		if self.disable_brace_expansion || !self.shell.options().perform_brace_expansion {
+			return Ok(vec![word.into()]);
+		}
+		let long = word.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+		let may_contain_braces = if long {
+			may_contain_braces_to_expand_in_strides(self.params, word).await?
+		} else {
+			may_contain_braces_to_expand(word)
+		};
+		if !may_contain_braces {
 			return Ok(vec![word.into()]);
 		}
 
-		let parse_result = brush_parser::word::parse_brace_expansions(word, &self.parser_options);
+		let parse_result = if long {
+			parse_brace_expansions_in_strides(self.params, word, &self.parser_options).await?
+		} else {
+			brush_parser::word::parse_brace_expansions(word, &self.parser_options)
+		};
 		if parse_result.is_err() {
 			tracing::error!("failed to parse for brace expansion: {parse_result:?}");
 			return Ok(vec![word.into()]);
@@ -885,6 +1042,15 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let Some(brace_expansion_pieces) = brace_expansion_pieces else {
 			return Ok(vec![word.into()]);
 		};
+		// With no brace expression in it, a word is one text piece, which the
+		// generator would copy back into the word in one step.
+		if long
+			&& !brace_expansion_pieces
+				.iter()
+				.any(|piece| matches!(piece, brush_parser::word::BraceExpressionOrText::Expr(_)))
+		{
+			return Ok(vec![word.into()]);
+		}
 
 		tracing::debug!(target: trace_categories::EXPANSION, "Brace expansion pieces: {brace_expansion_pieces:?}");
 
@@ -1917,22 +2083,36 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				if *p == 0 {
 					self.expand_special_parameter(&brush_parser::word::SpecialParameter::ShellName).await
 				} else if let Some(parameter) = self.shell.current_shell_args().get((p - 1) as usize) {
-					Ok(Expansion::from(parameter.to_owned()))
+					copied_value(self.params, parameter).await
 				} else {
 					self.undefined_expansion(parameter, allow_unset_vars)
 				}
 			},
 			brush_parser::word::Parameter::Special(s) => self.expand_special_parameter(s).await,
 			brush_parser::word::Parameter::Named(n) => {
-				if !env::valid_variable_name(n.as_str()) {
-					Err(error::ErrorKind::BadSubstitution(n.clone()).into())
-				} else if let Some((_, var)) = self.shell.env().get(n) {
+				// A name is as long as the text after a `$` that a variable made:
+				// `$PWD` followed by 16 MiB of letters is one name.
+				let long = n.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+				let valid = if long {
+					valid_variable_name_in_strides(self.params, n).await?
+				} else {
+					env::valid_variable_name(n.as_str())
+				};
+				if !valid {
+					return Err(error::ErrorKind::BadSubstitution(n.clone()).into());
+				}
+				let var = if long {
+					variable_by_long_name(self.params, self.shell.env(), n).await?
+				} else {
+					self.shell.env().get(n).map(|(_, var)| var)
+				};
+				if let Some(var) = var {
 					if matches!(var.value(), ShellValue::Unset(_)) {
 						self.undefined_expansion(parameter, allow_unset_vars)
 					} else {
 						let value = var.value().try_get_cow_str(self.shell);
 						if let Some(value) = value {
-							Ok(Expansion::from(value.to_string()))
+							copied_value(self.params, &value).await
 						} else {
 							self.undefined_expansion(parameter, allow_unset_vars)
 						}
@@ -1962,7 +2142,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				if let Some((_, var)) = self.shell.env().get(name)
 					&& let Ok(Some(value)) = var.value().get_at(index_to_use.as_str(), self.shell)
 				{
-					Ok(Expansion::from(value.to_string()))
+					copied_value(self.params, &value).await
 				} else {
 					self.undefined_expansion(parameter, allow_unset_vars)
 				}
@@ -2338,31 +2518,79 @@ where
 }
 
 fn may_contain_braces_to_expand(s: &str) -> bool {
-	// This is a completely inaccurate but quick heuristic used to see if
-	// it's even worth properly parsing the string to find brace expressions.
-	// It's mostly used to avoid more expensive parsing just because we've
-	// encountered a brace used in a parameter expansion.
-	let mut last_was_unescaped_dollar_sign = false;
-	let mut last_was_escape = false;
-	let mut saw_opening_brace = false;
-	let mut saw_closing_brace = false;
-	for c in s.chars() {
-		if !last_was_unescaped_dollar_sign {
-			if c == '{' {
-				saw_opening_brace = true;
-			} else if c == '}' {
-				saw_closing_brace = true;
-				if saw_opening_brace {
-					return true;
+	let mut scan = BraceScan::default();
+	scan.found_in(s) || scan.verdict()
+}
+
+/// [`may_contain_braces_to_expand`], spending a checkpoint before each stride
+/// of `s`: the heuristic reads the whole of a word with no brace in it, and a
+/// prompt of 16 MiB is such a word.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+async fn may_contain_braces_to_expand_in_strides(
+	params: &ExecutionParameters,
+	s: &str,
+) -> Result<bool, error::Error> {
+	let mut scan = BraceScan::default();
+	let mut rest = s;
+	while !rest.is_empty() {
+		interp::stride_checkpoint(params).await?;
+		let mut end = rest.len().min(interp::BYTE_CHECKPOINT_STRIDE);
+		// A stride lands mid-character at most three bytes in.
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		if scan.found_in(piece) {
+			return Ok(true);
+		}
+		rest = remaining;
+	}
+	Ok(scan.verdict())
+}
+
+/// What [`may_contain_braces_to_expand`] has seen so far, so that a word can be
+/// read in pieces.
+#[derive(Default)]
+struct BraceScan {
+	last_was_unescaped_dollar_sign: bool,
+	last_was_escape:                bool,
+	saw_opening_brace:              bool,
+	saw_closing_brace:              bool,
+}
+
+impl BraceScan {
+	/// Reads `s`, the text that follows whatever was read before, and returns
+	/// true as soon as it finds a closing brace after an opening one.
+	fn found_in(&mut self, s: &str) -> bool {
+		// This is a completely inaccurate but quick heuristic used to see if
+		// it's even worth properly parsing the string to find brace expressions.
+		// It's mostly used to avoid more expensive parsing just because we've
+		// encountered a brace used in a parameter expansion.
+		for c in s.chars() {
+			if !self.last_was_unescaped_dollar_sign {
+				if c == '{' {
+					self.saw_opening_brace = true;
+				} else if c == '}' {
+					self.saw_closing_brace = true;
+					if self.saw_opening_brace {
+						return true;
+					}
 				}
 			}
-		}
 
-		last_was_unescaped_dollar_sign = !last_was_escape && c == '$';
-		last_was_escape = c == '\\';
+			self.last_was_unescaped_dollar_sign = !self.last_was_escape && c == '$';
+			self.last_was_escape = c == '\\';
+		}
+		false
 	}
 
-	saw_opening_brace && saw_closing_brace
+	/// The answer for everything read, once it has all been read.
+	const fn verdict(&self) -> bool {
+		self.saw_opening_brace && self.saw_closing_brace
+	}
 }
 
 #[expect(clippy::panic_in_result_fn)]
@@ -2577,6 +2805,157 @@ mod tests {
 			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(parent.clone()));
 		}
 		shell.jobs_mut().wait_all().await?;
+		Ok(())
+	}
+
+	/// A word long enough to take the stepped parse, with every kind of piece
+	/// in it and literal text longer than a stride on either side of them.
+	fn long_word_with_every_kind_of_piece() -> String {
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES);
+		std::format!(
+			"$PWD{literal}\"{literal}$v ${{v}} `echo b` $(echo c)\"'{literal}'$'{literal}\\x41'\\$~:~\
+			 {literal}$((1+2))$[3]$\"g\"é"
+		)
+	}
+
+	#[tokio::test]
+	async fn a_long_word_parses_to_the_pieces_the_whole_parse_gives() -> Result<()> {
+		let shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let options = shell.parser_options();
+		let word = long_word_with_every_kind_of_piece();
+
+		let stepped = parse_word_in_strides(&params, &word, &options).await?;
+		let whole = brush_parser::word::parse(&word, &options)?;
+		// The pieces compare for equality only where the parser is built for
+		// its own tests or with `serde`.
+		assert_eq!(std::format!("{stepped:?}"), std::format!("{whole:?}"));
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn a_long_word_expands_to_the_text_the_whole_parse_gives() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.env_mut().set_global("v", ShellVariable::new("val"))?;
+		let params = shell.default_exec_params();
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES + 1);
+
+		let word = std::format!("{literal}\"$v ${{v}}\"'$v'$'\\x41'\\$\"{literal}\"$v");
+		let expanded = basic_expand_word(&mut shell, &params, &word).await?;
+		assert_eq!(expanded, std::format!("{literal}val val$vA${literal}val"));
+
+		Ok(())
+	}
+
+	/// `$` and a name of any length is one parameter; the variable it names is
+	/// found without hashing the name, and a variable whose name is the same
+	/// length and differs only at its end is not taken for it.
+	#[tokio::test]
+	async fn a_long_variable_name_finds_only_the_variable_it_names() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let name = std::format!("PWD{}", "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES));
+		let near = std::format!("PWD{}x", "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES - 1));
+		shell.env_mut().set_global(near, ShellVariable::new("near"))?;
+		let params = shell.default_exec_params();
+		let word = std::format!("${name}/");
+
+		assert_eq!(basic_expand_word(&mut shell, &params, &word).await?, "/");
+		shell.env_mut().set_global(name.as_str(), ShellVariable::new("found"))?;
+		assert_eq!(basic_expand_word(&mut shell, &params, &word).await?, "found/");
+
+		Ok(())
+	}
+
+	/// Each loop over a long word spends a checkpoint, so a cancelled run stops
+	/// before it reaches the end of the word.
+	#[tokio::test]
+	async fn a_long_word_sees_the_run_cancellation() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let name = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES + 1024);
+		shell.env_mut().set_global(name.as_str(), ShellVariable::new("v"))?;
+		let options = shell.parser_options();
+		let mut params = shell.default_exec_params();
+		let cancel = tokio_util::sync::CancellationToken::new();
+		params.set_cancel_token(cancel.clone());
+		cancel.cancel();
+		let word = std::format!("${name}");
+
+		let interrupted = |err: &error::Error| matches!(err.kind(), error::ErrorKind::Interrupted);
+		let err = parse_word_in_strides(&params, &word, &options)
+			.await
+			.expect_err("the parse ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = may_contain_braces_to_expand_in_strides(&params, &word)
+			.await
+			.expect_err("the brace scan ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = valid_variable_name_in_strides(&params, &name)
+			.await
+			.expect_err("the name check ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = parse_brace_expansions_in_strides(&params, &word, &options)
+			.await
+			.expect_err("the brace parse ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = variable_by_long_name(&params, shell.env(), &name)
+			.await
+			.expect_err("the lookup ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+		let err = basic_expand_word(&mut shell, &params, &word)
+			.await
+			.expect_err("the expansion ignored the cancellation");
+		assert!(interrupted(&err), "unexpected error: {err}");
+
+		Ok(())
+	}
+
+	/// A long word with a brace expression in it expands to the words the whole
+	/// brace parse gives, and one whose braces match nothing is left whole.
+	#[tokio::test]
+	async fn a_long_word_brace_expands_to_what_the_whole_parse_gives() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let options = shell.parser_options();
+		let literal = "h".repeat(interp::DIVIDE_COPY_ABOVE_BYTES);
+		let listed = std::format!("x{{a,{literal}}}{literal}\"{{c,d}}\"{{1..2}}");
+		let unmatched = std::format!("{{{literal}}}{literal}{{a}}");
+
+		let pieces = brush_parser::word::parse_brace_expansions(&listed, &options)?
+			.expect("the word has brace expressions");
+		let whole = braceexpansion::generate_and_combine_brace_expansions(pieces, &params).await?;
+		let expander = WordExpander::new(&mut shell, &params);
+		let stepped = expander.brace_expand_words(&listed).await?;
+		assert_eq!(stepped, whole);
+		assert_eq!(expander.brace_expand_words(&unmatched).await?, vec![unmatched.as_str()]);
+
+		Ok(())
+	}
+
+	/// The brace heuristic read a stride at a time gives the answer it gives
+	/// read whole, with the characters it remembers from one character to the
+	/// next on either side of a stride boundary.
+	#[tokio::test]
+	async fn the_brace_heuristic_in_strides_gives_the_same_answer() -> Result<()> {
+		let shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let cases = [
+			"${a}", "\\${a}", "\\\\${a}", "{a}", "}{", "{", "}", "a{b}c", "${a}{b}", "$${a}", "é{é}", "$é{}",
+			"h",
+		];
+		for shift in 0..4 {
+			let pad = "h".repeat(interp::BYTE_CHECKPOINT_STRIDE - shift);
+			for case in cases {
+				for word in [std::format!("{pad}{case}{pad}"), std::format!("{case}{pad}{pad}")] {
+					assert_eq!(
+						may_contain_braces_to_expand_in_strides(&params, &word).await?,
+						may_contain_braces_to_expand(&word),
+						"{case} at {shift}"
+					);
+				}
+			}
+		}
+
 		Ok(())
 	}
 

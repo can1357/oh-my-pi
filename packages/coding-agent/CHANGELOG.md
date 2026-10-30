@@ -28,6 +28,8 @@
 - Fixed `declare -u`/`-l`/`-c` conversions of large values producing different text from the same conversion of a smaller one, and crashing on a value whose first character is not one byte ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `declare -c` arrays capitalizing an element differently from the same value in a scalar: `ßeta` became `Sseta` instead of `SSeta`, and `ﬃeld` became `Ffield` instead of `FFIeld`, because the value was converted twice on its way to the element ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
 - Fixed appending to a large shell variable (`x+=`, `arr[0]+=`, `arr[k]+=`), and assigning into an array that was a plain string, taking the shell from every later command in the session ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an array-literal subscript that Bash refuses, such as `x+=([-2]=v)` on a plain string, silently overwriting element 0; literal subscripts are now arithmetic (`[1+1]`, `[i++]`), a negative one counts back from the end, and one still below zero is skipped with Bash's `bad array subscript` message ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a very long prompt or word, a regular-expression match on a large value, a builtin given a large argument list, `printf -v` of a large value, or a plain `"$var"`, `"$1"` or `"${a[0]}"` expansion of a large value taking the shell from every later command in the session ([#17412](https://github.com/can1357/oh-my-pi/pull/17412) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

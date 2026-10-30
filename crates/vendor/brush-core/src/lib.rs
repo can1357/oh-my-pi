@@ -58,7 +58,7 @@ pub use commands::{CommandArg, ExecutionContext};
 pub use error::{BuiltinError, Error, ErrorKind};
 pub use extensions::ShellExtensions;
 pub use interp::{
-	DIVIDE_COPY_ABOVE_BYTES, ElementBudget, ExecutionParameters, ExternalCommandInfo,
+	DIVIDE_COPY_ABOVE_BYTES, Due, ElementBudget, ExecutionParameters, ExternalCommandInfo,
 	ExternalCommandOutputMarker, ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
 	// A builtin assigning a value the caller sized needs the same divided
 	// copy the interpreter uses: `read`'s line, `getopts`' positionals. A

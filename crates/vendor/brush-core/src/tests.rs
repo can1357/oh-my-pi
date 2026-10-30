@@ -1444,6 +1444,193 @@ mod regression {
 			}
 		}
 
+		/// A builtin `clap` parses, taking any arguments and doing nothing
+		/// with them: it stands in for `printf` and `source`, which the bare
+		/// shell lacks.
+		#[derive(clap::Parser)]
+		struct TakesArguments {
+			#[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+			_args: Vec<String>,
+		}
+
+		impl builtins::Command for TakesArguments {
+			type Error = error::Error;
+
+			async fn execute<SE: extensions::ShellExtensions>(
+				&self,
+				_context: commands::ExecutionContext<'_, SE>,
+			) -> Result<ExecutionResult, Self::Error> {
+				Ok(ExecutionResult::success())
+			}
+		}
+
+		/// `huge`, and the builtin `takes`.
+		fn one_huge_and_takes(shell: &mut Shell<DefaultShellExtensions>) {
+			one_huge(shell);
+			shell.register_builtin(
+				"takes",
+				builtins::builtin::<TakesArguments, DefaultShellExtensions>(),
+			);
+		}
+
+		/// `many`: 255 elements of one byte stride each, about 16 MiB in all,
+		/// with each element `text`; and the builtin `takes`.
+		fn many_strides(shell: &mut Shell<DefaultShellExtensions>, text: &str) {
+			let values: BTreeMap<u64, String> = (0..255).map(|index| (index, text.to_owned())).collect();
+			shell
+				.env_mut()
+				.set_global("many", ShellVariable::new(ShellValue::IndexedArray(values)))
+				.expect("many");
+			shell.register_builtin(
+				"takes",
+				builtins::builtin::<TakesArguments, DefaultShellExtensions>(),
+			);
+		}
+
+		/// Steps that are single calls into a library, with nothing inside
+		/// them that can yield: `clap` parsing a builtin's arguments (about 52
+		/// ms on a 64 MiB one), the regex engine matching a 64 MiB subject
+		/// (340 ms), and a function's positional parameters copied before the
+		/// copy was charged (26 ms). A parameter's own value was copied the
+		/// same way: `"$big"`, `"$1"` and `"${a[0]}"` each held 24.6–25.9 ms in
+		/// one `to_string`. The arguments of 255 strides each are the
+		/// many-small-arguments shape: the rendering of `BASH_COMMAND` took the
+		/// plain join for any count up to 256, 5.5 ms for these, and 240 ms
+		/// when `BASH_COMMAND` lowercases what it is given.
+		#[test]
+		fn library_calls_and_command_lines_yield_throughout() {
+			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 7] = [
+				("takes \"$open${huge[0]}\"; closed=$close", one_huge_and_takes),
+				("takes \"$open$big\"; closed=$close", |shell| {
+					one_huge_and_takes(shell);
+					let big = ShellVariable::new(ShellValue::String("h".repeat(ONE_HUGE_ELEMENT_BYTES)));
+					shell.env_mut().set_global("big", big).expect("big");
+				}),
+				("f() { takes \"$open$1\"; }; f \"${huge[@]}\"; closed=$close", one_huge_and_takes),
+				("[[ \"$open${huge[0]}\" =~ ^(h*)$ ]]; closed=$close; (( ${#BASH_REMATCH[1]} > 0 ))", one_huge),
+				("f() { x=1; }; f \"$open${huge[0]}\"; closed=$close", one_huge),
+				("takes \"$open\" \"${many[@]}\"; closed=$close", |shell| {
+					many_strides(shell, &"h".repeat(64 << 10));
+				}),
+				// `declare -l BASH_COMMAND`, which the bare shell cannot say.
+				("takes \"$open\" \"${many[@]}\"; closed=$close", |shell| {
+					many_strides(shell, &"Σ".repeat(32 << 10));
+					let mut command = ShellVariable::new(ShellValue::String(String::new()));
+					command.set_update_transform(ShellVariableUpdateTransform::Lowercase);
+					shell.env_mut().set_global("BASH_COMMAND", command).expect("BASH_COMMAND");
+				}),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(command, prepare);
+			}
+		}
+
+		/// A subshell inherits a copy of every variable, and `Shell::clone`
+		/// made that copy in one step: each pipeline stage, command
+		/// substitution and `( … )` of a shell holding a 64 MiB variable held
+		/// the worker 25.3 ms before it ran anything. A million-element array
+		/// is the many-small-values shape of the same copy; its window closes
+		/// inside the subshell, because freeing a million elements when the
+		/// subshell ends is the destructor's step that no checkpoint can
+		/// enter, the limit this pull request states for every large free.
+		#[test]
+		fn subshells_of_a_large_environment_yield_throughout() {
+			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 4] = [
+				("x=$open; y=$( x=1 ); closed=$close", one_huge),
+				("x=$open; ( x=1 ); closed=$close", one_huge),
+				("x=$open; f() { x=1; }; f | f; closed=$close", one_huge),
+				("x=$open; ( closed=$close )", seeded),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(command, prepare);
+			}
+		}
+
+		/// The longest single poll `future` takes, outside the allocator
+		/// calls [`TimesLargeCalls`] times.
+		async fn longest_poll<F: Future>(future: F) -> (F::Output, Duration) {
+			let mut future = std::pin::pin!(future);
+			let mut longest = Duration::ZERO;
+			let output = std::future::poll_fn(|cx| {
+				let before = reading();
+				let poll = future.as_mut().poll(cx);
+				let after = reading();
+				let held = (after.cpu - before.cpu).saturating_sub(after.in_allocator - before.in_allocator);
+				longest = longest.max(held);
+				poll
+			})
+			.await;
+			(output, longest)
+		}
+
+		/// Rendering `BASH_COMMAND` for every shape of command line, the way
+		/// each was measured over the bound: arguments of a stride each up to
+		/// the old count limit, a `BASH_COMMAND` that lowercases, an expanded
+		/// array key and element subscript of 64 MiB, and a million small and
+		/// a million empty array assignments. Each renders to what `Display`
+		/// writes, and no poll holds the worker past the bound.
+		#[test]
+		fn every_command_line_shape_renders_within_the_bound() {
+			use commands::{CommandArg, ShellForCommand, SimpleCommand};
+			use brush_parser::ast;
+
+			let _serial = lock(&MEASURED_RUN);
+			settle_the_allocator();
+			let word = |value: String| ast::Word { value, loc: None };
+			let assignment = |name: ast::AssignmentName, value: ast::AssignmentValue| {
+				CommandArg::Assignment(ast::Assignment { name, value, append: false, loc: Default::default() })
+			};
+			let shapes: Vec<(&str, Vec<CommandArg>)> = vec![
+				("strides", (0..256).map(|_| CommandArg::String("h".repeat(64 << 10))).collect()),
+				("lowercased", (0..256).map(|_| CommandArg::String("Σ".repeat(32 << 10))).collect()),
+				("array key", vec![assignment(
+					ast::AssignmentName::VariableName("x".into()),
+					ast::AssignmentValue::Array(vec![(Some(word("k".repeat(64 << 20))), word("v".into()))]),
+				)]),
+				("element subscript", vec![assignment(
+					ast::AssignmentName::ArrayElementName("x".into(), "k".repeat(64 << 20)),
+					ast::AssignmentValue::Scalar(word("v".into())),
+				)]),
+				("small assignments", (0..1_000_000)
+					.map(|_| assignment(ast::AssignmentName::VariableName("x".into()), ast::AssignmentValue::Scalar(word(String::new()))))
+					.collect()),
+				("empty arrays", (0..1_000_000)
+					.map(|_| assignment(ast::AssignmentName::VariableName("x".into()), ast::AssignmentValue::Array(vec![])))
+					.collect()),
+			];
+
+			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+			runtime.block_on(async {
+				for (label, args) in shapes {
+					let mut shell = Shell::builder().build().await.expect("shell");
+					let lowercased = label == "lowercased";
+					let mut command_variable = ShellVariable::new(ShellValue::String(String::new()));
+					if lowercased {
+						command_variable.set_update_transform(ShellVariableUpdateTransform::Lowercase);
+					}
+					shell.env_mut().set_global("BASH_COMMAND", command_variable).expect("BASH_COMMAND");
+					let rendered = args.iter().map(ToString::to_string).join(" ");
+					let expected = if lowercased { rendered.to_lowercase() } else { rendered };
+
+					let params = shell.default_exec_params();
+					let mut command =
+						SimpleCommand::new(ShellForCommand::ParentShell(&mut shell), params, "noop".into(), args);
+					let (outcome, longest) = longest_poll(commands::on_preexecute(&mut command)).await;
+					outcome.expect("rendered");
+					drop(command);
+
+					eprintln!("RENDER {label}: longest_poll={longest:?}");
+					assert!(
+						shell.env().get_str("BASH_COMMAND", &shell).is_some_and(|value| value == expected),
+						"{label}: BASH_COMMAND holds what Display writes"
+					);
+					assert!(longest <= LONGEST_ALLOWED_HOLD, "{label}: held the worker {longest:?}");
+				}
+			});
+		}
+
 		/// How many steps `steps` takes, and what each costs: a fortieth of
 		/// the bound, so sixteen of them — a reading of the clock — stay well
 		/// under it and 128 — one turn of Tokio's budget — are far over it.

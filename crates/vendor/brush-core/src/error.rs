@@ -264,6 +264,13 @@ pub enum ErrorKind {
 	#[error("array index out of range: {0}")]
 	ArrayIndexOutOfRange(String),
 
+	/// An indexed array's subscript names no element: it is not a number, or
+	/// it is still negative after counting back from one past the largest
+	/// index. Holds what Bash quotes: the whole `[subscript]=value` word of an
+	/// array literal, or the `name[subscript]` an assignment named.
+	#[error("{0}: bad array subscript")]
+	BadArraySubscript(String),
+
 	/// Unhandled key code.
 	#[error("unhandled key code: {0:?}")]
 	UnhandledKeyCode(Vec<u8>),

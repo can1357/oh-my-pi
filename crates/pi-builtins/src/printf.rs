@@ -27,9 +27,7 @@ impl builtins::Command for PrintfCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
 		if let Some(variable_name) = &self.output_variable {
-			// Format to a u8 vector.
-			let mut result: Vec<u8> = vec![];
-			format(&context.params, self.format_and_args.as_slice(), &mut result).await?;
+			let result = format_to_buffer(&context.params, self.format_and_args.as_slice()).await?;
 
 			// Convert to a string, a stride at a time: `String::from_utf8` of
 			// the whole buffer is one scan nothing can interrupt, and the
@@ -110,6 +108,61 @@ async fn format_via_uucore(
 	args: &[String],
 	mut writer: impl Write,
 ) -> Result<(), brush_core::Error> {
+	let (format_items, format_args, _) = prepare_uucore(params, format_string, args).await?;
+	write_uucore_items(params, &format_items, &format_args, &mut writer).await
+}
+
+/// Formats into a buffer, for `printf -v`.
+///
+/// What one format item writes is uucore's own work, one call that no
+/// checkpoint of ours can enter, and an item that writes an argument writes
+/// all of it: `printf -v out %s "$big"` spent 27.1 ms in one `write` of a
+/// 64 MiB argument. The buffer is this builtin's own, so where an argument
+/// or the format is longer than a stride the whole format runs on a blocking
+/// worker instead, unless this builtin is on one already (see
+/// [`brush_core::commands::builtin_on_blocking_worker`]). Output to a
+/// descriptor stays where it is: writing it is the builtin's I/O, which a
+/// synchronous builtin does in place.
+async fn format_to_buffer(
+	params: &ExecutionParameters,
+	format_and_args: &[String],
+) -> Result<Vec<u8>, brush_core::Error> {
+	let mut result = vec![];
+	let [format_string, args @ ..] = format_and_args else {
+		format(params, format_and_args, &mut result).await?;
+		return Ok(result);
+	};
+	if matches!(format_and_args, [fmt, _] if fmt == "%q" || fmt == "~%q") {
+		format(params, format_and_args, &mut result).await?;
+		return Ok(result);
+	}
+
+	let (format_items, format_args, longest) = prepare_uucore(params, format_string, args).await?;
+	if longest.max(format_string.len()) <= brush_core::DIVIDE_COPY_ABOVE_BYTES
+		|| brush_core::commands::builtin_on_blocking_worker()
+	{
+		write_uucore_items(params, &format_items, &format_args, &mut result).await?;
+		return Ok(result);
+	}
+	match tokio::task::spawn_blocking(move || {
+		write_uucore_items_in_place(&format_items, &format_args, &mut result).map(|()| result)
+	})
+	.await
+	{
+		Ok(written) => written,
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(ErrorKind::ThreadingError(join_error).into()),
+	}
+}
+
+/// Parses the format and copies the arguments into the form uucore takes,
+/// returning with them the length of the longest argument.
+async fn prepare_uucore(
+	params: &ExecutionParameters,
+	format_string: &str,
+	args: &[String],
+) -> Result<(Vec<format::FormatItem<format::EscapedChar>>, Vec<format::FormatArgument>, usize), brush_core::Error>
+{
 	// Convert string arguments to FormatArgument::Unparsed. Each conversion
 	// copies the argument, and `printf -v out %s "$big"` makes that copy the
 	// size of the expansion: 64 MiB of it held the worker here before the
@@ -117,62 +170,99 @@ async fn format_via_uucore(
 	// checkpoint `clone_in_strides` spends per argument also divides a loop
 	// over a million short ones.
 	let mut format_args = Vec::with_capacity(args.len());
+	let mut longest = 0;
 	for arg in args {
+		longest = longest.max(arg.len());
 		format_args.push(format::FormatArgument::Unparsed(OsString::from(
 			brush_core::clone_in_strides(params, arg).await?,
 		)));
 	}
 
 	// Parse format string once.
-	let format_items = parse_format_string(format_string)?;
+	Ok((parse_format_string(format_string)?, format_args, longest))
+}
 
-	// Wrap the format arguments.
-	let mut format_args_wrapper = format::FormatArguments::new(&format_args);
-
-	// Keep going until we've exhausted all format arguments. Also make sure to run
-	// at least once even if there's no format arguments.
-	//
-	// The loop runs the whole format once per batch of arguments, so
-	// `printf -v v '%s\n' "${million[@]}"` runs it a million times. Charge it
-	// by steps: what a single item writes is uucore's own copy, which no
-	// checkpoint of ours can enter, so there are no bytes of ours to charge.
+/// Runs the format over the arguments onto `writer`.
+///
+/// The loop runs the whole format once per batch of arguments, so
+/// `printf -v v '%s\n' "${million[@]}"` runs it a million times. Charge it
+/// by steps: what a single item writes is uucore's own copy, which no
+/// checkpoint of ours can enter, so there are no bytes of ours to charge.
+async fn write_uucore_items(
+	params: &ExecutionParameters,
+	format_items: &[format::FormatItem<format::EscapedChar>],
+	format_args: &[format::FormatArgument],
+	writer: &mut impl Write,
+) -> Result<(), brush_core::Error> {
+	let mut format_args_wrapper = format::FormatArguments::new(format_args);
 	let mut budget = brush_core::ElementBudget::new();
+	// Keep going until we've exhausted all format arguments. Also make sure to
+	// run at least once even if there's no format arguments.
 	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
 		// Process all format items, in order. We'll bail when we're told to stop.
-		for item in &format_items {
+		for item in format_items {
 			let due = budget.charge(0);
 			if due > 0 {
 				brush_core::loop_checkpoints(params, due).await?;
 			}
-
-			let control_flow =
-				item
-					.write(&mut writer, &mut format_args_wrapper)
-					.map_err(|e| match e {
-						// Propagate I/O errors directly so they can be handled appropriately
-						format::FormatError::IoError(io_err) => Error::from(io_err),
-						// Wrap other format errors
-						other => Error::from(ErrorKind::PrintfInvalidUsage(std::format!(
-							"printf formatting error: {other}"
-						))),
-					})?;
-
-			if control_flow == ControlFlow::Break(()) {
+			if write_item(item, writer, &mut format_args_wrapper)? == ControlFlow::Break(()) {
 				break;
 			}
 		}
-
-		// Start next batch if not exhausted
-		if !format_args_wrapper.is_exhausted() {
-			format_args_wrapper.start_next_batch();
-		}
-
-		if format_args.is_empty() {
+		if !next_batch(format_args, &mut format_args_wrapper) {
 			break;
 		}
 	}
-
 	Ok(())
+}
+
+/// [`write_uucore_items`] for a caller on a blocking worker, which has no
+/// checkpoints to spend.
+fn write_uucore_items_in_place(
+	format_items: &[format::FormatItem<format::EscapedChar>],
+	format_args: &[format::FormatArgument],
+	writer: &mut impl Write,
+) -> Result<(), brush_core::Error> {
+	let mut format_args_wrapper = format::FormatArguments::new(format_args);
+	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
+		for item in format_items {
+			if write_item(item, writer, &mut format_args_wrapper)? == ControlFlow::Break(()) {
+				break;
+			}
+		}
+		if !next_batch(format_args, &mut format_args_wrapper) {
+			break;
+		}
+	}
+	Ok(())
+}
+
+/// Writes one format item, mapping uucore's error onto the shell's.
+fn write_item(
+	item: &format::FormatItem<format::EscapedChar>,
+	writer: &mut impl Write,
+	format_args: &mut format::FormatArguments<'_>,
+) -> Result<ControlFlow<()>, brush_core::Error> {
+	item.write(writer, format_args).map_err(|e| match e {
+		// Propagate I/O errors directly so they can be handled appropriately
+		format::FormatError::IoError(io_err) => Error::from(io_err),
+		// Wrap other format errors
+		other => Error::from(ErrorKind::PrintfInvalidUsage(std::format!(
+			"printf formatting error: {other}"
+		))),
+	})
+}
+
+/// Starts the next batch of arguments, returning whether there is one to run
+/// the format over.
+fn next_batch(
+	format_args: &[format::FormatArgument],
+	format_args_wrapper: &mut format::FormatArguments<'_>,
+) -> bool {
+	if !format_args_wrapper.is_exhausted() {
+		format_args_wrapper.start_next_batch();
+	}
+	!format_args.is_empty()
 }
 
 /// Validates `bytes` as UTF-8 and copies them into a `String`, a stride at a
@@ -286,6 +376,24 @@ mod tests {
 		}
 		assert_eq!(utf8_in_strides(&params, b"").await?, "");
 		assert!(utf8_in_strides(&params, b"\xff").await.is_err());
+
+		Ok(())
+	}
+
+	/// `printf -v` with an argument longer than a stride formats on a blocking
+	/// worker, and the buffer it gives back is what formatting in place gives,
+	/// cycling over batches and with literal text around the argument.
+	#[tokio::test]
+	async fn a_long_argument_formats_the_same_off_the_worker() -> Result<()> {
+		let params = ExecutionParameters::default();
+		let long = "é".repeat(brush_core::DIVIDE_COPY_ABOVE_BYTES);
+		let format_and_args: Vec<String> =
+			["<%s|%d>\\n", long.as_str(), "7", "x", "8"].iter().map(|arg| (*arg).to_owned()).collect();
+
+		let mut in_place = vec![];
+		format(&params, &format_and_args, &mut in_place).await?;
+		assert_eq!(format_to_buffer(&params, &format_and_args).await?, in_place);
+		assert_eq!(String::from_utf8(in_place)?, format!("<{long}|7>\n<x|8>\n"));
 
 		Ok(())
 	}

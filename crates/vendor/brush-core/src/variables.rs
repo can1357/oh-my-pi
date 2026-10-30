@@ -12,6 +12,21 @@ use crate::{
 	shell::{Shell, ShellState},
 };
 
+/// Copies `text` as one step of `budget`: charged its bytes and copied in one
+/// go within a stride, and copied in strides of its own above one.
+pub(crate) async fn clone_charged(
+	params: &ExecutionParameters,
+	budget: &mut interp::ElementBudget,
+	text: &str,
+) -> Result<String, error::Error> {
+	let long = text.len() > interp::DIVIDE_COPY_ABOVE_BYTES;
+	let due = budget.charge(if long { 0 } else { text.len() });
+	if due > 0 {
+		interp::loop_checkpoints(params, due).await?;
+	}
+	if long { interp::clone_in_strides(params, text).await } else { Ok(text.to_owned()) }
+}
+
 /// A shell variable.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -77,6 +92,55 @@ impl ShellVariable {
 	/// Returns the value associated with the variable.
 	pub const fn value(&self) -> &ShellValue {
 		&self.value
+	}
+
+	/// A copy of this variable whose value is copied an element and a stride
+	/// at a time, each charged to `budget`: the copy a subshell makes of every
+	/// variable it inherits.
+	///
+	/// `Shell::clone` copied the whole environment in one step, so every
+	/// pipeline stage, command substitution and subshell of a shell holding a
+	/// 64 MiB variable held the worker 25.3 ms copying it, 136 ms under load,
+	/// before running anything.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn clone_divided(
+		&self,
+		params: &ExecutionParameters,
+		budget: &mut interp::ElementBudget,
+	) -> Result<Self, error::Error> {
+		let value = match &self.value {
+			ShellValue::String(text) => ShellValue::String(clone_charged(params, budget, text).await?),
+			ShellValue::IndexedArray(values) => {
+				let mut copy = BTreeMap::new();
+				for (key, value) in values {
+					copy.insert(*key, clone_charged(params, budget, value).await?);
+				}
+				ShellValue::IndexedArray(copy)
+			},
+			ShellValue::AssociativeArray(values) => {
+				let mut copy = BTreeMap::new();
+				for (key, value) in values {
+					let key = clone_charged(params, budget, key).await?;
+					copy.insert(key, clone_charged(params, budget, value).await?);
+				}
+				ShellValue::AssociativeArray(copy)
+			},
+			ShellValue::Unset(_) | ShellValue::Dynamic { .. } => self.value.clone(),
+		};
+		Ok(Self {
+			value,
+			exported: self.exported,
+			readonly: self.readonly,
+			enumerable: self.enumerable,
+			transform_on_update: self.transform_on_update,
+			trace: self.trace,
+			treat_as_integer: self.treat_as_integer,
+			treat_as_nameref: self.treat_as_nameref,
+		})
 	}
 
 	/// Returns whether or not the variable is exported to child processes.
@@ -582,10 +646,10 @@ impl ShellVariable {
 		// the variable's kind without assigning anything.
 		match &self.value {
 			ShellValue::IndexedArray(_) => {
+				let next = self.indexed_literal_start(true);
 				let ShellValue::IndexedArray(existing_values) = &mut self.value else {
 					unreachable!("matched above")
 				};
-				let next = existing_values.last_key_value().map_or(0, |(largest, _)| largest + 1);
 				ShellValue::update_indexed_array_from_literals(
 					existing_values,
 					literal,
@@ -619,9 +683,24 @@ impl ShellVariable {
 				// the element read `base` where bash gives the empty string.
 				// A key that is not in the map is not a value, so it cannot
 				// be forged.
+				//
+				// Presence has to mean the literal assigned index zero, too,
+				// and it did not while a subscript that failed to parse was
+				// read as `0`: `x+=([-2]='')` discarded `base`. Every key
+				// here has been evaluated and counted back by
+				// [`ArrayLiteral::evaluate_subscripts`], which skips one that
+				// names no element, and [`literal_index`] refuses anything
+				// else rather than reading it as zero.
+				let first = self.indexed_literal_start(true);
 				let mut values: BTreeMap<u64, String> = BTreeMap::new();
-				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params, 1)
-					.await?;
+				ShellValue::update_indexed_array_from_literals(
+					&mut values,
+					literal,
+					convert,
+					params,
+					first,
+				)
+				.await?;
 				if !values.contains_key(&0) {
 					values.insert(0, self.take_scalar());
 				}
@@ -651,6 +730,41 @@ impl ShellVariable {
 			},
 			// TODO(dynamic): implement appending to dynamic vars
 			ShellValue::Dynamic { .. } => Ok(()),
+		}
+	}
+
+	/// Whether a subscript of this variable names an index, which is an
+	/// arithmetic expression, rather than a key, which is text. Everything
+	/// but an associative array, set or declared, is or becomes an indexed
+	/// array when it is assigned at a subscript, so its subscripts are
+	/// indexes: `x=base; x[1+1]=v` assigns index `2` beside `base`.
+	pub const fn takes_indexes(&self) -> bool {
+		!matches!(
+			self.value,
+			ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+		)
+	}
+
+	/// One past the largest index of the array that an indexed array literal
+	/// assigned to this variable starts from: where the literal's first
+	/// unindexed element goes, and what a negative subscript counts back from
+	/// until the literal assigns past it.
+	///
+	/// These are the starts [`Self::assign`] builds an array literal from. A
+	/// replacement starts from an empty array, whatever the variable held. An
+	/// append starts from the array as it stands, and a scalar is element `0`
+	/// of it, so `x=base; x+=([-1]=z)` replaces `base` where `x+=([-2]=z)` is
+	/// refused.
+	pub fn indexed_literal_start(&self, append: bool) -> u64 {
+		if !append {
+			return 0;
+		}
+		match &self.value {
+			ShellValue::IndexedArray(values) => {
+				values.last_key_value().map_or(0, |(largest, _)| largest + 1)
+			},
+			ShellValue::String(_) => 1,
+			ShellValue::AssociativeArray(_) | ShellValue::Unset(_) | ShellValue::Dynamic { .. } => 0,
 		}
 	}
 
@@ -1544,10 +1658,14 @@ pub struct ArrayLiteral(pub Vec<(Option<String>, String)>);
 
 impl ArrayLiteral {
 	/// Copies the expanded elements of an array assignment (`name=(…)`, as a
-	/// declaration builtin receives it) into a literal.
+	/// declaration builtin receives it) into a literal, and says whether any
+	/// element names its own subscript (`[subscript]=value`).
 	///
 	/// The builtin holds the elements borrowed, and they can be any number, so
-	/// each copy spends a checkpoint.
+	/// each copy spends a checkpoint. Whether a subscript is there comes from
+	/// the same loop: only then does an indexed destination need
+	/// [`Self::evaluate_subscripts`], and asking afterwards would be a second
+	/// pass over every element of a literal that has none.
 	///
 	/// # Arguments
 	///
@@ -1556,10 +1674,12 @@ impl ArrayLiteral {
 	pub async fn from_assignment_elements(
 		elements: &[(Option<brush_parser::ast::Word>, brush_parser::ast::Word)],
 		params: &ExecutionParameters,
-	) -> Result<Self, error::Error> {
+	) -> Result<(Self, bool), error::Error> {
 		let mut literal = Vec::with_capacity(elements.len());
+		let mut keyed = false;
 		let mut budget = interp::ElementBudget::new();
 		for (key, value) in elements {
+			keyed |= key.is_some();
 			// One element can be of any size, so the copy itself is divided
 			// rather than merely charged for; the step charge is what makes a
 			// long list of short elements yield.
@@ -1580,8 +1700,136 @@ impl ArrayLiteral {
 			literal.push((key.as_ref().map(|key| key.value.clone()), value.value.clone()));
 		}
 
-		Ok(Self(literal))
+		Ok((Self(literal), keyed))
 	}
+
+	/// Gives each `[subscript]=value` element of a literal bound for an indexed
+	/// array the index Bash gives it, here where the shell is, so that the
+	/// array is built from indexes alone.
+	///
+	/// Each subscript is an arithmetic expression ([`evaluate_index_subscript`]),
+	/// evaluated in order, so `[i++]` counts. A negative one counts back from
+	/// one past the largest index the array holds **at that element**:
+	/// `start` ([`ShellVariable::indexed_literal_start`]), or further if the
+	/// literal has already assigned past it. One that still names no element
+	/// is refused as Bash refuses it: `bad array subscript` through the shell's
+	/// error display, the element skipped, the rest of the literal assigned
+	/// and the command's status left alone. The next unindexed element follows
+	/// the last one *assigned*, not the refused one.
+	///
+	/// Only a literal with a subscript needs this, and its caller knows
+	/// whether it has one from the loop that built it, so a literal without
+	/// one pays nothing for it.
+	///
+	/// # Arguments
+	///
+	/// * `shell` - The shell the subscripts are evaluated in.
+	/// * `params` - The execution parameters of the run doing the assignment.
+	/// * `start` - One past the largest index of the array the literal
+	///   starts from.
+	pub async fn evaluate_subscripts(
+		mut self,
+		shell: &mut Shell<impl extensions::ShellExtensions>,
+		params: &ExecutionParameters,
+		start: u64,
+	) -> Result<Self, error::Error> {
+		// One past the largest index assigned so far, and where the next
+		// unindexed element goes.
+		let mut end = start;
+		let mut next = start;
+		// The elements stay in their vector and close up over the refused
+		// ones, rather than moving into a second vector as long as the first.
+		let mut kept = 0;
+		let mut budget = interp::ElementBudget::new();
+		for read in 0..self.0.len() {
+			let (subscript, value) = std::mem::take(&mut self.0[read]);
+			let index = match subscript {
+				// An unindexed element is only moved, so it is a cheap step.
+				None => {
+					let due = budget.charge(0);
+					if due > 0 {
+						interp::loop_checkpoints(params, due).await?;
+					}
+					end = end.max(next + 1);
+					next += 1;
+					None
+				},
+				// Evaluating a subscript expands it again and parses it as
+				// arithmetic, which is the work its expansion spent a
+				// checkpoint on, so it spends one too: a stride of them would
+				// be a stride of parses.
+				Some(subscript) => {
+					interp::loop_checkpoint(params).await?;
+					let Some(index) = evaluate_index_subscript(shell, params, &subscript, end).await?
+					else {
+						refuse_literal_element(shell, params, &subscript, &value).await?;
+						continue;
+					};
+					end = end.max(index + 1);
+					next = index + 1;
+					Some(index.to_string())
+				},
+			};
+			self.0[kept] = (index, value);
+			kept += 1;
+		}
+		self.0.truncate(kept);
+
+		Ok(self)
+	}
+}
+
+/// Evaluates the subscript of an indexed array's element in an assignment as
+/// Bash does: as an arithmetic expression, a negative value counting back
+/// from `end`, one past the largest index the array holds.
+///
+/// Returns `None` for a subscript that names no element — empty, or still
+/// negative once counted back — which Bash refuses with `bad array
+/// subscript`. A failed evaluation is an error, as it is in Bash; it is not
+/// index `0`.
+///
+/// # Arguments
+///
+/// * `shell` - The shell the subscript is evaluated in.
+/// * `params` - The execution parameters of the run doing the assignment.
+/// * `subscript` - The subscript, expanded once already.
+/// * `end` - One past the largest index of the array at this element.
+pub async fn evaluate_index_subscript(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	subscript: &str,
+	end: u64,
+) -> Result<Option<u64>, error::Error> {
+	if subscript.is_empty() {
+		return Ok(None);
+	}
+	let index = crate::arithmetic::expand_and_eval(shell, params, subscript, false).await?;
+	Ok(count_back(index, end))
+}
+
+/// Reports an array literal's element whose subscript names no element, as
+/// Bash does: the whole `[subscript]=value` word, then `bad array subscript`.
+///
+/// The value is as long as the caller made it, so the word is built in
+/// strides. Showing it goes through the shell's error formatter, which
+/// formats the whole message in one step.
+async fn refuse_literal_element(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	subscript: &str,
+	value: &str,
+) -> Result<(), error::Error> {
+	let mut word = String::with_capacity(subscript.len() + value.len() + 3);
+	word.push('[');
+	interp::push_str_in_strides(params, &mut word, subscript).await?;
+	word.push_str("]=");
+	interp::push_str_in_strides(params, &mut word, value).await?;
+
+	if params.reports_errors() {
+		let refusal = error::Error::from(error::ErrorKind::BadArraySubscript(word));
+		let _ = shell.display_error(&mut params.stderr(shell), &refusal).await;
+	}
+	Ok(())
 }
 
 /// Style for formatting a shell variable's value.
@@ -1669,20 +1917,26 @@ impl ShellValue {
 		Ok(Self::IndexedArray(values))
 	}
 
-	/// Returns an indexed array holding `value` alone, at the index that
-	/// `[index]=value` names in an array literal.
+	/// Returns an indexed array holding `value` alone, at `index`.
 	///
 	/// # Arguments
 	///
-	/// * `index` - The index of the element.
+	/// * `index` - The index of the element, evaluated already.
 	/// * `value` - The element.
-	pub fn indexed_array_with_element(index: &str, value: String) -> Self {
-		Self::IndexedArray(BTreeMap::from([(literal_index(index), value)]))
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::BadArraySubscript`] if `index` is not a
+	/// non-negative number: it names no element, and it is not element `0`.
+	pub fn indexed_array_with_element(index: &str, value: String) -> Result<Self, error::Error> {
+		Ok(Self::IndexedArray(BTreeMap::from([(literal_index(index)?, value)])))
 	}
 
 	/// Adds the elements of `literal_values` to `existing_values`, each after
 	/// the one before unless it names its own index (`[index]=value`), and each
-	/// passed through `convert`.
+	/// passed through `convert`. A named index has been evaluated already
+	/// ([`ArrayLiteral::evaluate_subscripts`]); one that is not a non-negative
+	/// number is refused.
 	///
 	/// The literal can hold any number of elements and nothing in the loop
 	/// waits on anything, so it spends a checkpoint on each element.
@@ -1703,7 +1957,7 @@ impl ShellValue {
 				interp::loop_checkpoints(params, due).await?;
 			}
 			if let Some(key) = key {
-				new_key = literal_index(&key);
+				new_key = literal_index(&key)?;
 			}
 
 			existing_values.insert(new_key, convert.apply_divided(value, params).await?);
@@ -1947,31 +2201,38 @@ impl ShellValue {
 	}
 }
 
-/// The index `[index]=value` names in an indexed array literal; anything but
-/// a number names `0`.
-fn literal_index(index: &str) -> u64 {
-	index.parse().unwrap_or(0)
+/// The index a resolved `[index]=value` element names. Its subscript has been
+/// evaluated and counted back already ([`ArrayLiteral::evaluate_subscripts`]),
+/// so anything but a non-negative number reaching here is refused: a parse
+/// that failed is not index `0`, and reading it as `0` once let
+/// `x=base; x+=([-2]='')` replace `base`.
+fn literal_index(index: &str) -> Result<u64, error::Error> {
+	index
+		.parse()
+		.map_err(|_| error::ErrorKind::BadArraySubscript(index.to_owned()).into())
 }
 
+/// Counts a negative index back from `end`, one past an array's largest
+/// index, as Bash does; `None` if it is still negative.
+fn count_back(index: i64, end: u64) -> Option<u64> {
+	u64::try_from(index)
+		.ok()
+		.or_else(|| end.checked_sub(index.unsigned_abs()))
+}
+
+/// The element an evaluated index names in an indexed array. A negative one
+/// counts back from one past the largest index, not from the number of
+/// elements: in `([5]=x)` the two differ, and `-1` names `5`.
 fn get_key_for_indexed_array(
 	values: &BTreeMap<u64, String>,
 	index_str: &str,
 ) -> Result<u64, error::Error> {
-	let mut index_value = index_str.parse::<i64>().unwrap_or(0);
-
-	// Handle negative indices, but check for out-of-range values.
-	#[expect(clippy::cast_possible_wrap)]
-	if index_value < 0 {
-		index_value += values.len() as i64;
-		if index_value < 0 {
-			return Err(error::ErrorKind::ArrayIndexOutOfRange(index_str.to_owned()).into());
-		}
-	}
-
-	// Now that we've confirmed that the index is non-negative, we can safely
-	// convert it to a u64 without any fuss.
-	#[expect(clippy::cast_sign_loss)]
-	Ok(index_value as u64)
+	let index = index_str
+		.parse::<i64>()
+		.map_err(|_| error::ErrorKind::BadArraySubscript(index_str.to_owned()))?;
+	let end = values.last_key_value().map_or(0, |(largest, _)| largest + 1);
+	count_back(index, end)
+		.ok_or_else(|| error::ErrorKind::ArrayIndexOutOfRange(index_str.to_owned()).into())
 }
 
 impl From<&str> for ShellValue {
@@ -2216,5 +2477,378 @@ mod conversion {
 		assert_eq!(text, &reference, "the same bytes as a plain `String`");
 		assert_eq!(text.capacity(), reference.capacity(), "the same growth as a plain `String`");
 		assert_eq!(moves, 0, "512 bytes into 4096 of capacity moved the buffer {moves} times");
+	}
+}
+
+#[cfg(test)]
+mod subscripts {
+	//! An indexed array's subscript as Bash 5.2 reads it in an assignment: an
+	//! arithmetic expression, where a negative value counts back from one past
+	//! the largest index the array holds **at that element**, and a value still
+	//! negative is refused with `bad array subscript` while the rest of the
+	//! literal goes on and the command still succeeds. Every expectation here
+	//! is what Bash 5.2 printed for the same script.
+	//!
+	//! The bare shell has no builtins, so attributes a script would give with
+	//! `export` or `declare -u` are given to the variable before the run.
+
+	use std::{
+		collections::BTreeMap,
+		io::{Read, Seek},
+	};
+
+	use super::*;
+	use crate::{
+		SourceInfo,
+		extensions::DefaultShellExtensions,
+		openfiles::{OpenFile, OpenFiles},
+	};
+
+	type TestShell = Shell<DefaultShellExtensions>;
+
+	/// What a script left behind: its status, what it wrote to standard
+	/// error, and the shell it ran in.
+	struct Ran {
+		status: u8,
+		stderr: String,
+		shell:  TestShell,
+	}
+
+	async fn run(script: &str, prepare: fn(&mut TestShell)) -> Ran {
+		let mut shell = Shell::builder()
+			.do_not_inherit_env(true)
+			.build()
+			.await
+			.expect("shell");
+		prepare(&mut shell);
+		let mut stderr = tempfile::tempfile().expect("stderr file");
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDERR_FD, OpenFile::from(stderr.try_clone().expect("stderr")));
+		let result = shell
+			.run_string(script, &SourceInfo::default(), &params)
+			.await
+			.expect("the script ran");
+		let mut text = String::new();
+		stderr.rewind().expect("rewind stderr");
+		stderr.read_to_string(&mut text).expect("read stderr");
+		Ran { status: u8::from(result.exit_code), stderr: text, shell }
+	}
+
+	fn nothing(_: &mut TestShell) {}
+
+	fn base(shell: &mut TestShell) -> &mut ShellVariable {
+		shell
+			.env_mut()
+			.set_global("x", ShellVariable::new(ShellValue::String(String::from("base"))))
+			.expect("x");
+		shell.env_mut().get_mut("x").expect("x was set").1
+	}
+
+	fn exported_base(shell: &mut TestShell) {
+		base(shell).export();
+	}
+
+	/// `declare -u x=base` stores the converted value.
+	fn uppercase_base(shell: &mut TestShell) {
+		let x = base(shell);
+		x.set_update_transform(ShellVariableUpdateTransform::Uppercase);
+		x.assign_scalar(String::from("base"), false).expect("converted");
+	}
+
+	fn associative(shell: &mut TestShell) {
+		let declared = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::AssociativeArray));
+		shell.env_mut().set_global("A", declared).expect("A");
+	}
+
+	fn declared_untyped(shell: &mut TestShell) {
+		shell
+			.env_mut()
+			.set_global("x", ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped)))
+			.expect("x");
+	}
+
+	fn bad(word: &str) -> String {
+		format!("error: {word}: bad array subscript\n")
+	}
+
+	fn elements(pairs: &[(u64, &str)]) -> ShellValue {
+		ShellValue::IndexedArray(pairs.iter().map(|&(key, value)| (key, value.to_owned())).collect())
+	}
+
+	fn keys(pairs: &[(&str, &str)]) -> ShellValue {
+		ShellValue::AssociativeArray(
+			pairs
+				.iter()
+				.map(|&(key, value)| (key.to_owned(), value.to_owned()))
+				.collect::<BTreeMap<_, _>>(),
+		)
+	}
+
+	fn scalar(text: &str) -> ShellValue {
+		ShellValue::String(text.to_owned())
+	}
+
+	struct Case {
+		script:  &'static str,
+		prepare: fn(&mut TestShell),
+		values:  Vec<(&'static str, ShellValue)>,
+		stderr:  String,
+	}
+
+	/// Runs each case and lists every way it differed from Bash.
+	async fn differences(cases: Vec<Case>) -> Vec<String> {
+		let mut differences = Vec::new();
+		for Case { script, prepare, values, stderr } in cases {
+			let ran = run(script, prepare).await;
+			if ran.status != 0 {
+				differences.push(format!("{script}: status {} where Bash gives 0", ran.status));
+			}
+			if ran.stderr != stderr {
+				let actual = &ran.stderr;
+				differences.push(format!("{script}: stderr {actual:?} where Bash gives {stderr:?}"));
+			}
+			for (name, expected) in values {
+				let actual = ran.shell.env().get(name).map(|(_, var)| format!("{:?}", var.value()));
+				let expected = format!("{expected:?}");
+				if actual.as_deref() != Some(expected.as_str()) {
+					let actual = format!("{actual:?}");
+					differences.push(format!("{script}: {name} is {actual} where Bash gives {expected}"));
+				}
+			}
+		}
+		differences
+	}
+
+	/// The reviewer's three cases and the rules around them. `-2` counted
+	/// back from a scalar's one element is still negative, so it is refused
+	/// and the scalar stays at `0`; before, the failed parse became index
+	/// `0` and the empty value replaced `base`.
+	#[tokio::test]
+	async fn literal_subscripts_are_evaluated_and_refused_like_bash() {
+		let cases = vec![
+			Case {
+				script:  "x=base; x+=([-2]='')",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "base")]))],
+				stderr:  bad("[-2]="),
+			},
+			Case {
+				script:  "x+=([-2]='')",
+				prepare: exported_base,
+				values:  vec![("x", elements(&[(0, "base")]))],
+				stderr:  bad("[-2]="),
+			},
+			Case {
+				script:  "x+=([-2]='')",
+				prepare: uppercase_base,
+				values:  vec![("x", elements(&[(0, "BASE")]))],
+				stderr:  bad("[-2]="),
+			},
+			// The scalar is element `0` when the literal starts.
+			Case {
+				script:  "x=base; x+=([-1]=z)",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "z")]))],
+				stderr:  String::new(),
+			},
+			// A replacement starts from an empty array, whatever was there.
+			Case {
+				script:  "x=base; x=([-1]=z)",
+				prepare: nothing,
+				values:  vec![("x", elements(&[]))],
+				stderr:  bad("[-1]=z"),
+			},
+			// `[-1]` counts from the array as it stands; the refused `[-5]`
+			// does not move where the next unindexed element goes.
+			Case {
+				script:  "a=(1 2 3); a+=([-1]=z [-5]=q w)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "1"), (1, "2"), (2, "z"), (3, "w")]))],
+				stderr:  bad("[-5]=q"),
+			},
+			Case {
+				script:  "a=(1 2 3); a=([-1]=z w)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "w")]))],
+				stderr:  bad("[-1]=z"),
+			},
+			Case {
+				script:  "a=([-1]=x b)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "b")]))],
+				stderr:  bad("[-1]=x"),
+			},
+			// Elements this literal already assigned count.
+			Case {
+				script:  "a=(p q [-1]=r [-3]=s)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "p"), (1, "r")]))],
+				stderr:  bad("[-3]=s"),
+			},
+			// The diagnostic quotes the subscript as written, not its value.
+			Case {
+				script:  "a=([1-5]=q)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[]))],
+				stderr:  bad("[1-5]=q"),
+			},
+			Case {
+				script:  "a=([]=x y)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "y")]))],
+				stderr:  bad("[]=x"),
+			},
+			Case {
+				script:  "a=([1+1]=x [foo]=y)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "y"), (2, "x")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "foo=3; a=([foo]=y z)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(3, "y"), (4, "z")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "i=0; a=([i++]=x [i++]=y)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "x"), (1, "y")])), ("i", scalar("2"))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "a=([0x10]=x [010]=y [' 2 ']=z)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(2, "z"), (8, "y"), (16, "x")]))],
+				stderr:  String::new(),
+			},
+			// An unindexed element follows the last one assigned.
+			Case {
+				script:  "a=([5]=x y [1]=z w)",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(1, "z"), (2, "w"), (5, "x"), (6, "y")]))],
+				stderr:  String::new(),
+			},
+			// Explicit zero still replaces the scalar, whatever its spelling.
+			Case {
+				script:  "x=base; x+=([0]='')",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "x=base; x+=([00]='')",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "")]))],
+				stderr:  String::new(),
+			},
+			// Associative keys are strings: none of the above applies.
+			Case {
+				script:  "A=([1+1]=v [-1]=w)",
+				prepare: associative,
+				values:  vec![("A", keys(&[("-1", "w"), ("1+1", "v")]))],
+				stderr:  String::new(),
+			},
+		];
+
+		let differences = differences(cases).await;
+		assert!(differences.is_empty(), "{}", differences.join("\n"));
+	}
+
+	/// The exported and converted scalars keep their attributes through the
+	/// refusal, as Bash's `declare -ax` and `declare -au` show.
+	#[tokio::test]
+	async fn a_refused_element_keeps_the_scalars_attributes() {
+		let exported = run("x+=([-2]='')", exported_base).await;
+		let (_, x) = exported.shell.env().get("x").expect("x");
+		assert!(x.is_exported(), "x is still exported");
+
+		let converted = run("x+=([-2]='' [1]=up)", uppercase_base).await;
+		let (_, x) = converted.shell.env().get("x").expect("x");
+		assert_eq!(format!("{:?}", x.value()), format!("{:?}", elements(&[(0, "BASE"), (1, "UP")])));
+	}
+
+	/// The single-element form reads the same subscript the same way: as
+	/// arithmetic on a scalar or a declared-but-unset variable too, and
+	/// counting a negative back from one past the largest index rather than
+	/// from the number of elements.
+	#[tokio::test]
+	async fn element_subscripts_are_evaluated_like_bash() {
+		let cases = vec![
+			Case {
+				script:  "x=base; x[1+1]=v",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "base"), (2, "v")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "x[1+1]=v",
+				prepare: declared_untyped,
+				values:  vec![("x", elements(&[(2, "v")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "x=base; x[-1]=z",
+				prepare: nothing,
+				values:  vec![("x", elements(&[(0, "z")]))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "a=([5]=x); r=${a[-1]}; a[-1]=y",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(5, "y")])), ("r", scalar("x"))],
+				stderr:  String::new(),
+			},
+			Case {
+				script:  "a=([2]=x [5]=y); a[-6]=z",
+				prepare: nothing,
+				values:  vec![("a", elements(&[(0, "z"), (2, "x"), (5, "y")]))],
+				stderr:  String::new(),
+			},
+		];
+
+		let differences = differences(cases).await;
+		assert!(differences.is_empty(), "{}", differences.join("\n"));
+	}
+
+	/// An element subscript that names no element fails the assignment and
+	/// assigns nothing, as in Bash, and the message names it as Bash does:
+	/// `name[subscript]` as written.
+	#[tokio::test]
+	async fn an_element_subscript_that_names_no_element_is_refused() {
+		let cases = [
+			("a=(1); a[-5]=x", "a", Some(elements(&[(0, "1")])), "a[-5]"),
+			("a=([5]=x); a[1-8]=y", "a", Some(elements(&[(5, "x")])), "a[1-8]"),
+			("x=base; x[-2]=z", "x", Some(scalar("base")), "x[-2]"),
+			("b[-1]=x", "b", None, "b[-1]"),
+			("b[]=x", "b", None, "b[]"),
+		];
+		for (script, name, value, word) in cases {
+			let ran = run(script, nothing).await;
+			let actual = ran.shell.env().get(name).map(|(_, var)| format!("{:?}", var.value()));
+			assert_eq!(
+				(ran.status, ran.stderr, actual),
+				(1, bad(word), value.map(|value| format!("{value:?}"))),
+				"{script}"
+			);
+		}
+	}
+
+	/// A key that is not a number is refused, not read as `0`: no caller can
+	/// lean on the old coercion.
+	#[test]
+	fn a_literal_key_that_is_not_an_index_is_refused() {
+		for key in ["", "-1", "1+1", "foo", " 2", "18446744073709551616"] {
+			assert!(
+				ShellValue::indexed_array_with_element(key, String::from("v")).is_err(),
+				"{key:?} named an element"
+			);
+		}
+		let ShellValue::IndexedArray(values) =
+			ShellValue::indexed_array_with_element("7", String::from("v")).expect("7 is an index")
+		else {
+			unreachable!("an indexed array")
+		};
+		assert_eq!(values.into_iter().collect::<Vec<_>>(), [(7, String::from("v"))]);
 	}
 }

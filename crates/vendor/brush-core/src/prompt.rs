@@ -83,14 +83,16 @@ fn parse_prompt(
 }
 
 /// Parses a prompt spec a stride at a time, spending a checkpoint before each
-/// run of whole pieces.
+/// stride.
 ///
 /// A spec this long is not a prompt anybody typed; it is a variable that grew.
 /// The parser is a PEG that tries each of its escape sequences at every
 /// character of a literal, and 16 MiB of literal text held the worker for
-/// 719.780 ms in one call, the longest hold measured on this branch. The run
-/// boundaries cost one search for the next backslash per stride, and the
-/// pieces are the same pieces.
+/// 719.780 ms in one call. Finding the boundaries between pieces did not
+/// divide that: a literal is one piece, so a spec with no backslash in it was
+/// still parsed whole, for 659 ms. [`brush_parser::prompt::parse_stride`]
+/// copies literal text out without the grammar and cuts it at the stride; the
+/// literal pieces that come out of one literal render to the same text.
 ///
 /// The cache above is left to the ordinary spec on purpose. Its key is the
 /// whole spec, so a spec of this size would be hashed on every prompt and its
@@ -104,12 +106,9 @@ async fn parse_prompt_in_strides(
 	let mut at = 0;
 	while at < spec.len() {
 		interp::stride_checkpoint(params).await?;
-		let end = brush_parser::prompt::next_piece_boundary(
-			spec,
-			at,
-			interp::BYTE_CHECKPOINT_STRIDE,
-		);
-		pieces.extend(brush_parser::prompt::parse(&spec[at..end])?);
+		let (stride, end) =
+			brush_parser::prompt::parse_stride(spec, at, interp::BYTE_CHECKPOINT_STRIDE)?;
+		pieces.extend(stride);
 		at = end;
 	}
 	Ok(pieces)

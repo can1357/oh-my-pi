@@ -112,9 +112,29 @@ impl ExportCommand {
 					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(
 						brush_core::clone_in_strides(&context.params, s.as_ref()).await?,
 					),
-					ast::AssignmentValue::Array(a) => variables::ShellValueLiteral::Array(
-						variables::ArrayLiteral::from_assignment_elements(a, &context.params).await?,
-					),
+					ast::AssignmentValue::Array(a) => {
+						let (literal, keyed) =
+							variables::ArrayLiteral::from_assignment_elements(a, &context.params).await?;
+						// The assignment below replaces the value, so an indexed
+						// literal counts its subscripts from an empty array; an
+						// associative array's are keys. Only a literal that names
+						// a subscript asks.
+						let start = if keyed {
+							match context.shell.env().get_using_policy(name, EnvironmentLookup::Anywhere) {
+								Some(var) => var.takes_indexes().then(|| var.indexed_literal_start(false)),
+								None => Some(0),
+							}
+						} else {
+							None
+						};
+						let literal = match start {
+							Some(start) => {
+								literal.evaluate_subscripts(context.shell, &context.params, start).await?
+							},
+							None => literal,
+						};
+						variables::ShellValueLiteral::Array(literal)
+					},
 				};
 
 				// Update the variable with the provided value and then mark it exported.

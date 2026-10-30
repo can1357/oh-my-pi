@@ -4,7 +4,10 @@ use std::{borrow::Cow, cell::RefCell};
 
 use cached::Cached;
 
-use crate::{ExecutionParameters, error, interp};
+use crate::{ExecutionParameters, commands, error, interp};
+
+/// Where each capture group of `value` lies, if `pattern` matches it.
+type CaptureRanges = Option<Vec<Option<std::ops::Range<usize>>>>;
 
 thread_local! {
 	 static REGEX_CACHE: RefCell<cached::SizedCache<(String, bool, bool), fancy_regex::Regex>> =
@@ -90,13 +93,39 @@ impl Regex {
 	pub async fn matches(
 		&self,
 		params: &ExecutionParameters,
-		value: &str,
+		value: String,
 	) -> Result<Option<Vec<Option<String>>>, error::Error> {
 		let regex_pattern = self.to_regex_pattern(params).await?;
+		let (case_insensitive, multiline) = (self.case_insensitive, self.multiline);
 
-		let re = compile_regex(regex_pattern, self.case_insensitive, self.multiline)?;
-
-		let Some(captures) = re.captures(value)? else {
+		// Compiling and matching are each one call into the regex engine, with
+		// nothing inside that can yield: `[[ $huge =~ ^(h*)$ ]]` on a 64 MiB
+		// subject held the worker for 340 ms in them. A pattern and subject
+		// within one stride between them are matched where they are, which is
+		// every match a script spells out; anything longer is matched on a
+		// blocking worker, unless this is one already (see
+		// [`commands::builtin_on_blocking_worker`]).
+		let (value, groups) = if value.len().saturating_add(regex_pattern.len())
+			<= interp::DIVIDE_COPY_ABOVE_BYTES
+			|| commands::builtin_on_blocking_worker()
+		{
+			let groups = capture_ranges(regex_pattern, case_insensitive, multiline, &value)?;
+			(value, groups)
+		} else {
+			let matched = tokio::task::spawn_blocking(move || {
+				let groups = capture_ranges(regex_pattern, case_insensitive, multiline, &value);
+				(value, groups)
+			})
+			.await;
+			match matched {
+				Ok((value, groups)) => (value, groups?),
+				Err(join_error) if join_error.is_panic() => {
+					std::panic::resume_unwind(join_error.into_panic())
+				},
+				Err(join_error) => return Err(error::ErrorKind::ThreadingError(join_error).into()),
+			}
+		};
+		let Some(groups) = groups else {
 			return Ok(None);
 		};
 
@@ -105,15 +134,15 @@ impl Regex {
 		// the pattern is. This is the construction behind `BASH_REMATCH`: the
 		// assignment that follows is divided already, and before this the whole
 		// of it was one step.
-		let mut groups = Vec::with_capacity(captures.len());
+		let mut copies = Vec::with_capacity(groups.len());
 		let mut budget = interp::ElementBudget::new();
-		for group in captures.iter() {
-			let matched = group.map(|m| m.as_str());
+		for group in groups {
+			let matched = group.map(|range| &value[range]);
 			let due = budget.charge(matched.map_or(0, str::len));
 			if due > 0 {
 				interp::loop_checkpoints(params, due).await?;
 			}
-			groups.push(match matched {
+			copies.push(match matched {
 				Some(text) if text.len() > interp::DIVIDE_COPY_ABOVE_BYTES => {
 					Some(interp::clone_in_strides(params, text).await?)
 				},
@@ -122,7 +151,7 @@ impl Regex {
 			});
 		}
 
-		Ok(Some(groups))
+		Ok(Some(copies))
 	}
 
 	/// Builds the pattern to compile out of the pieces the expansion left.
@@ -193,6 +222,21 @@ async fn push_escaped_literal_in_strides(
 		}
 		rest = remaining;
 	}
+}
+
+/// Compiles `pattern` and finds where its capture groups lie in `value`: the
+/// part of a match that is one call into the regex engine.
+fn capture_ranges(
+	pattern: String,
+	case_insensitive: bool,
+	multiline: bool,
+	value: &str,
+) -> Result<CaptureRanges, error::Error> {
+	let re = compile_regex(pattern, case_insensitive, multiline)?;
+	let Some(captures) = re.captures(value)? else {
+		return Ok(None);
+	};
+	Ok(Some(captures.iter().map(|group| group.map(|m| m.range())).collect()))
 }
 
 pub(crate) fn compile_regex(
@@ -327,7 +371,7 @@ mod tests {
 
 		let regex = Regex::from(vec![RegexPiece::Pattern(String::from("(x+)"))]);
 		let err = regex
-			.matches(&params, "xxx")
+			.matches(&params, String::from("xxx"))
 			.await
 			.expect_err("the match ignored the cancellation");
 		assert!(matches!(err.kind(), error::ErrorKind::Interrupted), "unexpected error: {err}");
@@ -365,7 +409,7 @@ mod tests {
 		let regex = Regex::from(vec![RegexPiece::Pattern(String::from("^(x+)$"))]);
 
 		let groups = regex
-			.matches(&params, subject.as_str())
+			.matches(&params, subject.clone())
 			.await?
 			.expect("the subject did not match");
 		assert_eq!(groups.len(), 2);

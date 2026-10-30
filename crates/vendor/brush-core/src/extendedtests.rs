@@ -275,7 +275,7 @@ async fn apply_binary_predicate(
 				shell.trace_command(params, traced).await;
 			}
 
-			let (matches, captures) = match regex.matches(params, s.as_str()).await {
+			let (matches, captures) = match regex.matches(params, s).await {
 				Ok(Some(captures)) => (true, captures),
 				Ok(None) => (false, vec![]),
 				// A cancelled run carries out rather than being reported as a

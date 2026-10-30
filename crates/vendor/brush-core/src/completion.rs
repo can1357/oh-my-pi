@@ -697,7 +697,7 @@ impl Spec {
 		context: &Context<'_>,
 	) -> Result<Vec<String>, error::Error> {
 		// Move to a subshell so we can start filling out variables.
-		let mut shell = shell.clone();
+		let mut shell = shell.clone_divided(&shell.default_exec_params()).await?;
 
 		// `COMP_LINE` is the line being completed and has no bound, so the
 		// copy of it is divided as well as the assignment: dividing only the
@@ -1331,7 +1331,7 @@ async fn get_file_completions(
 ) -> Result<Vec<String>, error::Error> {
 	// Basic-expand the token-to-be-completed; it won't have been expanded to this
 	// point.
-	let mut throwaway_shell = shell.clone();
+	let mut throwaway_shell = shell.clone_divided(&shell.default_exec_params()).await?;
 	let params = throwaway_shell.default_exec_params();
 	let options =
 		expansion::ExpanderOptions { execute_command_substitutions: false, ..Default::default() };
