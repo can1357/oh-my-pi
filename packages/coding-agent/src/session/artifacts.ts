@@ -79,6 +79,7 @@ export class ArtifactManager {
 	#initPromise: Promise<void> | null = null;
 	readonly #ready: Promise<unknown> | undefined;
 	readonly #reservedIdsDir: string | undefined;
+	readonly #reservedThroughId: (() => number | undefined) | undefined;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
@@ -88,11 +89,21 @@ export class ArtifactManager {
 	 * @param reservedIdsDir Read-only directory whose ids stay reserved: a seance
 	 *   fork allocates past its source's ids so `artifact://<n>` from the inherited
 	 *   transcript keeps naming the source artifact.
+	 * @param reservedThroughId The highest id this session must not hand out again
+	 *   even though no file carries it, read after `ready`: a fork whose inherited
+	 *   artifacts never arrived still has a transcript full of `artifact://<n>`,
+	 *   and new output taking one of those numbers would silently answer for it.
 	 */
-	constructor(dir: string, ready?: Promise<unknown>, reservedIdsDir?: string) {
+	constructor(
+		dir: string,
+		ready?: Promise<unknown>,
+		reservedIdsDir?: string,
+		reservedThroughId?: () => number | undefined,
+	) {
 		this.#dir = dir;
 		this.#ready = ready;
 		this.#reservedIdsDir = reservedIdsDir;
+		this.#reservedThroughId = reservedThroughId;
 	}
 
 	/**
@@ -129,7 +140,7 @@ export class ArtifactManager {
 				// A missing source artifacts dir reserves nothing.
 			}
 		}
-		let maxId = -1;
+		let maxId = this.#reservedThroughId?.() ?? -1;
 		for (const file of files) {
 			// Files are named: {id}.{toolType}.log
 			const match = file.match(/^(\d+)\..*\.log$/);

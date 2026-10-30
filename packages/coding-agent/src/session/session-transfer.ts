@@ -76,14 +76,15 @@ export interface SessionArchiveManifest {
  *   owned session `sessionId`, so this conversation continued as a fork of it;
  * - `artifacts-missing` — the fork of session `sessionId` could not keep that
  *   session's artifacts, because `source` stopped holding it while they were
- *   being copied, so they were taken back rather than inherited.
+ *   being copied, so the copy was discarded rather than inherited; identifiers
+ *   up to `reservedThroughId` are reserved and will never be handed out again.
  */
 export type SessionTransferDetails =
 	| { kind: "arrived"; fromCwd: string; cwd: string }
 	| { kind: "departed"; to: string }
 	| { kind: "forked"; source: string; to: string }
 	| { kind: "owned-elsewhere"; source: string; sessionId: string }
-	| { kind: "artifacts-missing"; source: string; sessionId: string };
+	| { kind: "artifacts-missing"; source: string; sessionId: string; reservedThroughId: number };
 
 /** User-facing failure of a pack, unpack, or move marker: missing input, bad archive, live owner. */
 export class SessionTransferError extends Error {
@@ -164,8 +165,15 @@ export function sessionTransferDetails(entry: FileEntry): SessionTransferDetails
 				? { kind: "owned-elsewhere", source: details.source, sessionId: details.sessionId }
 				: undefined;
 		case "artifacts-missing":
-			return typeof details.source === "string" && typeof details.sessionId === "string"
-				? { kind: "artifacts-missing", source: details.source, sessionId: details.sessionId }
+			return typeof details.source === "string" &&
+				typeof details.sessionId === "string" &&
+				typeof details.reservedThroughId === "number"
+				? {
+						kind: "artifacts-missing",
+						source: details.source,
+						sessionId: details.sessionId,
+						reservedThroughId: details.reservedThroughId,
+					}
 				: undefined;
 		default:
 			return undefined;
@@ -195,15 +203,26 @@ function renderTransferNotice(details: SessionTransferDetails): string {
 				.trim();
 		case "artifacts-missing":
 			return prompt
-				.render(resumeArtifactsMissingTemplate, { source: details.source, sessionId: details.sessionId })
+				.render(resumeArtifactsMissingTemplate, {
+					source: details.source,
+					sessionId: details.sessionId,
+					reservedThroughId: details.reservedThroughId,
+					hasIds: details.reservedThroughId >= 0,
+				})
 				.trim();
 	}
 }
 
-/** Append a visible, model-facing transfer marker and make it durable. */
+/**
+ * Append a visible, model-facing transfer marker and make it durable.
+ *
+ * The entry is made durable, not the fork's artifact copy: `flush()` waits for
+ * that copy as well, and a resume that waited here would hand back the whole
+ * copy time it was restructured to stop paying.
+ */
 async function appendTransferNotice(manager: SessionManager, details: SessionTransferDetails): Promise<void> {
 	manager.appendCustomMessageEntry(SESSION_TRANSFER_MESSAGE_TYPE, renderTransferNotice(details), true, details);
-	await manager.flush();
+	await manager.flushEntries();
 }
 
 async function requireFile(file: string, what: string): Promise<void> {
@@ -771,6 +790,7 @@ async function noteArtifactsNotReproduced(manager: SessionManager, forkedFrom: R
 			kind: "artifacts-missing",
 			source: forkedFrom.sessionFile,
 			sessionId: forkedFrom.sessionId,
+			reservedThroughId: manager.reservedArtifactId() ?? -1,
 		});
 	} catch (error) {
 		logger.warn("Failed to record that a fork's artifacts were not reproduced", {
@@ -788,4 +808,7 @@ async function noteArtifactsNotReproduced(manager: SessionManager, forkedFrom: R
  */
 export async function noteResumedSessionFork(manager: SessionManager, forkedFrom: ResumedSessionFork): Promise<void> {
 	await appendTransferNotice(manager, resumeForkNotice(forkedFrom, undefined));
+	// Same follow-up as a startup resume: this caller's fork copies artifacts
+	// in the background too, and loses them the same way.
+	void noteArtifactsNotReproduced(manager, forkedFrom);
 }

@@ -11,6 +11,7 @@ import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-en
 import { findSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import {
+	type ResumedSessionFork,
 	SessionManager,
 	type SessionPersistenceNotice,
 	SessionSourceReplacedError,
@@ -20,6 +21,7 @@ import {
 	adoptResumedSession,
 	lastSessionTransfer,
 	markSessionMoved,
+	noteResumedSessionFork,
 	type SessionTransferDetails,
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -592,6 +594,100 @@ describe("SessionManager on a session file another omp process writes", () => {
 		}
 	}, 30_000);
 
+	it("tells the agent about artifacts an in-session resume lost, as a startup resume does", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const originalId = await readSessionHeaderId(original);
+		if (!originalId) throw new Error("Expected a session header");
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const artifacts = original.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "0.bash.log"), "this session's artifact");
+
+		const { other: owner } = await OtherProcess.adopt(tempDir, original);
+		try {
+			const resuming = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+			await resuming.ensureOnDisk();
+			// The journal is taken over while the fork's artifacts are copied,
+			// exactly as in the startup case — and this caller has to say so too.
+			const realpath = fs.promises.realpath;
+			const raceOnRealpath = (async (target: fs.PathLike) => {
+				if (target === original) fs.renameSync(replacement, original);
+				return realpath(target);
+			}) as typeof fs.promises.realpath;
+			const spy = spyOn(fs.promises, "realpath").mockImplementation(raceOnRealpath);
+			let forkedFrom: ResumedSessionFork | undefined;
+			try {
+				({ forkedFrom } = await resuming.setSessionFile(original, { forkIfContested: true }));
+			} finally {
+				spy.mockRestore();
+			}
+			if (!forkedFrom) throw new Error("Expected the in-session resume to fork");
+			await noteResumedSessionFork(resuming, forkedFrom);
+			try {
+				expect(await resuming.artifactsReproduced()).toBe(false);
+				await resuming.flush();
+				expect(lastSessionTransfer(resuming.getEntries())).toEqual({
+					kind: "artifacts-missing",
+					source: original,
+					sessionId: originalId,
+					reservedThroughId: 0,
+				});
+			} finally {
+				await resuming.close();
+			}
+		} finally {
+			await owner.close();
+		}
+	}, 30_000);
+
+	it("returns from a resume without waiting for the artifacts to be copied", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const artifacts = original.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "0.bash.log"), "a big one, in spirit");
+
+		const { other: owner } = await OtherProcess.adopt(tempDir, original);
+		const copyReachedStaging = Promise.withResolvers<void>();
+		const letTheCopyFinish = Promise.withResolvers<void>();
+		// Held open in the staging tree: the copy cannot finish until this test
+		// says so, so a resume that waits for it cannot return at all.
+		const open = fs.promises.open;
+		const holdTheCopy = (async (target: fs.PathLike, flags?: string | number) => {
+			if (String(target).includes(".staging")) {
+				copyReachedStaging.resolve();
+				await letTheCopyFinish.promise;
+			}
+			return open(target, flags as string);
+		}) as typeof fs.promises.open;
+		const spy = spyOn(fs.promises, "open").mockImplementation(holdTheCopy);
+		try {
+			const resumed = await adoptResumedSession(
+				await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				}),
+				tempDir.path(),
+			);
+			const fork = resumed.getSessionFile();
+			if (!fork) throw new Error("Expected the resumed session to have a file");
+			// The resume is done and the fork is usable while the copy is still
+			// blocked: nothing of the artifacts has been published yet.
+			await copyReachedStaging.promise;
+			expect(fs.existsSync(path.join(fork.slice(0, -".jsonl".length), "0.bash.log"))).toBe(false);
+			letTheCopyFinish.resolve();
+			expect(await resumed.artifactsReproduced()).toBe(true);
+			expect(fs.readFileSync(path.join(fork.slice(0, -".jsonl".length), "0.bash.log"), "utf8")).toBe(
+				"a big one, in spirit",
+			);
+			await resumed.close();
+		} finally {
+			letTheCopyFinish.resolve();
+			spy.mockRestore();
+			await owner.close();
+		}
+	}, 30_000);
+
 	it("gives the session to the process that resumed it first, before either has written", async () => {
 		using tempDir = TempDir.createSync("@omp-shared-session-file-");
 		const original = await createSession(tempDir);
@@ -775,14 +871,20 @@ describe("SessionManager on a session file another omp process writes", () => {
 		const fork = resumed.getSessionFile();
 		if (!fork) throw new Error("Expected the resumed session to have a file");
 		expect(await resumed.artifactsReproduced()).toBe(false);
-		// Nothing of the replacement's is in the fork, and the transcript says
-		// the artifacts are missing rather than leaving the agent to find out.
-		expect(fs.existsSync(path.join(fork.slice(0, -".jsonl".length), "1.bash.log"))).toBe(false);
+		// Nothing of the replacement's is in the fork — not the file, not the
+		// directory it would have arrived in — and the transcript says the
+		// artifacts are missing rather than leaving the agent to find out.
+		expect(fs.existsSync(fork.slice(0, -".jsonl".length))).toBe(false);
 		expect(lastSessionTransfer(resumed.getEntries())).toEqual({
 			kind: "artifacts-missing",
 			source: requested,
 			sessionId: requestedId,
+			reservedThroughId: 1,
 		});
+		// The identifier the lost artifact carried is never handed out again, so
+		// a reference this transcript already makes cannot come to mean new output.
+		const allocated = await resumed.allocateArtifactPath("read");
+		expect(Number(allocated.id)).toBeGreaterThan(1);
 		await resumed.close();
 	}, 30_000);
 
