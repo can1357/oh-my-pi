@@ -2377,16 +2377,22 @@ export class SessionManager {
 		// tree. Bring one back to its own path before anything reads or appends
 		// to it: the writer appends raw JSONL, so a `.jsonl.gz` must never
 		// become this manager's session file.
+		//
+		// Asked for every session, not only a `.gz`. A run killed between a
+		// restore publishing the transcript and carrying its artifact tree home
+		// leaves a live `.jsonl` with its archive still beside it, and that is
+		// the path resume-by-id resolves to; opening it as if it were whole
+		// gives a session whose subagent transcripts and tool output are
+		// missing with nothing said. `materializeSessionFile` returns the path
+		// unchanged when there is no archive to finish, so this costs one
+		// `stat` on the ordinary route.
 		const requestedFile = path.resolve(sessionFile);
 		const fromArchive = isArchivedSessionPath(requestedFile);
-		let resolvedSessionFile = requestedFile;
-		if (fromArchive) {
-			resolvedSessionFile = await materializeSessionFile(requestedFile);
+		const resolvedSessionFile = await materializeSessionFile(requestedFile);
+		if (fromArchive && this.#sessionDir === path.dirname(requestedFile)) {
 			// `SessionManager.open` derived the session dir from the archive path.
 			// Follow the transcript home, or /new and /branch would write there.
-			if (this.#sessionDir === path.dirname(requestedFile)) {
-				this.#sessionDir = path.dirname(resolvedSessionFile);
-			}
+			this.#sessionDir = path.dirname(resolvedSessionFile);
 		}
 		// A caller's snapshot of an archive was read before the restore took the
 		// gc lock. Another process may have restored that archive and appended a

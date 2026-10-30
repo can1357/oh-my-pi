@@ -2372,3 +2372,20 @@ test("resuming a session whose artifacts are still archived finishes the restore
 	expect(materialized).toBe(sessionFile);
 	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
 });
+test("the resume route finishes a half restore rather than opening a session without its artifacts", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
+	await archiveEverything();
+	// What a kill between publishing the transcript and carrying the tree
+	// home leaves. Resume-by-id resolves to the live `.jsonl`, not the
+	// archive, so a materialize that only looks at `.gz` never runs.
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+
+	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	await manager.close();
+
+	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
