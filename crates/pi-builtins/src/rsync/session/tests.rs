@@ -245,40 +245,64 @@ fn no_search_path_but_the_shells_own_answers() {
 	assert!(cap.out().contains("\\#303\\#274n\\#303\\#257.txt"), "{}", cap.out());
 }
 
-/// A relative search-path entry that no process can resolve must not defeat
-/// an absolute entry that supplies the locale.
+/// A working directory the child cannot be put into ends the query.
 ///
-/// Measured on the gate VM from a directory with mode 0600, and again from
-/// one removed after the shell entered it — both are working directories of
-/// the shell and so of its children: `env -i LOCPATH=missing:…/locales
-/// LC_ALL=… /usr/bin/locale charmap` reports `ISO-8859-1` there and rsync
-/// 3.5.1 prints `ünï.txt`. A lookup that enters the working directory before
-/// it reads the list answers for neither.
+/// The error says nothing about what the reference resolves from a
+/// directory it is already inside: `EACCES` can come from an ancestor the
+/// reference never traverses, and `ENOENT` or `ENOTDIR` can mean the
+/// directory was renamed rather than removed. Measured on the gate VM, the
+/// reference answers `ISO-8859-1` in the ancestor and renamed cases and
+/// `ANSI_X3.4-1968` in the archive one, and this cannot reproduce any of
+/// them — so each is reported rather than answered from a question that was
+/// changed to make it answerable.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_absolute_entry_answers_from_a_directory_no_process_can_enter() {
+fn a_working_directory_the_child_cannot_enter_is_reported() {
 	use std::os::unix::fs::PermissionsExt as _;
 
 	let dir = tempfile::tempdir().unwrap();
 	let Some(locales) = shell_only_locale(dir.path()) else { return };
-	let path = format!("missing:{}", locales.display());
-	let env = |key: &str| (key == "LOCPATH").then(|| path.clone());
-	for shut in ["unsearchable", "removed"] {
-		let cwd = dir.path().join(shut);
+	let mixed = format!("missing:{}", locales.display());
+	let listed = format!("locales:{}", locales.display());
+	let open = |at: &Path| fs::set_permissions(at, fs::Permissions::from_mode(0o755)).unwrap();
+	let shut = |at: &Path| fs::set_permissions(at, fs::Permissions::from_mode(0o600)).unwrap();
+	// Each case is a working directory and the search path the shell set in
+	// it. The last is the one that used to come back from glibc's locale
+	// archive, which an emptied `LOCPATH` turns back on: `en_US.utf8` is
+	// installed, and the reference in that directory still reports the C
+	// locale because its own `LOCPATH` names nothing it can read.
+	let cases: [(&str, &str, &str); 5] = [
+		("unsearchable", SHELL_ONLY_LOCALE, &mixed),
+		("removed", SHELL_ONLY_LOCALE, &mixed),
+		("ancestor/child", SHELL_ONLY_LOCALE, "locales"),
+		("renamed", SHELL_ONLY_LOCALE, &listed),
+		("archive", "en_US.utf8", "missing"),
+	];
+	for (at, locale, path) in cases {
+		let cwd = dir.path().join(at);
 		fs::create_dir_all(&cwd).unwrap();
-		// The shell is already in the directory; what it cannot do is enter it
-		// again, which is what a lookup that `chdir`s asks of it.
+		std::os::unix::fs::symlink(&locales, cwd.join("locales")).unwrap();
+		// The shell is already in the directory; what no process can do is
+		// enter it again, which is what putting a child there asks.
 		let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
 		let child = host.child_env();
-		match shut {
-			"removed" => fs::remove_dir(&cwd).unwrap(),
-			_ => fs::set_permissions(&cwd, fs::Permissions::from_mode(0o600)).unwrap(),
+		match at {
+			"removed" => fs::remove_dir_all(&cwd).unwrap(),
+			"ancestor/child" => shut(&dir.path().join("ancestor")),
+			"renamed" => {
+				fs::rename(&cwd, dir.path().join("renamed-away")).unwrap();
+				fs::write(&cwd, b"not a directory\n").unwrap();
+			},
+			_ => shut(&cwd),
 		}
-		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
-		if shut != "removed" {
-			fs::set_permissions(&cwd, fs::Permissions::from_mode(0o755)).unwrap();
+		let env = |key: &str| (key == "LOCPATH").then(|| path.to_owned());
+		let answer = crate::locale::loaded_codeset(locale, &env, Some(&child));
+		match at {
+			"removed" | "renamed" => {},
+			"ancestor/child" => open(&dir.path().join("ancestor")),
+			_ => open(&cwd),
 		}
-		assert!(matches!(&answer, crate::locale::Codeset::Loaded(c) if c == "ISO-8859-1"), "{shut}: {answer:?}");
+		assert!(matches!(&answer, crate::locale::Codeset::Unasked(_)), "{at}: {answer:?}");
 	}
 }
 
@@ -419,7 +443,9 @@ fn a_colon_in_the_working_directory_is_not_a_list_separator() {
 /// A working directory the shell is in but that no longer exists keeps a
 /// parent in the kernel that its vanished pathname does not: the reference
 /// resolves `../locales` from it and this cannot. An answer from somewhere
-/// else is not that answer, so the lookup says so instead of giving one.
+/// else is not that answer, so the lookup says so instead of giving one —
+/// and `./../` reaches that parent exactly as `../` does, so no reading of
+/// the entries can stand in for entering the directory.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_vanished_working_directory_is_reported_rather_than_guessed() {
@@ -427,14 +453,16 @@ fn a_vanished_working_directory_is_reported_rather_than_guessed() {
 	if shell_only_locale(dir.path()).is_none() {
 		return;
 	}
-	let cwd = dir.path().join("vanished");
-	fs::create_dir_all(&cwd).unwrap();
-	let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
-	let child = host.child_env();
-	fs::remove_dir(&cwd).unwrap();
-	let env = |key: &str| (key == "LOCPATH").then(|| "../locales".to_owned());
-	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
-	assert!(matches!(&answer, crate::locale::Codeset::Unasked(_)), "{answer:?}");
+	for path in ["../locales", "./../locales", "././../locales"] {
+		let cwd = dir.path().join(path.replace(['.', '/'], "-"));
+		fs::create_dir_all(&cwd).unwrap();
+		let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+		let child = host.child_env();
+		fs::remove_dir(&cwd).unwrap();
+		let env = |key: &str| (key == "LOCPATH").then(|| path.to_owned());
+		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+		assert!(matches!(&answer, crate::locale::Codeset::Unasked(_)), "{path}: {answer:?}");
+	}
 }
 
 /// A utility that does not answer whole, or does not finish, has not
@@ -470,6 +498,46 @@ fn a_locale_utility_that_misbehaves_is_reported() {
 	}
 }
 
+/// Nothing the utility leaves behind outlives the query, whether it answered
+/// or not: a descendant that closes the answer pipe and sleeps used to
+/// survive, because the normal-exit path returned without sweeping the
+/// process group.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_of_the_utility_does_not_outlive_the_query() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let program = dir.path().join("locale");
+	let marker = dir.path().join("descendant");
+	// The utility leaves a descendant that closes the pipe it inherited and
+	// sleeps, records that descendant's process id (`$$` in a subshell is
+	// still the shell's), answers, and exits 0.
+	let body = format!(
+		"#!/bin/sh\n(exec 1>&-; exec sleep 30) &\necho $! > '{}'\nprintf 'ISO-8859-1\\n'\nexit 0\n",
+		marker.display()
+	);
+	fs::write(&program, body).unwrap();
+	fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+	let env = |_: &str| None;
+	let answer = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &env);
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
+	let descendant: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+	// The kill is delivered as the group leader is reaped; give it the
+	// moment the scheduler needs, then insist the process is gone.
+	for _ in 0..200 {
+		// SAFETY: a signal-free existence probe for a process this test
+		// started and does not reap.
+		if unsafe { libc::kill(descendant, 0) } != 0 {
+			return;
+		}
+		std::thread::sleep(std::time::Duration::from_millis(10));
+	}
+	// SAFETY: as above; the test cleans up what it started before failing.
+	unsafe { libc::kill(descendant, libc::SIGKILL) };
+	panic!("the descendant {descendant} outlived the query");
+}
+
 /// With this process's own standard output and error closed, a fresh pipe
 /// takes descriptors 1 and 2, and the spawn's file actions must not open
 /// `/dev/null` over the one the answer is written to.
@@ -499,22 +567,56 @@ fn the_answer_pipe_survives_closed_standard_descriptors() {
 	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
 }
 
-/// `newlocale` splits a composite name per category and `setlocale(LC_CTYPE,
-/// "")` does not, so the reference reads one as the C locale (measured:
-/// `ANSI_X3.4-1968`). The answer may not turn on which of the two paths ran.
+/// A name is the name of locale data, whatever punctuation it carries.
+///
+/// `newlocale` splits a name containing `;` per category and `setlocale`
+/// takes it whole, so the one answer that is right is the reference's: data
+/// literally so named loads (measured: `ISO-8859-1`, and rsync 3.5.1 prints
+/// `ünï.txt`), and with no such data the C locale follows. This asserts
+/// against `locale charmap` under the same environment, through both of
+/// this code's paths — the shell's search path differing from this
+/// process's, which spawns, and neither set, which does not.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_composite_locale_name_reads_as_the_c_locale() {
+fn a_name_is_the_name_of_the_data_whatever_punctuation_it_carries() {
 	let dir = tempfile::tempdir().unwrap();
 	let Some(locales) = shell_only_locale(dir.path()) else { return };
-	let composite = format!("LC_CTYPE={SHELL_ONLY_LOCALE};LC_TIME=C");
+	let literal = ["astra=latin", "astra;latin", "LC_CTYPE=astra;LC_TIME=C"];
+	for name in literal {
+		let mut copy = Command::new("cp");
+		copy.arg("-a").arg(locales.join(SHELL_ONLY_LOCALE)).arg(locales.join(name));
+		assert!(copy.output().unwrap().status.success(), "{name}");
+	}
+	let absent = format!("LC_CTYPE={SHELL_ONLY_LOCALE};LC_TIME=C");
 	let shell_path = locales.to_str().unwrap().to_owned();
-	// Once with the shell's search path differing from this process's, which
-	// is the spawning path, and once with neither set, which is not.
-	for path in [Some(shell_path), None] {
-		let env = |key: &str| (key == "LOCPATH").then(|| path.clone()).flatten();
-		let answer = crate::locale::loaded_codeset(&composite, &env, None);
-		assert!(matches!(&answer, crate::locale::Codeset::Unloadable), "{answer:?}");
+	for name in literal.iter().copied().chain([absent.as_str()]) {
+		let reference = Command::new("/usr/bin/locale")
+			.arg("charmap")
+			.env_clear()
+			.env("LC_CTYPE", name)
+			.env("LOCPATH", &locales)
+			.output()
+			.unwrap();
+		let reference = String::from_utf8_lossy(&reference.stdout).trim().to_owned();
+		// Spawning: the shell's search path is not this process's.
+		let env = |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+		let spawned = crate::locale::loaded_codeset(name, &env, None);
+		assert!(
+			matches!(&spawned, crate::locale::Codeset::Loaded(codeset) if *codeset == reference),
+			"{name} spawned: {spawned:?} vs {reference}"
+		);
+		// In process: neither search path is set, so the same name has to
+		// read the same way through `newlocale` or not be answered there.
+		// SAFETY: nextest gives this test its own process, and nothing else
+		// in it reads `LOCPATH` concurrently.
+		unsafe { std::env::set_var("LOCPATH", &locales) };
+		let here = crate::locale::loaded_codeset(name, &env, None);
+		// SAFETY: as above.
+		unsafe { std::env::remove_var("LOCPATH") };
+		assert!(
+			matches!(&here, crate::locale::Codeset::Loaded(codeset) if *codeset == reference),
+			"{name} in process: {here:?} vs {reference}"
+		);
 	}
 }
 

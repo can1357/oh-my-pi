@@ -66,14 +66,12 @@ pub(crate) fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
 /// with `newlocale` rather than `setlocale`, which would change the C locale
 /// of the whole host process.
 ///
-/// A composite name is refused ([`is_single_locale_name`]): the utilities
-/// here model `setlocale(CATEGORY, "")`, which does not take one, however
-/// `newlocale` reads it.
+/// `newlocale` splits a name carrying a `;` per category where `setlocale`
+/// would take it whole ([`reads_as_a_composite`]). Nothing here refuses such
+/// a name: the reference loads locale data literally so named, and a filter
+/// on the punctuation would turn those into the C locale.
 #[cfg(unix)]
 pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
-	if !is_single_locale_name(locale) {
-		return false;
-	}
 	let Ok(locale) = std::ffi::CString::new(locale) else {
 		return false;
 	};
@@ -128,17 +126,20 @@ pub(crate) enum Codeset {
 	Unasked(String),
 }
 
-/// Whether `name` is a locale name `setlocale(CATEGORY, "")` accepts.
+/// Whether `newlocale` would read `name` as a *composite* — `LC_CTYPE=…;
+/// LC_TIME=…`, split per category (`locale/newlocale.c`, on `strchr (locale,
+/// ';')`) — where `setlocale(CATEGORY, …)` takes the whole string as the
+/// name of one locale's data.
 ///
-/// glibc's `newlocale` also takes a *composite* name — `LC_CTYPE=…;LC_TIME=…`,
-/// which it splits per category (`locale/newlocale.c`) — and `setlocale` for
-/// a single category does not. The reference gets the C locale from one
-/// (measured: `LC_ALL=LC_CTYPE=astra;LC_TIME=C` reports `ANSI_X3.4-1968`),
-/// so neither path here may read it as a locale, and the answer must not
-/// turn on which path ran.
+/// The reference does the latter, so a name with a `;` in it is never
+/// answered from `newlocale` here: with no data of that name the reference
+/// gets the C locale (measured: `LC_ALL=LC_CTYPE=astra;LC_TIME=C` reports
+/// `ANSI_X3.4-1968`), and with data literally so named it loads it
+/// (measured: `ISO-8859-1`, and rsync 3.5.1 prints `ünï.txt`). `=` on its
+/// own is not part of this: `newlocale` reads it literally too.
 #[cfg(unix)]
-fn is_single_locale_name(name: &str) -> bool {
-	!name.contains(';') && !name.contains('=')
+fn reads_as_a_composite(name: &str) -> bool {
+	name.contains(';')
 }
 
 /// The codeset `nl_langinfo(CODESET)` reports once `locale` is loaded for
@@ -184,7 +185,7 @@ pub(crate) fn loaded_codeset(
 	// C and POSIX never reach the search path: glibc answers them from the
 	// data in the library itself, before it looks at `LOCPATH`
 	// (`findlocale.c`, `_nl_find_locale`).
-	if locale == "C" || locale == "POSIX" || !is_single_locale_name(locale) {
+	if locale == "C" || locale == "POSIX" {
 		return loaded_codeset_here(locale);
 	}
 	let shell: LocaleEnv =
@@ -198,7 +199,10 @@ pub(crate) fn loaded_codeset(
 	let ours_cwd = std::env::current_dir().ok();
 	let relative = relative_entry_in(&shell) || relative_entry_in(&ours);
 	let same_cwd = !relative || (shell_cwd.is_some() && shell_cwd == ours_cwd.as_deref());
-	if shell == ours && same_cwd {
+	// A name `newlocale` would split per category has to go to the utility
+	// even when nothing else would send it there, because only `setlocale`
+	// reads it the way the reference does.
+	if shell == ours && same_cwd && !reads_as_a_composite(locale) {
 		return loaded_codeset_here(locale);
 	}
 	let cwd = match relative_entry_in(&shell) {
@@ -219,9 +223,6 @@ pub(crate) fn loaded_codeset(
 /// [`loaded_codeset`] through this process's own locale data.
 #[cfg(unix)]
 fn loaded_codeset_here(locale: &str) -> Codeset {
-	if !is_single_locale_name(locale) {
-		return Codeset::Unloadable;
-	}
 	let Ok(name) = std::ffi::CString::new(locale) else {
 		return Codeset::Unloadable;
 	};
@@ -251,44 +252,16 @@ fn loaded_codeset_here(locale: &str) -> Codeset {
 /// trailing one as an empty directory name, and an empty name prefixes the
 /// locale with `/` — the root, not the working directory (measured:
 /// `LOCPATH=/nonexistent:` reads `/<name>/LC_CTYPE`). A value that is one
-/// file name rather than a list, such as `LOCALE_ARCHIVE`, is split here too:
-/// the only cost of reading a colon in it as a separator is asking for a
-/// working directory that is then correct anyway, because no value is ever
-/// rewritten.
+/// file name rather than a list, such as `LOCALE_ARCHIVE`, is split here
+/// too: no value is ever rewritten, so the only cost of reading a colon in
+/// one as a separator is asking for a working directory that is then the
+/// right one anyway.
 #[cfg(unix)]
 fn relative_entry_in(env: &LocaleEnv) -> bool {
 	use std::os::unix::ffi::OsStrExt as _;
 
 	env.iter().flatten().any(|value| {
 		value.as_bytes().split(|&byte| byte == b':').any(|entry| !entry.is_empty() && entry[0] != b'/')
-	})
-}
-
-/// The shell's locale environment with every relative entry removed, for the
-/// one case where no process can resolve one: a working directory that
-/// refuses to be entered for want of search permission. The reference binary
-/// sits in that directory and its own relative lookups fail there too
-/// (measured: `LOCPATH=missing:/…/latin` under mode 0600 reports
-/// `ISO-8859-1`, from the absolute entry), so dropping them is what it does.
-#[cfg(unix)]
-fn without_relative_entries(env: &LocaleEnv) -> LocaleEnv {
-	use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-
-	env.clone().map(|value| {
-		let value = value?;
-		let mut kept: Vec<u8> = Vec::with_capacity(value.len());
-		let mut empty = true;
-		for entry in value.as_bytes().split(|&byte| byte == b':') {
-			if !entry.is_empty() && entry[0] != b'/' {
-				continue;
-			}
-			if !empty {
-				kept.push(b':');
-			}
-			empty = false;
-			kept.extend_from_slice(entry);
-		}
-		(!empty).then(|| std::ffi::OsString::from_vec(kept))
 	})
 }
 
@@ -310,21 +283,9 @@ const LOCALE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(unix)]
 const LOCALE_ANSWER_LIMIT: usize = 1024;
 
-/// Why a query produced no answer.
+/// Why a query produced no answer: the words the caller reports.
 #[cfg(unix)]
-enum Unanswered {
-	/// The spawn's `chdir` into the shell's working directory did not
-	/// happen, and whether the reference could have resolved a relative
-	/// entry from there depends on which way (see
-	/// [`codeset_from_locale_utility`]).
-	WorkingDirectoryClosed {
-		/// The directory is not there at all, rather than refusing to be
-		/// entered.
-		gone: bool,
-	},
-	/// Anything else, in the words the caller reports.
-	Reported(String),
-}
+struct Unanswered(String);
 
 /// [`loaded_codeset`] as a process the shell starts would see it: the
 /// system's `locale` utility, which reports `nl_langinfo(CODESET)` after
@@ -335,54 +296,39 @@ enum Unanswered {
 /// async-signal-safe calls. It inherits this thread's signal mask, as any
 /// exec'd program does; that cannot strand the query, because the deadline is
 /// the parent's and the child has no part in enforcing it. It is named by an
-/// absolute path, put in its own process group so a descendant cannot outlive
-/// the deadline, and handed an environment built here — [`LOCALE_ENV_VARS`]
-/// as the shell set them, and `LC_CTYPE` — so no `PATH` or `LD_*` of anyone
-/// else's reaches it. Its working directory is the shell's whenever a value
-/// is relative to one, set by the spawn's `chdir` file action rather than by
-/// rewriting the value: a directory name is not a list element, and one
-/// containing `:` has no spelling inside `LOCPATH` at all.
+/// absolute path, put in its own process group so neither it nor a
+/// descendant outlives the query, and handed an environment built here —
+/// [`LOCALE_ENV_VARS`] as the shell set them, and `LC_CTYPE` — so no `PATH`
+/// or `LD_*` of anyone else's reaches it.
+///
+/// Its working directory is the shell's whenever a value is relative to one,
+/// set by the spawn's `chdir` file action rather than by rewriting the
+/// value: a directory name is not a list element, and one containing `:` has
+/// no spelling inside `LOCPATH` at all.
+///
+/// **A `chdir` that fails ends the query.** It is tempting to drop the
+/// relative entries and ask again, and it is wrong: the error says nothing
+/// about what the reference resolves from a directory it is already inside.
+/// `EACCES` can come from an ancestor the reference never traverses;
+/// `ENOENT` and `ENOTDIR` can mean the directory was renamed rather than
+/// removed; and a removed directory's parent is reached by `./../` as well
+/// as by `../`. Dropping entries also moves where the answer comes from: an
+/// emptied `LOCPATH` turns glibc's locale archive back on (`findlocale.c`
+/// consults it only when `locale_path == NULL`), which read `LOCPATH=missing`
+/// from an unenterable working directory as the archive's `UTF-8` where the
+/// reference reports `ANSI_X3.4-1968`. All of those are reported instead.
+///
+/// The working directory reaches the child as a pathname, so a directory
+/// replaced between this call and the child's `chdir` is entered in place of
+/// the one the shell sits in. [`crate::host::ChildEnv`] holds a pathname and
+/// starts every other command of the shell's the same way; closing that
+/// would take a different representation of the shell's working directory.
 #[cfg(unix)]
 fn codeset_from_locale_utility(locale: &str, env: &LocaleEnv, cwd: Option<&std::path::Path>) -> Codeset {
-	let closed = match locale_utility_charmap(locale, env, cwd) {
-		Ok(codeset) => return Codeset::Loaded(codeset),
-		Err(Unanswered::Reported(why)) => return Codeset::Unasked(why),
-		Err(Unanswered::WorkingDirectoryClosed { gone }) => gone,
-	};
-	// A directory that refuses to be entered refuses every process, the
-	// reference included: its own relative lookups fail there too, so the
-	// answer is the one the absolute entries give. A directory that is gone
-	// is different — the reference is still in it and the kernel still knows
-	// its parent — but only an entry reaching through that parent can profit
-	// from it, because a removed directory has no entries of its own. One of
-	// those, and the context cannot be reproduced at all.
-	if gone_beyond_reach(closed, env) {
-		return Codeset::Unasked(
-			"the shell's working directory is gone, and its locale search path reaches out through it".to_owned(),
-		);
-	}
-	match locale_utility_charmap(locale, &without_relative_entries(env), None) {
+	match locale_utility_charmap(locale, env, cwd) {
 		Ok(codeset) => Codeset::Loaded(codeset),
-		Err(Unanswered::Reported(why)) => Codeset::Unasked(why),
-		Err(Unanswered::WorkingDirectoryClosed { .. }) => {
-			Codeset::Unasked("the shell's working directory refused the locale utility".to_owned())
-		},
+		Err(Unanswered(why)) => Codeset::Unasked(why),
 	}
-}
-
-/// Whether a vanished working directory takes an answer with it: only an
-/// entry that starts at the parent (`..`) can still resolve from one, and
-/// only its pathname — which no longer names anything — could be used here.
-#[cfg(unix)]
-fn gone_beyond_reach(gone: bool, env: &LocaleEnv) -> bool {
-	use std::os::unix::ffi::OsStrExt as _;
-
-	gone && env.iter().flatten().any(|value| {
-		value
-			.as_bytes()
-			.split(|&byte| byte == b':')
-			.any(|entry| entry == b".." || entry.starts_with(b"../"))
-	})
 }
 
 /// The body of [`codeset_from_locale_utility`]: the first utility that is
@@ -396,7 +342,7 @@ fn locale_utility_charmap(
 	let Some(program) =
 		LOCALE_UTILITIES.iter().copied().find(|at| std::fs::metadata(at).is_ok_and(|meta| meta.is_file()))
 	else {
-		return Err(Unanswered::Reported(format!(
+		return Err(Unanswered(format!(
 			"there is no locale utility at {} or {}",
 			LOCALE_UTILITIES[0], LOCALE_UTILITIES[1]
 		)));
@@ -418,7 +364,7 @@ fn locale_utility_charmap_at(
 	use std::os::fd::AsRawFd as _;
 	use std::os::unix::ffi::OsStrExt as _;
 
-	let report = |why: String| Unanswered::Reported(why);
+	let report = Unanswered;
 	let named = program.display();
 	let text = |bytes: &[u8]| {
 		std::ffi::CString::new(bytes)
@@ -457,10 +403,9 @@ fn locale_utility_charmap_at(
 
 	let deadline = std::time::Instant::now() + LOCALE_QUERY_TIMEOUT;
 	let pid = spawn_locale_utility(&program_c, &argv, &envp, writer.as_raw_fd(), cwd_c.as_deref()).map_err(
-		|err| match (cwd_c.is_some(), err.raw_os_error()) {
-			(true, Some(libc::EACCES)) => Unanswered::WorkingDirectoryClosed { gone: false },
-			(true, Some(libc::ENOENT | libc::ENOTDIR)) => Unanswered::WorkingDirectoryClosed { gone: true },
-			_ => report(format!("{named} could not be started: {err}")),
+		|err| match cwd_c.is_some() {
+			true => report(format!("{named} could not enter the shell's working directory or start: {err}")),
+			false => report(format!("{named} could not be started: {err}")),
 		},
 	)?;
 	// The write end is the child's now; holding it here would keep the read
@@ -548,10 +493,7 @@ pub(crate) fn codeset_from_utility_for_test(
 		LOCALE_ENV_VARS.map(|name| env(name).filter(|value| !value.is_empty()).map(std::ffi::OsString::from));
 	match locale_utility_charmap_at(program, locale, &values, None) {
 		Ok(codeset) => Codeset::Loaded(codeset),
-		Err(Unanswered::Reported(why)) => Codeset::Unasked(why),
-		Err(Unanswered::WorkingDirectoryClosed { .. }) => {
-			Codeset::Unasked("the working directory refused the locale utility".to_owned())
-		},
+		Err(Unanswered(why)) => Codeset::Unasked(why),
 	}
 }
 
@@ -668,11 +610,10 @@ fn spawn_locale_utility(
 /// `actions` is an initialised file-action list and `cwd` outlives the spawn.
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe fn add_chdir(_actions: *mut libc::posix_spawn_file_actions_t, _cwd: &std::ffi::CStr) -> libc::c_int {
-	// No portable file action does this. Refusing with the error a closed
-	// working directory gives sends the caller down the same path: the
-	// absolute entries answer, and a relative one is dropped rather than
-	// resolved against the wrong directory.
-	libc::EACCES
+	// No portable file action does this, and nothing else here can put the
+	// child in the shell's working directory, so the query is reported
+	// rather than asked from a directory that is not the one in question.
+	libc::ENOSYS
 }
 
 /// Adds the child's `chdir` to a spawn's file actions.
@@ -719,7 +660,13 @@ fn reap_locale_utility(pid: libc::pid_t, deadline: std::time::Instant, kill_now:
 		// SAFETY: as above.
 		let reaped = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
 		if reaped == pid {
-			return completion_of(status);
+			let completion = completion_of(status);
+			// The leader is gone; anything it left in the group is not an
+			// answer and must not outlive the query. The group number is the
+			// leader's, and the kernel keeps it while the group has members.
+			// SAFETY: as above.
+			unsafe { libc::kill(-pid, libc::SIGKILL) };
+			return completion;
 		}
 		if reaped < 0 && !interrupted() {
 			return Completion::Ended(format!("could not be waited for: {}", std::io::Error::last_os_error()));
