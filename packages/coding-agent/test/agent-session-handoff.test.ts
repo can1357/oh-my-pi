@@ -210,6 +210,80 @@ describe("AgentSession handoff", () => {
 		expect(summary?.role === "compactionSummary" ? summary.summary : "").toContain("- review");
 	});
 
+	it("names namespaced skill reads in handoff details by the session's skills", async () => {
+		await session.dispose();
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const skill = (name: string) => ({
+			name,
+			description: `${name} instructions`,
+			filePath: `/skills/${name}/SKILL.md`,
+			baseDir: `/skills/${name}`,
+			source: "test",
+		});
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.asyncEnabled": false,
+				"compaction.keepRecentTokens": 1,
+			}),
+			modelRegistry,
+			skills: [skill("plugin"), skill("plugin/review")],
+		});
+		const usage = {
+			input: 16,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 24,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "read-skill",
+					name: "read",
+					arguments: { path: "skill://plugin/review/SKILL.md:raw" },
+				},
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "toolUse",
+			usage,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-skill",
+			toolName: "read",
+			content: [{ type: "text", text: "Review instructions." }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({ role: "user", content: "Continue after the review.", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Ready to continue." }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage,
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("Continue the reviewed work.");
+		await session.handoff();
+		const entry = sessionManager.getBranch().at(-1);
+		if (entry?.type !== "compaction") throw new Error("Expected a handoff compaction entry");
+		expect(entry.details).toMatchObject({ loadedSkills: ["plugin/review"] });
+		expect(entry.summary).toContain("- plugin/review");
+	});
+
 	it("persists loaded skills when navigating with a branch summary", async () => {
 		await session.dispose();
 		sessionManager = SessionManager.inMemory(tempDir.path());

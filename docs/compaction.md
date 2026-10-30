@@ -386,9 +386,11 @@ Legacy `<read-files>`/`<modified-files>` tags from summaries written by earlier 
 
 LLM, handoff, and branch summaries append a deterministic `<loaded-skills>` block
 when the discarded entries include skill loads. This includes `read skill://name`
-(including selectors and sub-files), legacy `skill` tool calls, and the custom
-messages used for `/skill:name` invocations and autoloaded skills. Skill URLs stay
-out of `<files>`.
+(including selectors, sub-files, and `skill://` targets inside a `;` path list),
+legacy `skill` tool calls, and the custom messages used for `/skill:name`
+invocations and autoloaded skills. Skill URLs stay out of `<files>`. Like the
+`skill://` protocol, `skill://plugin/name/…` is recorded as the namespaced skill
+`plugin/name` when the session has a skill by that name, and as `plugin` otherwise.
 
 The block lists up to 50 distinct skill names, most recent first, and tells the
 agent to re-load a skill with `read skill://<name>` before relying on its compacted

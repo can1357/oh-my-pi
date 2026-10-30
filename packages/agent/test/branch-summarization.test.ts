@@ -439,6 +439,34 @@ describe("branch summarization", () => {
 		expect(metadataOnly.summary).toContain("- release\n- review\n- deploy\n- build");
 	});
 
+	test("resolves namespaced skill reads with the session's known skill names", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "read-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: createAssistantMessage([
+					{
+						type: "toolCall",
+						id: "read",
+						name: "read",
+						arguments: { path: "skill://plugin/review/SKILL.md:raw" },
+					},
+				]),
+			},
+		];
+		const result = await generateBranchSummary(entries, {
+			model: MODEL,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => createAssistantMessage([{ type: "text", text: "Branch work completed." }]),
+			knownSkills: ["plugin", "plugin/review"],
+		});
+		expect(result.loadedSkills).toEqual(["plugin/review"]);
+		expect(result.summary).toContain("- plugin/review");
+	});
+
 	test("returns an aborted result when cancelled during transient retry backoff", async () => {
 		const reason = new Error("user cancelled branch summary");
 		let aborted = false;

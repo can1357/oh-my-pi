@@ -110,6 +110,8 @@ export interface GenerateBranchSummaryOptions {
 		ctx: Context,
 		options: SimpleStreamOptions,
 	) => Promise<AssistantMessage>;
+	/** Skill names the session can load; resolves namespaced `skill://<plugin>/<name>/…` reads. */
+	knownSkills?: readonly string[];
 }
 
 // ============================================================================
@@ -252,11 +254,13 @@ function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer
  *
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
+ * @param knownSkills - Skill names the session can load, for namespaced `skill://` reads
  */
 export function prepareBranchEntries(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	tokenBudget: number = 0,
+	knownSkills?: readonly string[],
 ): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
@@ -308,7 +312,7 @@ export function prepareBranchEntries(
 		totalTokens += tokens;
 	}
 
-	return { messages, fileOps, loadedSkills: collectLoadedSkillsFromEntries(entries), totalTokens };
+	return { messages, fileOps, loadedSkills: collectLoadedSkillsFromEntries(entries, [], knownSkills), totalTokens };
 }
 
 // ============================================================================
@@ -340,7 +344,7 @@ export async function generateBranchSummary(
 		messages: branchMessages,
 		fileOps,
 		loadedSkills = [],
-	} = prepareBranchEntries(entries, tokenizer, tokenBudget);
+	} = prepareBranchEntries(entries, tokenizer, tokenBudget, options.knownSkills);
 
 	if (branchMessages.length === 0) {
 		return {

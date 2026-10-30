@@ -1384,6 +1384,8 @@ export interface CompactionPreparation {
 	fileOps: FileOperations;
 	/** Skills whose content will be summarized, including prior summary metadata. */
 	loadedSkills?: string[];
+	/** Skill names the session can load; resolves namespaced `skill://<plugin>/<name>/…` reads. */
+	knownSkills?: readonly string[];
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -1454,13 +1456,15 @@ export function findReadableCompactionIndex(
 /**
  * Pass the caller's warm `tokenizer` (the Agent's for the active model) so the
  * full-branch estimate walk hits its memo; the cold default is for one-shot
- * callers that have no live agent.
+ * callers that have no live agent. `knownSkills` lists the session's skill
+ * names so `skill://<plugin>/<name>/…` reads resolve to their namespaced skill.
  */
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
+	knownSkills?: readonly string[],
 ): CompactionPreparation | undefined {
 	const lastEntry = pathEntries[pathEntries.length - 1];
 	// A speculative native record may leave uncovered messages before the record.
@@ -1613,7 +1617,9 @@ export function prepareCompaction(
 		loadedSkills: collectLoadedSkillsFromEntries(
 			compactionEntries.slice(0, cutPoint.firstKeptEntryIndex),
 			previousCompaction ? collectLoadedSkillsFromEntries([previousCompaction]) : [],
+			knownSkills,
 		),
+		knownSkills,
 		settings,
 	};
 }
@@ -1749,11 +1755,12 @@ export async function compact(
 		previousSummary,
 		previousPreserveData,
 		fileOps,
+		knownSkills,
 		settings,
 	} = preparation;
 	let loadedSkills = preparation.loadedSkills
 		? collectLoadedSkills([], preparation.loadedSkills)
-		: collectLoadedSkills([...messagesToSummarize, ...turnPrefixMessages]);
+		: collectLoadedSkills([...messagesToSummarize, ...turnPrefixMessages], [], knownSkills);
 
 	const reserveTokens = settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
 
@@ -2262,7 +2269,7 @@ export async function compact(
 					retry: summaryOneshotRetry(summaryOptions),
 				},
 			);
-			loadedSkills = collectLoadedSkills(allMessages.slice(originalCut, safeCut), loadedSkills);
+			loadedSkills = collectLoadedSkills(allMessages.slice(originalCut, safeCut), loadedSkills, knownSkills);
 			nativeSummary = remote.content;
 			nativeSignature = remote.signature;
 			nativeToolChanges = remote.toolChanges;
@@ -2355,7 +2362,7 @@ export async function compact(
 	// Responses compaction replaces the kept tail too, unless the request had to
 	// fall back to compacting only the prefix before that tail.
 	if (usedRemoteCompaction && nativeSummary === undefined && !remoteReplayThroughEntryId) {
-		loadedSkills = collectLoadedSkills(recentMessages, loadedSkills);
+		loadedSkills = collectLoadedSkills(recentMessages, loadedSkills, knownSkills);
 	}
 	summary = upsertLoadedSkills(summary, loadedSkills);
 	if (usedRemoteCompaction && nativeSummary === undefined && loadedSkills.length > 0) {

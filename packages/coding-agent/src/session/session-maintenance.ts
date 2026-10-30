@@ -385,7 +385,11 @@ function handoffSummaryFromDocument(
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	const loadedSkills = preparation.loadedSkills
 		? collectLoadedSkills([], preparation.loadedSkills)
-		: collectLoadedSkills([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]);
+		: collectLoadedSkills(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				[],
+				preparation.knownSkills,
+			);
 	return {
 		summary: upsertLoadedSkills(
 			upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
@@ -444,6 +448,8 @@ export interface SessionMaintenanceHost {
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
+	/** Names of the session's loaded skills, which resolve namespaced `skill://` reads in summaries. */
+	knownSkills(): readonly string[];
 	nonMessageTokenSource(): NonMessageTokenSource;
 	hasExperimentalContextRolloverTools(): boolean;
 	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
@@ -1329,7 +1335,13 @@ export class SessionMaintenance {
 				);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			const preparation = prepareCompaction(
+				pathEntries,
+				effectiveSettings,
+				activeModel,
+				this.#tokenizer,
+				this.#host.knownSkills(),
+			);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1719,7 +1731,7 @@ export class SessionMaintenance {
 	): Promise<CompactionResult> {
 		const entries = this.#host.sessionManager.getBranch();
 		const settings = this.#compactionSettings;
-		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
+		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer, this.#host.knownSkills());
 		if (!preparation)
 			throw new ManualCompactionNoOpError("Nothing to compact (session too small or already rolled over)");
 
@@ -1841,7 +1853,7 @@ export class SessionMaintenance {
 			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 		}
 		const branch = this.#host.sessionManager.getBranch();
-		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
+		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer, this.#host.knownSkills());
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 		const sourceLeafId = branch.at(-1)?.id;
 		const sourceSessionId = this.#host.sessionId();
@@ -2213,6 +2225,7 @@ export class SessionMaintenance {
 			resolveMethodSettings(compactionSettings, "handoff"),
 			model,
 			this.#tokenizer,
+			this.#host.knownSkills(),
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		const cleanup = Promise.withResolvers<void>();
@@ -2399,7 +2412,13 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		const preparation = prepareCompaction(
+			branch,
+			effectiveSettings,
+			model,
+			this.#tokenizer,
+			this.#host.knownSkills(),
+		);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -4036,7 +4055,11 @@ export class SessionMaintenance {
 		}
 		const loadedSkills =
 			preparation.loadedSkills ??
-			collectLoadedSkills([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]);
+			collectLoadedSkills(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				[],
+				preparation.knownSkills,
+			);
 		return { result: withLoadedSkillDetails(result, loadedSkills), framePayloadBytes };
 	}
 
@@ -5146,7 +5169,13 @@ export class SessionMaintenance {
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
+			let preparation = prepareCompaction(
+				pathEntriesForCompaction,
+				effectiveSettings,
+				this.#model,
+				this.#tokenizer,
+				this.#host.knownSkills(),
+			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -5201,6 +5230,7 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
+									this.#host.knownSkills(),
 								);
 								return preparation !== undefined;
 							},

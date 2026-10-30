@@ -191,8 +191,12 @@ describe("loaded skills in compaction summaries", () => {
 		]);
 	}
 
-	async function summarize(entries: SessionEntry[], generatedSummary = "Work completed.") {
-		const preparation = prepareCompaction(entries, settings, model);
+	async function summarize(
+		entries: SessionEntry[],
+		generatedSummary = "Work completed.",
+		knownSkills?: readonly string[],
+	) {
+		const preparation = prepareCompaction(entries, settings, model, undefined, knownSkills);
 		if (!preparation) throw new Error("Expected discarded history");
 		return compact(preparation, model, "test-key", undefined, undefined, {
 			completeImpl: async () => createAssistantMessage([{ type: "text", text: generatedSummary }]),
@@ -228,6 +232,24 @@ describe("loaded skills in compaction summaries", () => {
 				expect(result.summary).not.toContain("<loaded-skills>");
 			}
 		}
+	});
+
+	it("resolves namespaced skill URLs to the skill the skill protocol loads", async () => {
+		const entries: SessionEntry[] = [];
+		appendReadTurn(entries, ["skill://plugin/review/SKILL.md:raw", "skill://review/references/x.md"]);
+		appendTail(entries);
+		const result = await summarize(entries, "Work completed.", ["plugin", "plugin/review", "review"]);
+		expect((result.details as CompactionDetails).loadedSkills).toEqual(["review", "plugin/review"]);
+		expect(result.summary).toContain("- review\n- plugin/review");
+	});
+
+	it("collects skill URLs from every target of a delimited read path", async () => {
+		const entries: SessionEntry[] = [];
+		appendReadTurn(entries, ["docs/compaction.md; skill://review:raw", "skill://build;src/main.ts:1-5"]);
+		appendTail(entries);
+		const result = await summarize(entries);
+		expect((result.details as CompactionDetails).loadedSkills).toEqual(["build", "review"]);
+		expect(result.summary).toContain("- build\n- review");
 	});
 
 	it("carries skills across compactions, promotes newer loads, and replaces echoed blocks", async () => {
