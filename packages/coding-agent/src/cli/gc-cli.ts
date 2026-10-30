@@ -482,7 +482,7 @@ async function collectReferencedBlobHashes(
 	sessionRoots: string[],
 	exactSessionFiles: string[],
 	blobDir: string,
-): Promise<{ hashes: Set<string>; unresolved: string[] }> {
+): Promise<{ hashes: Set<string>; unresolved: string[]; leases: FileLockHandle[] }> {
 	// Every discovered name, deduplicated only as text. Collapsing them by a
 	// normalisation that resolves symlinks dropped an alias before anything
 	// opened it — and a guard that would have refused on that alias never
@@ -509,6 +509,8 @@ async function collectReferencedBlobHashes(
 	const hashes = new Set<string>();
 	const unresolved: string[] = [];
 	const read = new Set<string>();
+	// Held, not probed: released by the caller once the deletions are done.
+	const leases: FileLockHandle[] = [];
 	for (const file of names) {
 		// Opened first, and what this run trusts afterwards is the identity
 		// of the object it holds. Not the pathname: `/proc/self/fd/<n>` is
@@ -557,6 +559,12 @@ async function collectReferencedBlobHashes(
 			// same re-derivation one step later. What closes it is the
 			// mechanism that already says who is writing: a session a live
 			// process holds is not one this run may reclaim against.
+			//
+			// Taking the lease and giving it straight back proves nothing:
+			// the writer this is about simply starts a moment later, between
+			// the release and the deletion, and adds a reference to a blob
+			// this run has already decided is unreferenced. The lease is
+			// held from here until the deletions are done.
 			const lease = await tryAcquireSessionFileLease(file);
 			if (lease === null) {
 				unresolved.push(
@@ -565,7 +573,7 @@ async function collectReferencedBlobHashes(
 				);
 				continue;
 			}
-			lease?.release();
+			if (lease) leases.push(lease);
 			// Two names that turn out to be one file are read once, and the
 			// identity that says so is the opened file's own, not a guess
 			// made about their names beforehand. The link check above has
@@ -613,7 +621,7 @@ async function collectReferencedBlobHashes(
 	else if (standing.dev !== blobDirAtStart?.dev || standing.ino !== blobDirAtStart.ino) {
 		unresolved.push(`${blobDir}: its identity changed while the sweep was reading`);
 	}
-	return { hashes, unresolved };
+	return { hashes, unresolved, leases };
 }
 
 /**
@@ -778,7 +786,15 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
-	const exactSessionFiles = new Map<string, string>();
+	// Every name every source offers, kept as text. A map keyed by a
+	// normalising comparison let one source overwrite another's entry: a
+	// registry marker reached through a symlinked directory and a breadcrumb
+	// naming the same physical file collapsed to one key, the breadcrumb won
+	// it, and the route that would have been refused was gone before any
+	// check ran. The rule is the same here as inside the collector — no name
+	// collapses another by name; two entries become one only after they are
+	// opened and found to be one file.
+	const exactSessionFiles: string[] = [];
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		// `lstat`, and a failure is not an absence: a registered path that
 		// loops or cannot be read is a session this run cannot account for,
@@ -786,51 +802,60 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 		// the command as a stack trace.
 		const standing = await fs.lstat(file).catch(() => undefined);
 		if (!standing?.isFile() && !standing?.isSymbolicLink()) continue;
-		exactSessionFiles.set(normalizePathForComparison(file), file);
+		exactSessionFiles.push(file);
 	}
-	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
-		exactSessionFiles.set(normalizePathForComparison(file), file);
-	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], blobDir);
-	const { candidates, staging } = await collectBlobCandidates(blobDir);
-	const result: BlobGcResult = {
-		referenced: referenced.hashes.size,
-		candidates: candidates.length,
-		wouldDelete: 0,
-		deleted: 0,
-		bytes: 0,
-		errors: [],
-	};
-	// A sweep that could not finish reading keeps. Every refusal above is a
-	// reading this run knows is incomplete — a path it could not follow, a
-	// blob directory it could not identify or one that stopped being the
-	// directory it had been comparing against — and deleting on the strength
-	// of an incomplete reading is how an unreferenced-looking blob turns out
-	// to have been a session.
-	if (referenced.unresolved.length > 0) {
-		for (const reason of referenced.unresolved) {
-			result.errors.push(`${reason}; no blob was deleted in this run`);
+	exactSessionFiles.push(...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))));
+	const referenced = await collectReferencedBlobHashes(defaultRoots, exactSessionFiles, blobDir);
+	// Every session read above is still held. The decision about which blobs
+	// are unreferenced and the deletions that act on it happen inside that
+	// hold, because a lease taken and given back is only a question about a
+	// moment that has passed: a writer that starts between the release and
+	// the deletion adds a reference to a blob this run has already judged
+	// unreferenced, and the session is then readable and pointing at
+	// something that is gone.
+	try {
+		const { candidates, staging } = await collectBlobCandidates(blobDir);
+		const result: BlobGcResult = {
+			referenced: referenced.hashes.size,
+			candidates: candidates.length,
+			wouldDelete: 0,
+			deleted: 0,
+			bytes: 0,
+			errors: [],
+		};
+		// A sweep that could not finish reading keeps. Every refusal above is a
+		// reading this run knows is incomplete — a path it could not follow, a
+		// blob directory it could not identify or one that stopped being the
+		// directory it had been comparing against — and deleting on the strength
+		// of an incomplete reading is how an unreferenced-looking blob turns out
+		// to have been a session.
+		if (referenced.unresolved.length > 0) {
+			for (const reason of referenced.unresolved) {
+				result.errors.push(`${reason}; no blob was deleted in this run`);
+			}
+			return result;
+		}
+
+		const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
+		for (const candidate of candidates) {
+			if (referenced.hashes.has(candidate.hash)) continue;
+			if (candidate.mtimeMs > deleteBeforeMs) continue;
+			if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
+			result.wouldDelete += candidate.paths.length;
+			result.bytes += candidate.bytes;
+		}
+		// A live write renames its staging file away within milliseconds; one past
+		// the grace was left by a killed or crashed writer and nothing will claim it.
+		for (const file of staging) {
+			if (file.mtimeMs > deleteBeforeMs) continue;
+			result.wouldDelete += 1;
+			result.bytes += file.bytes;
+			if (options.apply) await unlinkBlobFile(file.path, result);
 		}
 		return result;
+	} finally {
+		for (const lease of referenced.leases) lease.release();
 	}
-
-	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const candidate of candidates) {
-		if (referenced.hashes.has(candidate.hash)) continue;
-		if (candidate.mtimeMs > deleteBeforeMs) continue;
-		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
-		result.wouldDelete += candidate.paths.length;
-		result.bytes += candidate.bytes;
-	}
-	// A live write renames its staging file away within milliseconds; one past
-	// the grace was left by a killed or crashed writer and nothing will claim it.
-	for (const file of staging) {
-		if (file.mtimeMs > deleteBeforeMs) continue;
-		result.wouldDelete += 1;
-		result.bytes += file.bytes;
-		if (options.apply) await unlinkBlobFile(file.path, result);
-	}
-	return result;
 }
 
 interface StaleCandidate {

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -295,6 +296,77 @@ describe("runGcCommand blob sweep", () => {
 			expect((await fs.lstat(hop)).isSymbolicLink()).toBe(true);
 		});
 	}
+	test("does not let one name source collapse another's entry", async () => {
+		const referencedHash = hashFor("merge-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, hashFor("merge-orphan"), "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+		// One physical transcript with two names from two sources: the
+		// registry records it through a symlinked directory inside the blob
+		// store, the breadcrumb names the file directly. Merging the sources
+		// under a normalised key let the breadcrumb overwrite the registry's
+		// entry, and the route that would have been refused was gone before
+		// any check ran.
+		const external = path.join(root, "external-sessions");
+		await fs.mkdir(external, { recursive: true });
+		const transcript = path.join(external, "current.jsonl");
+		await Bun.write(transcript, `${JSON.stringify({ type: "message", ref: `blob:sha256:${referencedHash}` })}\n`);
+		const linkedDir = path.join(getBlobsDir(root), hashFor("merge-dir"));
+		await fs.symlink(external, linkedDir);
+		const aged = new Date(Date.now() - 86_400_000);
+		await fs.lutimes(linkedDir, aged, aged);
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "session-1"), path.join(linkedDir, "current.jsonl"));
+		const crumbDir = getTerminalSessionsDir(root);
+		await fs.mkdir(crumbDir, { recursive: true });
+		await Bun.write(path.join(crumbDir, "tty-1"), `${external}\ncurrent.jsonl\n`);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(true);
+		expect((await fs.lstat(linkedDir)).isSymbolicLink()).toBe(true);
+	});
+
+	test("still holds each session's lease while it deletes", async () => {
+		const orphan = await writeBlob(root, hashFor("held-orphan"), "orphan");
+		await agePath(orphan);
+		const session = await writeSession(root, "project", "held", "complete");
+		const header: unknown = JSON.parse((await Bun.file(session).text()).split("\n")[0] ?? "{}");
+		const sessionId =
+			header && typeof header === "object" && "id" in header && typeof header.id === "string" ? header.id : "";
+		expect(sessionId).not.toBe("");
+
+		// A lease taken and given back is a question about a moment that has
+		// passed: the writer it is about starts between the release and the
+		// deletion and adds a reference to a blob this run has already judged
+		// unreferenced. So the lease has to still be held here.
+		let heldDuringDeletion: boolean | undefined;
+		const realUnlink = fs.unlink;
+		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			if (heldDuringDeletion === undefined) {
+				const contender = tryAcquireSessionLease(sessionId);
+				heldDuringDeletion = contender === null;
+				contender?.release();
+			}
+			return await realUnlink(target);
+		});
+		try {
+			await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			unlink.mockRestore();
+		}
+
+		expect(heldDuringDeletion).toBe(true);
+		// And released afterwards, so the next writer is not locked out.
+		const after = tryAcquireSessionLease(sessionId);
+		expect(after).not.toBeNull();
+		after?.release();
+	});
 	test("refuses to reclaim while a running process owns a session", async () => {
 		const orphan = await writeBlob(root, hashFor("owned-orphan"), "orphan");
 		await agePath(orphan);
