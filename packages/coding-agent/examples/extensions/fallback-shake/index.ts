@@ -13,16 +13,19 @@ export default function fallbackShake(pi: ExtensionAPI): void {
 			...MAX_THINKING_SUFFIX_OPTIONS,
 			isLiteralModelId: (provider: string, id: string) => ctx.modelRegistry.find(provider, id) !== undefined,
 		};
-		const parsedFrom = parseModelString(event.from, parseOptions);
-		const from =
-			(parsedFrom && ctx.modelRegistry.find(parsedFrom.provider, parsedFrom.id)) ??
-			ctx.models.resolve(event.from) ??
-			parseModelString(splitUpstreamRouting(event.from)?.base ?? event.from, parseOptions);
+		const resolveIdentity = (selector: string) => {
+			const parsed = parseModelString(selector, parseOptions);
+			return (
+				(parsed && ctx.modelRegistry.find(parsed.provider, parsed.id)) ??
+				ctx.models.resolve(selector) ??
+				parseModelString(splitUpstreamRouting(selector)?.base ?? selector, parseOptions)
+			);
+		};
 		const shouldShake = shouldShakeFallback({
 			agentKind: ctx.agent.kind,
 			target: event.target,
-			from,
-			to: ctx.models.resolve(event.to),
+			from: resolveIdentity(event.from),
+			to: resolveIdentity(event.to),
 			current: ctx.model,
 		});
 		if (!shouldShake) return;

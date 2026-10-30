@@ -225,6 +225,21 @@ describe("automatic fallback shake", () => {
 		expect(await Bun.file(artifact).text()).toContain("exchange-0 payload");
 	});
 
+	it("resolves explicit fallback identities without probing unrelated provider credentials", async () => {
+		seed(8);
+		const createContext = runner.createContext.bind(runner);
+		vi.spyOn(runner, "createContext").mockImplementation(() => {
+			const context = createContext();
+			vi.spyOn(context.models, "resolve").mockImplementation(() => {
+				throw new Error("Unrelated provider credentials must not be probed");
+			});
+			return context;
+		});
+		await session.prompt("continue without ambient credentials");
+		await session.waitForIdle();
+		expect(JSON.stringify(requests[1]?.context.messages)).toContain("artifact://");
+	});
+
 	it.each([0, 5, 6])("keeps all entries when only %i user-started exchanges exist", async count => {
 		seed(count);
 		const before = entryBytes(manager.getBranch());
