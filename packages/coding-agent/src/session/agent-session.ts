@@ -4022,6 +4022,12 @@ export class AgentSession implements SettingsScope {
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			// A `tool_execution_end` carries no run identity, so a duplicate of an
+			// earlier end is indistinguishable from the current run's own end: a
+			// host that replays or reorders these frames can settle a run that is
+			// still live, and a record parked against it is then dropped on the way
+			// back rather than reported. The loop emits one end per start, in
+			// order, so only a replayed or reordered stream can make that shape.
 			const run = this.#toolCallRuns.get(event.toolCallId);
 			if (run) run.settled = true;
 			else this.#toolCallRuns.set(event.toolCallId, { generation: 1, settled: true });
