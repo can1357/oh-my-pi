@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import {
 	buildStepDigest,
+	localStepSummary,
 	normalizeStepSummary,
 	STEP_SUMMARY_CUSTOM_TYPE,
 	stepSummariesFromEntries,
@@ -37,6 +38,69 @@ function result(toolCallId: string, text: string, isError = false): ToolResultMe
 		timestamp: 2,
 	};
 }
+
+function toolResult(toolCallId: string, toolName: string, details: unknown, isError = false): ToolResultMessage {
+	return { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text: "" }], details, isError, timestamp: 2 };
+}
+
+describe("localStepSummary", () => {
+	it("captions read-only search steps from arguments and result counts", () => {
+		expect(
+			localStepSummary({
+				message: assistant([
+					{ type: "toolCall", id: "g", name: "grep", arguments: { pattern: "retryLoop", path: "src" } },
+					{ type: "toolCall", id: "f", name: "glob", arguments: { path: "src/**/*.md" } },
+					{ type: "toolCall", id: "r1", name: "read", arguments: { path: "src/session/manager.ts:50-80" } },
+					{ type: "toolCall", id: "r2", name: "read", arguments: { path: "src/b.ts" } },
+					{ type: "toolCall", id: "r3", name: "read", arguments: { path: "src/session/manager.ts:200-220" } },
+				]),
+				toolResults: [
+					toolResult("g", "grep", { matchCount: 3, fileCount: 1 }),
+					toolResult("f", "glob", { fileCount: 0 }),
+					toolResult("r1", "read", {}),
+					toolResult("r2", "read", {}),
+					toolResult("r3", "read", {}),
+				],
+			}),
+		).toBe("Found 3 matches for retryLoop in 1 file; no files matching src/**/*.md; read manager.ts and b.ts");
+		expect(
+			localStepSummary({
+				message: assistant(
+					["a", "b", "c", "d", "e"].map(name => ({
+						type: "toolCall" as const,
+						id: name,
+						name: "read",
+						arguments: { path: `${name}.ts` },
+					})),
+				),
+				toolResults: ["a", "b", "c", "d", "e"].map(name => toolResult(name, "read", {})),
+			}),
+		).toBe("Read a.ts, b.ts, c.ts and 2 more");
+	});
+
+	it("leaves failed, mixed, remote, or count-less steps to the model", () => {
+		const grep = { type: "toolCall" as const, id: "g", name: "grep", arguments: { pattern: "x" } };
+		const caption = (calls: AssistantMessage["content"], results: ToolResultMessage[]) =>
+			localStepSummary({ message: assistant(calls), toolResults: results });
+		expect(caption([grep], [toolResult("g", "grep", { matchCount: 1 }, true)])).toBe(undefined);
+		expect(caption([grep], [toolResult("g", "grep", { matchCount: 0, error: "bad regex" })])).toBe(undefined);
+		expect(caption([grep], [toolResult("g", "grep", {})])).toBe(undefined);
+		expect(caption([grep], [])).toBe(undefined);
+		expect(
+			caption(
+				[grep, { type: "toolCall", id: "b", name: "bash", arguments: { command: "ls" } }],
+				[toolResult("g", "grep", { matchCount: 1 }), toolResult("b", "bash", {})],
+			),
+		).toBe(undefined);
+		expect(
+			caption(
+				[{ type: "toolCall", id: "r", name: "read", arguments: { path: "https://example.com/a.md" } }],
+				[toolResult("r", "read", {})],
+			),
+		).toBe(undefined);
+		expect(caption([{ type: "text", text: "done" }], [])).toBe(undefined);
+	});
+});
 
 describe("buildStepDigest", () => {
 	it("skips steps without tool calls: their reply already says what happened", () => {
