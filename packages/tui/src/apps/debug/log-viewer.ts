@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspPickerGroup, TspPickerItem, TspTone } from "@oh-my-pi/pi-wire";
 import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
 import type { Component } from "../../tui";
@@ -678,7 +679,7 @@ export class DebugLogViewerComponent implements Component {
 		this.#onError = options.onError;
 		this.#onUpdate = options.onUpdate;
 		this.#frame = new DebugViewerFrame({
-			title: "Recent Logs",
+			title: __ompTranslate("Recent Logs"),
 			getHeight: () => process.stdout.rows || this.#terminalRows || 24,
 			headerRows: 2,
 			footerRows: 2,
@@ -883,11 +884,11 @@ export class DebugLogViewerComponent implements Component {
 				const needle = query.toLowerCase();
 				for (const viewerRow of model.rows) {
 					if (viewerRow.kind === "warning") {
-						order.push({ group: "session", label: "This session" });
+						order.push({ group: "session", label: __ompTranslate("This session") });
 						continue;
 					}
 					if (viewerRow.kind === "load-older") {
-						items.push({ id: OLDER_ITEM, label: "Load older entries", tone: "muted" });
+						items.push({ id: OLDER_ITEM, label: __ompTranslate("Load older entries"), tone: "muted" });
 						order.push(OLDER_ITEM);
 						continue;
 					}
@@ -908,21 +909,21 @@ export class DebugLogViewerComponent implements Component {
 				const subtitle = [
 					`${model.visibleLogCount}/${model.logCount} entries`,
 					selected.length > 1 ? `${selected.length} selected` : undefined,
-					model.historyLimitReached ? "history limit reached" : undefined,
-					this.#loadingOlder ? "loading older…" : undefined,
+					model.historyLimitReached ? __ompTranslate("history limit reached") : undefined,
+					this.#loadingOlder ? __ompTranslate("loading older…") : undefined,
 				]
 					.filter(part => part !== undefined)
 					.join(" · ");
 				return picker(
 					{
-						title: "Recent logs",
+						title: __ompTranslate("Recent logs"),
 						subtitle,
 						noun: "entries",
 						size: "lg",
 						layout: "rows",
 						preview: preview ? "below" : "none",
 						...pickerQuery(this.#filter),
-						placeholder: "Filter logs…",
+						placeholder: __ompTranslate("Filter logs…"),
 						columns: [
 							{ id: "pid", format: "dim", priority: 0 },
 							{ id: "time", format: "dim", priority: 1 },
@@ -938,18 +939,20 @@ export class DebugLogViewerComponent implements Component {
 									: `l${cursorLog}`,
 						current: selected.length > 1 ? selected.map(index => `l${index}`) : [],
 						total: model.logCount,
-						empty: query ? "No matching log entries" : "No log entries",
+						empty: query ? __ompTranslate("No matching log entries") : __ompTranslate("No log entries"),
 						message: this.#statusMessage,
 						actions: [
-							pickerAction("copy", "Copy", "ctrl+c", { primary: true }),
-							pickerAction("all", "Select all", "ctrl+a"),
-							pickerAction("pid", "This process", "ctrl+p", { on: model.isProcessFilterEnabled() }),
-							pickerAction("older", "Load older", "ctrl+o", {
+							pickerAction("copy", __ompTranslate("Copy"), "ctrl+c", { primary: true }),
+							pickerAction("all", __ompTranslate("Select all"), "ctrl+a"),
+							pickerAction("pid", __ompTranslate("This process"), "ctrl+p", {
+								on: model.isProcessFilterEnabled(),
+							}),
+							pickerAction("older", __ompTranslate("Load older"), "ctrl+o", {
 								disabled: model.canLoadOlder()
 									? undefined
 									: model.historyLimitReached
-										? "Log history limit reached"
-										: "No older log entries",
+										? __ompTranslate("Log history limit reached")
+										: __ompTranslate("No older log entries"),
 							}),
 							CLOSE_ACTION,
 						],
@@ -1015,7 +1018,7 @@ export class DebugLogViewerComponent implements Component {
 		let anchor: DebugViewerFrameContent["body"]["anchor"];
 
 		if (rendered.length === 0) {
-			lines.push(theme.fg("muted", "no matches"));
+			lines.push(theme.fg("muted", __ompTranslate("no matches")));
 			mapping.push(undefined);
 		} else {
 			for (const entry of rendered) {
@@ -1041,29 +1044,50 @@ export class DebugLogViewerComponent implements Component {
 	#summaryText(): string {
 		const selected = this.#model.getSelectedCount();
 		const expanded = this.#model.expandedCount;
-		const limitText = this.#model.historyLimitReached ? `  ${theme.fg("warning", "history limit reached")}` : "";
-		return `${theme.fg("muted", "showing")} ${theme.fg("accent", `${this.#model.visibleLogCount}/${this.#model.logCount}`)}  ${theme.fg("muted", "selected")} ${theme.fg(selected > 0 ? "accent" : "muted", String(selected))}  ${theme.fg("muted", "expanded")} ${theme.fg(expanded > 0 ? "accent" : "muted", String(expanded))}${limitText}`;
+		const limitText = this.#model.historyLimitReached
+			? `  ${theme.fg("warning", __ompTranslate("history limit reached"))}`
+			: "";
+		return `${theme.fg("muted", __ompTranslate("showing"))} ${theme.fg("accent", `${this.#model.visibleLogCount}/${this.#model.logCount}`)}  ${theme.fg("muted", __ompTranslate("selected"))} ${theme.fg(selected > 0 ? "accent" : "muted", String(selected))}  ${theme.fg("muted", __ompTranslate("expanded"))} ${theme.fg(expanded > 0 ? "accent" : "muted", String(expanded))}${limitText}`;
 	}
 
 	#controlsText(): string {
-		return `${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy · ${formatKeyHints(["up", "down"])}/wheel move · ${formatKeyHints(["pageUp", "pageDown"])} page · ${formatKeyHints(["home", "end"])} first/last · click toggle · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["left", "right"])} collapse/expand · ${formatKeyHint("ctrl+a")} all · ${formatKeyHint("ctrl+o")} older · ${formatKeyHint("ctrl+p")} pid`;
+		return __ompTranslate(
+			"{0} close · {1} copy · {2}/wheel move · {3} page · {4} first/last · click toggle · {5} select · {6} collapse/expand · {7} all · {8} older · {9} pid",
+			`${formatKeyHint("escape")}`,
+			`${formatKeyHint("ctrl+c")}`,
+			`${formatKeyHints(["up", "down"])}`,
+			`${formatKeyHints(["pageUp", "pageDown"])}`,
+			`${formatKeyHints(["home", "end"])}`,
+			`${formatKeyHints(["shift+up", "shift+down"])}`,
+			`${formatKeyHints(["left", "right"])}`,
+			`${formatKeyHint("ctrl+a")}`,
+			`${formatKeyHint("ctrl+o")}`,
+			`${formatKeyHint("ctrl+p")}`,
+		);
 	}
 
 	#filterText(): string {
 		const value = this.#filter.getValue();
 		const [field = ""] = this.#filter.render(visibleWidth(value) + 1);
-		const query = value.length === 0 ? field + theme.fg("muted", "type to filter") : theme.fg("accent", field);
+		const query =
+			value.length === 0 ? field + theme.fg("muted", __ompTranslate("type to filter")) : theme.fg("accent", field);
 		const pidStatus = this.#model.isProcessFilterEnabled()
-			? theme.fg("success", "pid on")
-			: theme.fg("muted", "pid off");
-		const loading = this.#loadingOlder ? `  ${theme.fg("warning", "loading older…")}` : "";
-		return `${theme.fg("muted", "filter")} ${query}  ${pidStatus}${loading}`;
+			? theme.fg("success", __ompTranslate("pid on"))
+			: theme.fg("muted", __ompTranslate("pid off"));
+		const loading = this.#loadingOlder ? `  ${theme.fg("warning", __ompTranslate("loading older…"))}` : "";
+		return `${theme.fg("muted", __ompTranslate("filter"))} ${query}  ${pidStatus}${loading}`;
 	}
 
 	#statusText(): string {
 		return this.#statusMessage
 			? theme.fg("success", this.#statusMessage)
-			: theme.fg("dim", `${formatKeyHint("enter")} loads older when highlighted; printable keys update filter`);
+			: theme.fg(
+					"dim",
+					__ompTranslate(
+						"{0} loads older when highlighted; printable keys update filter",
+						`${formatKeyHint("enter")}`,
+					),
+				);
 	}
 
 	async #handleLoadOlder(additionalCount: number = LOAD_OLDER_CHUNK): Promise<void> {
@@ -1104,8 +1128,8 @@ export class DebugLogViewerComponent implements Component {
 			return await this.#model.loadOlder(additionalCount);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.#statusMessage = `Load older failed: ${message}`;
-			this.#onError?.(`Failed to load older logs: ${message}`);
+			this.#statusMessage = __ompTranslate("Load older failed: {0}", `${message}`);
+			this.#onError?.(__ompTranslate("Failed to load older logs: {0}", `${message}`));
 			this.#onUpdate?.();
 			return false;
 		} finally {
@@ -1199,7 +1223,7 @@ export class DebugLogViewerComponent implements Component {
 		const selected = selectedPayload.length === 0 ? [] : selectedPayload.split("\n");
 
 		if (selected.length === 0) {
-			const message = "No log entry selected";
+			const message = __ompTranslate("No log entry selected");
 			this.#statusMessage = message;
 			this.#onStatus?.(message);
 			return;
@@ -1207,13 +1231,17 @@ export class DebugLogViewerComponent implements Component {
 
 		try {
 			this.#deps.copyToClipboard(selectedPayload);
-			const message = `Copied ${selected.length} log ${selected.length === 1 ? "entry" : "entries"}`;
+			const message = __ompTranslate(
+				"Copied {0} log {1}",
+				`${selected.length}`,
+				`${selected.length === 1 ? "entry" : "entries"}`,
+			);
 			this.#statusMessage = message;
 			this.#onStatus?.(message);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.#statusMessage = `Copy failed: ${message}`;
-			this.#onError?.(`Failed to copy logs: ${message}`);
+			this.#statusMessage = __ompTranslate("Copy failed: {0}", `${message}`);
+			this.#onError?.(__ompTranslate("Failed to copy logs: {0}", `${message}`));
 		}
 	}
 }

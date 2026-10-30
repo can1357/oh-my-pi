@@ -2,6 +2,7 @@
 // High-level API
 // ============================================================================
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
@@ -70,14 +71,14 @@ export async function refreshOAuthToken(
 	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
 	if (!credentials) {
-		throw new AIError.OAuthError(`No OAuth credentials found for ${provider}`, {
+		throw new AIError.OAuthError(__ompTranslate("No OAuth credentials found for {0}", `${provider}`), {
 			kind: "validation",
 			provider,
 		});
 	}
 	const def = getProviderDefinition(provider);
 	if (!def?.login) {
-		throw new AIError.OAuthError(`Unknown OAuth provider: ${provider}`, {
+		throw new AIError.OAuthError(__ompTranslate("Unknown OAuth provider: {0}", `${provider}`), {
 			kind: "validation",
 			provider,
 		});
@@ -132,7 +133,10 @@ export async function getOAuthApiKey(
 	// as `invalid_grant` and disables the row. Refuse loudly instead.
 	if (Date.now() >= creds.expires) {
 		throw new AIError.OAuthError(
-			`OAuth credential for ${provider} is expired and must be refreshed via AuthStorage before getOAuthApiKey is called`,
+			__ompTranslate(
+				"OAuth credential for {0} is expired and must be refreshed via AuthStorage before getOAuthApiKey is called",
+				`${provider}`,
+			),
 			{ kind: "validation", provider },
 		);
 	}

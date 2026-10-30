@@ -63,20 +63,27 @@ function imagesCell(model: Model<Api>): string {
 }
 
 describe("omp models kind filtering", () => {
-	it("accepts every advertised kind and rejects invalid values", async () => {
+	it("accepts every advertised model kind", async () => {
 		for (const kind of [...MODEL_KINDS, "all"]) {
 			const command = new Models(["--kind", kind], TEST_CONFIG);
 			const parsed = await command.parse(Models);
 			expect(parsed.flags.kind).toBe(kind);
 		}
-
 		const defaults = await new Models([], TEST_CONFIG).parse(Models);
 		expect(defaults.flags.kind).toBe("chat");
+	});
 
-		const invalid = new Models(["--kind", "hologram"], TEST_CONFIG);
-		await expect(invalid.parse(Models)).rejects.toThrow(
-			`Expected --kind to be one of: ${[...MODEL_KINDS, "all"].join(", ")}; got "hologram"`,
-		);
+	it("identifies the invalid model-kind option without disclosing its rejected value", async () => {
+		const rejectedValue = "OMP_FAKE_API_KEY_NOT_FOR_LOGS";
+		let failure: unknown;
+		try {
+			await new Models(["--kind", rejectedValue], TEST_CONFIG).parse(Models);
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("--kind");
+		expect((failure as Error).message).not.toContain(rejectedValue);
 	});
 
 	it("keeps the default listing chat-only and selects runner or all pools", () => {

@@ -2,6 +2,7 @@
  * System information collection for debug reports.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as os from "node:os";
 import { formatBytes, getProjectDir, VERSION } from "@oh-my-pi/pi-utils";
 
@@ -79,20 +80,24 @@ export async function collectSystemInfo(): Promise<SystemInfo> {
 /** Format system info for display */
 export function formatSystemInfo(info: SystemInfo): string {
 	const lines = [
-		"System Information",
+		__ompTranslate("System Information"),
 		"━━━━━━━━━━━━━━━━━━",
 		`OS:      ${info.os}`,
-		`Arch:    ${info.arch}`,
+		__ompTranslate("Arch:    {0}", `${info.arch}`),
 		`CPU:     ${info.cpu}`,
-		`Memory:  ${formatBytes(info.memory.total)} (${formatBytes(info.memory.free)} free)`,
+		__ompTranslate(
+			"Memory:  {0} ({1} free)",
+			`${formatBytes(info.memory.total)}`,
+			`${formatBytes(info.memory.free)}`,
+		),
 		`Bun:     ${info.versions.bun}`,
-		`App:     omp ${info.versions.app}`,
-		`Node:    ${info.versions.node} (compat)`,
-		`CWD:     ${info.cwd}`,
-		`Shell:   ${info.shell}`,
+		__ompTranslate("App:     omp {0}", `${info.versions.app}`),
+		__ompTranslate("Node:    {0} (compat)", `${info.versions.node}`),
+		__ompTranslate("CWD:     {0}", `${info.cwd}`),
+		__ompTranslate("Shell:   {0}", `${info.shell}`),
 	];
 	if (info.terminal) {
-		lines.push(`Terminal: ${info.terminal}`);
+		lines.push(__ompTranslate("Terminal: {0}", `${info.terminal}`));
 	}
 	return lines.join("\n");
 }

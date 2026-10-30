@@ -8,6 +8,7 @@
  * (`tp-...`/`ttp-...`) keys, probing the regional Token Plan clusters in fallback order.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { isXiaomiTokenPlanKey } from "@oh-my-pi/pi-catalog/wire/xiaomi-token-plan";
@@ -28,7 +29,9 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 		? ["xiaomi-token-plan-sgp", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn"].map(provider => {
 				const login = authPolicyFor(provider)?.login;
 				if (login?.kind !== "api-key" || login.validate?.kind !== "chat-completions") {
-					throw new AIError.ConfigurationError(`Missing chat-completions validation policy for ${provider}`);
+					throw new AIError.ConfigurationError(
+						__ompTranslate("Missing chat-completions validation policy for {0}", `${provider}`),
+					);
 				}
 				return login.validate;
 			})
@@ -80,8 +83,13 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 		}
 		const error = new AIError.OAuthError(
 			details
-				? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
-				: `${PROVIDER_NAME} API key validation failed (${response.status})`,
+				? __ompTranslate(
+						"{0} API key validation failed ({1}): {2}",
+						`${PROVIDER_NAME}`,
+						`${response.status}`,
+						`${details}`,
+					)
+				: __ompTranslate("{0} API key validation failed ({1})", `${PROVIDER_NAME}`, `${response.status}`),
 			{ kind: "validation", provider: PROVIDER_ID, status: response.status },
 		);
 		// 401 means this endpoint didn't accept the key; try the next one. Any other
@@ -94,7 +102,7 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 	}
 	throw (
 		lastError ??
-		new AIError.OAuthError(`${PROVIDER_NAME} API key validation failed`, {
+		new AIError.OAuthError(__ompTranslate("{0} API key validation failed", `${PROVIDER_NAME}`), {
 			kind: "validation",
 			provider: PROVIDER_ID,
 		})
@@ -114,11 +122,11 @@ export async function loginXiaomi(options: OAuthController): Promise<string> {
 	}
 	options.onAuth?.({
 		url: STANDARD_AUTH_URL,
-		instructions: "Copy your API key from the Xiaomi MiMo console",
+		instructions: __ompTranslate("Copy your API key from the Xiaomi MiMo console"),
 	});
 	const apiKey = await options.onPrompt({
-		message: "Paste your Xiaomi API key (sk-... or Token Plan tp-... / ttp-...)",
-		placeholder: "sk-..., tp-..., or ttp-...",
+		message: __ompTranslate("Paste your Xiaomi API key (sk-... or Token Plan tp-... / ttp-...)"),
+		placeholder: __ompTranslate("sk-..., tp-..., or ttp-..."),
 	});
 	if (options.signal?.aborted) {
 		throw new AIError.LoginCancelledError();
@@ -128,7 +136,7 @@ export async function loginXiaomi(options: OAuthController): Promise<string> {
 		throw new AIError.ApiKeyRequiredError();
 	}
 
-	options.onProgress?.(`Validating ${PROVIDER_ID} API key...`);
+	options.onProgress?.(__ompTranslate("Validating {0} API key...", `${PROVIDER_ID}`));
 	await validateXiaomiApiKey(trimmed, options.signal, fetchImpl);
 	return trimmed;
 }

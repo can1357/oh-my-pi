@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type AppKeybinding, formatKeyHint, type KeybindingsManager, keyHintPlatform } from "./app-keybindings";
 import { Markdown } from "./components/markdown";
@@ -49,7 +50,9 @@ function hints(keys: readonly KeyName[]): HotkeyPart {
 function markdownPart(bindings: HotkeysMarkdownBindings, part: HotkeyPart): string {
 	if ("text" in part) return part.text;
 	if ("token" in part) return `\`${part.token}\``;
-	const label = part.action ? bindings.keybindings.getDisplayString(part.action) || "Disabled" : part.keys.join("/");
+	const label = part.action
+		? bindings.keybindings.getDisplayString(part.action) || __ompTranslate("Disabled\u0004hotkey.state.disabled")
+		: part.keys.join("/");
 	return `\`${label}\``;
 }
 
@@ -60,7 +63,11 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 	const act = (action: AppKeybinding): HotkeyPart => {
 		const keys = bindings.keybindings.getKeys(action);
 		if (keys.length > 0) return { keys: keys.map(formatKeyHint), ids: keys, action };
-		return { keys: [bindings.keybindings.getDisplayString(action) || "Disabled"], ids: [], action };
+		return {
+			keys: [bindings.keybindings.getDisplayString(action) || __ompTranslate("Disabled\u0004hotkey.state.disabled")],
+			ids: [],
+			action,
+		};
 	};
 	const pushToTalkKeys = bindings.keybindings.getKeys("app.stt.pushToTalk");
 	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
@@ -79,102 +86,115 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 	if (deletingExitKeys.length > 0) {
 		exitRows.push({
 			keys: [hints(deletingExitKeys)],
-			action: "Delete char forward (with draft) / exit (empty prompt)",
+			action: __ompTranslate("Delete char forward (with draft) / exit (empty prompt)"),
 		});
 	}
 	// An unbound exit action still gets its row, mirroring the `Disabled` hint every other row uses.
 	if (quittingExitKeys.length > 0 || deletingExitKeys.length === 0) {
 		exitRows.push({
-			keys: [quittingExitKeys.length > 0 ? hints(quittingExitKeys) : { keys: ["Disabled"], ids: [] }],
-			action: "Exit",
+			keys: [
+				quittingExitKeys.length > 0
+					? hints(quittingExitKeys)
+					: { keys: [__ompTranslate("Disabled\u0004hotkey.state.disabled")], ids: [] },
+			],
+			action: __ompTranslate("Exit"),
 		});
 	}
 	const groups: HotkeyGroup[] = [
 		{
-			title: "Navigation",
+			title: __ompTranslate("Navigation"),
 			rows: [
 				{
 					keys: [hints(["up", "down", "left", "right"])],
-					action: `Move cursor / browse history (${formatKeyHint("up")} when empty)`,
+					action: __ompTranslate("Move cursor / browse history ({0} when empty)", `${formatKeyHint("up")}`),
 				},
-				{ keys: [hints(["alt+left", "alt+right"])], action: "Move by word" },
+				{ keys: [hints(["alt+left", "alt+right"])], action: __ompTranslate("Move by word") },
 				{
 					keys: [hints(isMac ? ["ctrl+a", "home", "super+left"] : ["ctrl+a", "home"])],
-					action: "Start of line",
+					action: __ompTranslate("Start of line"),
 				},
-				{ keys: [hints(isMac ? ["ctrl+e", "end", "super+right"] : ["ctrl+e", "end"])], action: "End of line" },
+				{
+					keys: [hints(isMac ? ["ctrl+e", "end", "super+right"] : ["ctrl+e", "end"])],
+					action: __ompTranslate("End of line"),
+				},
 			],
 		},
 		{
-			title: "Editing",
+			title: __ompTranslate("Editing"),
 			rows: [
-				{ keys: [hints(["enter"])], action: "Send message" },
-				{ keys: [hints(["shift+enter", "alt+enter"])], action: "New line" },
-				{ keys: [hints(["ctrl+w", "alt+backspace"])], action: "Delete word backwards" },
-				{ keys: [hints(["ctrl+u"])], action: "Delete to start of line" },
-				{ keys: [hints(["ctrl+k"])], action: "Delete to end of line" },
-				{ keys: [act("app.clipboard.copyLine")], action: "Copy current line" },
-				{ keys: [act("app.clipboard.copyPrompt")], action: "Copy whole prompt" },
+				{ keys: [hints(["enter"])], action: __ompTranslate("Send message") },
+				{ keys: [hints(["shift+enter", "alt+enter"])], action: __ompTranslate("New line") },
+				{ keys: [hints(["ctrl+w", "alt+backspace"])], action: __ompTranslate("Delete word backwards") },
+				{ keys: [hints(["ctrl+u"])], action: __ompTranslate("Delete to start of line") },
+				{ keys: [hints(["ctrl+k"])], action: __ompTranslate("Delete to end of line") },
+				{ keys: [act("app.clipboard.copyLine")], action: __ompTranslate("Copy current line") },
+				{ keys: [act("app.clipboard.copyPrompt")], action: __ompTranslate("Copy whole prompt") },
 			],
 		},
 		{
-			title: "Other",
+			title: __ompTranslate("Other"),
 			rows: [
-				{ keys: [hints(["tab"])], action: "Path completion / accept autocomplete" },
-				{ keys: [act("app.interrupt")], action: "Cancel autocomplete / interrupt active work" },
-				{ keys: [act("app.clear")], action: "Clear editor (first) / exit (second)" },
+				{ keys: [hints(["tab"])], action: __ompTranslate("Path completion / accept autocomplete") },
+				{ keys: [act("app.interrupt")], action: __ompTranslate("Cancel autocomplete / interrupt active work") },
+				{ keys: [act("app.clear")], action: __ompTranslate("Clear editor (first) / exit (second)") },
 				...exitRows,
-				{ keys: [act("app.suspend")], action: "Suspend to background" },
-				{ keys: [act("app.display.reset")], action: "Reset terminal display" },
-				{ keys: [act("app.thinking.cycle")], action: "Cycle thinking level" },
-				{ keys: [act("app.model.cycleForward")], action: "Cycle role models (slow/default/smol)" },
-				{ keys: [act("app.model.cycleBackward")], action: "Cycle role models (backward)" },
-				{ keys: [act("app.model.selectTemporary")], action: "Select model (temporary)" },
-				{ keys: [act("app.model.select")], action: "Select model (set roles)" },
-				{ keys: [act("app.plan.toggle")], action: "Toggle plan mode" },
-				{ keys: [act("app.history.search")], action: "Search prompt history" },
-				{ keys: [act("app.tools.expand")], action: "Toggle tool output expansion" },
-				{ keys: [act("app.tools.toggleVisibility")], action: "Toggle tool activity visibility" },
+				{ keys: [act("app.suspend")], action: __ompTranslate("Suspend to background") },
+				{ keys: [act("app.display.reset")], action: __ompTranslate("Reset terminal display") },
+				{ keys: [act("app.thinking.cycle")], action: __ompTranslate("Cycle thinking level") },
+				{ keys: [act("app.model.cycleForward")], action: __ompTranslate("Cycle role models (slow/default/smol)") },
+				{ keys: [act("app.model.cycleBackward")], action: __ompTranslate("Cycle role models (backward)") },
+				{ keys: [act("app.model.selectTemporary")], action: __ompTranslate("Select model (temporary)") },
+				{ keys: [act("app.model.select")], action: __ompTranslate("Select model (set roles)") },
+				{ keys: [act("app.plan.toggle")], action: __ompTranslate("Toggle plan mode") },
+				{ keys: [act("app.history.search")], action: __ompTranslate("Search prompt history") },
+				{ keys: [act("app.tools.expand")], action: __ompTranslate("Toggle tool output expansion") },
+				{ keys: [act("app.tools.toggleVisibility")], action: __ompTranslate("Toggle tool activity visibility") },
 				{ keys: [act("app.links.hint")], action: "Pick an extension link on screen by its tag" },
-				{ keys: [act("app.ask.hide")], action: "Hide/show a pending ask question" },
-				{ keys: [act("app.approval.approve")], action: "Approve a pending tool call" },
-				{ keys: [act("app.thinking.toggle")], action: "Toggle thinking block visibility" },
-				{ keys: [act("app.editor.external")], action: "Edit message in external editor" },
-				{ keys: [act("app.local.open")], action: "Open a local:// file in external editor" },
-				{ keys: [act("app.retry")], action: "Retry last failed assistant turn" },
-				{ keys: [act("app.clipboard.pasteImage")], action: "Paste image or text from clipboard" },
+				{ keys: [act("app.ask.hide")], action: __ompTranslate("Hide/show a pending ask question") },
+				{ keys: [act("app.approval.approve")], action: __ompTranslate("Approve a pending tool call") },
+				{ keys: [act("app.thinking.toggle")], action: __ompTranslate("Toggle thinking block visibility") },
+				{ keys: [act("app.editor.external")], action: __ompTranslate("Edit message in external editor") },
+				{ keys: [act("app.local.open")], action: __ompTranslate("Open a local:// file in external editor") },
+				{
+					keys: [act("app.retry")],
+					action: __ompTranslate("Retry last failed assistant turn\u0004hotkey.retry.action"),
+				},
+				{ keys: [act("app.clipboard.pasteImage")], action: __ompTranslate("Paste image or text from clipboard") },
 				{
 					keys:
 						pushToTalkKeys.length > 0
-							? [{ text: "Hold " }, act("app.stt.pushToTalk")]
+							? [{ text: __ompTranslate("Hold ") }, act("app.stt.pushToTalk")]
 							: [act("app.stt.pushToTalk")],
 					action:
 						pushToTalkKeys.length > 0
-							? "Speech-to-text (push-to-talk): hold to record, release to transcribe"
-							: "Speech-to-text (push-to-talk) (disabled)",
+							? __ompTranslate("Speech-to-text (push-to-talk): hold to record, release to transcribe")
+							: __ompTranslate("Speech-to-text (push-to-talk) (disabled)"),
 				},
-				{ keys: [act("app.live.toggle")], action: "Start/stop live voice mode (/live)" },
+				{ keys: [act("app.live.toggle")], action: __ompTranslate("Start/stop live voice mode (/live)") },
 				{
 					keys: [
 						act("app.agents.hub"),
 						{ text: " / " },
 						act("app.session.observe"),
-						{ text: " / double-tap " },
+						{ text: __ompTranslate(" / double-tap ") },
 						hints(["left"]),
-						{ text: " (empty editor)" },
+						{ text: __ompTranslate(" (empty editor)") },
 					],
-					action: "Open the agent hub",
+					action: __ompTranslate("Open the agent hub"),
 				},
-				{ keys: [{ token: "#<number>" }], action: "GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)" },
+				{
+					keys: [{ token: "#<number>" }],
+					action: __ompTranslate("GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)"),
+				},
 				{
 					keys: [{ token: "#" }, { text: " / " }, { token: "#<text>" }],
-					action: "Prompt actions (copy / undo / move cursor)",
+					action: __ompTranslate("Prompt actions (copy / undo / move cursor)"),
 				},
-				{ keys: [{ token: "/" }], action: "Slash commands" },
-				{ keys: [{ token: "!" }], action: "Run bash command" },
-				{ keys: [{ token: "!!" }], action: "Run bash command (excluded from context)" },
-				{ keys: [{ token: "$" }], action: "Run Python in shared kernel" },
-				{ keys: [{ token: "$$" }], action: "Run Python (excluded from context)" },
+				{ keys: [{ token: "/" }], action: __ompTranslate("Slash commands") },
+				{ keys: [{ token: "!" }], action: __ompTranslate("Run bash command") },
+				{ keys: [{ token: "!!" }], action: __ompTranslate("Run bash command (excluded from context)") },
+				{ keys: [{ token: "$" }], action: __ompTranslate("Run Python in shared kernel") },
+				{ keys: [{ token: "$$" }], action: __ompTranslate("Run Python (excluded from context)") },
 			],
 		},
 	];
@@ -186,7 +206,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 	const lines: string[] = [];
 	for (const [index, group] of hotkeyGroups(bindings).entries()) {
 		if (index > 0) lines.push("");
-		lines.push(`**${group.title}**`, "| Key | Action |", "|-----|--------|");
+		lines.push(`**${group.title}**`, __ompTranslate("| Key | Action |"), "|-----|--------|");
 		for (const row of group.rows) {
 			const keys = row.keys.map(part => markdownPart(bindings, part)).join("");
 			lines.push(`| ${keys} | ${row.action} |`);
@@ -230,7 +250,11 @@ function actionSpans(action: string): TspSpan[] {
  * without the native surface get the transcript markdown panel instead.
  */
 export class HotkeysSheetComponent implements Component {
-	readonly nativeOverlay = { role: "omp.overlay.hotkeys", size: "lg", head: "Keyboard shortcuts" } as const;
+	readonly nativeOverlay = {
+		role: "omp.overlay.hotkeys",
+		size: "lg",
+		head: __ompTranslate("Keyboard shortcuts"),
+	} as const;
 	readonly #bindings: HotkeysMarkdownBindings;
 	readonly #onClose: () => void;
 	#native: NativeNode | undefined;
@@ -251,8 +275,8 @@ export class HotkeysSheetComponent implements Component {
 					node("table", {
 						role: "omp.hotkeys.table",
 						cols: [
-							{ id: "keys", head: "Key" },
-							{ id: "action", head: "Action", grow: 1 },
+							{ id: "keys", head: __ompTranslate("Key") },
+							{ id: "action", head: __ompTranslate("Action"), grow: 1 },
 						],
 						rows: group.rows.map((row, rowIndex) => ({
 							id: String(rowIndex),
@@ -263,7 +287,7 @@ export class HotkeysSheetComponent implements Component {
 				`g${index}`,
 			),
 		);
-		const close = actionButton("Close", "close", { keys: "escape" });
+		const close = actionButton(__ompTranslate("Close"), "close", { keys: "escape" });
 		this.#native = col([...sections, actionBar([null, close])], { gap: "lg" });
 		return this.#native;
 	}

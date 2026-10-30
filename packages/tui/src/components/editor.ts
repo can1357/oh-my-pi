@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
@@ -88,10 +89,10 @@ export interface NativeEditorLayout {
  */
 const VIM_MODE_LABELS: Record<VimMode, string | undefined> = {
 	insert: undefined,
-	normal: "NORMAL",
-	visual: "VISUAL",
-	"visual-line": "VISUAL",
-	replace: "REPLACE",
+	normal: __ompTranslate("NORMAL"),
+	visual: __ompTranslate("VISUAL"),
+	"visual-line": __ompTranslate("VISUAL"),
+	replace: __ompTranslate("REPLACE"),
 };
 
 const PASSTHROUGH_COLOR = (text: string): string => text;

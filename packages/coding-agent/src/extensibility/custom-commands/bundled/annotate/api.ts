@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type {
 	AnnotationDelivery,
 	AnnotationDiffNote,
@@ -36,13 +37,14 @@ async function resolveTextSource(ctx: AnnotationContext, source: AnnotationTextS
 	const sessionId = ctx.sessionManager.getSessionId();
 	switch (source.kind) {
 		case "text":
-			if (source.text.length === 0) throw new Error("Annotation text source is empty.");
+			if (source.text.length === 0) throw new Error(__ompTranslate("Annotation text source is empty."));
 			return promptTextReviewSource(source.text, sessionId, source.label);
 		case "file":
 			return readFileTextReviewSource(source.path, ctx.sessionManager.getCwd?.() ?? ctx.cwd, sessionId);
 		case "last": {
 			const latest = latestAssistantTextReviewSource(ctx.sessionManager.getBranch(), sessionId);
-			if (!latest) throw new Error("No non-empty assistant reply is available on the active session branch.");
+			if (!latest)
+				throw new Error(__ompTranslate("No non-empty assistant reply is available on the active session branch."));
 			return latest;
 		}
 	}
@@ -65,7 +67,10 @@ async function resolveDiffTarget(ctx: AnnotationContext, source: AnnotationDiffS
 			break;
 		case "pr": {
 			const ref = parseReviewPrRef(source.ref);
-			if (!ref) throw new Error(`Not a GitHub pull request or GitLab merge request reference: ${source.ref}`);
+			if (!ref)
+				throw new Error(
+					__ompTranslate("Not a GitHub pull request or GitLab merge request reference: {0}", `${source.ref}`),
+				);
 			target = await fetchPrReviewTarget(cwd, ref);
 			break;
 		}
@@ -79,11 +84,17 @@ function matchTextNotes(source: TextReviewSource, notes: readonly AnnotationText
 	const lines = splitTextLines(source.text);
 	return notes.map((entry, index) => {
 		const note = entry.note.trim();
-		if (!note) throw new Error(`Annotation ${index + 1} has an empty note.`);
+		if (!note) throw new Error(__ompTranslate("Annotation {0} has an empty note.", `${index + 1}`));
 		if (entry.line === undefined) return { scope: "text", note };
 		if (!Number.isInteger(entry.line) || entry.line < 1 || entry.line > lines.length) {
 			throw new Error(
-				`Annotation ${index + 1}: line ${entry.line} is outside ${source.label} (lines 1-${lines.length}).`,
+				__ompTranslate(
+					"Annotation {0}: line {1} is outside {2} (lines 1-{3}).",
+					`${index + 1}`,
+					`${entry.line}`,
+					`${source.label}`,
+					`${lines.length}`,
+				),
 			);
 		}
 		const quote = lines[entry.line - 1]!;
@@ -217,7 +228,12 @@ export function createAnnotationsAPI(
 		async open(request) {
 			const ctx = getContext();
 			if (ctx.mode !== "tui") {
-				throw new Error(`The annotation overlay needs the interactive TUI (mode "${ctx.mode}"); use submit.`);
+				throw new Error(
+					__ompTranslate(
+						'The annotation overlay needs the interactive TUI (mode "{0}"); use submit.',
+						`${ctx.mode}`,
+					),
+				);
 			}
 			if (isTextRequest(request)) {
 				let source = await resolveTextSource(ctx, request.source);

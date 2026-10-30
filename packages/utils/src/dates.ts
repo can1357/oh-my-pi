@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 /** Behavior-compatible reimplementation of date-fns's used surface. */
 
 const MONTHS = [
@@ -143,8 +144,16 @@ export function format(value: Date | number, pattern: string): string {
 	return result;
 }
 
-function plural(count: number, singular: string): string {
-	return `${count} ${count === 1 ? singular : `${singular}s`}`;
+const DISTANCE_UNITS = {
+	minute: "{0} minute{1}\u0004time.distance.minutes",
+	hour: "{0} hour{1}\u0004time.distance.hours",
+	day: "{0} day{1}\u0004time.distance.days",
+	month: "{0} month{1}\u0004time.distance.months",
+	year: "{0} year{1}\u0004time.distance.years",
+} as const;
+
+function plural(count: number, singular: keyof typeof DISTANCE_UNITS): string {
+	return __ompTranslate(DISTANCE_UNITS[singular], String(count), count === 1 ? "" : "s");
 }
 
 function completedMonths(earlier: Date, later: Date): number {
@@ -165,22 +174,27 @@ function distanceWords(earlier: Date, later: Date): string {
 	const timezoneOffset = (later.getTimezoneOffset() - earlier.getTimezoneOffset()) * 60;
 	const minutes = Math.round((seconds - timezoneOffset) / 60);
 
-	if (minutes < 2) return minutes === 0 ? "less than a minute" : "1 minute";
+	if (minutes < 2)
+		return minutes === 0
+			? __ompTranslate("less than a minute\u0004time.distance.less-than-minute")
+			: plural(1, "minute");
 	if (minutes < 45) return plural(minutes, "minute");
-	if (minutes < 90) return "about 1 hour";
-	if (minutes < 1_440) return `about ${plural(Math.round(minutes / 60), "hour")}`;
-	if (minutes < 2_520) return "1 day";
+	if (minutes < 90) return __ompTranslate("about {0}\u0004time.distance.approximate", plural(1, "hour"));
+	if (minutes < 1_440)
+		return __ompTranslate("about {0}\u0004time.distance.approximate", plural(Math.round(minutes / 60), "hour"));
+	if (minutes < 2_520) return plural(1, "day");
 	if (minutes < 43_200) return plural(Math.round(minutes / 1_440), "day");
-	if (minutes < 86_400) return `about ${plural(Math.round(minutes / 43_200), "month")}`;
+	if (minutes < 86_400)
+		return __ompTranslate("about {0}\u0004time.distance.approximate", plural(Math.round(minutes / 43_200), "month"));
 
 	const months = completedMonths(earlier, later);
 	if (months < 12) return plural(Math.round(minutes / 43_200), "month");
 
 	const years = Math.trunc(months / 12);
 	const remainingMonths = months % 12;
-	if (remainingMonths < 3) return `about ${plural(years, "year")}`;
-	if (remainingMonths < 9) return `over ${plural(years, "year")}`;
-	return `almost ${plural(years + 1, "year")}`;
+	if (remainingMonths < 3) return __ompTranslate("about {0}\u0004time.distance.approximate", plural(years, "year"));
+	if (remainingMonths < 9) return __ompTranslate("over {0}\u0004time.distance.over", plural(years, "year"));
+	return __ompTranslate("almost {0}\u0004time.distance.almost", plural(years + 1, "year"));
 }
 
 /** Describe the distance from a date to now using date-fns's English thresholds. */
@@ -190,5 +204,7 @@ export function formatDistanceToNow(value: Date | number, options: { addSuffix?:
 	const isFuture = date.getTime() > now.getTime();
 	const words = isFuture ? distanceWords(now, date) : distanceWords(date, now);
 	if (!options.addSuffix) return words;
-	return isFuture ? `in ${words}` : `${words} ago`;
+	return isFuture
+		? __ompTranslate("in {0}\u0004time.relative.future", words)
+		: __ompTranslate("{0} ago\u0004time.relative.past", words);
 }

@@ -2,6 +2,7 @@
  * Inspect and control daemon-broker supervised processes from outside the harness.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { psHelp as commandHelp } from "../cli/command-help";
 import { type PsAction, type PsCommandArgs, runPsCommand } from "../cli/ps-cli";
@@ -13,27 +14,32 @@ export default class Ps extends Command {
 
 	static args = {
 		action: Args.string({
-			description: "list (default), info, logs, stop, kill, or restart",
+			description: __ompTranslate("list (default), info, logs, stop, kill, or restart"),
 			required: false,
 			options: ACTIONS,
 		}),
 		name: Args.string({
-			description: "Process name (required for every action except list)",
+			description: __ompTranslate("Process name (required for every action except list)"),
 			required: false,
 		}),
 	};
 
 	static flags = {
-		all: Flags.boolean({ char: "a", description: "Also list other projects and exited global services (list)" }),
-		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON" }),
-		plain: Flags.boolean({ description: "Static listing instead of the interactive monitor (list)" }),
-		dir: Flags.string({ description: "Target another project directory instead of the current one" }),
-		global: Flags.string({ description: "Target a machine-global service scope (e.g. browser-relay)" }),
-		follow: Flags.boolean({ char: "f", description: "Keep streaming new output (logs)" }),
-		head: Flags.boolean({ description: "Read from the beginning instead of the tail (logs)" }),
-		lines: Flags.integer({ char: "n", description: "Number of log lines, max 1000 (logs)" }),
-		grep: Flags.string({ description: "Regex filter applied to log lines (logs)" }),
-		timeout: Flags.integer({ description: "Grace period in seconds before hard kill (stop)" }),
+		all: Flags.boolean({
+			char: "a",
+			description: __ompTranslate("Also list other projects and exited global services (list)"),
+		}),
+		json: Flags.boolean({ char: "j", description: __ompTranslate("Emit machine-readable JSON") }),
+		plain: Flags.boolean({ description: __ompTranslate("Static listing instead of the interactive monitor (list)") }),
+		dir: Flags.string({ description: __ompTranslate("Target another project directory instead of the current one") }),
+		global: Flags.string({
+			description: __ompTranslate("Target a machine-global service scope (e.g. browser-relay)"),
+		}),
+		follow: Flags.boolean({ char: "f", description: __ompTranslate("Keep streaming new output (logs)") }),
+		head: Flags.boolean({ description: __ompTranslate("Read from the beginning instead of the tail (logs)") }),
+		lines: Flags.integer({ char: "n", description: __ompTranslate("Number of log lines, max 1000 (logs)") }),
+		grep: Flags.string({ description: __ompTranslate("Regex filter applied to log lines (logs)") }),
+		timeout: Flags.integer({ description: __ompTranslate("Grace period in seconds before hard kill (stop)") }),
 	};
 
 	static examples = [

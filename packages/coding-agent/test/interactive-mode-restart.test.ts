@@ -19,6 +19,8 @@ describe("InteractiveMode restart", () => {
 	let sessionManager: SessionManager;
 	let session: AgentSession | undefined;
 	let originalArgv: string[];
+	let originalLanguage: string | undefined;
+	let platformDescriptor: PropertyDescriptor | undefined;
 
 	beforeAll(() => initTheme());
 	beforeEach(async () => {
@@ -27,12 +29,17 @@ describe("InteractiveMode restart", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		originalArgv = process.argv;
+		originalLanguage = process.env.OMP_LANG;
+		platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "persona sessions"));
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		process.argv = originalArgv;
+		if (originalLanguage === undefined) delete process.env.OMP_LANG;
+		else process.env.OMP_LANG = originalLanguage;
+		if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 		await session?.dispose();
 		session = undefined;
 		await sessionManager.close();
@@ -41,7 +48,7 @@ describe("InteractiveMode restart", () => {
 		resetSettingsForTest();
 	});
 
-	async function restart(argv: string[]): Promise<string[]> {
+	async function restart(argv: string[], platform?: NodeJS.Platform, failExec = false) {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
@@ -56,15 +63,22 @@ describe("InteractiveMode restart", () => {
 		mode.ui.terminal.drainInput = async () => {};
 		process.argv = [originalArgv[0], originalArgv[1], ...argv];
 		// Stop only at the process replacement boundary; teardown and argv production run for real.
-		const exec = vi.spyOn(natives, "execReplace").mockImplementation(() => undefined as never);
+		const exec = vi.spyOn(natives, "execReplace").mockImplementation(() => {
+			if (failExec) throw new Error("test exec failure");
+		});
 		const spawn = vi.spyOn(Bun, "spawn").mockReturnValue({ exited: Promise.resolve(0) } as never);
 		vi.spyOn(postmortem, "cleanup").mockResolvedValue();
 		vi.spyOn(postmortem, "drainStdout").mockResolvedValue();
 		vi.spyOn(postmortem, "quit").mockResolvedValue();
+		if (platform) {
+			if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+			Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+		}
+		if (failExec) vi.spyOn(process.stderr, "write").mockReturnValue(true);
 		await mode.restart();
 		const command = process.platform === "win32" ? spawn.mock.calls[0]?.[0] : exec.mock.calls[0]?.[0];
 		if (!Array.isArray(command)) throw new Error("expected replacement command");
-		return command;
+		return { command, exec, spawn };
 	}
 
 	it("resumes an explicitly opened persona journal without rediscovering its ID", async () => {
@@ -93,7 +107,7 @@ describe("InteractiveMode restart", () => {
 		const transcript = sessionManager.buildSessionContext().messages;
 		await sessionManager.close();
 		sessionManager = await SessionManager.open(file);
-		const command = await restart([
+		const { command } = await restart([
 			"--session",
 			file,
 			"--model",
@@ -131,7 +145,11 @@ describe("InteractiveMode restart", () => {
 		const file = sessionManager.getSessionFile();
 		if (!file) throw new Error("expected persisted journal");
 		const id = sessionManager.getSessionId();
-		const command = await restart(["--model", "anthropic/claude-sonnet-4-5", `--session-dir=${relativeDir.path()}`]);
+		const { command } = await restart([
+			"--model",
+			"anthropic/claude-sonnet-4-5",
+			`--session-dir=${relativeDir.path()}`,
+		]);
 		const parsed = parseArgs(command.slice(command.indexOf("--model")));
 		const resumed = await createSessionManager(parsed, tempDir.path(), Settings.isolated());
 		if (!resumed) throw new Error("expected resumed journal");
@@ -148,7 +166,7 @@ describe("InteractiveMode restart", () => {
 
 	it("does not resume a journal that has never materialized", async () => {
 		const file = sessionManager.getSessionFile();
-		const command = await restart(["--model", "anthropic/claude-sonnet-4-5", "initial request"]);
+		const { command } = await restart(["--model", "anthropic/claude-sonnet-4-5", "initial request"]);
 		const parsed = parseArgs(command.slice(command.indexOf("--model")));
 		expect(parsed.resume).toBeUndefined();
 		expect(parsed.messages).toEqual([]);
@@ -156,4 +174,38 @@ describe("InteractiveMode restart", () => {
 		if (!file) throw new Error("expected allocated journal path");
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
+	for (const language of ["ko", "en"]) {
+		it.each([
+			["linux", false],
+			["darwin", false],
+			["win32", false],
+			["linux", true],
+			["darwin", true],
+		] as const)(`preserves ${language} on %s (exec failure: %s)`, async (platform, failExec) => {
+			sessionManager.appendMessage({ role: "user", content: "saved request", timestamp: 1 });
+			await sessionManager.ensureOnDisk();
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("expected persisted journal");
+			process.env.OMP_LANG = language;
+			const { command, exec, spawn } = await restart(
+				["--model", "anthropic/claude-sonnet-4-5", "--append-system-prompt", "persona prompt", "initial request"],
+				platform,
+				failExec,
+			);
+			const parsed = parseArgs(command.slice(command.indexOf("--model")));
+			expect(parsed.model).toBe("anthropic/claude-sonnet-4-5");
+			expect(parsed.appendSystemPrompt).toBe("persona prompt");
+			expect(parsed.resume).toBe(path.resolve(file));
+			expect(parsed.messages).toEqual([]);
+			if (platform === "win32") {
+				expect(exec).not.toHaveBeenCalled();
+			} else {
+				expect(exec.mock.calls[0]?.[0].slice(0, 2)).toEqual(["env", `OMP_LANG=${language}`]);
+			}
+			const spawnedCommand = spawn.mock.calls[0]?.[0];
+			expect(Array.isArray(spawnedCommand)).toBe(true);
+			expect(spawnedCommand).not.toContain(`OMP_LANG=${language}`);
+			expect(spawn.mock.calls[0]?.[1]?.env?.OMP_LANG).toBe(language);
+		});
+	}
 });

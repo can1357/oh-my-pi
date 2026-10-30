@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../index";
 import { Markdown, Text } from "../index";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -758,7 +759,10 @@ function evalToolHead(
 ): NativeToolHead {
 	const badges: { text: string; title?: string }[] = [...new Set(languages)].map(language => ({ text: language }));
 	if (details?.async?.state === "running") {
-		badges.push({ text: "background", title: `Backgrounded as job ${details.async.jobId}` });
+		badges.push({
+			text: __ompTranslate("background"),
+			title: __ompTranslate("Backgrounded as job {0}", `${details.async.jobId}`),
+		});
 	}
 	return {
 		title: (cellCount > 1 ? "" : plainText(title ?? "").trim()) || "Eval",
@@ -1084,7 +1088,7 @@ export const evalToolRenderer = {
 								}
 								if (statusLines.length > 0) {
 									if (outputLines.length > 0) {
-										outputLines.push(uiTheme.fg("dim", "Status"));
+										outputLines.push(uiTheme.fg("dim", __ompTranslate("Status")));
 									}
 									outputLines.push(...statusLines);
 								}
@@ -1171,7 +1175,7 @@ export const evalToolRenderer = {
 
 		if (!output && statusLines.length > 0) {
 			const lines = [
-				uiTheme.fg("dim", "Status"),
+				uiTheme.fg("dim", __ompTranslate("Status")),
 				...statusLines,
 				timeoutLine,
 				noticeLine,
@@ -1188,7 +1192,7 @@ export const evalToolRenderer = {
 				.join("\n");
 			const lines = [
 				styledOutput,
-				...(statusLines.length > 0 ? [uiTheme.fg("dim", "Status"), ...statusLines] : []),
+				...(statusLines.length > 0 ? [uiTheme.fg("dim", __ompTranslate("Status")), ...statusLines] : []),
 				timeoutLine,
 				noticeLine,
 				asyncLine,
@@ -1232,7 +1236,7 @@ export const evalToolRenderer = {
 				}
 				outputLines.push(...cachedLines);
 				if (statusLines.length > 0) {
-					outputLines.push(truncateToWidth(uiTheme.fg("dim", "Status"), width));
+					outputLines.push(truncateToWidth(uiTheme.fg("dim", __ompTranslate("Status")), width));
 					for (const statusLine of statusLines) {
 						outputLines.push(truncateToWidth(statusLine, width));
 					}

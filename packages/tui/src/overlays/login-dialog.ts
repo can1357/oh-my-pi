@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthPrompt } from "@oh-my-pi/pi-ai/oauth/types";
 import { Container, getKeybindings, Spacer, Text, type TUI, wrapTextWithAnsi } from "../index";
@@ -23,10 +24,12 @@ const PRESS_KEY_SUFFIX = /,?\s*then press\s+\S+\s*:?\s*$/i;
 const PROGRESS_PROBLEM = /\b(?:fail(?:ed|ure)?|error|unavailable|in use|could ?n[o']t|unable)\b/i;
 
 /** Shown on the field when the flow asks for the manual code again: the last paste had no usable code. */
-const RETRY_MESSAGE = "Couldn't read a code from that. Paste the authorization code or the full redirect URL.";
+const RETRY_MESSAGE = __ompTranslate(
+	"Couldn't read a code from that. Paste the authorization code or the full redirect URL.",
+);
 
 /** Shown while the browser half of the flow runs and the provider reports nothing. */
-const BROWSER_WAIT = "Waiting for you to finish in the browser…";
+const BROWSER_WAIT = __ompTranslate("Waiting for you to finish in the browser…");
 
 /** The sign-in link from `showAuth`: the provider's instructions, or the device code split out of them. */
 interface LoginAuth {
@@ -87,7 +90,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	) {
 		const providerInfo = getOAuthProviders().find(p => p.id === providerId);
 		const providerName = providerInfo?.name || providerId;
-		super(`Login to ${providerName}`, "omp.overlay.login");
+		super(__ompTranslate("Login to {0}", `${providerName}`), "omp.overlay.login");
 		this.#providerName = providerName;
 		this.#tui = tui;
 		this.#onComplete = onComplete;
@@ -153,7 +156,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		const reject = this.#inputRejecter;
 		this.#clearInputHandlers();
 		reject?.(new Error("Login cancelled"));
-		this.#onComplete(false, "Login cancelled");
+		this.#onComplete(false, __ompTranslate("Login cancelled"));
 	}
 
 	/**
@@ -181,13 +184,16 @@ export class LoginDialogComponent extends OverlayPanel {
 			),
 		);
 
-		const clickHint = `${formatKeyHint(keyHintPlatform() === "darwin" ? "super" : "ctrl")}+click to open`;
+		const clickHint = __ompTranslate(
+			"{0}+click to open",
+			`${formatKeyHint(keyHintPlatform() === "darwin" ? "super" : "ctrl")}`,
+		);
 		const hyperlink = `\x1b]8;;${url}\x07${clickHint}\x1b]8;;\x07`;
 		this.#contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 0, 0));
 
 		if (launchUrl && launchUrl !== url) {
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `Local shortcut (this machine only): ${launchUrl}`), 0, 0),
+				new Text(theme.fg("dim", __ompTranslate("Local shortcut (this machine only): {0}", `${launchUrl}`)), 0, 0),
 			);
 		}
 
@@ -233,7 +239,17 @@ export class LoginDialogComponent extends OverlayPanel {
 			this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 0, 0));
 			this.#contentContainer.addChild(this.#input);
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `(${editorKey("tui.select.cancel")} to cancel)`), 0, 0),
+				new Text(
+					theme.fg(
+						"dim",
+						__ompTranslate(
+							"({0} to cancel)\u0004authentication.input.cancel-hint",
+							`${editorKey("tui.select.cancel")}`,
+						),
+					),
+					0,
+					0,
+				),
 			);
 		}
 		this.#nativeRoot = undefined;
@@ -278,14 +294,20 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 0, 0));
 		if (prompt.placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${prompt.placeholder}`), 0, 0));
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", __ompTranslate("e.g., {0}", `${prompt.placeholder}`)), 0, 0),
+			);
 		}
 		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(
 			new Text(
 				theme.fg(
 					"dim",
-					`(${editorKey("tui.select.cancel")} to cancel, ${editorKey("tui.input.submit")} to submit)`,
+					__ompTranslate(
+						"({0} to cancel, {1} to submit)",
+						`${editorKey("tui.select.cancel")}`,
+						`${editorKey("tui.input.submit")}`,
+					),
 				),
 				0,
 				0,
@@ -317,7 +339,19 @@ export class LoginDialogComponent extends OverlayPanel {
 	showWaiting(message: string): void {
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 0, 0));
-		this.#contentContainer.addChild(new Text(theme.fg("dim", `(${editorKey("tui.select.cancel")} to cancel)`), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					__ompTranslate(
+						"({0} to cancel)\u0004authentication.input.cancel-hint",
+						`${editorKey("tui.select.cancel")}`,
+					),
+				),
+				0,
+				0,
+			),
+		);
 		this.#nativeSteps.push({ kind: "progress", message: plainText(message) });
 		this.#nativeRoot = undefined;
 		this.#tui.requestRender();
@@ -356,12 +390,18 @@ export class LoginDialogComponent extends OverlayPanel {
 			if (auth.launchUrl) {
 				body.push(
 					keyed(
-						text([span("On this machine  ", "dim"), span(auth.launchUrl, "mono", { href: auth.launchUrl })], {
-							role: "omp.login.shortcut",
-							truncate: "middle",
-							lines: 1,
-							title: auth.launchUrl,
-						}),
+						text(
+							[
+								span(__ompTranslate("On this machine  "), "dim"),
+								span(auth.launchUrl, "mono", { href: auth.launchUrl }),
+							],
+							{
+								role: "omp.login.shortcut",
+								truncate: "middle",
+								lines: 1,
+								title: auth.launchUrl,
+							},
+						),
 						"shortcut",
 					),
 				);
@@ -408,12 +448,12 @@ export class LoginDialogComponent extends OverlayPanel {
 		if (status.length > 0) body.push(node("col", { role: "omp.login.status", gap: "xs" }, status, "status"));
 
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
-		const cancel = actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {});
+		const cancel = actionButton(__ompTranslate("Cancel"), "cancel", cancelKey ? { keys: cancelKey } : {});
 		const open = auth ? this.#describeOpen(auth.url, !field) : null;
 		let buttons: (NativeNode | null)[];
 		if (field) {
 			const submitKey = getKeybindings().getKeys("tui.input.submit")[0];
-			const submit = actionButton("Continue", "submit", {
+			const submit = actionButton(__ompTranslate("Continue"), "submit", {
 				tone: "accent",
 				...(submitKey ? { keys: submitKey } : {}),
 			});
@@ -425,7 +465,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			"overlay",
 			{
 				role: this.nativeRole,
-				head: `Sign in to ${this.#providerName}`,
+				head: __ompTranslate("Sign in to {0}", `${this.#providerName}`),
 				anchor: "center",
 				size: "md",
 				modal: true,
@@ -439,16 +479,22 @@ export class LoginDialogComponent extends OverlayPanel {
 
 	/** What to do, in one sentence: enter the code, follow the provider's instructions, or finish in the browser. */
 	#lead(auth: LoginAuth): string {
-		if (auth.device) return "Enter this code on the sign-in page to connect your account.";
+		if (auth.device) return __ompTranslate("Enter this code on the sign-in page to connect your account.");
 		if (auth.instructions) return sheetText(auth.instructions);
-		return "Continue in your browser. If it didn't open, open or copy the link below.";
+		return __ompTranslate("Continue in your browser. If it didn't open, open or copy the link below.");
 	}
 
 	/** The device code, large in a well; a click copies it. */
 	#describeCode(code: string): NativeNode {
 		return node(
 			"row",
-			{ role: "omp.login.code", align: "center", actions: { click: "copy" }, href: code, title: "Copy code" },
+			{
+				role: "omp.login.code",
+				align: "center",
+				actions: { click: "copy" },
+				href: code,
+				title: __ompTranslate("Copy code"),
+			},
 			[keyed(text([span(code, "mono")]), "value"), node("icon", { name: "copy" }, undefined, "icon")],
 			"code",
 		);
@@ -475,9 +521,9 @@ export class LoginDialogComponent extends OverlayPanel {
 						align: "center",
 						actions: { click: "copy" },
 						href: url,
-						title: "Copy the sign-in link",
+						title: __ompTranslate("Copy the sign-in link"),
 					},
-					[text("Copy")],
+					[text(__ompTranslate("Copy"))],
 					"copyLink",
 				),
 			],
@@ -495,10 +541,10 @@ export class LoginDialogComponent extends OverlayPanel {
 				align: "center",
 				actions: { click: "open" },
 				href: url,
-				title: `Open ${urlPlace(url)} in your browser`,
+				title: __ompTranslate("Open {0} in your browser", `${urlPlace(url)}`),
 				...(primary ? { tone: "accent" as const } : {}),
 			},
-			[text("Open sign-in page"), node("icon", { name: "open" }, undefined, "icon")],
+			[text(__ompTranslate("Open sign-in page")), node("icon", { name: "open" }, undefined, "icon")],
 			"openLink",
 		);
 	}

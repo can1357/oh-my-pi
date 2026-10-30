@@ -5,6 +5,7 @@
  * YAML. Writes show the `previous → value` change, its scope (session or
  * saved), and whether the user approved it.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { renderStatusLine } from "../render";
 import {
@@ -59,19 +60,20 @@ export function renderCfgRead(
 		const meta: string[] = [];
 		if (details) {
 			meta.push(details.count === 1 ? "1 setting" : `${details.count} settings`);
-			if (details.modified) meta.push(`${details.modified} modified`);
+			if (details.modified) meta.push(__ompTranslate("{0} modified", `${details.modified}`));
 		}
 		const header = renderStatusLine(
 			{
 				icon: result === undefined ? "pending" : result.isError ? "error" : "info",
-				title: "Config",
-				description: (details?.path ?? parseCfgUrl(url)?.segments.join(".")) || "all settings",
+				title: __ompTranslate("Config"),
+				description: (details?.path ?? parseCfgUrl(url)?.segments.join(".")) || __ompTranslate("all settings"),
 				meta,
 			},
 			theme,
 		);
 		if (!result) return [header];
-		if (result.isError) return [header, formatErrorDetail(firstText(result) || "Settings read failed.", theme)];
+		if (result.isError)
+			return [header, formatErrorDetail(firstText(result) || __ompTranslate("Settings read failed."), theme)];
 		const body = firstText(result).trimEnd().split("\n");
 		const shown = cappedHeadLines(body, expanded ? body.length : PREVIEW_LIMITS.COLLAPSED_ITEMS);
 		const lines = [header, ...highlightCode(safe(shown.lines.join("\n")), "yaml", theme).map(line => `  ${line}`)];
@@ -86,14 +88,20 @@ export function describeCfgRead(
 	result: CardToolResult | undefined,
 	details: CfgReadDetails | undefined,
 ): NativeToolView {
-	const description = (details?.path ?? parseCfgUrl(url)?.segments.join(".")) || "all settings";
+	const description = (details?.path ?? parseCfgUrl(url)?.segments.join(".")) || __ompTranslate("all settings");
 	const meta: string[] = [];
 	if (details) {
 		meta.push(details.count === 1 ? "1 setting" : `${details.count} settings`);
-		if (details.modified) meta.push(`${details.modified} modified`);
+		if (details.modified) meta.push(__ompTranslate("{0} modified", `${details.modified}`));
 	}
-	if (result?.isError) return errorView("Config", firstText(result) || "Settings read failed.", description, ...meta);
-	const head = toolHead("Config", description, ...meta);
+	if (result?.isError)
+		return errorView(
+			__ompTranslate("Config"),
+			firstText(result) || __ompTranslate("Settings read failed."),
+			description,
+			...meta,
+		);
+	const head = toolHead(__ompTranslate("Config"), description, ...meta);
 	if (!result) return { head };
 	const listing = plainText(safe(firstText(result).trimEnd()));
 	return {
@@ -113,11 +121,15 @@ export function describeCfgWrite(
 	const target = parseCfgUrl(url);
 	const path = details?.path ?? target?.segments.join(".");
 	const save = details?.save ?? target?.save ?? false;
-	if (result?.isError) return errorView("Config", firstText(result) || "Settings write failed.", path);
-	const head = toolHead("Config", path);
-	head.push(span(" "), span(save ? "persist" : "session", save ? "accent strong" : "muted"));
-	if (details?.outcome === "declined") head.push(span(" "), span("declined", "warning strong"));
-	if (details?.outcome === "unchanged") head.push(span(" "), span("unchanged", "muted"));
+	if (result?.isError)
+		return errorView(__ompTranslate("Config"), firstText(result) || __ompTranslate("Settings write failed."), path);
+	const head = toolHead(__ompTranslate("Config"), path);
+	head.push(
+		span(" "),
+		span(save ? __ompTranslate("persist") : __ompTranslate("session"), save ? "accent strong" : "muted"),
+	);
+	if (details?.outcome === "declined") head.push(span(" "), span(__ompTranslate("declined"), "warning strong"));
+	if (details?.outcome === "unchanged") head.push(span(" "), span(__ompTranslate("unchanged"), "muted"));
 	const next = span(plainText(details?.value ?? content?.trim() ?? "…"), "toolOutput");
 	const change = details
 		? [span(plainText(details.previous), "dim"), span(" → ", "dim"), next]
@@ -131,7 +143,10 @@ export function describeCfgWrite(
 				? text(
 						[
 							span(
-								`still ${plainText(details.effective)}: a higher-precedence layer overrides the saved value`,
+								__ompTranslate(
+									"still {0}: a higher-precedence layer overrides the saved value",
+									`${plainText(details.effective)}`,
+								),
 								"warning",
 							),
 						],
@@ -165,8 +180,9 @@ export function renderCfgWrite(
 		const badges = [formatBadge(save ? "persist" : "session", save ? "accent" : "muted", theme)];
 		if (details?.outcome === "declined") badges.push(formatBadge("declined", "warning", theme));
 		if (details?.outcome === "unchanged") badges.push(formatBadge("unchanged", "muted", theme));
-		const header = `${renderStatusLine({ icon, title: "Config", description: details?.path ?? target?.segments.join(".") }, theme)} ${badges.join(" ")}`;
-		if (result?.isError) return [header, formatErrorDetail(firstText(result) || "Settings write failed.", theme)];
+		const header = `${renderStatusLine({ icon, title: __ompTranslate("Config"), description: details?.path ?? target?.segments.join(".") }, theme)} ${badges.join(" ")}`;
+		if (result?.isError)
+			return [header, formatErrorDetail(firstText(result) || __ompTranslate("Settings write failed."), theme)];
 		const arrow = theme.fg("dim", "→");
 		const next = theme.fg("toolOutput", details?.value ?? content?.trim() ?? "…");
 		const lines = [

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -51,7 +52,7 @@ interface ThinkToolDetails {
 export class ThinkTool implements AgentTool<typeof thinkSchema, ThinkToolDetails> {
 	readonly name = "think";
 	readonly approval = "read" as const;
-	readonly label = "Think";
+	readonly label = __ompTranslate("Think");
 	readonly summary = "Record private scratchpad thoughts";
 	readonly description = "private scratchpad; not shown to user";
 	readonly parameters = thinkSchema;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added host-selected Korean interface text with top-level imports and labels evaluated after language initialization ([#17440](https://github.com/can1357/oh-my-pi/pull/17440) by [@seojihun618-dotcom](https://github.com/seojihun618-dotcom))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

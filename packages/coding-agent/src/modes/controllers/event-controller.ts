@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -137,11 +138,11 @@ function nativeTaskJobToast(message: { role: string; customType?: string; detail
 	const details = message.details as AsyncResultJob & { jobs?: AsyncResultJob[] };
 	const jobs = details.jobs && details.jobs.length > 0 ? details.jobs : [details];
 	if (!jobs.every(job => job.type === "task")) return;
-	if (jobs.length > 1) return `${jobs.length} background tasks completed`;
+	if (jobs.length > 1) return __ompTranslate("{0} background tasks completed", `${jobs.length}`);
 	const job = jobs[0]!;
 	const name = sanitizeText(job.label ?? job.jobId ?? "task").trim() || "task";
 	const took = typeof job.durationMs === "number" ? ` · ${formatDuration(job.durationMs)}` : "";
-	return `Background task ${name} completed${took}`;
+	return __ompTranslate("Background task {0} completed{1}", `${name}`, `${took}`);
 }
 
 function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknown): boolean {
@@ -181,11 +182,11 @@ const ASYNC_WAIT_LISTED_JOBS = 3;
 
 /** Working-row text while the run only waits on background jobs; short enough for a narrow terminal. */
 function formatAsyncWaitLabel(jobIds: readonly string[]): string {
-	if (jobIds.length === 0) return "Waiting for background work";
-	if (jobIds.length === 1) return `Waiting for background job ${jobIds[0]}`;
+	if (jobIds.length === 0) return __ompTranslate("Waiting for background work");
+	if (jobIds.length === 1) return __ompTranslate("Waiting for background job {0}", `${jobIds[0]}`);
 	const listed = jobIds.slice(0, ASYNC_WAIT_LISTED_JOBS).join(", ");
 	const more = jobIds.length > ASYNC_WAIT_LISTED_JOBS ? ` +${jobIds.length - ASYNC_WAIT_LISTED_JOBS}` : "";
-	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
+	return __ompTranslate("Waiting for {0} background jobs: {1}{2}", `${jobIds.length}`, `${listed}`, `${more}`);
 }
 
 /** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
@@ -2310,7 +2311,10 @@ export class EventController {
 			// error stays full-fidelity for the transcript and for replays.
 			const detail = textContent ? previewLine(sanitizeText(textContent), TRUNCATE_LENGTHS.LINE) : "";
 			this.ctx.showWarning(
-				`Todo update failed${detail ? `: ${detail}` : ". Progress may be stale until todo succeeds."}`,
+				__ompTranslate(
+					"Todo update failed{0}",
+					`${detail ? `: ${detail}` : __ompTranslate(". Progress may be stale until todo succeeds.")}`,
+				),
 				{ hideWithToolActivity: true },
 			);
 		}
@@ -2519,7 +2523,11 @@ export class EventController {
 				const running = session.getAsyncJobSnapshot()?.running.length ?? 0;
 				if (running > 0) {
 					this.ctx.showStatus(
-						`Stopped waiting · ${running} background ${running === 1 ? "job" : "jobs"} still running (/jobs)`,
+						__ompTranslate(
+							"Stopped waiting · {0} background {1} still running (/jobs)",
+							`${running}`,
+							`${running === 1 ? "job" : "jobs"}`,
+						),
 					);
 				}
 			});
@@ -2639,7 +2647,9 @@ export class EventController {
 	 * label carries no dangling whitespace.
 	 */
 	#maintenanceEscHint(): string {
-		return this.ctx.focusedAgentId ? "" : ` (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
+		return this.ctx.focusedAgentId
+			? ""
+			: __ompTranslate(" ({0} to cancel)", `${appKey(this.ctx.keybindings, "app.interrupt")}`);
 	}
 
 	async #handleAutoCompactionStart(
@@ -2654,22 +2664,22 @@ export class EventController {
 		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
 			event.reason === "overflow"
-				? "Context overflow detected, "
+				? __ompTranslate("Context overflow detected, ")
 				: event.reason === "incomplete"
-					? "Response incomplete, "
+					? __ompTranslate("Response incomplete, ")
 					: event.reason === "idle"
-						? "Idle "
+						? __ompTranslate("Idle ")
 						: "";
 		const actionLabel =
 			event.action === "remote"
-				? "Auto server compaction"
+				? __ompTranslate("Auto server compaction")
 				: event.action === "handoff"
-					? "Auto-handoff"
+					? __ompTranslate("Auto-handoff")
 					: event.action === "shake"
-						? "Auto-shake"
+						? __ompTranslate("Auto-shake")
 						: event.action === "snapcompact"
-							? "Auto-snapcompact"
-							: "Auto context-full maintenance";
+							? __ompTranslate("Auto-snapcompact")
+							: __ompTranslate("Auto context-full maintenance");
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -2712,14 +2722,14 @@ export class EventController {
 		if (event.aborted) {
 			this.ctx.showStatus(
 				isHandoffAction
-					? "Auto-handoff cancelled"
+					? __ompTranslate("Auto-handoff cancelled")
 					: isRemoteAction
-						? "Auto server compaction cancelled"
+						? __ompTranslate("Auto server compaction cancelled")
 						: isShakeAction
-							? "Auto-shake cancelled"
+							? __ompTranslate("Auto-shake cancelled")
 							: isSnapcompactAction
-								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+								? __ompTranslate("Auto-snapcompact cancelled")
+								: __ompTranslate("Auto context-full maintenance cancelled"),
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
@@ -2738,7 +2748,7 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
-				this.ctx.showStatus("Auto-shake completed");
+				this.ctx.showStatus(__ompTranslate("Auto-shake completed"));
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;
@@ -2763,16 +2773,16 @@ export class EventController {
 			this.ctx.statusLine.invalidate();
 			await this.ctx.reloadTodos();
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
-			this.ctx.showStatus("Auto-handoff completed");
+			this.ctx.showStatus(__ompTranslate("Auto-handoff completed"));
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.
 		} else if (isSnapcompactAction) {
-			this.ctx.showWarning("Auto-snapcompact maintenance failed; continuing without maintenance");
+			this.ctx.showWarning(__ompTranslate("Auto-snapcompact maintenance failed; continuing without maintenance"));
 		} else if (isRemoteAction) {
-			this.ctx.showWarning("Auto server compaction failed; continuing without maintenance");
+			this.ctx.showWarning(__ompTranslate("Auto server compaction failed; continuing without maintenance"));
 		} else {
-			this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
+			this.ctx.showWarning(__ompTranslate("Auto context-full maintenance failed; continuing without maintenance"));
 		}
 		await this.ctx.flushCompactionQueue({ willRetry: event.willRetry });
 		this.#ensureWorkingLoaderWhileStreaming();
@@ -2805,14 +2815,19 @@ export class EventController {
 			this.ctx.clearPinnedError();
 		}
 		const retryStartMs = Date.now();
-		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const retryLabel = __ompTranslate("Retrying ({0}/{1})", `${event.attempt}`, `${event.maxAttempts}`);
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				return __ompTranslate(
+					"{0} in {1}…{2}",
+					`${retryLabel}`,
+					`${formatDuration(remaining)}`,
+					`${this.#maintenanceEscHint()}`,
+				);
 			},
 			getSymbolTheme().spinnerFrames,
 		);
@@ -2874,12 +2889,22 @@ export class EventController {
 		if (!event.success) {
 			if (terminalFailurePinned) {
 				const terminalError = this.#restorePinnedErrorInline
-					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
+					? __ompTranslate(
+							"Retry failed after {0} attempts: {1}",
+							`${event.attempt}`,
+							`${event.finalError || pinnedError || __ompTranslate("Unknown error")}`,
+						)
 					: (pinnedError ?? event.finalError);
 				if (terminalError) this.ctx.showPinnedError(terminalError);
 				this.#restorePinnedErrorInline = true;
 			} else {
-				this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+				this.ctx.showError(
+					__ompTranslate(
+						"Retry failed after {0} attempts: {1}",
+						`${event.attempt}`,
+						`${event.finalError || __ompTranslate("Unknown error")}`,
+					),
+				);
 			}
 		}
 		this.#ensureWorkingLoaderWhileStreaming();
@@ -2892,13 +2917,13 @@ export class EventController {
 		const reason = event.reason
 			? `\n${previewLine(sanitizeText(event.reason), TRUNCATE_LENGTHS.LINE * PREVIEW_LIMITS.COLLAPSED_LINES)}`
 			: "";
-		this.ctx.showWarning(`Fallback: ${event.from} -> ${event.to}${reason}`);
+		this.ctx.showWarning(__ompTranslate("Fallback: {0} -> {1}{2}", `${event.from}`, `${event.to}`, `${reason}`));
 	}
 
 	async #handleRetryFallbackSucceeded(
 		event: Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>,
 	): Promise<void> {
-		this.ctx.showStatus(`Fallback succeeded on ${event.model}`);
+		this.ctx.showStatus(__ompTranslate("Fallback succeeded on {0}", `${event.model}`));
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {
@@ -2969,7 +2994,7 @@ export class EventController {
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
 			title: sessionName || "omp",
-			body: "Stopped with error",
+			body: __ompTranslate("Stopped with error"),
 			type: "error",
 			actions: "focus",
 		});
@@ -2994,7 +3019,7 @@ export class EventController {
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
 			title: sessionName || "omp",
-			body: "Complete",
+			body: __ompTranslate("Complete"),
 			type: "completion",
 			actions: "focus",
 		});

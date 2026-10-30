@@ -30,6 +30,7 @@
  * real implementations at the dispatch site.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
@@ -105,7 +106,10 @@ function parseMaxTimeSeconds(value: string): number {
 	const seconds = duration ? Number(duration[1]) * maxTimeMultiplier(duration[2]) : Number(trimmed);
 	if (Number.isFinite(seconds) && seconds > 0) return seconds;
 	throw new CliUsageError(
-		`Invalid --max-time value: ${JSON.stringify(value)}. Expected a positive number of seconds or duration like "5s", "10m", "1h".`,
+		__ompTranslate(
+			'Invalid --max-time value: {0}. Expected a positive number of seconds or duration like "5s", "10m", "1h".',
+			`${JSON.stringify(value)}`,
+		),
 	);
 }
 
@@ -113,7 +117,11 @@ function parseCostUsd(flag: string, value: string): number {
 	const usd = Number(value.trim());
 	if (Number.isFinite(usd) && usd > 0) return usd;
 	throw new CliUsageError(
-		`Invalid ${flag} value: ${JSON.stringify(value)}. Expected a positive USD amount, e.g. 0.50.`,
+		__ompTranslate(
+			"Invalid {0} value: {1}. Expected a positive USD amount, e.g. 0.50.",
+			`${flag}`,
+			`${JSON.stringify(value)}`,
+		),
 	);
 }
 
@@ -138,7 +146,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			result.mode = value;
 		} else {
 			result.invalidFlagValues.push(
-				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp.`,
+				__ompTranslate(
+					"Invalid --mode value: {0}. Expected one of: text, json, rpc, rpc-ui, acp.",
+					`${JSON.stringify(value)}`,
+				),
 			);
 		}
 	},
@@ -158,7 +169,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.slow = value;
 	},
 	"--goal": (result, value) => {
-		if (!value.trim()) throw new CliUsageError("--goal requires a non-empty objective.");
+		if (!value.trim()) throw new CliUsageError(__ompTranslate("--goal requires a non-empty objective."));
 		result.goal = value.trim();
 	},
 	"--plan": (result, value) => {
@@ -182,7 +193,11 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
 			throw new CliUsageError(
-				`Invalid --service-tier value: ${JSON.stringify(value)}. Expected one of: ${SERVICE_TIER_OPENAI_VALUES.join(", ")}.`,
+				__ompTranslate(
+					"Invalid --service-tier value: {0}. Expected one of: {1}.",
+					`${JSON.stringify(value)}`,
+					`${SERVICE_TIER_OPENAI_VALUES.join(", ")}`,
+				),
 			);
 		}
 		result.serviceTier = value;

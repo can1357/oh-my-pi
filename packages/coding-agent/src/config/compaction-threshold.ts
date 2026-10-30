@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
 /**
@@ -53,24 +54,44 @@ function validateThresholdMap(
 ): Record<string, CompactionThresholdPair> {
 	if (value === undefined || value === null) return {};
 	if (!isRecord(value)) {
-		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		const received = Array.isArray(value) ? __ompTranslate("an array") : __ompTranslate("a {0}", `${typeof value}`);
 		throw new Error(
-			`Invalid ${settingId}: expected a map of ${keyNoun} to token count or percentage, got ${received}.`,
+			__ompTranslate(
+				"Invalid {0}: expected a map of {1} to token count or percentage, got {2}.",
+				`${settingId}`,
+				`${keyNoun}`,
+				`${received}`,
+			),
 		);
 	}
 
 	const thresholds: Record<string, CompactionThresholdPair> = {};
 	for (const [key, entry] of Object.entries(value)) {
 		const keyError = options.checkKey?.(key);
-		if (keyError) throw new Error(`Invalid ${settingId} key "${key}": ${keyError}.`);
+		if (keyError)
+			throw new Error(__ompTranslate('Invalid {0} key "{1}": {2}.', `${settingId}`, `${key}`, `${keyError}`));
 		if (entry === null) continue;
 		const threshold = parseThresholdEntry(entry, options.allowFixed);
 		if (!threshold) {
-			const received = Array.isArray(entry) ? "an array" : typeof entry === "string" ? `"${entry}"` : String(entry);
+			const received = Array.isArray(entry)
+				? __ompTranslate("an array")
+				: typeof entry === "string"
+					? `"${entry}"`
+					: String(entry);
 			const forms = options.allowFixed
-				? `a positive integer token count (e.g. 90000), a fixed trigger (e.g. "f90000") or a percentage in (0, 100] (e.g. "80%")`
-				: `a positive integer token count (e.g. 90000) or a percentage in (0, 100] (e.g. "80%")`;
-			throw new Error(`Invalid ${settingId}.${key}: expected ${forms}, got ${received}.`);
+				? __ompTranslate(
+						'a positive integer token count (e.g. 90000), a fixed trigger (e.g. "f90000") or a percentage in (0, 100] (e.g. "80%")',
+					)
+				: __ompTranslate('a positive integer token count (e.g. 90000) or a percentage in (0, 100] (e.g. "80%")');
+			throw new Error(
+				__ompTranslate(
+					"Invalid {0}.{1}: expected {2}, got {3}.",
+					`${settingId}`,
+					`${key}`,
+					`${forms}`,
+					`${received}`,
+				),
+			);
 		}
 		thresholds[key] = threshold;
 	}
@@ -79,14 +100,17 @@ function validateThresholdMap(
 
 /** Validate the exact-agent compaction threshold map and normalize each entry to both threshold fields. */
 export function validateAgentCompactionThresholdOverrides(value: unknown): Record<string, CompactionThresholdPair> {
-	return validateThresholdMap("task.agentCompactionThresholdOverrides", "agent name", value, { allowFixed: false });
+	return validateThresholdMap("task.agentCompactionThresholdOverrides", __ompTranslate("agent name"), value, {
+		allowFixed: false,
+	});
 }
 
 function checkModelThresholdKey(key: string): string | undefined {
 	const star = key.indexOf("*");
-	if (star !== -1 && star !== key.length - 1) return "`*` is only allowed as the last character";
+	if (star !== -1 && star !== key.length - 1) return __ompTranslate("`*` is only allowed as the last character");
 	const slash = key.indexOf("/");
-	if (slash <= 0 || slash === key.length - 1) return "expected `provider/model-id` or a `provider/…*` prefix";
+	if (slash <= 0 || slash === key.length - 1)
+		return __ompTranslate("expected `provider/model-id` or a `provider/…*` prefix");
 	return undefined;
 }
 
@@ -95,7 +119,7 @@ function checkModelThresholdKey(key: string): string | undefined {
  * or a `*`-terminated prefix of one (`deepseek/*`, `openrouter/anthropic/*`).
  */
 export function validateModelCompactionThresholds(value: unknown): Record<string, CompactionThresholdPair> {
-	return validateThresholdMap("compaction.modelThresholds", "model selector", value, {
+	return validateThresholdMap("compaction.modelThresholds", __ompTranslate("model selector"), value, {
 		checkKey: checkModelThresholdKey,
 		allowFixed: true,
 	});
@@ -201,7 +225,7 @@ export function parseCompactionPointInput(input: string): number | string | null
 	if (text.length === 0) return null;
 	if (text.endsWith("%")) {
 		if (parseThresholdEntry(text, false)) return text;
-		throw new Error(`Invalid compaction point "${text}": percentage must be in (0, 100]`);
+		throw new Error(__ompTranslate('Invalid compaction point "{0}": percentage must be in (0, 100]', `${text}`));
 	}
 	const match = TOKEN_INPUT_PATTERN.exec(text);
 	if (match) {
@@ -210,7 +234,10 @@ export function parseCompactionPointInput(input: string): number | string | null
 		if (parseThresholdEntry(tokens, false)) return match[1] ? `f${tokens}` : tokens;
 	}
 	throw new Error(
-		`Invalid compaction point "${text}": use a token count (90000, 90k, 1m), a fixed trigger (f400k) or a percentage (80%)`,
+		__ompTranslate(
+			'Invalid compaction point "{0}": use a token count (90000, 90k, 1m), a fixed trigger (f400k) or a percentage (80%)',
+			`${text}`,
+		),
 	);
 }
 

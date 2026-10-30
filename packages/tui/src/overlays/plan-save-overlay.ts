@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, CURSOR_MARKER, type Focusable, Input, truncateToWidth, visibleWidth } from "../index";
 import { theme } from "../theme/theme";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
@@ -26,10 +27,10 @@ export class PlanSaveOverlay implements Component, Focusable {
 	constructor(suggestedPath: string, done: (result: PlanSaveOverlayResult | undefined) => void) {
 		this.#suggestedPath = suggestedPath;
 		this.#done = done;
-		this.#input.prompt = theme.fg("dim", "Path: ");
+		this.#input.prompt = theme.fg("dim", __ompTranslate("Path: "));
 		this.#input.onSubmit = value => this.#done({ path: value.trim() || this.#suggestedPath });
 		this.#input.onEscape = () => this.#done(undefined);
-		this.#panel = new OverlayPanel("Save and quit");
+		this.#panel = new OverlayPanel(__ompTranslate("Save and quit"));
 		this.#body = new PanelRows();
 		this.#body.setHeight(2);
 		this.#panel.addChild(this.#body);
@@ -65,13 +66,21 @@ export class PlanSaveOverlay implements Component, Focusable {
 	render(width: number): readonly string[] {
 		const innerWidth = Math.max(0, width - 4);
 		this.#input.focused = this.#focused;
-		const hint = `${editorKey("tui.input.submit")} save and quit · ${editorKey("tui.select.cancel")} cancel`;
+		const hint = __ompTranslate(
+			"{0} save and quit · {1} cancel",
+			`${editorKey("tui.input.submit")}`,
+			`${editorKey("tui.select.cancel")}`,
+		);
 		this.#body.setLines([this.#renderInput(innerWidth), theme.fg("dim", hint)]);
 		return this.#panel.render(width);
 	}
 
 	/** A small glass sheet titled "Save and quit". */
-	readonly nativeOverlay = { role: "omp.overlay.planSave", size: "sm", head: "Save and quit" } as const;
+	readonly nativeOverlay = {
+		role: "omp.overlay.planSave",
+		size: "sm",
+		head: __ompTranslate("Save and quit"),
+	} as const;
 
 	describe(): NativeNode {
 		this.#input.focused = this.#focused;
@@ -85,7 +94,9 @@ export class PlanSaveOverlay implements Component, Focusable {
 		if (showDefault) {
 			children.push(
 				keyed(
-					text([span("Empty saves to ", "dim"), span(this.#suggestedPath, "path")], { truncate: "middle" }),
+					text([span(__ompTranslate("Empty saves to "), "dim"), span(this.#suggestedPath, "path")], {
+						truncate: "middle",
+					}),
 					"default",
 				),
 			);
@@ -93,8 +104,11 @@ export class PlanSaveOverlay implements Component, Focusable {
 		children.push(
 			actionBar([
 				null,
-				actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {}),
-				actionButton("Save and quit", "save", { tone: "accent", ...(submitKey ? { keys: submitKey } : {}) }),
+				actionButton(__ompTranslate("Cancel"), "cancel", cancelKey ? { keys: cancelKey } : {}),
+				actionButton(__ompTranslate("Save and quit"), "save", {
+					tone: "accent",
+					...(submitKey ? { keys: submitKey } : {}),
+				}),
 			]),
 		);
 		this.#nativeSig = sig;

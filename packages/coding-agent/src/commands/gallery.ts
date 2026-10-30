@@ -2,6 +2,7 @@
  * Render every built-in tool's renderer across its lifecycle states.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { galleryHelp as commandHelp } from "../cli/command-help";
 import {
@@ -18,37 +19,40 @@ export default class Gallery extends Command {
 	static description = commandHelp.description;
 	static flags = {
 		surface: Flags.string({
-			description: "Render only tool, composer, or segment surfaces (repeatable; default: all)",
+			description: __ompTranslate("Render only tool, composer, or segment surfaces (repeatable; default: all)"),
 			options: [...GALLERY_SURFACE_TOKENS],
 			multiple: true,
 		}),
-		tool: Flags.string({ char: "t", description: "Render a single tool by name" }),
-		composer: Flags.string({ description: "Render a single composer shape by name" }),
-		segment: Flags.string({ description: "Render a single status-line segment by name" }),
+		tool: Flags.string({ char: "t", description: __ompTranslate("Render a single tool by name") }),
+		composer: Flags.string({ description: __ompTranslate("Render a single composer shape by name") }),
+		segment: Flags.string({ description: __ompTranslate("Render a single status-line segment by name") }),
 		state: Flags.string({
 			char: "s",
-			description: "Render only the given lifecycle state(s)",
+			description: __ompTranslate("Render only the given lifecycle state(s)"),
 			options: GALLERY_STATE_TOKENS,
 			multiple: true,
 		}),
-		width: Flags.integer({ char: "w", description: "Render width in columns" }),
+		width: Flags.integer({ char: "w", description: __ompTranslate("Render width in columns") }),
 		expanded: Flags.boolean({
 			char: "e",
-			description: "Render the expanded variant of each renderer",
+			description: __ompTranslate("Render the expanded variant of each renderer"),
 			default: false,
 		}),
-		plain: Flags.boolean({ description: "Strip ANSI styling from the output", default: false }),
+		plain: Flags.boolean({ description: __ompTranslate("Strip ANSI styling from the output"), default: false }),
 		screenshot: Flags.boolean({
-			description:
+			description: __ompTranslate(
 				"Capture the rendered output as PNG screenshot(s) via VHS instead of printing ANSI (requires vhs)",
+			),
 			default: false,
 		}),
 		out: Flags.string({
 			char: "o",
-			description: "Screenshot output path (with --screenshot); suffixed per image when split across multiple",
+			description: __ompTranslate(
+				"Screenshot output path (with --screenshot); suffixed per image when split across multiple",
+			),
 		}),
-		font: Flags.string({ description: "Screenshot font family (default: JetBrainsMono Nerd Font)" }),
-		"font-size": Flags.integer({ description: "Screenshot font size in points (default: 18)" }),
+		font: Flags.string({ description: __ompTranslate("Screenshot font family (default: JetBrainsMono Nerd Font)") }),
+		"font-size": Flags.integer({ description: __ompTranslate("Screenshot font size in points (default: 18)") }),
 	};
 
 	async run(): Promise<void> {

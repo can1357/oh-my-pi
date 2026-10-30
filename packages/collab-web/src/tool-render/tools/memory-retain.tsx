@@ -1,4 +1,5 @@
 /** `retain` — store facts in long-term memory (one bullet per stored item). */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, InvalidArg, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -31,7 +32,9 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 	const first = items[0] ? truncate(normalizeWs(items[0].content), 80) : "";
 	return (
 		<>
-			<Badge tone="accent">{count === 1 ? "1 memory" : `${count} memories`}</Badge>
+			<Badge tone="accent">
+				{count === 1 ? __ompTranslate("1 memory") : __ompTranslate("{0} memories", `${count}`)}
+			</Badge>
 			{first && <span className="tv-trunc">{first}</span>}
 		</>
 	);

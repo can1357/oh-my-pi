@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { Markdown } from "../components/markdown";
@@ -17,7 +18,7 @@ export class CollabPromptMessageComponent extends Container {
 
 	constructor(message: CustomMessage<CollabPromptDetails>) {
 		super();
-		const from = message.details?.from?.trim() || "guest";
+		const from = message.details?.from?.trim() || __ompTranslate("guest");
 		const authorText = new Text(theme.fg("accent", `\x1b[1m«${from}»\x1b[22m ›`), 1, 0);
 		authorText.setIgnoreTight(true);
 		this.addChild(authorText);

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -123,17 +124,17 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 	api.registerTool(createUpdateNotesTool({ dashboard, getRuntime, pi: api }));
 
 	api.registerCommand("autoresearch", {
-		description: "Toggle builtin autoresearch mode, or pass off / clear, or a goal message.",
+		description: __ompTranslate("Toggle builtin autoresearch mode, or pass off / clear, or a goal message."),
 		getArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
 			if (argumentPrefix.includes(" ")) return null;
 			const normalized = argumentPrefix.trim().toLowerCase();
 			if (normalized.length === 0) return null;
 			const completions: AutocompleteItem[] = [
-				{ label: "off", value: "off", description: "Leave autoresearch mode" },
+				{ label: "off", value: "off", description: __ompTranslate("Leave autoresearch mode") },
 				{
 					label: "clear",
 					value: "clear",
-					description: "Reset worktree to baseline and close the active session",
+					description: __ompTranslate("Reset worktree to baseline and close the active session"),
 				},
 			];
 			const filtered = completions.filter(item => item.label.startsWith(normalized));
@@ -219,17 +220,20 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (goalArg !== null) {
 				api.sendUserMessage(goalArg);
 			} else {
-				ctx.ui.notify("Autoresearch enabled—describe what to optimize in your next message.", "info");
+				ctx.ui.notify(
+					__ompTranslate("Autoresearch enabled—describe what to optimize in your next message."),
+					"info",
+				);
 			}
 		},
 	});
 
 	api.registerShortcut("ctrl+x", {
-		description: "Toggle autoresearch dashboard",
+		description: __ompTranslate("Toggle autoresearch dashboard"),
 		handler(ctx): void {
 			const runtime = getRuntime(ctx);
 			if (runtime.state.results.length === 0 && !runtime.runningExperiment) {
-				ctx.ui.notify("No autoresearch results yet", "info");
+				ctx.ui.notify(__ompTranslate("No autoresearch results yet"), "info");
 				return;
 			}
 			runtime.dashboardExpanded = !runtime.dashboardExpanded;
@@ -238,7 +242,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 	});
 
 	api.registerShortcut("ctrl+shift+x", {
-		description: "Show autoresearch dashboard overlay",
+		description: __ompTranslate("Show autoresearch dashboard overlay"),
 		handler(ctx): Promise<void> {
 			return dashboard.showOverlay(ctx, getRuntime(ctx));
 		},
@@ -430,15 +434,21 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				const repository = vcs.requireGit(ctx.cwd);
 				await repository.reset("hard", session.baselineCommit);
 				await repository.clean({});
-				ctx.ui.notify(`Reset worktree to baseline ${session.baselineCommit.slice(0, 12)}.`, "info");
+				ctx.ui.notify(
+					__ompTranslate("Reset worktree to baseline {0}.", `${session.baselineCommit.slice(0, 12)}`),
+					"info",
+				);
 			} catch (err) {
 				ctx.ui.notify(
-					`Failed to reset worktree to baseline: ${err instanceof Error ? err.message : String(err)}`,
+					__ompTranslate(
+						"Failed to reset worktree to baseline: {0}",
+						`${err instanceof Error ? err.message : String(err)}`,
+					),
 					"error",
 				);
 			}
 		} else if (shouldResetTree) {
-			ctx.ui.notify("No baseline commit recorded — skipped worktree reset.", "warning");
+			ctx.ui.notify(__ompTranslate("No baseline commit recorded — skipped worktree reset."), "warning");
 		}
 
 		removeLegacyArtifacts(ctx.cwd);
@@ -457,7 +467,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		dashboard.updateWidget(ctx, runtime);
 		const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
 		await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
-		ctx.ui.notify("Autoresearch session cleared.", "info");
+		ctx.ui.notify(__ompTranslate("Autoresearch session cleared."), "info");
 	}
 };
 

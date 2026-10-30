@@ -9,6 +9,7 @@
  * model into the worker's cache.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
@@ -28,15 +29,17 @@ import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
 export default class Say extends Command {
 	static description = commandHelp.description;
 	static args = {
-		text: Args.string({ description: "Text to speak (or use --file)" }),
+		text: Args.string({ description: __ompTranslate("Text to speak (or use --file)") }),
 	};
 
 	static flags = {
-		voice: Flags.string({ description: "Voice id", options: TTS_LOCAL_VOICE_VALUES }),
-		speed: Flags.string({ description: "Speaking rate, 0.5–2.5 (1 = normal; default: tts.localSpeed)" }),
-		model: Flags.string({ description: "Local TTS model key" }),
-		file: Flags.string({ char: "f", description: "Read the text to speak from this file" }),
-		out: Flags.string({ char: "o", description: "Write WAV to this path instead of playing" }),
+		voice: Flags.string({ description: __ompTranslate("Voice id"), options: TTS_LOCAL_VOICE_VALUES }),
+		speed: Flags.string({
+			description: __ompTranslate("Speaking rate, 0.5–2.5 (1 = normal; default: tts.localSpeed)"),
+		}),
+		model: Flags.string({ description: __ompTranslate("Local TTS model key") }),
+		file: Flags.string({ char: "f", description: __ompTranslate("Read the text to speak from this file") }),
+		out: Flags.string({ char: "o", description: __ompTranslate("Write WAV to this path instead of playing") }),
 	};
 
 	static examples = [
@@ -48,7 +51,7 @@ export default class Say extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Say);
 		if (args.text && flags.file) {
-			process.stderr.write(chalk.red("error: pass either text or --file, not both\n"));
+			process.stderr.write(chalk.red(__ompTranslate("error: pass either text or --file, not both\n")));
 			process.exit(1);
 		}
 
@@ -57,7 +60,7 @@ export default class Say extends Command {
 		const voice = flags.voice ?? cfgTtsLocalVoice.get(settings);
 		const speed = flags.speed === undefined ? cfgTtsLocalSpeed.get(settings) : Number(flags.speed);
 		if (!Number.isFinite(speed) || speed <= 0) {
-			process.stderr.write(chalk.red(`error: invalid --speed: ${flags.speed}\n`));
+			process.stderr.write(chalk.red(__ompTranslate("error: invalid --speed: {0}\n", `${flags.speed}`)));
 			process.exit(1);
 		}
 
@@ -65,7 +68,7 @@ export default class Say extends Command {
 		const unsubscribe = ttsClient.onProgress(event => {
 			if (event.status === "progress" && typeof event.progress === "number") {
 				process.stderr.write(
-					`\r${chalk.dim(`downloading ${event.file ?? model}: ${Math.round(event.progress)}%`)}`,
+					`\r${chalk.dim(__ompTranslate("downloading {0}: {1}%", `${event.file ?? model}`, `${Math.round(event.progress)}`))}`,
 				);
 			} else if (event.status === "done" || event.status === "ready") {
 				// Clear the progress line once the download finishes.
@@ -78,7 +81,7 @@ export default class Say extends Command {
 			const splitter = new SpeakableStream();
 			const segments = [...splitter.push(text), ...splitter.flush()];
 			if (segments.length === 0) {
-				process.stderr.write(chalk.red("error: nothing speakable in the input\n"));
+				process.stderr.write(chalk.red(__ompTranslate("error: nothing speakable in the input\n")));
 				exitCode = 1;
 				return;
 			}
@@ -111,8 +114,8 @@ export default class Say extends Command {
 				await Bun.write(flags.out, wav);
 				const durationSec = total / sampleRate;
 				process.stdout.write(
-					`${chalk.green("saved")} ${flags.out} ` +
-						`${chalk.dim(`(${voice}, ${model}, ${durationSec.toFixed(1)}s, ${wav.byteLength} bytes)`)}\n`,
+					`${chalk.green(__ompTranslate("saved\u0004speech.audio.saved"))} ${flags.out} ` +
+						`${chalk.dim(__ompTranslate("({0}, {1}, {2}s, {3} bytes)", `${voice}`, `${model}`, `${durationSec.toFixed(1)}`, `${wav.byteLength}`))}\n`,
 				);
 				return;
 			}
@@ -134,10 +137,12 @@ export default class Say extends Command {
 			}
 			await player.end();
 			process.stdout.write(
-				`${chalk.green("spoke")} ${chalk.dim(`(${voice}, ${model}, ${seconds.toFixed(1)}s, ${spoken} segments)`)}\n`,
+				`${chalk.green(__ompTranslate("spoke"))} ${chalk.dim(__ompTranslate("({0}, {1}, {2}s, {3} segments)", `${voice}`, `${model}`, `${seconds.toFixed(1)}`, `${spoken}`))}\n`,
 			);
 		} catch (err) {
-			process.stderr.write(chalk.red(`error: ${err instanceof Error ? err.message : String(err)}\n`));
+			process.stderr.write(
+				chalk.red(__ompTranslate("error: {0}\n", `${err instanceof Error ? err.message : String(err)}`)),
+			);
 			exitCode = 1;
 		} finally {
 			unsubscribe();
@@ -160,7 +165,10 @@ export default class Say extends Command {
 	#synthesisFailed(model: string): void {
 		process.stderr.write(
 			chalk.red(
-				`error: could not synthesize with local TTS model "${model}". Run \`omp setup speech\` to install it.\n`,
+				__ompTranslate(
+					'error: could not synthesize with local TTS model "{0}". Run `omp setup speech` to install it.\n',
+					`${model}`,
+				),
 			),
 		);
 	}

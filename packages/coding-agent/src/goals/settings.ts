@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 export const cfgGoalEnabled = register({
@@ -7,7 +8,7 @@ export const cfgGoalEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Goal Mode",
+		label: __ompTranslate("Goal Mode"),
 		description: "Enable per-session goal mode and the hidden goal tool",
 	},
 });
@@ -19,7 +20,7 @@ export const cfgGoalStatusInFooter = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Goal Status in Footer",
+		label: __ompTranslate("Goal Status in Footer"),
 		description: "Show token budget alongside the goal indicator in the status line",
 	},
 });
@@ -33,7 +34,7 @@ export const cfgGoalContinuationModes = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Goal Continuation Modes",
+		label: __ompTranslate("Goal Continuation Modes"),
 		description: 'Run modes where active goals may auto-continue between turns ("interactive", "rpc")',
 	},
 });

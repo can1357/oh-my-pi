@@ -4,6 +4,7 @@
  * `<provider>/<credential id>` target, and map a redeem outcome code to a
  * human message.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
@@ -49,10 +50,16 @@ export interface ResetUsageTarget {
 export function parseResetUsageTarget(arg: string, command: string): ResetUsageTarget | { error: string } {
 	const text = arg.trim();
 	const slash = text.indexOf("/");
-	if (slash <= 0) return { error: `Choose an account with \`${command} <provider>/<credential id>\`.` };
+	if (slash <= 0)
+		return { error: __ompTranslate("Choose an account with `{0} <provider>/<credential id>`.", `${command}`) };
 	const provider = normalizeResetProvider(text.slice(0, slash));
 	if (!provider) {
-		return { error: `Unknown reset provider "${oneLine(text.slice(0, slash))}". Use anthropic or openai-codex.` };
+		return {
+			error: __ompTranslate(
+				'Unknown reset provider "{0}". Use anthropic or openai-codex.',
+				`${oneLine(text.slice(0, slash))}`,
+			),
+		};
 	}
 	return {
 		provider,
@@ -81,17 +88,33 @@ export function resolveResetUsageTarget(
 		return credentialId !== undefined && candidate.target.credentialId === credentialId;
 	});
 	if (!account) {
-		return { error: `No stored account matches "${oneLine(arg.trim())}". List choices with \`${command}\`.` };
+		return {
+			error: __ompTranslate(
+				'No stored account matches "{0}". List choices with `{1}`.',
+				`${oneLine(arg.trim())}`,
+				`${command}`,
+			),
+		};
 	}
 	if (account.error) {
 		return {
-			error: `${oneLine(account.label)} [${oneLine(account.providerLabel)}]: saved resets unavailable (${oneLine(account.error)}), so nothing was spent.`,
+			error: __ompTranslate(
+				"{0} [{1}]: saved resets unavailable ({2}), so nothing was spent.",
+				`${oneLine(account.label)}`,
+				`${oneLine(account.providerLabel)}`,
+				`${oneLine(account.error)}`,
+			),
 		};
 	}
 	if (account.redeemableCount <= 0) {
 		const reason = account.unavailableReason ? ` (${oneLine(account.unavailableReason)})` : "";
 		return {
-			error: `${oneLine(account.label)} [${oneLine(account.providerLabel)}]: no saved resets usable right now${reason}.`,
+			error: __ompTranslate(
+				"{0} [{1}]: no saved resets usable right now{2}.",
+				`${oneLine(account.label)}`,
+				`${oneLine(account.providerLabel)}`,
+				`${reason}`,
+			),
 		};
 	}
 	return { account };
@@ -103,8 +126,8 @@ export function formatResetUsageAccountLine(account: ResetUsageAccount): string 
 	if (account.error) {
 		detail = `unavailable (${oneLine(account.error)})`;
 	} else {
-		detail = `${account.availableCount} saved, ${account.redeemableCount} usable now`;
-		if (account.expiresAt) detail += `, expires ${oneLine(account.expiresAt)}`;
+		detail = __ompTranslate("{0} saved, {1} usable now", `${account.availableCount}`, `${account.redeemableCount}`);
+		if (account.expiresAt) detail += __ompTranslate(", expires {0}", `${oneLine(account.expiresAt)}`);
 		if (account.redeemableCount === 0 && account.unavailableReason) {
 			detail += ` (${oneLine(account.unavailableReason)})`;
 		}
@@ -130,9 +153,9 @@ export function toResetUsageAccount(status: ResetCreditAccountStatus): ResetUsag
 	const unavailableReason =
 		summary?.unavailableReason ??
 		(provider === CLAUDE_PROVIDER_ID && advertisedRedeemable > 0 && !status.nextCreditId
-			? "the provider did not identify a grant that can be safely spent"
+			? __ompTranslate("the provider did not identify a grant that can be safely spent")
 			: undefined) ??
-		(status.availableCount > 0 && redeemableCount === 0 ? "not usable right now" : undefined);
+		(status.availableCount > 0 && redeemableCount === 0 ? __ompTranslate("not usable right now") : undefined);
 	return {
 		label,
 		provider,
@@ -182,29 +205,57 @@ export function describeRedeemOutcome(outcome: ResetCreditRedeemOutcome, label: 
 					: cleared.length > 0
 						? `the covered rate-limit window${cleared.length === 1 ? " has" : "s have"} been refreshed`
 						: "your rate-limit window has been refreshed";
-			return `Reset applied for ${label}${provider} — ${scope}.`;
+			return __ompTranslate("Reset applied for {0}{1} — {2}.", `${label}`, `${provider}`, `${scope}`);
 		}
 		case "already_redeemed":
-			return `${label}${provider}: that reset was already redeemed.`;
+			return __ompTranslate("{0}{1}: that reset was already redeemed.", `${label}`, `${provider}`);
 		case "no_credit":
-			return `${label}${provider}: no saved resets available to spend${reason}.`;
+			return __ompTranslate(
+				"{0}{1}: no saved resets available to spend{2}.",
+				`${label}`,
+				`${provider}`,
+				`${reason}`,
+			);
 		case "credit_list_failed":
-			return `${label}${provider}: couldn't load this account's saved resets (network/auth) — nothing was spent, try again.`;
+			return __ompTranslate(
+				"{0}{1}: couldn't load this account's saved resets (network/auth) — nothing was spent, try again.",
+				`${label}`,
+				`${provider}`,
+			);
 		case "nothing_to_reset":
-			return `${label}${provider}: nothing to reset right now — your covered limits aren't constrained, so no credit was spent.`;
+			return __ompTranslate(
+				"{0}{1}: nothing to reset right now — your covered limits aren't constrained, so no credit was spent.",
+				`${label}`,
+				`${provider}`,
+			);
 		case "no_account":
-			return `Could not find the stored account ${label}${provider}.`;
+			return __ompTranslate("Could not find the stored account {0}{1}.", `${label}`, `${provider}`);
 		case "account_unavailable":
-			return `${label}${provider}: could not authenticate this account — try /login.`;
+			return __ompTranslate("{0}{1}: could not authenticate this account — try /login.", `${label}`, `${provider}`);
 		case "offer_changed":
-			return `${label}${provider}: the reset offer changed — nothing was spent; reopen /usage reset.`;
+			return __ompTranslate(
+				"{0}{1}: the reset offer changed — nothing was spent; reopen /usage reset.",
+				`${label}`,
+				`${provider}`,
+			);
 		case "reset_in_progress":
-			return `${label}${provider}: a reset is already in progress.`;
+			return __ompTranslate("{0}{1}: a reset is already in progress.", `${label}`, `${provider}`);
 		case "reset_unconfirmed":
 		case "network_error":
 		case "malformed_response":
-			return `${label}${provider}: couldn't confirm whether the reset applied — check /usage before trying again${reason}.`;
+			return __ompTranslate(
+				"{0}{1}: couldn't confirm whether the reset applied — check /usage before trying again{2}.",
+				`${label}`,
+				`${provider}`,
+				`${reason}`,
+			);
 		default:
-			return `${label}${provider}: reset was not confirmed (${outcome.code})${reason}.`;
+			return __ompTranslate(
+				"{0}{1}: reset was not confirmed ({2}){3}.",
+				`${label}`,
+				`${provider}`,
+				`${outcome.code}`,
+				`${reason}`,
+			);
 	}
 }

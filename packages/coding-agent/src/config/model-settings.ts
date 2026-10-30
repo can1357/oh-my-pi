@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
@@ -89,18 +90,20 @@ export const cfgModelRoleStorage = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "Model Role Storage",
+		label: __ompTranslate("Model Role Storage"),
 		description: "Where model selector role assignments are saved",
 		options: [
 			{
 				value: "global",
-				label: "Global",
-				description: "Save role models in the active profile config (current behavior)",
+				label: __ompTranslate("Global"),
+				description: __ompTranslate("Save role models in the active profile config (current behavior)"),
 			},
 			{
 				value: "project",
-				label: "Per-project",
-				description: "Save project role models in .omp/config.yml; missing project roles use global defaults",
+				label: __ompTranslate("Per-project"),
+				description: __ompTranslate(
+					"Save project role models in .omp/config.yml; missing project roles use global defaults",
+				),
 			},
 		],
 	},

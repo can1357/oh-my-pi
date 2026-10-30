@@ -6,6 +6,8 @@
  * then cancelled/completed) with type badge, label, duration, and a one-line
  * result preview; we mirror that as rows plus the raw snapshot text.
  */
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import type { Tone } from "../parts";
 import { Badge, Badges, Note, ResultText, Row } from "../parts";
@@ -120,9 +122,9 @@ const STATUS_ORDER: Record<string, number> = { running: 0, failed: 1, cancelled:
 function formatDuration(ms: number): string {
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	const s = ms / 1000;
-	if (s < 60) return `${s.toFixed(1)}s`;
+	if (s < 60) return ___ompTranslate("{0}s", `${s.toFixed(1)}`);
 	const m = Math.floor(s / 60);
-	return `${m}m ${Math.round(s % 60)}s`;
+	return ___ompTranslate("{0}m {1}s", `${m}`, `${Math.round(s % 60)}`);
 }
 
 /**
@@ -137,7 +139,7 @@ function stripTaskResultEnvelope(text: string): string {
 
 function JobRow({ job }: { job: JobSnapshotLike }): ReactNode {
 	const tone = statusTone(job.status);
-	const label = normalizeWs(job.label) || "(no label)";
+	const label = normalizeWs(job.label) || ___ompTranslate("(no label)");
 	// Task jobs label themselves with their agent id — drop the id column
 	// instead of stuttering it twice.
 	const showId = label !== job.id;
@@ -161,25 +163,25 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 	if (args.list === true) {
 		items.push(
 			<Badge key="list" tone="accent">
-				list
+				{__ompTranslate("list")}
 			</Badge>,
 		);
 	}
 	if (cancel.length > 0) {
 		items.push(
 			<Badge key="cancel" tone="warn">
-				{groupLabel("cancel", cancel)}
+				{groupLabel(__ompTranslate("cancel"), cancel)}
 			</Badge>,
 		);
 	}
 	if (poll.length > 0) {
 		items.push(
 			<Badge key="poll" tone="accent">
-				{groupLabel("poll", poll)}
+				{groupLabel(__ompTranslate("poll"), poll)}
 			</Badge>,
 		);
 	}
-	if (items.length === 0) return <span className="tv-muted">all running jobs</span>;
+	if (items.length === 0) return <span className="tv-muted">{__ompTranslate("all running jobs")}</span>;
 	return <Badges items={items} />;
 }
 
@@ -211,9 +213,9 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		<>
 			{(args.list === true || poll.length > 0 || cancel.length > 0) && (
 				<div className="tv-list">
-					{args.list === true && <Row k="list">all jobs</Row>}
-					{poll.length > 0 && <Row k="poll">{poll.join(", ")}</Row>}
-					{cancel.length > 0 && <Row k="cancel">{cancel.join(", ")}</Row>}
+					{args.list === true && <Row k={___ompTranslate("list")}>{___ompTranslate("all jobs")}</Row>}
+					{poll.length > 0 && <Row k={___ompTranslate("poll")}>{poll.join(", ")}</Row>}
+					{cancel.length > 0 && <Row k={___ompTranslate("cancel")}>{cancel.join(", ")}</Row>}
 				</div>
 			)}
 			{jobs.length > 0 && (
@@ -254,7 +256,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{badOutcomes.length > 0 && (
 				<Note tone="warn">{badOutcomes.map(o => `${o.id}: ${o.status.replace(/_/g, " ")}`).join(" · ")}</Note>
 			)}
-			<ResultText result={result} maxLines={10} title={jobs.length > 0 ? "snapshot" : undefined} />
+			<ResultText result={result} maxLines={10} title={jobs.length > 0 ? ___ompTranslate("snapshot") : undefined} />
 		</>
 	);
 }

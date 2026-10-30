@@ -5,6 +5,7 @@
  * metadata for the clean-tree view, per-file old/new content resolution for
  * the split diff pane, and the staging/commit actions the sidebar triggers.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import { DiffSide, DiffStream, type DiffStreamProgress, rasterizeSvg } from "@oh-my-pi/pi-natives";
@@ -256,7 +257,7 @@ export class GitModel {
 			this.#repo.currentBranch(),
 			this.#repo.headSha(),
 		]);
-		if (statusText === null) throw new Error("Not a git repository");
+		if (statusText === null) throw new Error(__ompTranslate("Not a git repository"));
 		const fingerprint = `${headSha ?? ""}\u0000${statusText}`;
 		if (fingerprint === this.#fingerprint) {
 			this.branch = branchName ?? null;

@@ -1,4 +1,5 @@
 /** `irc` — inter-agent messaging: send/wait/inbox/list ops with delivery receipts. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import type { Tone } from "../parts";
 import { Badge, Badges, Note, ResultText, Row } from "../parts";
@@ -136,7 +137,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 				{d?.waited === null && (
 					<>
 						{" "}
-						<Badge tone="warn">timed out</Badge>
+						<Badge tone="warn">{__ompTranslate("timed out")}</Badge>
 					</>
 				)}
 			</>
@@ -146,10 +147,16 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 		const inbox = d ? parseInbox(d.inbox) : [];
 		return (
 			<>
-				{opBadge} {args.peek === true && <Badge>peek</Badge>}{" "}
+				{opBadge} {args.peek === true && <Badge>{__ompTranslate("peek")}</Badge>}{" "}
 				{d && (
 					<span className="tv-muted">
-						{inbox.length === 0 ? "empty" : `${inbox.length} ${inbox.length === 1 ? "message" : "messages"}`}
+						{inbox.length === 0
+							? __ompTranslate("empty")
+							: __ompTranslate(
+									"{0} {1}",
+									`${inbox.length}`,
+									__ompTranslate(inbox.length === 1 ? "message" : "messages"),
+								)}
 					</span>
 				)}
 			</>
@@ -161,11 +168,11 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 		for (const peer of peers) unread += peer.unread;
 		return (
 			<>
-				{opBadge} {d && <span className="tv-muted">{peers.length === 1 ? "1 peer" : `${peers.length} peers`}</span>}
+				{opBadge} {d && <span className="tv-muted">{__ompTranslate("{0} peers", `${peers.length}`)}</span>}
 				{unread > 0 && (
 					<>
 						{" "}
-						<Badge tone="warn">{unread} unread</Badge>
+						<Badge tone="warn">{__ompTranslate("{0} unread", `${unread}`)}</Badge>
 					</>
 				)}
 			</>
@@ -191,12 +198,12 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			<Badges
 				items={[
 					op ?? "?",
-					to && `to ${to}`,
-					op === "wait" && from && `from ${from}`,
-					to === "all" && "broadcast",
-					args.await === true && "await reply",
-					str(args.replyTo) && "reply",
-					args.peek === true && "peek",
+					to && __ompTranslate("to {0}", `${to}`),
+					op === "wait" && from && __ompTranslate("from {0}", `${from}`),
+					to === "all" && __ompTranslate("broadcast"),
+					args.await === true && __ompTranslate("await reply"),
+					str(args.replyTo) && __ompTranslate("reply"),
+					args.peek === true && __ompTranslate("peek"),
 				]}
 			/>
 			{message && <Note>{message}</Note>}
@@ -217,13 +224,17 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 						{waited.replyTo && (
 							<>
 								{" "}
-								<Badge>reply</Badge>
+								<Badge>{__ompTranslate("reply")}</Badge>
 							</>
 						)}
 					</Row>
 				</div>
 			)}
-			{timedOut && <Note tone="warn">No reply yet — they may answer later; check inbox or wait again.</Note>}
+			{timedOut && (
+				<Note tone="warn">
+					{__ompTranslate("No reply yet — they may answer later; check inbox or wait again.")}
+				</Note>
+			)}
 			{inbox.length > 0 && (
 				<div className="tv-list">
 					{inbox.map((msg, i) => (
@@ -232,7 +243,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							{msg.replyTo && (
 								<>
 									{" "}
-									<Badge>reply</Badge>
+									<Badge>{__ompTranslate("reply")}</Badge>
 								</>
 							)}
 						</Row>
@@ -250,7 +261,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							{peer.unread > 0 && (
 								<>
 									{" "}
-									<Badge tone="warn">{peer.unread} unread</Badge>
+									<Badge tone="warn">{__ompTranslate("{0} unread", `${peer.unread}`)}</Badge>
 								</>
 							)}
 						</Row>

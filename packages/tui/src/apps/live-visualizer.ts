@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatKeyHint } from "../app-keybindings";
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
@@ -180,7 +181,7 @@ export class LiveVisualizer implements Component {
 				meter
 					? row(
 							[
-								text([span("mic", "muted")]),
+								text([span(__ompTranslate("mic"), "muted")]),
 								node("meter", { value: level, style: "bar", size: "md", tone, grow: 1 }),
 							],
 							{
@@ -189,12 +190,14 @@ export class LiveVisualizer implements Component {
 								role: "omp.app.live.level",
 							},
 						)
-					: node("progress", { value: level, tone, label: [span("mic", "muted")] }),
+					: node("progress", { value: level, tone, label: [span(__ompTranslate("mic"), "muted")] }),
 				text([span(this.#userTranscript, "accent")], { wrap: "none", truncate: "start" }),
 				actionBar([
 					null,
-					actionButton(phase === "muted" ? "Unmute" : "Mute", "mute", { keys: "space" }),
-					actionButton("End call", "end", { keys: "escape", tone: "error" }),
+					actionButton(phase === "muted" ? __ompTranslate("Unmute") : __ompTranslate("Mute"), "mute", {
+						keys: "space",
+					}),
+					actionButton(__ompTranslate("End call"), "end", { keys: "escape", tone: "error" }),
 				]),
 			]);
 		});
@@ -263,7 +266,12 @@ export class LiveVisualizer implements Component {
 		const frames = theme.spinnerFrames;
 		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
-		const fullLabel = ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
+		const fullLabel = __ompTranslate(
+			" {0} · {1} mute · {2} end ",
+			`${status}`,
+			`${formatKeyHint("space")}`,
+			`${formatKeyHint("escape")}`,
+		);
 		const shortLabel = ` ${status} `;
 		const label =
 			innerWidth >= visibleWidth(fullLabel) + 1

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import { IR_BRAND } from "@oh-my-pi/omptype/ir";
 import {
@@ -105,7 +106,7 @@ function unsafe<T = unknown>(jsonSchema: Record<string, unknown> = {}): LegacyUn
 			if (message) message += "; ";
 			message += issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message;
 		}
-		const failure = { message: message || "Invalid value" } as ValidationFailure;
+		const failure = { message: message || __ompTranslate("Invalid value") } as ValidationFailure;
 		defineHidden(failure, VALIDATION_FAILURE, true);
 		return failure;
 	};

@@ -8,6 +8,7 @@
  * sends peerId 0; the relay rewrites it to the sender's id.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ParsedCollabLink } from "@oh-my-pi/pi-wire";
 import {
 	DEFAULT_RELAY_URL,
@@ -89,7 +90,7 @@ function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: s
 	try {
 		url = new URL(relayUrl);
 	} catch {
-		return { error: `Invalid relay URL: ${relayUrl}` };
+		return { error: __ompTranslate("Invalid relay URL: {0}", `${relayUrl}`) };
 	}
 	let scheme: string;
 	switch (url.protocol) {
@@ -102,10 +103,10 @@ function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: s
 			scheme = "ws:";
 			break;
 		default:
-			return { error: `Unsupported relay URL scheme: ${url.protocol}` };
+			return { error: __ompTranslate("Unsupported relay URL scheme: {0}", `${url.protocol}`) };
 	}
 	if (scheme === "ws:" && !LOCAL_HOSTNAMES[url.hostname]) {
-		return { error: "relay link must be wss:// (plain ws:// is only allowed for localhost)" };
+		return { error: __ompTranslate("relay link must be wss:// (plain ws:// is only allowed for localhost)") };
 	}
 	const port = url.port ? `:${url.port}` : "";
 	return { origin: `${scheme}//${url.hostname}${port}` };
@@ -155,7 +156,7 @@ export function parseCollabLink(link: string): ParsedCollabLink | { error: strin
 	try {
 		url = new URL(text);
 	} catch {
-		return { error: `Invalid collab link: ${link}` };
+		return { error: __ompTranslate("Invalid collab link: {0}", `${link}`) };
 	}
 	if ((url.protocol === "http:" || url.protocol === "https:") && url.hash) {
 		const inner = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
@@ -171,18 +172,18 @@ export function parseCollabLink(link: string): ParsedCollabLink | { error: strin
 		// fall through to direct relay validation instead of double-recursing.
 		const inner = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
 		if (inner && url.protocol !== "http:" && url.protocol !== "https:") return parseCollabLink(inner);
-		return { error: "Collab link must contain a /r/<roomId> path" };
+		return { error: __ompTranslate("Collab link must contain a /r/<roomId> path") };
 	}
 	const roomId = match[1] as string;
 	// Key rides dot-joined in the path (`/r/<roomId>.<key>`); legacy links
 	// carry it in the fragment (`/r/<roomId>#<key>`).
 	const fragment = match[2] ?? (url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
 	if (!fragment) {
-		return { error: "Collab link is missing the <key> part" };
+		return { error: __ompTranslate("Collab link is missing the <key> part") };
 	}
 	const secret = decodeBase64Url(fragment);
 	if (!secret || (secret.byteLength !== ROOM_KEY_BYTES && secret.byteLength !== ROOM_KEY_BYTES + WRITE_TOKEN_BYTES)) {
-		return { error: "Collab link key must be 32 (view) or 48 (full) base64url bytes" };
+		return { error: __ompTranslate("Collab link key must be 32 (view) or 48 (full) base64url bytes") };
 	}
 	const key = secret.subarray(0, ROOM_KEY_BYTES);
 	const writeToken = secret.byteLength > ROOM_KEY_BYTES ? secret.subarray(ROOM_KEY_BYTES) : undefined;

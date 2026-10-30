@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 // Setting declarations (`session/settings.ts`) pull this module into CLI startup; import the classifier
 // from the dependency-free types module so the `pi-ai` index (and the native
@@ -92,13 +93,21 @@ export function validateAgentServiceTierOverrides(value: unknown): Record<string
 	if (value === undefined || value === null) return overrides;
 	if (typeof value !== "object" || Array.isArray(value)) {
 		throw new Error(
-			`Invalid task.agentServiceTierOverrides: expected a map of agent name to service tier, got ${Array.isArray(value) ? "an array" : `a ${typeof value}`}.`,
+			__ompTranslate(
+				"Invalid task.agentServiceTierOverrides: expected a map of agent name to service tier, got {0}.",
+				`${Array.isArray(value) ? __ompTranslate("an array") : __ompTranslate("a {0}", `${typeof value}`)}`,
+			),
 		);
 	}
 	for (const [agentName, setting] of Object.entries(value)) {
 		if (!isServiceTierInheritSettingValue(setting)) {
 			throw new Error(
-				`Invalid service tier for task.agentServiceTierOverrides.${agentName}: ${String(setting)}. Expected one of: ${SERVICE_TIER_INHERIT_SETTING_VALUES.join(", ")}.`,
+				__ompTranslate(
+					"Invalid service tier for task.agentServiceTierOverrides.{0}: {1}. Expected one of: {2}.",
+					`${agentName}`,
+					`${String(setting)}`,
+					`${SERVICE_TIER_INHERIT_SETTING_VALUES.join(", ")}`,
+				),
 			);
 		}
 		overrides[agentName] = setting;
@@ -107,43 +116,91 @@ export function validateAgentServiceTierOverrides(value: unknown): Record<string
 }
 
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
-	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
-	{ value: "auto", label: "Auto", description: "Provider default tier selection" },
-	{ value: "default", label: "Default", description: "Standard priority processing" },
-	{ value: "flex", label: "Flex", description: "Lower cost, higher latency when available" },
-	{ value: "scale", label: "Scale", description: "Scale Tier credits when available" },
-	{ value: "priority", label: "Priority", description: "Faster, higher cost (premium request)" },
+	{
+		value: "none",
+		label: __ompTranslate("None"),
+		description: __ompTranslate("Omit service_tier (standard processing)"),
+	},
+	{ value: "auto", label: __ompTranslate("Auto"), description: __ompTranslate("Provider default tier selection") },
+	{ value: "default", label: __ompTranslate("Default"), description: __ompTranslate("Standard priority processing") },
+	{
+		value: "flex",
+		label: __ompTranslate("Flex"),
+		description: __ompTranslate("Lower cost, higher latency when available"),
+	},
+	{ value: "scale", label: "Scale", description: __ompTranslate("Scale Tier credits when available") },
+	{
+		value: "priority",
+		label: __ompTranslate("Priority"),
+		description: __ompTranslate("Faster, higher cost (premium request)"),
+	},
 	{
 		value: "ultrafast",
-		label: "Ultrafast",
-		description: "Lowest-latency serving; OpenAI API preview access, or Codex models that advertise it",
+		label: __ompTranslate("Ultrafast"),
+		description: __ompTranslate(
+			"Lowest-latency serving; OpenAI API preview access, or Codex models that advertise it",
+		),
 	},
 ];
 
 export const SERVICE_TIER_ANTHROPIC_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierAnthropicSettingValue>> = [
-	{ value: "none", label: "None", description: "Standard processing" },
+	{ value: "none", label: __ompTranslate("None"), description: __ompTranslate("Standard processing") },
 	{
 		value: "priority",
-		label: "Priority",
-		description: 'Fast mode (`speed: "fast"`) on supported direct Claude models; ignored on Bedrock/Vertex',
+		label: __ompTranslate("Priority"),
+		description: __ompTranslate(
+			'Fast mode (`speed: "fast"`) on supported direct Claude models; ignored on Bedrock/Vertex',
+		),
 	},
 ];
 
 export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierGoogleSettingValue>> = [
-	{ value: "none", label: "None", description: "Standard processing" },
-	{ value: "flex", label: "Flex", description: "Lower cost, higher latency (Gemini API + Vertex)" },
-	{ value: "priority", label: "Priority", description: "Faster, higher reliability (Gemini API + Vertex)" },
+	{ value: "none", label: __ompTranslate("None"), description: __ompTranslate("Standard processing") },
+	{
+		value: "flex",
+		label: __ompTranslate("Flex"),
+		description: __ompTranslate("Lower cost, higher latency (Gemini API + Vertex)"),
+	},
+	{
+		value: "priority",
+		label: __ompTranslate("Priority"),
+		description: __ompTranslate("Faster, higher reliability (Gemini API + Vertex)"),
+	},
 ];
 
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
-	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
-	{ value: "none", label: "None", description: "Standard processing" },
-	{ value: "auto", label: "Auto", description: "Provider default tier selection (OpenAI family)" },
-	{ value: "default", label: "Default", description: "Standard priority processing (OpenAI family)" },
-	{ value: "flex", label: "Flex", description: "Flexible capacity tier (OpenAI/Google families)" },
-	{ value: "scale", label: "Scale", description: "Scale Tier credits (OpenAI family)" },
-	{ value: "priority", label: "Priority", description: "Priority on every supported family of the spawned model" },
-	{ value: "ultrafast", label: "Ultrafast", description: "Ultrafast serving (OpenAI family, where available)" },
+	{
+		value: "inherit",
+		label: __ompTranslate("Inherit"),
+		description: __ompTranslate("Match the main agent's live per-family tiers"),
+	},
+	{ value: "none", label: __ompTranslate("None"), description: __ompTranslate("Standard processing") },
+	{
+		value: "auto",
+		label: __ompTranslate("Auto"),
+		description: __ompTranslate("Provider default tier selection (OpenAI family)"),
+	},
+	{
+		value: "default",
+		label: __ompTranslate("Default"),
+		description: __ompTranslate("Standard priority processing (OpenAI family)"),
+	},
+	{
+		value: "flex",
+		label: __ompTranslate("Flex"),
+		description: __ompTranslate("Flexible capacity tier (OpenAI/Google families)"),
+	},
+	{ value: "scale", label: "Scale", description: __ompTranslate("Scale Tier credits (OpenAI family)") },
+	{
+		value: "priority",
+		label: __ompTranslate("Priority"),
+		description: __ompTranslate("Priority on every supported family of the spawned model"),
+	},
+	{
+		value: "ultrafast",
+		label: __ompTranslate("Ultrafast"),
+		description: __ompTranslate("Ultrafast serving (OpenAI family, where available)"),
+	},
 ];
 
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */

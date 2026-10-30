@@ -2,6 +2,7 @@
  * Get the API key or OAuth token for a provider.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
@@ -50,27 +51,29 @@ export default class Token extends Command {
 	static description = commandHelp.description;
 	static args = {
 		provider: Args.string({
-			description: "Provider ID (e.g. anthropic, openai)",
+			description: __ompTranslate("Provider ID (e.g. anthropic, openai)"),
 			required: true,
 		}),
 	};
 
 	static flags = {
 		raw: Flags.boolean({
-			description: "Output the raw credential value without parsing nested JSON structures",
+			description: __ompTranslate("Output the raw credential value without parsing nested JSON structures"),
 			default: false,
 		}),
 		"force-refresh": Flags.boolean({
-			description: "Force refresh the OAuth token even if it has not expired",
+			description: __ompTranslate("Force refresh the OAuth token even if it has not expired"),
 			default: false,
 		}),
 		account: Flags.integer({
 			char: "a",
-			description: "Select the Nth OAuth account (1-based) in stored order instead of the round-robin default",
+			description: __ompTranslate(
+				"Select the Nth OAuth account (1-based) in stored order instead of the round-robin default",
+			),
 		}),
 		list: Flags.boolean({
 			char: "l",
-			description: "List the provider's OAuth accounts (index + identity) and exit",
+			description: __ompTranslate("List the provider's OAuth accounts (index + identity) and exit"),
 			default: false,
 		}),
 	};
@@ -96,7 +99,7 @@ export default class Token extends Command {
 			const scopedProfile = mcpOAuthCredentialProfile(provider);
 			if (scopedProfile !== undefined && scopedProfile !== (getActiveProfile() ?? "default")) {
 				process.stderr.write(
-					`${chalk.red(`Managed MCP credential "${providerName}" belongs to profile "${scopedProfile}", not the active profile.`)}\n`,
+					`${chalk.red(__ompTranslate('Managed MCP credential "{0}" belongs to profile "{1}", not the active profile.', `${providerName}`, `${scopedProfile}`))}\n`,
 				);
 				process.exitCode = 1;
 				return;
@@ -108,8 +111,12 @@ export default class Token extends Command {
 			if (flags.list || flags.account !== undefined) {
 				const accounts = authStorage.oauth.accounts(provider);
 				if (accounts.length === 0) {
-					process.stderr.write(`${chalk.red(`No OAuth accounts found for provider "${providerName}".`)}\n`);
-					process.stderr.write("--account/--list select among OAuth accounts; this provider has none stored.\n");
+					process.stderr.write(
+						`${chalk.red(__ompTranslate('No OAuth accounts found for provider "{0}".', `${providerName}`))}\n`,
+					);
+					process.stderr.write(
+						__ompTranslate("--account/--list select among OAuth accounts; this provider has none stored.\n"),
+					);
 					process.exitCode = 1;
 					return;
 				}
@@ -120,7 +127,7 @@ export default class Token extends Command {
 							acct.accountId ??
 							acct.projectId ??
 							acct.enterpriseUrl ??
-							`credential #${acct.credentialId}`;
+							__ompTranslate("credential #{0}", `${acct.credentialId}`);
 						const org = acct.orgName ?? acct.orgId;
 						const label = org && org !== base ? `${base} (${org})` : base;
 						process.stdout.write(`${acct.position + 1}. ${label}\n`);
@@ -130,7 +137,13 @@ export default class Token extends Command {
 				const n = flags.account;
 				if (n === undefined || n < 1 || n > accounts.length) {
 					process.stderr.write(
-						`${chalk.red(`Invalid --account ${n ?? "(missing)"}.`)} Provider "${providerName}" has ${accounts.length} OAuth account(s) (1-${accounts.length}).\n`,
+						__ompTranslate(
+							'{0} Provider "{1}" has {2} OAuth account(s) (1-{3}).\n',
+							`${chalk.red(__ompTranslate("Invalid --account {0}.", `${n ?? __ompTranslate("(missing)")}`))}`,
+							`${providerName}`,
+							`${accounts.length}`,
+							`${accounts.length}`,
+						),
 					);
 					process.exitCode = 1;
 					return;
@@ -148,7 +161,8 @@ export default class Token extends Command {
 					return;
 				}
 				if (!resolution?.ok) {
-					const reason = resolution && !resolution.ok ? resolution.error : "no OAuth credential available";
+					const reason =
+						resolution && !resolution.ok ? resolution.error : __ompTranslate("no OAuth credential available");
 					process.stderr.write(
 						`${chalk.red(`Could not get token for account ${n} of "${providerName}": ${reason}`)}\n`,
 					);
@@ -199,10 +213,12 @@ export default class Token extends Command {
 					}
 				}
 
-				const msg = `No active credential found for provider "${providerName}".`;
+				const msg = __ompTranslate('No active credential found for provider "{0}".', `${providerName}`);
 				process.stderr.write(`${chalk.red(msg)}\n`);
 				if (activeProviders.size > 0) {
-					process.stderr.write(`Configured providers: ${Array.from(activeProviders).sort().join(", ")}\n`);
+					process.stderr.write(
+						__ompTranslate("Configured providers: {0}\n", `${Array.from(activeProviders).sort().join(", ")}`),
+					);
 				}
 				process.exitCode = 1;
 				return;

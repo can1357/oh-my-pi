@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -85,13 +86,18 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		return "write";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const lines = [`Action: ${stringArg(args, "action") ?? "(missing)"}`];
+		const lines = [
+			__ompTranslate(
+				"Action: {0}",
+				`${stringArg(args, "action") ?? __ompTranslate("(missing)\u0004tool.shell.command.missing")}`,
+			),
+		];
 		const db = stringArg(args, "db");
 		if (db) lines.push(`DB: ${truncateForPrompt(db)}`);
 		const target = stringArg(args, "target");
-		if (target) lines.push(`Target: ${truncateForPrompt(target)}`);
+		if (target) lines.push(__ompTranslate("Target: {0}", `${truncateForPrompt(target)}`));
 		const code = stringArg(args, "code");
-		if (code) lines.push(`Code: ${truncateForPrompt(code)}`);
+		if (code) lines.push(__ompTranslate("Code: {0}", `${truncateForPrompt(code)}`));
 		return lines;
 	};
 	readonly label = "IDA";

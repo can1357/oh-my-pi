@@ -5,6 +5,7 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
@@ -89,7 +90,7 @@ async function withTimeoutSignal<T>(timeoutMs: number, fn: (signal: AbortSignal)
 	const controller = new AbortController();
 	const timeout = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		const error = new DOMException("The operation timed out.", "TimeoutError");
+		const error = new DOMException(__ompTranslate("The operation timed out."), "TimeoutError");
 		controller.abort(error);
 		timeout.reject(error);
 	}, timeoutMs);

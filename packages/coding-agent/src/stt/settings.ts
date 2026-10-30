@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "./submit-trigger";
 
@@ -13,7 +14,7 @@ export const cfgSttEnabled = register({
 	ui: {
 		tab: "interaction",
 		group: "Speech",
-		label: "Speech-to-Text",
+		label: __ompTranslate("Speech-to-Text"),
 		description: "Enable speech-to-text input via microphone",
 	},
 });
@@ -28,7 +29,7 @@ export const cfgSttSubmitTrigger = register({
 	ui: {
 		tab: "interaction",
 		group: "Speech",
-		label: "Speech-to-Text Submit Trigger",
+		label: __ompTranslate("Speech-to-Text Submit Trigger"),
 		description:
 			"Choose when speech dictation automatically submits: Never, Release (2+ words), Release with complete sentence, or When I Say Submit.",
 		options: STT_SUBMIT_TRIGGER_OPTIONS,

@@ -11,6 +11,7 @@
  * The session file is copied to a temp dir before opening, so rendering never
  * takes the single-writer lock on (or appends breadcrumbs to) a live session.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -120,7 +121,7 @@ class DrainScheduler implements RenderScheduler {
 	/** Run queued callbacks until no render work remains. */
 	drain(): void {
 		for (let rounds = 0; this.#immediate.length > 0 || this.#renders.size > 0; rounds++) {
-			if (rounds > 100) throw new Error("render scheduler did not settle after 100 drain rounds");
+			if (rounds > 100) throw new Error(__ompTranslate("render scheduler did not settle after 100 drain rounds"));
 			const immediate = this.#immediate;
 			this.#immediate = [];
 			for (const callback of immediate) callback();
@@ -167,7 +168,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.getAll()[0];
-		if (!model) throw new Error("No models available in the bundled catalog");
+		if (!model) throw new Error(__ompTranslate("No models available in the bundled catalog"));
 
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: [], tools: [], messages: [] } }),
@@ -223,11 +224,24 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		if (args.timing || args.repaint) {
 			const rows = mode.chatContainer.render(width).length;
 			const report = [
-				`session  ${sourcePath}`,
-				`         ${formatBytes(sourceSize)}, ${entries.length} entries, ${messageCount} messages, ${rows} transcript rows @ ${width}x${height}`,
-				`open     ${formatMs(openMs)}`,
-				`replay   ${formatMs(replayMs)}  (transcript build + component construction)`,
-				`paint    ${formatMs(paintMs)}  (full frame compose + emit: ${formatBytes(paintBytes)}, ${terminal.writes} writes)`,
+				__ompTranslate("session  {0}", `${sourcePath}`),
+				__ompTranslate(
+					"         {0}, {1} entries, {2} messages, {3} transcript rows @ {4}x{5}",
+					`${formatBytes(sourceSize)}`,
+					`${entries.length}`,
+					`${messageCount}`,
+					`${rows}`,
+					`${width}`,
+					`${height}`,
+				),
+				__ompTranslate("open     {0}", `${formatMs(openMs)}`),
+				__ompTranslate("replay   {0}  (transcript build + component construction)", `${formatMs(replayMs)}`),
+				__ompTranslate(
+					"paint    {0}  (full frame compose + emit: {1}, {2} writes)",
+					`${formatMs(paintMs)}`,
+					`${formatBytes(paintBytes)}`,
+					`${terminal.writes}`,
+				),
 			];
 			if (repaints.length > 0) {
 				const times = repaints.map(r => r.ms);

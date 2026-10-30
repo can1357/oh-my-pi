@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type BashToolDetails,
 	formatBackgroundNotice,
@@ -601,8 +602,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
-		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
-		return [`Command: ${truncateForPrompt(command)}`];
+		const command =
+			typeof rawCommand === "string" ? rawCommand : __ompTranslate("(missing)\u0004tool.shell.command.missing");
+		return [__ompTranslate("Command: {0}", `${truncateForPrompt(command)}`)];
 	};
 	readonly label = "Bash";
 	readonly loadMode = "essential";

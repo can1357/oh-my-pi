@@ -13,7 +13,10 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/can1357/oh-my-pi.git",
@@ -40,7 +43,16 @@
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"
 		},
-		"./*.js": "./src/*.ts"
+		"./*.js": "./src/*.ts",
+		"./i18n": {
+			"browser": "./src/i18n-browser.ts",
+			"types": "./src/i18n.ts",
+			"default": "./src/i18n.ts"
+		},
+		"./i18n-browser": {
+			"types": "./src/i18n-browser.ts",
+			"default": "./src/i18n-browser.ts"
+		}
 	},
 	"scripts": {
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",

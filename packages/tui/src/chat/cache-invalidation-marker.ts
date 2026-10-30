@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { MessageDividerComponent } from "../chrome/message-divider";
@@ -80,9 +81,11 @@ export class CacheInvalidationMarkerComponent extends MessageDividerComponent {
 		super({
 			label: () => {
 				const icon = theme.icon.cacheMiss;
-				const head = icon ? `${icon} cache miss` : "cache miss";
+				const head = icon ? __ompTranslate("{0} cache miss", `${icon}`) : __ompTranslate("cache miss");
 				const tokens = info.reprocessedTokens;
-				return tokens > 0 ? `${head} ${theme.sep.dot.trim()} ${formatNumber(tokens)} tokens` : head;
+				return tokens > 0
+					? __ompTranslate("{0} {1} {2} tokens", `${head}`, `${theme.sep.dot.trim()}`, `${formatNumber(tokens)}`)
+					: head;
 			},
 			labelColor: "muted",
 			ruleColor: "dim",
@@ -92,8 +95,8 @@ export class CacheInvalidationMarkerComponent extends MessageDividerComponent {
 				icon: "database",
 				label: () =>
 					info.reprocessedTokens > 0
-						? `Cache miss · ${formatNumber(info.reprocessedTokens)} tokens`
-						: "Cache miss",
+						? __ompTranslate("Cache miss · {0} tokens", `${formatNumber(info.reprocessedTokens)}`)
+						: __ompTranslate("Cache miss"),
 			},
 			// Too narrow to frame — preserve the legacy bare label.
 			truncateWhenNarrow: false,

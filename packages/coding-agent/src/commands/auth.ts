@@ -8,6 +8,7 @@
  * account, an imported API key replaces the provider's stored API key, and
  * everything else is kept.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -66,10 +67,10 @@ export function exportAuthCredentials(store: Pick<AuthCredentialStore, "listAuth
 }
 
 function parseCredential(value: unknown, where: string): AuthCredential {
-	if (!isRecord(value)) throw new AuthTransferError(`${where}: credential is not an object.`);
+	if (!isRecord(value)) throw new AuthTransferError(__ompTranslate("{0}: credential is not an object.", `${where}`));
 	if (value.type === "api_key") {
 		if (typeof value.key !== "string" || value.key.length === 0) {
-			throw new AuthTransferError(`${where}: API key credential has no key.`);
+			throw new AuthTransferError(__ompTranslate("{0}: API key credential has no key.", `${where}`));
 		}
 		return value.source === "login"
 			? { type: "api_key", key: value.key, source: "login" }
@@ -78,43 +79,58 @@ function parseCredential(value: unknown, where: string): AuthCredential {
 	if (value.type === "oauth") {
 		if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
 			throw new AuthTransferError(
-				`${where}: OAuth credential needs string access/refresh tokens and a numeric expires.`,
+				__ompTranslate(
+					"{0}: OAuth credential needs string access/refresh tokens and a numeric expires.",
+					`${where}`,
+				),
 			);
 		}
 		if (value.refresh === REMOTE_REFRESH_SENTINEL) {
 			throw new AuthTransferError(
-				`${where}: OAuth credential has no refresh token (it comes from an auth-broker snapshot).`,
+				__ompTranslate(
+					"{0}: OAuth credential has no refresh token (it comes from an auth-broker snapshot).",
+					`${where}`,
+				),
 			);
 		}
 		// Required fields are checked above; the optional identity fields are
 		// carried as stored so the target store derives the same account identity.
 		return value as OAuthCredential;
 	}
-	throw new AuthTransferError(`${where}: unknown credential type ${JSON.stringify(value.type)}.`);
+	throw new AuthTransferError(
+		__ompTranslate("{0}: unknown credential type {1}.", `${where}`, `${JSON.stringify(value.type)}`),
+	);
 }
 
 /**
  * Parse and validate an `omp auth export` document. Throws
  * {@link AuthTransferError} naming the first offending entry.
  */
-export function parseAuthExport(text: string, source = "credential file"): AuthExport {
+export function parseAuthExport(text: string, source = __ompTranslate("credential file")): AuthExport {
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		throw new AuthTransferError(`${source} is not valid JSON.`);
+		throw new AuthTransferError(__ompTranslate("{0} is not valid JSON.", `${source}`));
 	}
-	if (!isRecord(value)) throw new AuthTransferError(`${source} is not an \`omp auth export\` document.`);
+	if (!isRecord(value))
+		throw new AuthTransferError(__ompTranslate("{0} is not an `omp auth export` document.", `${source}`));
 	if (value.version !== AUTH_EXPORT_VERSION) {
 		throw new AuthTransferError(
-			`${source} has export version ${JSON.stringify(value.version)}; this omp reads version ${AUTH_EXPORT_VERSION}.`,
+			__ompTranslate(
+				"{0} has export version {1}; this omp reads version {2}.",
+				`${source}`,
+				`${JSON.stringify(value.version)}`,
+				`${AUTH_EXPORT_VERSION}`,
+			),
 		);
 	}
-	if (!Array.isArray(value.credentials)) throw new AuthTransferError(`${source} has no credentials array.`);
+	if (!Array.isArray(value.credentials))
+		throw new AuthTransferError(__ompTranslate("{0} has no credentials array.", `${source}`));
 	const credentials = value.credentials.map((entry: unknown, index): AuthExportEntry => {
 		const where = `${source}: credentials[${index}]`;
 		if (!isRecord(entry) || typeof entry.provider !== "string" || entry.provider.length === 0) {
-			throw new AuthTransferError(`${where} has no provider.`);
+			throw new AuthTransferError(__ompTranslate("{0} has no provider.", `${where}`));
 		}
 		return {
 			provider: entry.provider,
@@ -169,12 +185,12 @@ export default class Auth extends Command {
 
 	static args = {
 		action: Args.string({
-			description: "export or import",
+			description: __ompTranslate("export or import"),
 			required: true,
 			options: ["export", "import"],
 		}),
 		file: Args.string({
-			description: "File written by `omp auth export`, or - for stdin (import)",
+			description: __ompTranslate("File written by `omp auth export`, or - for stdin (import)"),
 			required: false,
 		}),
 	};
@@ -189,20 +205,24 @@ export default class Auth extends Command {
 		const { args, argv } = await this.parse(Auth);
 		const action = args.action;
 		if (action === "export" && argv.length > 1) {
-			throw new CliUsageError(`Unexpected argument "${argv[1]}". Usage: omp auth export`);
+			throw new CliUsageError(__ompTranslate('Unexpected argument "{0}". Usage: omp auth export', `${argv[1]}`));
 		}
 		if (action === "import" && !args.file) {
-			throw new CliUsageError("Missing credential file. Usage: omp auth import <file|->");
+			throw new CliUsageError(__ompTranslate("Missing credential file. Usage: omp auth import <file|->"));
 		}
 		if (action === "import" && argv.length > 2) {
-			throw new CliUsageError(`Unexpected argument "${argv[2]}". Usage: omp auth import <file|->`);
+			throw new CliUsageError(
+				__ompTranslate('Unexpected argument "{0}". Usage: omp auth import <file|->', `${argv[2]}`),
+			);
 		}
 
 		const broker = await resolveAuthBrokerConfig();
 		if (broker) {
 			process.stderr.write(
-				`${chalk.red(`error: omp uses the auth broker at ${broker.url}; credentials live there, not in this machine's agent.db.`)}\n` +
-					"Run this on the broker host, or disable the broker (`omp config reset auth.broker.url`) first.\n",
+				`${chalk.red(__ompTranslate("error: omp uses the auth broker at {0}; credentials live there, not in this machine's agent.db.", `${broker.url}`))}\n` +
+					__ompTranslate(
+						"Run this on the broker host, or disable the broker (`omp config reset auth.broker.url`) first.\n",
+					),
 			);
 			process.exitCode = 1;
 			return;
@@ -219,7 +239,7 @@ export default class Auth extends Command {
 			const oauthCount = data.credentials.filter(entry => entry.credential.type === "oauth").length;
 			if (oauthCount > 0) {
 				process.stderr.write(
-					`${chalk.yellow(`warning: this output holds live secrets, including ${oauthCount} OAuth refresh token(s). Providers that rotate refresh tokens on use accept only the newest one: once the importing machine refreshes, this machine may be signed out of those accounts.`)}\n`,
+					`${chalk.yellow(__ompTranslate("warning: this output holds live secrets, including {0} OAuth refresh token(s). Providers that rotate refresh tokens on use accept only the newest one: once the importing machine refreshes, this machine may be signed out of those accounts.", `${oauthCount}`))}\n`,
 				);
 			}
 			process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
@@ -232,7 +252,7 @@ export default class Auth extends Command {
 			text = file === "-" ? await Bun.stdin.text() : await Bun.file(file).text();
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
-			process.stderr.write(`${chalk.red(`error: credential file not found: ${file}`)}\n`);
+			process.stderr.write(`${chalk.red(__ompTranslate("error: credential file not found: {0}", `${file}`))}\n`);
 			process.exitCode = 1;
 			return;
 		}
@@ -241,7 +261,7 @@ export default class Auth extends Command {
 			data = parseAuthExport(text, file === "-" ? "stdin" : file);
 		} catch (error) {
 			if (!(error instanceof AuthTransferError)) throw error;
-			process.stderr.write(`${chalk.red(`error: ${error.message}`)}\n`);
+			process.stderr.write(`${chalk.red(__ompTranslate("error: {0}", `${error.message}`))}\n`);
 			process.exitCode = 1;
 			return;
 		}

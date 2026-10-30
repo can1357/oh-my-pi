@@ -1,3 +1,5 @@
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
@@ -70,9 +72,10 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 		<div className="tr-think">
 			<button type="button" className="tr-think-head" onClick={() => setOpen(v => !v)}>
 				<ChevronRight size={11} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
-				thinking{redacted ? " · redacted" : ""}
+				{__ompTranslate("thinking")}
+				{redacted ? __ompTranslate(" · redacted") : ""}
 			</button>
-			{open && <div className="tr-think-body">{redacted ? "(redacted by provider)" : text}</div>}
+			{open && <div className="tr-think-body">{redacted ? __ompTranslate("(redacted by provider)") : text}</div>}
 		</div>
 	);
 }
@@ -92,7 +95,7 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 								key={i}
 								className="tr-msg-img"
 								src={`data:${block.mimeType};base64,${block.data}`}
-								alt="attachment"
+								alt={___ompTranslate("attachment")}
 							/>
 						);
 					default:
@@ -191,13 +194,13 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			switch (msg.role) {
 				case "user":
 					return (
-						<Row kind="user" gutter="host" title={entry.timestamp}>
+						<Row kind="user" gutter={__ompTranslate("host")} title={entry.timestamp}>
 							<MsgContent content={msg.content} />
 						</Row>
 					);
 				case "assistant":
 					return (
-						<Row kind="assistant" gutter="agent" title={entry.timestamp}>
+						<Row kind="assistant" gutter={__ompTranslate("agent")} title={entry.timestamp}>
 							<AssistantBody message={msg} results={results} active={active} pending={false} host={host} />
 						</Row>
 					);
@@ -214,7 +217,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 					typeof details === "object" &&
 					typeof (details as Record<string, unknown>).from === "string"
 						? ((details as Record<string, unknown>).from as string)
-						: "guest";
+						: __ompTranslate("guest");
 				return (
 					<Row kind="user" gutter={<span className="tr-badge">{from}</span>} title={entry.timestamp}>
 						<MsgContent content={entry.content} />
@@ -234,25 +237,27 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 		case "compaction":
 			return (
 				<div className="tr-divider" title={entry.shortSummary ?? entry.summary}>
-					<span>context compacted · {fmtTokens(entry.tokensBefore)} tokens</span>
+					<span>{__ompTranslate("context compacted · {0} tokens", fmtTokens(entry.tokensBefore))}</span>
 				</div>
 			);
 		case "branch_summary":
 			return (
 				<div className="tr-divider" title={entry.summary}>
-					<span>branch summary</span>
+					<span>{__ompTranslate("branch summary")}</span>
 				</div>
 			);
 		case "model_change":
 			return (
 				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">model → {entry.model}</span>
+					<span className="tr-marker">{__ompTranslate("model → {0}", entry.model)}</span>
 				</Row>
 			);
 		case "thinking_level_change":
 			return (
 				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">thinking → {entry.thinkingLevel ?? "off"}</span>
+					<span className="tr-marker">
+						{__ompTranslate("thinking → {0}", entry.thinkingLevel ?? __ompTranslate("off"))}
+					</span>
 				</Row>
 			);
 		default:
@@ -385,7 +390,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			}}
 		>
 			{settled && entries.length === 0 && stream === null && !working && (
-				<div className="tr-empty">no activity yet</div>
+				<div className="tr-empty">{___ompTranslate("no activity yet")}</div>
 			)}
 			{start > 0 && (
 				<button type="button" className="tr-earlier" onClick={showEarlier}>
@@ -407,7 +412,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				</Row>
 			)}
 			{tailTools.length > 0 && (
-				<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
+				<Row kind="assistant" gutter={stream === null ? ___ompTranslate("agent") : ""}>
 					{tailTools.map(tool => (
 						<ToolCard
 							key={tool.toolCallId}
@@ -424,7 +429,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			)}
 			{working && stream === null && activeTools.size === 0 && (
 				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
+					<div className="tr-shimmer">{___ompTranslate("thinking…")}</div>
 				</Row>
 			)}
 		</div>

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import {
 	Agent,
@@ -957,7 +958,7 @@ export interface CreateAgentSessionOptions {
 /** Saved models were exhausted without permission to substitute another model. */
 export class SessionModelRestoreError extends Error {
 	constructor(modelSelector: string) {
-		super(`Could not restore model ${modelSelector}`);
+		super(__ompTranslate("Could not restore model {0}", `${modelSelector}`));
 		this.name = "SessionModelRestoreError";
 	}
 }
@@ -1259,13 +1260,22 @@ export async function resolvePrewalkTarget(
 	if (resolved.error || !resolved.model) {
 		warnings.push(
 			disabledProvider
-				? `prewalk disabled — provider "${disabledProvider}" is disabled`
-				: `prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`,
+				? __ompTranslate('prewalk disabled — provider "{0}" is disabled', `${disabledProvider}`)
+				: __ompTranslate(
+						"prewalk disabled — {0}",
+						`${resolved.error ?? __ompTranslate('model "{0}" not found', `${target}`)}`,
+					),
 		);
 	} else if (disabledProviders.has(resolved.model.provider)) {
-		warnings.push(`prewalk disabled — provider "${resolved.model.provider}" is disabled`);
+		warnings.push(__ompTranslate('prewalk disabled — provider "{0}" is disabled', `${resolved.model.provider}`));
 	} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-		warnings.push(`prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`);
+		warnings.push(
+			__ompTranslate(
+				"prewalk disabled — no API key for {0}/{1}",
+				`${resolved.model.provider}`,
+				`${resolved.model.id}`,
+			),
+		);
 	} else {
 		return { prewalk: { target: resolved.model, thinkingLevel: resolved.thinkingLevel }, warnings, deferred: false };
 	}
@@ -2116,7 +2126,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				failedSessionModel ??= sessionModelStr;
 			}
 			if (failedSessionModel) {
-				modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
+				modelFallbackMessage = __ompTranslate("Could not restore model {0}", `${failedSessionModel}`);
 			}
 		});
 	}
@@ -3293,7 +3303,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						formatModelStringWithRouting(selectedModel),
 						effectiveThinkingLevel,
 					);
-					modelFallbackMessage = `Fallback: ${usageFallbackReason.from} -> ${target}\n${usageFallbackReason.reason}`;
+					modelFallbackMessage = __ompTranslate(
+						"Fallback: {0} -> {1}\n{2}",
+						`${usageFallbackReason.from}`,
+						`${target}`,
+						`${usageFallbackReason.reason}`,
+					);
 				}
 				void prewarmModelConnection(selectedModel);
 				break;
@@ -3302,7 +3317,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const requested =
 					deferredModelPatterns.length === 1
 						? `"${deferredModelPatterns[0]}"`
-						: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
+						: __ompTranslate("one of {0}", `${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`);
 				// A single provider-qualified selector names its closest siblings, the same
 				// hint `resolveCliModel` gives before the selector was deferred here.
 				const hint =
@@ -3480,14 +3495,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			if (model) {
 				if (modelFallbackMessage) {
-					modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+					modelFallbackMessage += __ompTranslate(". Using {0}/{1}", `${model.provider}`, `${model.id}`);
 				}
 			} else {
 				const patterns = cfgEnabledModels.get(settings);
 				modelFallbackMessage =
 					patterns && patterns.length > 0
-						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.";
+						? __ompTranslate(
+								"No model available matching enabledModels ({0}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.",
+								`${patterns.join(", ")}`,
+							)
+						: __ompTranslate(
+								"No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.",
+							);
 			}
 		}
 
@@ -5059,7 +5079,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			try {
 				await session.refreshBaseSystemPrompt();
 			} catch (error) {
-				session.emitNotice("error", `Failed to rebuild the system prompt after a settings change: ${error}`);
+				session.emitNotice(
+					"error",
+					__ompTranslate("Failed to rebuild the system prompt after a settings change: {0}", `${error}`),
+				);
 			}
 		});
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
@@ -5077,7 +5100,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				try {
 					await session.reconcileBuiltinTools(options);
 				} catch (error) {
-					session.emitNotice("error", `Failed to apply tool settings: ${error}`);
+					session.emitNotice("error", __ompTranslate("Failed to apply tool settings: {0}", `${error}`));
 				}
 			};
 			cfgSessionToolGates.listen(session, () => reconcileGatedTools());
@@ -5235,7 +5258,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					for (const extensionPath of unloaded) announcedUnloadedExtensions.add(extensionPath);
 					session.emitNotice(
 						"warning",
-						`Restart omp to load newly enabled extensions: ${unloaded.join(", ")}`,
+						__ompTranslate("Restart omp to load newly enabled extensions: {0}", `${unloaded.join(", ")}`),
 						"extensions",
 					);
 				}

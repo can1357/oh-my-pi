@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
@@ -114,7 +115,7 @@ export class STTController {
 	/** Start dictating into `editor`, reporting to `options` until the capture ends. A no-op while a
 	 *  capture is starting, recording, or transcribing. */
 	async start(editor: SttTarget, options: SttCallbacks): Promise<void> {
-		if (this.#state === "transcribing") options.showStatus("Transcription in progress...");
+		if (this.#state === "transcribing") options.showStatus(__ompTranslate("Transcription in progress..."));
 		if (this.#disposed || this.#toggling || this.#state !== "idle") return;
 		await this.#transition(options, () => this.#start(editor, options));
 	}
@@ -184,7 +185,7 @@ export class STTController {
 		} catch (err) {
 			// A cancelled start is not a setup failure; the worker finishes the load for the next start.
 			if (signal.aborted) return null;
-			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
+			const msg = err instanceof Error ? err.message : __ompTranslate("Failed to setup STT dependencies");
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
 			return null;
@@ -302,7 +303,7 @@ export class STTController {
 		} catch (err) {
 			this.#streamAbort?.abort();
 			this.#cleanupCloud();
-			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";
+			const msg = err instanceof Error ? err.message : __ompTranslate("Failed to start microphone capture");
 			options.showWarning(msg);
 			logger.error("STT recording failed to start", { error: msg });
 			return;
@@ -355,7 +356,7 @@ export class STTController {
 		} catch (err) {
 			failed = true;
 			if (!this.#disposed) {
-				const msg = err instanceof Error ? err.message : "Transcription failed";
+				const msg = err instanceof Error ? err.message : __ompTranslate("Transcription failed");
 				options.showWarning(msg);
 				logger.error("STT cloud transcription failed", { error: msg });
 			}
@@ -446,7 +447,7 @@ export class STTController {
 		} catch (err) {
 			stream.cancel();
 			this.#cleanupStream();
-			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";
+			const msg = err instanceof Error ? err.message : __ompTranslate("Failed to start microphone capture");
 			options.showWarning(msg);
 			logger.error("STT recording failed to start", { error: msg });
 			return;
@@ -481,7 +482,7 @@ export class STTController {
 		} catch (err) {
 			failed = true;
 			if (!this.#disposed) {
-				const msg = err instanceof Error ? err.message : "Transcription failed";
+				const msg = err instanceof Error ? err.message : __ompTranslate("Transcription failed");
 				options.showWarning(msg);
 				logger.error("STT live transcription failed", { error: msg });
 			}
@@ -514,7 +515,7 @@ export class STTController {
 		} else {
 			this.#streamEditor?.clearVolatileText();
 		}
-		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
+		if (!failed) options.showStatus(this.#streamCommitted ? "" : __ompTranslate("No speech detected."));
 
 		if (!options.manualSubmit && this.#streamCommitted && !failed && this.#streamEditor) {
 			const trigger = cfgSttSubmitTrigger.get(this.#settings);

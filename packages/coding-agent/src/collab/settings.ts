@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 import { DEFAULT_RELAY_URL } from "./protocol";
 
@@ -13,7 +14,7 @@ export const cfgCollabRelayUrl = register({
 	ui: {
 		tab: "interaction",
 		group: "Collab",
-		label: "Relay URL",
+		label: __ompTranslate("Relay URL"),
 		description: "Relay used by /collab (wss://host[:port])",
 	},
 });
@@ -25,7 +26,7 @@ export const cfgCollabWebUrl = register({
 	ui: {
 		tab: "interaction",
 		group: "Collab",
-		label: "Web UI URL",
+		label: __ompTranslate("Web UI URL"),
 		description:
 			"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only",
 	},
@@ -38,7 +39,7 @@ export const cfgCollabDisplayName = register({
 	ui: {
 		tab: "interaction",
 		group: "Collab",
-		label: "Display Name",
+		label: __ompTranslate("Display Name"),
 		description: "Name shown to other collab participants (default: OS username)",
 	},
 });
@@ -51,20 +52,24 @@ export const cfgCollabAutoStart = register({
 	ui: {
 		tab: "interaction",
 		group: "Collab",
-		label: "Auto Start",
+		label: __ompTranslate("Auto Start"),
 		description:
 			"Host every interactive session via collab.relayUrl as it starts and publish it to the local registry (omp collab list); rooms rotate on session switch",
 		options: [
-			{ value: "off", label: "Off", description: "Share only when /collab is run" },
+			{
+				value: "off",
+				label: __ompTranslate("Off\u0004collaboration.auto-start.disabled"),
+				description: __ompTranslate("Share only when /collab is run"),
+			},
 			{
 				value: "view",
-				label: "View",
-				description: "Auto-host; the registry hands out view-only links (omp collab link --view)",
+				label: __ompTranslate("View"),
+				description: __ompTranslate("Auto-host; the registry hands out view-only links (omp collab link --view)"),
 			},
 			{
 				value: "control",
-				label: "Control",
-				description: "Auto-host; the registry hands out control links that can prompt the session",
+				label: __ompTranslate("Control"),
+				description: __ompTranslate("Auto-host; the registry hands out control links that can prompt the session"),
 			},
 		],
 	},

@@ -4,6 +4,7 @@
  * tool binaries, browsers, side runtimes). Both render through
  * {@link renderHudProgressRow} so they read as one HUD.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, renderProgressBar, visibleWidth } from "@oh-my-pi/pi-tui";
 import { col, node, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
@@ -97,7 +98,7 @@ export class JudgmentBatchProgressHud implements Component {
 				const tail: TspSpan[] = [span(`${progress.done}/${progress.total}`, "strong")];
 				// Zero cost means unpriced, not free — omit rather than show $0.
 				if (progress.cost > 0) tail.push(span(` · ${formatCost(progress.cost)}`, "dim"));
-				if (progress.failed > 0) tail.push(span(` · ${progress.failed} failed`, "warning"));
+				if (progress.failed > 0) tail.push(span(__ompTranslate(" · {0} failed", `${progress.failed}`), "warning"));
 				return describeHudRow(progress.id, progress.intent, tail, progress.done / Math.max(1, progress.total));
 			}),
 			{ role: "omp.hud.judge" },
@@ -117,7 +118,7 @@ export class JudgmentBatchProgressHud implements Component {
 		const countText = `${progress.done}/${progress.total}`;
 		// Zero cost means unpriced (local/native without catalog pricing), not free — omit rather than show $0.
 		const costText = progress.cost > 0 ? ` · ${formatCost(progress.cost)}` : "";
-		const failedText = progress.failed > 0 ? ` · ${progress.failed} failed` : "";
+		const failedText = progress.failed > 0 ? __ompTranslate(" · {0} failed", `${progress.failed}`) : "";
 		const compactFailedText = progress.failed > 0 ? ` +${progress.failed}!` : "";
 		let failure = failedText;
 		if (
@@ -226,10 +227,14 @@ export class DownloadActivityHud implements Component {
 	#describeRow(activity: DownloadActivity): NativeNode {
 		const key = `${activity.id}`;
 		if (activity.state === "failed") {
-			const reason = `failed: ${sanitizeStatusText(activity.error ?? "unknown error")}`;
+			const reason = __ompTranslate(
+				"failed: {0}",
+				`${sanitizeStatusText(activity.error ?? __ompTranslate("unknown error"))}`,
+			);
 			return describeHudRow(key, activity.label, [span(reason, "warning")]);
 		}
-		if (activity.state === "done") return describeHudRow(key, activity.label, [span("ready", "success")]);
+		if (activity.state === "done")
+			return describeHudRow(key, activity.label, [span(__ompTranslate("ready"), "success")]);
 		const { loaded, total } = activity;
 		if (total !== undefined && total > 0) {
 			const received = loaded ?? 0;
@@ -241,7 +246,7 @@ export class DownloadActivityHud implements Component {
 				received / total,
 			);
 		}
-		const step = loaded ? formatBytes(loaded) : (activity.detail ?? "downloading…");
+		const step = loaded ? formatBytes(loaded) : (activity.detail ?? __ompTranslate("downloading…"));
 		return describeHudRow(key, activity.label, [span(step)]);
 	}
 
@@ -259,7 +264,10 @@ export class DownloadActivityHud implements Component {
 
 	#renderRow(activity: DownloadActivity, width: number): string {
 		if (activity.state === "failed") {
-			const reason = `failed: ${sanitizeStatusText(activity.error ?? "unknown error")}`;
+			const reason = __ompTranslate(
+				"failed: {0}",
+				`${sanitizeStatusText(activity.error ?? __ompTranslate("unknown error"))}`,
+			);
 			return renderHudProgressRow(width, {
 				label: activity.label,
 				tail: theme.fg("warning", truncateToWidth(reason, Math.max(8, Math.floor(width * 0.6)))),
@@ -269,8 +277,8 @@ export class DownloadActivityHud implements Component {
 		if (activity.state === "done") {
 			return renderHudProgressRow(width, {
 				label: activity.label,
-				tail: theme.fg("success", "ready"),
-				fallback: theme.fg("success", `${activity.label} ready`),
+				tail: theme.fg("success", __ompTranslate("ready")),
+				fallback: theme.fg("success", __ompTranslate("{0} ready", `${activity.label}`)),
 			});
 		}
 		const { loaded, total } = activity;
@@ -285,7 +293,7 @@ export class DownloadActivityHud implements Component {
 			});
 		}
 		// Size unknown: bytes so far, or the current step (`installing`, `extracting`).
-		const step = loaded ? formatBytes(loaded) : (activity.detail ?? "downloading…");
+		const step = loaded ? formatBytes(loaded) : (activity.detail ?? __ompTranslate("downloading…"));
 		return renderHudProgressRow(width, {
 			label: activity.label,
 			tail: theme.fg("text", step),

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type {
 	AgentProgress,
 	AgentSnapshot,
@@ -70,7 +71,7 @@ const AgentRow = memo(function AgentRow(props: {
 			</span>
 			<span className="ag-row-activity">{activityLine(agent, p, lifecycle, now)}</span>
 			<span className="ag-row-meta">
-				{p ? <span>{fmtTokens(p.tokens)} tok</span> : null}
+				{p ? <span>{__ompTranslate("{0} tok", fmtTokens(p.tokens))}</span> : null}
 				{p ? <span>{fmtCost(p.cost)}</span> : null}
 				<span className="ag-row-meta-when">{relTime(agent.lastActivity)}</span>
 			</span>
@@ -104,7 +105,7 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 
 	return (
 		<div className="ag-panel">
-			<div className="ag-heading">Session</div>
+			<div className="ag-heading">{__ompTranslate("Session")}</div>
 			{sorted.mains.map(agent => (
 				<AgentRow
 					key={agent.id}
@@ -117,7 +118,7 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 				/>
 			))}
 			<div className="ag-heading">
-				Subagents
+				{__ompTranslate("Subagents")}
 				{sorted.subs.length > 0 && <span className="ag-heading-count">{sorted.subs.length}</span>}
 			</div>
 			{sorted.subs.map(agent => (
@@ -131,7 +132,7 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 					onSelect={onSelect}
 				/>
 			))}
-			{sorted.subs.length === 0 ? <div className="ag-empty">No subagents yet</div> : null}
+			{sorted.subs.length === 0 ? <div className="ag-empty">{__ompTranslate("No subagents yet")}</div> : null}
 		</div>
 	);
 });

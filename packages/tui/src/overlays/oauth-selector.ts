@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
@@ -108,7 +109,10 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			sheet?: OAuthSelectorSheet;
 		},
 	) {
-		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
+		super(
+			mode === "login" ? __ompTranslate("Select provider to login") : __ompTranslate("Select provider to logout"),
+			"omp.overlay.oauth",
+		);
 		this.#mode = mode;
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
@@ -305,9 +309,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	#renderStatusLine(_total: number): string {
 		const query = this.#menu.query.trim();
-		if (!query) return theme.fg("muted", "Type to search");
+		if (!query) return theme.fg("muted", __ompTranslate("Type to search"));
 		const width = visibleWidth(this.#search.getValue()) + 1;
-		return theme.fg("muted", "Search: ") + (this.#search.render(width)[0] ?? "");
+		return theme.fg("muted", __ompTranslate("Search: ")) + (this.#search.render(width)[0] ?? "");
 	}
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
@@ -380,9 +384,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			const message =
 				this.#menu.items.length === 0
 					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
+						? __ompTranslate("No OAuth providers available")
+						: __ompTranslate("No stored provider credentials to log out")
+					: __ompTranslate("No matching providers");
 			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
 		}
 		if (this.#statusMessage) {
@@ -466,7 +470,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			this.stopValidation();
 			this.#onSelectCallback(selectedProvider.id);
 		} else if (selectedProvider) {
-			this.#statusMessage = "Provider unavailable in this environment.";
+			this.#statusMessage = __ompTranslate("Provider unavailable in this environment.");
 			this.#updateList();
 		}
 	}
@@ -509,10 +513,10 @@ export class OAuthSelectorComponent extends OverlayPanel {
 				: ORIGIN_LABELS[origin.kind]
 			: undefined;
 		const detail = !source
-			? "Not configured"
+			? __ompTranslate("Not configured")
 			: origin?.kind === "oauth"
-				? `Signed in · ${source}`
-				: `API key · ${source}`;
+				? __ompTranslate("Signed in · {0}", `${source}`)
+				: __ompTranslate("API key · {0}", `${source}`);
 		const initials = provider.name
 			.split(/[^\p{L}\p{N}]+/u)
 			.filter(word => word.length > 0)
@@ -525,7 +529,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			detail,
 			mark: { text: initials, seed: provider.id },
 			dot,
-			...(provider.available ? {} : { disabled: "Provider unavailable in this environment" }),
+			...(provider.available ? {} : { disabled: __ompTranslate("Provider unavailable in this environment") }),
 		};
 	}
 
@@ -545,17 +549,19 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			title: sheet?.title ?? (login ? "Sign in" : "Sign out"),
 			subtitle: sheet?.subtitle ?? (login ? "Pick a provider" : "Remove stored credentials"),
 			icon: "key-round",
-			noun: "providers",
+			noun: __ompTranslate("providers"),
 			size: sheet?.size ?? "md",
 			layout: "cards",
 			preview: "none",
 			...search,
-			placeholder: "Search providers…",
+			placeholder: __ompTranslate("Search providers…"),
 			items: this.#pickerItems,
 			...(query.length > 0 ? { order: this.#menu.visibleItems.map(provider => provider.id) } : {}),
 			selected: this.#menu.selectedKey ?? null,
 			total: all.length,
-			empty: login ? "No OAuth providers available" : "No stored provider credentials to log out",
+			empty: login
+				? __ompTranslate("No OAuth providers available")
+				: __ompTranslate("No stored provider credentials to log out"),
 			...(this.#statusMessage ? { message: this.#statusMessage } : {}),
 			...(sheet?.status ? { strip: { label: sheet.status, items: [] } } : {}),
 			actions: [
@@ -596,7 +602,11 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			children.push(
 				node(
 					"input",
-					{ text: this.#search.getValue(), cursor: this.#search.getCursor(), placeholder: "Type to search" },
+					{
+						text: this.#search.getValue(),
+						cursor: this.#search.getCursor(),
+						placeholder: __ompTranslate("Type to search"),
+					},
 					undefined,
 					"search",
 				),
@@ -605,9 +615,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const empty =
 			this.#menu.items.length === 0
 				? this.#mode === "login"
-					? "No OAuth providers available"
-					: "No stored provider credentials to log out"
-				: "No matching providers";
+					? __ompTranslate("No OAuth providers available")
+					: __ompTranslate("No stored provider credentials to log out")
+				: __ompTranslate("No matching providers");
 		children.push(
 			node(
 				"list",

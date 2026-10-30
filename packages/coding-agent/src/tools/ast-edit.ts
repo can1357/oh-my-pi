@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -174,14 +175,14 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 		const ops = Array.isArray(params.ops) ? params.ops : [];
 		const firstOp = ops[0];
 		if (firstOp) {
-			lines.push(`Pattern: ${truncateForPrompt(firstOp.pat)}`);
-			lines.push(`Replacement: ${truncateForPrompt(firstOp.out)}`);
+			lines.push(__ompTranslate("Pattern: {0}", `${truncateForPrompt(firstOp.pat)}`));
+			lines.push(__ompTranslate("Replacement: {0}", `${truncateForPrompt(firstOp.out)}`));
 			if (ops.length > 1) {
-				lines.push(`+${ops.length - 1} more op${ops.length === 2 ? "" : "s"}`);
+				lines.push(__ompTranslate("+{0} more op{1}", `${ops.length - 1}`, `${ops.length === 2 ? "" : "s"}`));
 			}
 		}
 		if (Array.isArray(params.paths) && params.paths.length > 0) {
-			lines.push(`Paths: ${truncateForPrompt(params.paths.join(", "))}`);
+			lines.push(__ompTranslate("Paths: {0}", `${truncateForPrompt(params.paths.join(", "))}`));
 		}
 		return lines;
 	};

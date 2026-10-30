@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
 	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
@@ -27,8 +28,9 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 	}
 
 	const endpointChoice = await options.onPrompt({
-		message:
+		message: __ompTranslate(
 			"Select QwenCloud Token Plan region: 1=International (default), 2=China (Beijing), 3=Custom — enter 1, 2, or 3",
+		),
 		placeholder: "1",
 	});
 	if (options.signal?.aborted) {
@@ -42,30 +44,31 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 	if (choice === "2") {
 		baseUrl = ALIBABA_TOKEN_PLAN_CN_BASE_URL;
 		authUrl = CHINA_AUTH_URL;
-		instructions = "Subscribe to the China (Beijing) 百炼 Token Plan and copy its dedicated API key";
+		instructions = __ompTranslate("Subscribe to the China (Beijing) 百炼 Token Plan and copy its dedicated API key");
 	} else if (choice === "3") {
 		const customUrl = await options.onPrompt({
-			message: "Enter custom Token Plan base URL",
+			message: __ompTranslate("Enter custom Token Plan base URL"),
 			placeholder: "https://token-plan.<region>.maas.aliyuncs.com/compatible-mode/v1",
 		});
 		const trimmedUrl = customUrl.trim().replace(/\/+$/, "");
 		if (!trimmedUrl) {
-			throw new AIError.ConfigurationError("Custom URL is required for option 3");
+			throw new AIError.ConfigurationError(__ompTranslate("Custom URL is required for option 3"));
 		}
 		baseUrl = trimmedUrl;
 		authUrl = INTERNATIONAL_AUTH_URL;
-		instructions = "Copy your Token Plan API key for the custom endpoint";
+		instructions = __ompTranslate("Copy your Token Plan API key for the custom endpoint");
 	} else {
 		baseUrl = ALIBABA_TOKEN_PLAN_BASE_URL;
 		authUrl = INTERNATIONAL_AUTH_URL;
-		instructions =
-			"Subscribe to Token Plan Individual and copy its dedicated API key. Keep this page open; the next prompt explains how to enable optional quota reporting.";
+		instructions = __ompTranslate(
+			"Subscribe to Token Plan Individual and copy its dedicated API key. Keep this page open; the next prompt explains how to enable optional quota reporting.",
+		);
 	}
 
 	options.onAuth?.({ url: authUrl, instructions });
 
 	const apiKeyInput = await options.onPrompt({
-		message: "Paste your QwenCloud Token Plan API key",
+		message: __ompTranslate("Paste your QwenCloud Token Plan API key"),
 		placeholder: "sk-sp-...",
 	});
 	if (options.signal?.aborted) {
@@ -76,7 +79,7 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 		throw new AIError.ApiKeyRequiredError();
 	}
 
-	options.onProgress?.("Validating API key...");
+	options.onProgress?.(__ompTranslate("Validating API key..."));
 	await validateApiKeyAgainstModelsEndpoint({
 		provider: "QwenCloud Token Plan",
 		apiKey,
@@ -90,8 +93,12 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 	const rawCookie = await options.onPrompt({
 		message:
 			baseUrl === ALIBABA_TOKEN_PLAN_CN_BASE_URL
-				? "Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the bailian-cs.console.aliyun.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip."
-				: "Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the cs-data.qwencloud.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip.",
+				? __ompTranslate(
+						"Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the bailian-cs.console.aliyun.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip.",
+					)
+				: __ompTranslate(
+						"Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the cs-data.qwencloud.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip.",
+					),
 		placeholder: "name=value; name=value; ...",
 		allowEmpty: true,
 	});
@@ -110,7 +117,10 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 		})
 	) {
 		throw new AIError.ConfigurationError(
-			`Invalid QwenCloud Cookie header. Copy the complete Cookie request header from the ${cookieRequestHost} usage request, not a single cookie value.`,
+			__ompTranslate(
+				"Invalid QwenCloud Cookie header. Copy the complete Cookie request header from the {0} usage request, not a single cookie value.",
+				`${cookieRequestHost}`,
+			),
 		);
 	}
 

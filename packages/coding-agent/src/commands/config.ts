@@ -2,6 +2,7 @@
  * Manage configuration settings.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { configHelp as commandHelp } from "../cli/command-help";
 import { type ConfigAction, type ConfigCommandArgs, type ConfigScope, runConfigCommand } from "../cli/config-cli";
@@ -13,26 +14,27 @@ export default class Config extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
-			description: "Config action",
+			description: __ompTranslate("Config action"),
 			required: false,
 			options: ACTIONS,
 		}),
 		key: Args.string({
-			description: "Setting key",
+			description: __ompTranslate("Setting key"),
 			required: false,
 		}),
 		value: Args.string({
-			description: "Value (for set/reset)",
+			description: __ompTranslate("Value (for set/reset)"),
 			required: false,
 			multiple: true,
 		}),
 	};
 
 	static flags = {
-		json: Flags.boolean({ description: "Output JSON" }),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON") }),
 		scope: Flags.string({
-			description:
+			description: __ompTranslate(
 				'With list: only the keys the "global" (config.yml in the agent dir) or "project" (<cwd>/.omp) layer sets, as written',
+			),
 			options: ["global", "project"],
 		}),
 	};

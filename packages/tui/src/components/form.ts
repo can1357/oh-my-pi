@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { getKeybindings } from "../keybindings";
 import { matchesKey } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
@@ -358,7 +359,7 @@ export class TextFormField extends FormField {
 				return;
 			}
 			if (empty === "reject") {
-				this.setError(this.#options.emptyError ?? "A value is required.");
+				this.setError(this.#options.emptyError ?? __ompTranslate("A value is required."));
 				return;
 			}
 		}
@@ -432,7 +433,7 @@ export class SelectFormField extends FormField {
 		const previewText = options.getPreview ? new StyledText(options.getPreview(), text => text) : undefined;
 		super(selectList, {
 			...options,
-			previewLabel: previewText ? (options.previewLabel ?? "Preview:") : undefined,
+			previewLabel: previewText ? (options.previewLabel ?? __ompTranslate("Preview:")) : undefined,
 			preview: previewText,
 		});
 		this.selectList = selectList;
@@ -443,7 +444,7 @@ export class SelectFormField extends FormField {
 		this.#sheet = new SelectListSheet(
 			selectList,
 			options.picker ?? {
-				title: options.label ?? "Select",
+				title: options.label ?? __ompTranslate("Select"),
 				...(options.description ? { subtitle: options.description } : {}),
 				searchable: true,
 			},

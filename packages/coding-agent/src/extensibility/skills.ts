@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import {
@@ -411,7 +412,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (/[\\/]/.test(skill.name)) {
 			collisionWarnings.push({
 				skillPath: skill.filePath,
-				message: `Skill name "${skill.name}" contains a path separator, skipping: ${skill.filePath}`,
+				message: __ompTranslate(
+					'Skill name "{0}" contains a path separator, skipping: {1}',
+					`${skill.name}`,
+					`${skill.filePath}`,
+				),
 			});
 			return undefined;
 		}

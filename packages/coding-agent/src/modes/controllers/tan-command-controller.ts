@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -48,7 +49,7 @@ export class TanCommandController {
 	async start(work: string, images?: ImageContent[]): Promise<boolean> {
 		const trimmedWork = work.trim();
 		if (!trimmedWork) {
-			this.ctx.showStatus("Usage: /tan <work>");
+			this.ctx.showStatus(__ompTranslate("Usage: /tan <work>"));
 			return false;
 		}
 
@@ -56,19 +57,19 @@ export class TanCommandController {
 
 		const model = session.model;
 		if (!model) {
-			this.ctx.showError("No active model available for /tan.");
+			this.ctx.showError(__ompTranslate("No active model available for /tan."));
 			return false;
 		}
 
 		const manager = session.asyncJobManager;
 		if (!manager) {
-			this.ctx.showError("Background jobs are disabled; enable async jobs to use /tan.");
+			this.ctx.showError(__ompTranslate("Background jobs are disabled; enable async jobs to use /tan."));
 			return false;
 		}
 
 		const parentFile = this.ctx.sessionManager.getSessionFile();
 		if (!parentFile) {
-			this.ctx.showError("/tan requires a persisted session.");
+			this.ctx.showError(__ompTranslate("/tan requires a persisted session."));
 			return false;
 		}
 
@@ -302,10 +303,10 @@ export class TanCommandController {
 							await clone.prompt(trimmedWork, { attribution: "user", images });
 							await clone.waitForIdle();
 							while (clone.hasPendingAsyncWork()) {
-								if (signal.aborted) throw new Error("Aborted while settling descendant work");
+								if (signal.aborted) throw new Error(__ompTranslate("Aborted while settling descendant work"));
 								await untilAborted(signal, clone.settleAsyncWork());
 							}
-							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
+							return extractAssistantText(clone.getLastAssistantMessage()) || __ompTranslate("(no output)");
 						} finally {
 							unsubscribeCompaction();
 							signal.removeEventListener("abort", abortClone);
@@ -353,7 +354,7 @@ export class TanCommandController {
 			{ triggerTurn: false, deliverAs: "nextTurn" },
 		);
 		if (!wasStreaming) this.ctx.rebuildChatFromMessages();
-		this.ctx.showStatus(`Dispatched background tan ${jobId}`);
+		this.ctx.showStatus(__ompTranslate("Dispatched background tan {0}", `${jobId}`));
 		return true;
 	}
 }

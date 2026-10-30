@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 export const cfgSharpshooterModel = register({
@@ -11,7 +12,7 @@ export const cfgSharpshooterModel = register({
 	ui: {
 		tab: "memory",
 		group: "Sharpshooter",
-		label: "Sharpshooter Model",
+		label: __ompTranslate("Sharpshooter Model"),
 		description: "Model selector for extraction/consolidation, empty = smol role",
 	},
 });

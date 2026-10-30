@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -16,11 +17,11 @@ const VALID_PACKAGE_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]
  */
 function validatePackageName(name: string): void {
 	if (!VALID_PACKAGE_NAME.test(name)) {
-		throw new Error(`Invalid package name: ${name}`);
+		throw new Error(__ompTranslate("Invalid package name: {0}", `${name}`));
 	}
 	// Extra safety: no shell metacharacters
 	if (/[;&|`$(){}[\]<>\\]/.test(name)) {
-		throw new Error(`Invalid characters in package name: ${name}`);
+		throw new Error(__ompTranslate("Invalid characters in package name: {0}", `${name}`));
 	}
 }
 
@@ -49,7 +50,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	// Run npm install in plugins directory
 	const { exitCode, stderr } = await runBunCli(["install", packageName], PLUGINS_DIR);
 	if (exitCode !== 0) {
-		throw new Error(`Failed to install ${packageName}: ${stderr}`);
+		throw new Error(__ompTranslate("Failed to install {0}: {1}", `${packageName}`, `${stderr}`));
 	}
 
 	// Extract the actual package name (without version specifier) for path lookup
@@ -59,7 +60,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	const pkgPath = path.join(PLUGINS_DIR, "node_modules", actualName, "package.json");
 	const pkgFile = Bun.file(pkgPath);
 	if (!(await pkgFile.exists())) {
-		throw new Error(`Package installed but package.json not found at ${pkgPath}`);
+		throw new Error(__ompTranslate("Package installed but package.json not found at {0}", `${pkgPath}`));
 	}
 
 	const pkg = await pkgFile.json();
@@ -82,7 +83,7 @@ export async function uninstallPlugin(name: string): Promise<void> {
 
 	const { exitCode } = await runBunCli(["uninstall", name], PLUGINS_DIR);
 	if (exitCode !== 0) {
-		throw new Error(`Failed to uninstall ${name}`);
+		throw new Error(__ompTranslate("Failed to uninstall {0}", `${name}`));
 	}
 }
 
@@ -123,31 +124,31 @@ export async function linkPlugin(localPath: string): Promise<void> {
 	const normalizedCwd = path.resolve(cwd);
 	const normalizedPath = path.resolve(absolutePath);
 	if (!normalizedPath.startsWith(`${normalizedCwd}/`) && normalizedPath !== normalizedCwd) {
-		throw new Error(`Invalid path: ${localPath} resolves outside working directory`);
+		throw new Error(__ompTranslate("Invalid path: {0} resolves outside working directory", `${localPath}`));
 	}
 
 	// Validate package.json exists
 	const pkgFile = Bun.file(path.join(absolutePath, "package.json"));
 	if (!(await pkgFile.exists())) {
-		throw new Error(`package.json not found at ${absolutePath}`);
+		throw new Error(__ompTranslate("package.json not found at {0}", `${absolutePath}`));
 	}
 
 	let pkg: { name?: string };
 	try {
 		pkg = await pkgFile.json();
 	} catch (err) {
-		throw new Error(`Invalid package.json at ${absolutePath}: ${err}`);
+		throw new Error(__ompTranslate("Invalid package.json at {0}: {1}", `${absolutePath}`, `${err}`));
 	}
 
 	if (!pkg.name || typeof pkg.name !== "string") {
-		throw new Error("package.json must have a valid name field");
+		throw new Error(__ompTranslate("package.json must have a valid name field"));
 	}
 
 	// Validate package name to prevent path traversal via pkg.name
 	if (pkg.name.includes("..") || pkg.name.includes("/") || pkg.name.includes("\\")) {
 		// Exception: scoped packages have one slash
 		if (!pkg.name.startsWith("@") || (pkg.name.match(/\//g) || []).length !== 1) {
-			throw new Error(`Invalid package name in package.json: ${pkg.name}`);
+			throw new Error(__ompTranslate("Invalid package name in package.json: {0}", `${pkg.name}`));
 		}
 	}
 

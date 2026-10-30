@@ -27,6 +27,7 @@
  * on a clean tree, which shows the HEAD commit instead of a change list.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatKeyHint, formatKeyHints, formatTooltipKey } from "../../app-keybindings";
 import { SplitPane } from "../../components/layout/split-pane";
@@ -104,13 +105,39 @@ export function gitFooterHints(clean: boolean, focus: Focus): string {
 	const edit = clean
 		? ""
 		: focus === "diff"
-			? ` · ${formatKeyHints(["s", "u"])} stage · ${formatKeyHints(["x", "delete"])} discard`
-			: ` · ${formatKeyHint("space")} stage · ${formatKeyHint("delete")} discard`;
-	const commit = clean ? "" : ` · ${formatKeyHint("c")} commit`;
-	const select = clean || focus !== "diff" ? "" : ` · ${formatKeyHints(["shift+up", "shift+down"])} select`;
+			? __ompTranslate(
+					" · {0} stage · {1} discard",
+					`${formatKeyHints(["s", "u"])}`,
+					`${formatKeyHints(["x", "delete"])}`,
+				)
+			: __ompTranslate(" · {0} stage · {1} discard", `${formatKeyHint("space")}`, `${formatKeyHint("delete")}`);
+	const commit = clean ? "" : __ompTranslate(" · {0} commit", `${formatKeyHint("c")}`);
+	const select =
+		clean || focus !== "diff" ? "" : __ompTranslate(" · {0} select", `${formatKeyHints(["shift+up", "shift+down"])}`);
 	return focus === "diff"
-		? `${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHints(["]", "["])} file${select}${edit} · ${formatKeyHint("v")} view${commit} · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`
-		: `${formatKeyHints(["up", "down"])} move · ${formatKeyHints(["left", "right"])} fold${edit} · ${formatKeyHint("enter")} open · ${formatKeyHints(["alt+down", "alt+up"])} hunk${commit} · ${formatKeyHint("t")} tree · ${formatKeyHint("?")} keys · ${formatKeyHint("q")} quit`;
+		? __ompTranslate(
+				"{0} hunk · {1} file{2}{3} · {4} view{5} · {6} keys · {7} quit",
+				`${formatKeyHints(["alt+down", "alt+up"])}`,
+				`${formatKeyHints(["]", "["])}`,
+				`${select}`,
+				`${edit}`,
+				`${formatKeyHint("v")}`,
+				`${commit}`,
+				`${formatKeyHint("?")}`,
+				`${formatKeyHint("q")}`,
+			)
+		: __ompTranslate(
+				"{0} move · {1} fold{2} · {3} open · {4} hunk{5} · {6} tree · {7} keys · {8} quit",
+				`${formatKeyHints(["up", "down"])}`,
+				`${formatKeyHints(["left", "right"])}`,
+				`${edit}`,
+				`${formatKeyHint("enter")}`,
+				`${formatKeyHints(["alt+down", "alt+up"])}`,
+				`${commit}`,
+				`${formatKeyHint("t")}`,
+				`${formatKeyHint("?")}`,
+				`${formatKeyHint("q")}`,
+			);
 }
 
 /** Tone of a status message: its colour in the header and its span token natively. */
@@ -121,10 +148,10 @@ const NARROW_COLS = 100;
 
 /** The views of the native segmented control, in omp's `1`–`4` order. */
 const VIEW_TABS: readonly { id: ViewMode; label: string }[] = [
-	{ id: "file", label: "File" },
-	{ id: "split", label: "Split" },
-	{ id: "inline", label: "Inline" },
-	{ id: "hunk", label: "Hunks" },
+	{ id: "file", label: __ompTranslate("File") },
+	{ id: "split", label: __ompTranslate("Split\u0004git.diff.split") },
+	{ id: "inline", label: __ompTranslate("Inline") },
+	{ id: "hunk", label: __ompTranslate("Hunks") },
 ];
 
 interface UiHit {
@@ -322,7 +349,10 @@ class GitTuiComponent implements Component {
 		this.#pane.patchTarget = this.#patchTargetFor(file);
 		const seq = ++this.#loadSeq;
 		if (!file) {
-			this.#pane.emptyMessage = this.#model.clean && !this.#model.headCommit ? "No commits yet" : "No changes";
+			this.#pane.emptyMessage =
+				this.#model.clean && !this.#model.headCommit
+					? __ompTranslate("No commits yet")
+					: __ompTranslate("No changes");
 			this.#pane.setDocument(null, "empty");
 			this.#ui.requestRender();
 			return;
@@ -395,7 +425,11 @@ class GitTuiComponent implements Component {
 				this.#pendingDiscard = key;
 				this.#setStatus(
 					"warning",
-					`Discard changes to ${action.selection.label}? Press ${formatKeyHint("delete")} again to confirm`,
+					__ompTranslate(
+						"Discard changes to {0}? Press {1} again to confirm",
+						`${action.selection.label}`,
+						`${formatKeyHint("delete")}`,
+					),
 				);
 				return;
 			}
@@ -407,23 +441,30 @@ class GitTuiComponent implements Component {
 			switch (action.type) {
 				case "discard":
 					await this.#model.discard(action.selection.files);
-					this.#setStatus("success", `Discarded ${action.selection.label}`);
+					this.#setStatus("success", __ompTranslate("Discarded {0}", `${action.selection.label}`));
 					break;
 				case "stage":
 					await this.#model.stage(action.selection?.files);
-					this.#setStatus("success", action.selection ? `Staged ${action.selection.label}` : "Staged all changes");
+					this.#setStatus(
+						"success",
+						action.selection
+							? __ompTranslate("Staged {0}", `${action.selection.label}`)
+							: __ompTranslate("Staged all changes"),
+					);
 					break;
 				case "unstage":
 					await this.#model.unstage(action.selection?.files);
 					this.#setStatus(
 						"success",
-						action.selection ? `Unstaged ${action.selection.label}` : "Unstaged all changes",
+						action.selection
+							? __ompTranslate("Unstaged {0}", `${action.selection.label}`)
+							: __ompTranslate("Unstaged all changes"),
 					);
 					break;
 				case "stage-ai": {
 					const abort = new AbortController();
 					this.#aiStageAbort = abort;
-					this.#setStatus("accent", `Filtering changes: ${action.prompt}`);
+					this.#setStatus("accent", __ompTranslate("Filtering changes: {0}", `${action.prompt}`));
 					try {
 						const outcome = await this.#host.aiStage({
 							cwd: this.#model.cwd,
@@ -435,12 +476,18 @@ class GitTuiComponent implements Component {
 							},
 						});
 						if (outcome.stagedHunks === 0 && outcome.wholeFiles === 0) {
-							this.#setStatus("warning", `No changes matched "${action.prompt}"`);
+							this.#setStatus("warning", __ompTranslate('No changes matched "{0}"', `${action.prompt}`));
 						} else {
 							const parts: string[] = [];
 							if (outcome.stagedHunks > 0) parts.push(`${outcome.stagedHunks} of ${outcome.totalHunks} hunks`);
 							if (outcome.wholeFiles > 0) {
-								parts.push(`${outcome.wholeFiles} whole file${outcome.wholeFiles === 1 ? "" : "s"}`);
+								parts.push(
+									__ompTranslate(
+										"{0} whole file{1}",
+										`${outcome.wholeFiles}`,
+										`${outcome.wholeFiles === 1 ? "" : "s"}`,
+									),
+								);
 							}
 							this.#setStatus(
 								"success",
@@ -456,7 +503,7 @@ class GitTuiComponent implements Component {
 					const abort = new AbortController();
 					this.#generationAbort = abort;
 					this.#sidebar.setGenerating(true);
-					this.#setStatus("accent", "Generating commit message…");
+					this.#setStatus("accent", __ompTranslate("Generating commit message…"));
 					try {
 						const generated = await this.#host.generateCommitMessage({
 							cwd: this.#model.cwd,
@@ -468,13 +515,16 @@ class GitTuiComponent implements Component {
 						});
 						this.#sidebar.setGeneratedCommit(generated.commit);
 						if (generated.validationError) {
-							this.#setStatus("warning", `Generated message needs review: ${generated.validationError}`);
+							this.#setStatus(
+								"warning",
+								__ompTranslate("Generated message needs review: {0}", `${generated.validationError}`),
+							);
 						} else {
 							this.#setStatus(
 								"success",
 								generated.stagedAll
-									? "Staged all changes and generated commit message"
-									: "Generated commit message",
+									? __ompTranslate("Staged all changes and generated commit message")
+									: __ompTranslate("Generated commit message"),
 							);
 						}
 					} finally {
@@ -487,7 +537,10 @@ class GitTuiComponent implements Component {
 					if (action.stageAll) await this.#model.stage();
 					await this.#model.commit(action.message, { amend: action.amend });
 					this.#sidebar.clearForm();
-					this.#setStatus("success", action.amend ? "Amended commit" : "Created commit");
+					this.#setStatus(
+						"success",
+						action.amend ? __ompTranslate("Amended commit") : __ompTranslate("Created commit"),
+					);
 					break;
 				}
 			}
@@ -503,7 +556,10 @@ class GitTuiComponent implements Component {
 		if (!hunk.patch) return;
 		if (action === "discard" && this.#pendingDiscard !== hunk.patch) {
 			this.#pendingDiscard = hunk.patch;
-			this.#setStatus("warning", `Discard hunk? Press ${formatKeyHint("x")} (or click) again to confirm`);
+			this.#setStatus(
+				"warning",
+				__ompTranslate("Discard hunk? Press {0} (or click) again to confirm", `${formatKeyHint("x")}`),
+			);
 			return;
 		}
 		this.#pendingDiscard = null;
@@ -515,7 +571,11 @@ class GitTuiComponent implements Component {
 			else await this.#model.applyPatch(hunk.patch, { reverse: true });
 			this.#setStatus(
 				"success",
-				action === "stage" ? "Staged hunk" : action === "unstage" ? "Unstaged hunk" : "Discarded hunk",
+				action === "stage"
+					? __ompTranslate("Staged hunk")
+					: action === "unstage"
+						? __ompTranslate("Unstaged hunk")
+						: __ompTranslate("Discarded hunk"),
 			);
 			await this.#refresh(true);
 		} catch (error) {
@@ -532,12 +592,15 @@ class GitTuiComponent implements Component {
 		const intent = action === "stage" ? "apply" : "revert";
 		const patch = buildLineSelectionPatch(doc, span.from, span.to, intent);
 		if (!patch) {
-			this.#setStatus("warning", "Selection contains no changes");
+			this.#setStatus("warning", __ompTranslate("Selection contains no changes"));
 			return;
 		}
 		if (action === "discard" && this.#pendingDiscard !== patch) {
 			this.#pendingDiscard = patch;
-			this.#setStatus("warning", `Discard selected lines? Press ${formatKeyHint("x")} again to confirm`);
+			this.#setStatus(
+				"warning",
+				__ompTranslate("Discard selected lines? Press {0} again to confirm", `${formatKeyHint("x")}`),
+			);
 			return;
 		}
 		this.#pendingDiscard = null;
@@ -551,10 +614,10 @@ class GitTuiComponent implements Component {
 			this.#setStatus(
 				"success",
 				action === "stage"
-					? "Staged selection"
+					? __ompTranslate("Staged selection")
 					: action === "unstage"
-						? "Unstaged selection"
-						: "Discarded selection",
+						? __ompTranslate("Unstaged selection")
+						: __ompTranslate("Discarded selection"),
 			);
 			await this.#refresh(true);
 		} catch (error) {
@@ -614,10 +677,10 @@ class GitTuiComponent implements Component {
 		this.#setStatus(
 			"dim",
 			this.#whitespace === "off"
-				? "Showing all changes"
+				? __ompTranslate("Showing all changes")
 				: this.#whitespace === "whitespace"
-					? "Ignoring whitespace-only line changes"
-					: "Ignoring formatting and import-only changes",
+					? __ompTranslate("Ignoring whitespace-only line changes")
+					: __ompTranslate("Ignoring formatting and import-only changes"),
 		);
 		this.#rebuildDocument();
 	}
@@ -801,18 +864,26 @@ class GitTuiComponent implements Component {
 			const doc = this.#pane.doc;
 			if (doc) row.add(`  ${theme.fg("success", `+${doc.additions}`)} ${theme.fg("error", `−${doc.deletions}`)}`);
 		} else {
-			row.add(theme.fg("dim", "no file selected"));
+			row.add(theme.fg("dim", __ompTranslate("no file selected")));
 		}
 
 		const right = new HitRow();
 		const asset = this.#contents?.kind === "asset" ? this.#contents : null;
 		const contentKind =
-			asset && (asset.old.kind === "image" || asset.new.kind === "image") ? "Media" : asset ? "Binary" : "UTF-8";
+			asset && (asset.old.kind === "image" || asset.new.kind === "image")
+				? __ompTranslate("Media")
+				: asset
+					? __ompTranslate("Binary")
+					: "UTF-8";
 		right.add(theme.fg("dim", contentKind)).add("  ");
 		if (file?.area === "unstaged")
-			right.button(pill(" Stage File ", theme.getColorHex("toolDiffAdded")), () => this.#stageCurrentFile());
+			right.button(pill(__ompTranslate(" Stage File "), theme.getColorHex("toolDiffAdded")), () =>
+				this.#stageCurrentFile(),
+			);
 		else if (file?.area === "staged")
-			right.button(pill(" Unstage File ", theme.getColorHex("warning")), () => this.#stageCurrentFile());
+			right.button(pill(__ompTranslate(" Unstage File "), theme.getColorHex("warning")), () =>
+				this.#stageCurrentFile(),
+			);
 		right.add(" ").button(softPill(` ${glyphs.close} `), () => this.#done.resolve());
 
 		// The empty middle carries the key hints (or a fresh status message).
@@ -841,12 +912,18 @@ class GitTuiComponent implements Component {
 		row.add(" ");
 		const scope =
 			file?.area === "staged"
-				? tintChip(" Staged ", theme.getColorHex("success"))
+				? tintChip(__ompTranslate(" Staged "), theme.getColorHex("success"))
 				: file?.area === "unstaged"
-					? tintChip(file.kind === "untracked" ? " Untracked " : " Unstaged ", theme.getColorHex("warning"))
+					? tintChip(
+							file.kind === "untracked" ? __ompTranslate(" Untracked ") : __ompTranslate(" Unstaged "),
+							theme.getColorHex("warning"),
+						)
 					: file
-						? tintChip(` ${this.#model.headCommit?.shortSha ?? "commit"} `, theme.getColorHex("accent"))
-						: theme.fg("dim", ` ${this.#model.branch ?? "detached"} `);
+						? tintChip(
+								` ${this.#model.headCommit?.shortSha ?? __ompTranslate("commit")} `,
+								theme.getColorHex("accent"),
+							)
+						: theme.fg("dim", ` ${this.#model.branch ?? __ompTranslate("detached")} `);
 		row.add(scope);
 
 		// Hunk nav + one segmented view control ⟨file│split│inline│hunk⟩,
@@ -1031,13 +1108,18 @@ class GitTuiComponent implements Component {
 			}
 			const scope =
 				file.area === "staged"
-					? { text: "Staged", tone: "success" as const }
+					? { text: __ompTranslate("Staged"), tone: "success" as const }
 					: file.area === "unstaged"
-						? { text: file.kind === "untracked" ? "Untracked" : "Unstaged", tone: "warning" as const }
-						: { text: this.#model.headCommit?.shortSha ?? "commit", tone: "accent" as const };
+						? {
+								text: file.kind === "untracked" ? __ompTranslate("Untracked") : __ompTranslate("Unstaged"),
+								tone: "warning" as const,
+							}
+						: { text: this.#model.headCommit?.shortSha ?? __ompTranslate("commit"), tone: "accent" as const };
 			left.push(node("badge", { text: scope.text, tone: scope.tone }));
 		} else {
-			left.push(text([span(this.#model.branch ?? "detached", "muted")], { role: "omp.app.git.path" }));
+			left.push(
+				text([span(this.#model.branch ?? __ompTranslate("detached"), "muted")], { role: "omp.app.git.path" }),
+			);
 		}
 		const iconButton = (name: string, act: string, title: string, on?: boolean): NativeNode =>
 			node(
@@ -1049,8 +1131,12 @@ class GitTuiComponent implements Component {
 		const right: NativeNode[] = [
 			row(
 				[
-					iconButton("chev-up", "prev-hunk", `Previous change (${formatTooltipKey("alt+up")})`),
-					iconButton("chev", "next-hunk", `Next change (${formatTooltipKey("alt+down")})`),
+					iconButton(
+						"chev-up",
+						"prev-hunk",
+						__ompTranslate("Previous change ({0})", `${formatTooltipKey("alt+up")}`),
+					),
+					iconButton("chev", "next-hunk", __ompTranslate("Next change ({0})", `${formatTooltipKey("alt+down")}`)),
 				],
 				{ gap: "none", align: "center" },
 			),
@@ -1071,13 +1157,18 @@ class GitTuiComponent implements Component {
 					"type",
 					"whitespace",
 					this.#whitespace === "off"
-						? `Ignore whitespace (${formatTooltipKey("b")})`
+						? __ompTranslate("Ignore whitespace ({0})", `${formatTooltipKey("b")}`)
 						: this.#whitespace === "whitespace"
-							? `Ignoring whitespace; also ignore formatting (${formatTooltipKey("b")})`
-							: `Ignoring formatting and imports; show all (${formatTooltipKey("b")})`,
+							? __ompTranslate("Ignoring whitespace; also ignore formatting ({0})", `${formatTooltipKey("b")}`)
+							: __ompTranslate("Ignoring formatting and imports; show all ({0})", `${formatTooltipKey("b")}`),
 					this.#whitespace !== "off",
 				),
-				iconButton("corner-down-right", "wrap", `Wrap lines (${formatTooltipKey("w")})`, this.#pane.wrap),
+				iconButton(
+					"corner-down-right",
+					"wrap",
+					__ompTranslate("Wrap lines ({0})", `${formatTooltipKey("w")}`),
+					this.#pane.wrap,
+				),
 			);
 		}
 		if (file?.area === "unstaged" || file?.area === "staged") {
@@ -1089,8 +1180,8 @@ class GitTuiComponent implements Component {
 			);
 		}
 		right.push(
-			iconButton("keyboard", "help", `Keyboard shortcuts (${formatTooltipKey("?")})`),
-			iconButton("x", "close", `Close (${formatTooltipKey("q")})`),
+			iconButton("keyboard", "help", __ompTranslate("Keyboard shortcuts ({0})", `${formatTooltipKey("?")}`)),
+			iconButton("x", "close", __ompTranslate("Close ({0})", `${formatTooltipKey("q")}`)),
 		);
 		return keyed(
 			row(
@@ -1138,11 +1229,11 @@ class GitTuiComponent implements Component {
 			return keyed(
 				col(
 					[
-						text([span("Binary or media file", "strong")]),
+						text([span(__ompTranslate("Binary or media file"), "strong")]),
 						node("kv", {
 							items: [
-								{ k: "before", v: assetText(contents.old) },
-								{ k: "after", v: assetText(contents.new) },
+								{ k: __ompTranslate("before"), v: assetText(contents.old) },
+								{ k: __ompTranslate("after"), v: assetText(contents.new) },
 							],
 							layout: "grid",
 						}),
@@ -1154,11 +1245,17 @@ class GitTuiComponent implements Component {
 		}
 		if (this.#pane.state === "streaming" || this.#pane.state === "loading") {
 			return keyed(
-				row([node("spinner", { style: "dots" }), text([span(`Loading ${file?.path ?? "diff"}…`, "muted")])], {
-					gap: "sm",
-					align: "center",
-					role: "omp.app.git.state",
-				}),
+				row(
+					[
+						node("spinner", { style: "dots" }),
+						text([span(__ompTranslate("Loading {0}…", `${file?.path ?? __ompTranslate("diff")}`), "muted")]),
+					],
+					{
+						gap: "sm",
+						align: "center",
+						role: "omp.app.git.state",
+					},
+				),
 				"loading",
 			);
 		}
@@ -1168,7 +1265,9 @@ class GitTuiComponent implements Component {
 					text([span(this.#pane.emptyMessage, "strong")]),
 					text([
 						span(
-							this.#model.clean ? "The working tree is clean." : "Pick a file on the right to see its changes.",
+							this.#model.clean
+								? __ompTranslate("The working tree is clean.")
+								: __ompTranslate("Pick a file on the right to see its changes."),
 							"muted",
 						),
 					]),
@@ -1231,10 +1330,13 @@ const MEDIA_COMPARE_LINK = "git-compare";
  */
 function mediaColumn(side: "before" | "after", asset: FileAssetSide, ref: MediaRef | undefined): NativeNode {
 	const head = keyed(
-		text([span(assetTitle(side === "before" ? "Before" : "After", asset), "strong")], {
-			truncate: "end",
-			role: "omp.app.git.media-head",
-		}),
+		text(
+			[span(assetTitle(side === "before" ? __ompTranslate("Before") : __ompTranslate("After"), asset), "strong")],
+			{
+				truncate: "end",
+				role: "omp.app.git.media-head",
+			},
+		),
 		"head",
 	);
 	const body = ref
@@ -1247,7 +1349,7 @@ function mediaColumn(side: "before" | "after", asset: FileAssetSide, ref: MediaR
 		: keyed(
 				text(
 					asset.kind === "empty"
-						? [span(side === "before" ? "Did not exist" : "Deleted", "muted")]
+						? [span(side === "before" ? __ompTranslate("Did not exist") : __ompTranslate("Deleted"), "muted")]
 						: assetText(asset).map(fact => span(fact.t, "muted")),
 					{ role: "omp.app.git.media-none" },
 				),
@@ -1262,17 +1364,34 @@ function assetText(asset: AssetFileContents["old"]): TspSpan[] {
 		bytes === undefined ? "" : bytes < 1024 ? ` · ${bytes} B` : ` · ${(bytes / 1024).toFixed(1)} KB`;
 	switch (asset.kind) {
 		case "empty":
-			return [span("none", "dim")];
+			return [span(__ompTranslate("none"), "dim")];
 		case "text":
-			return [span(`text${size(asset.byteLength)}`)];
+			return [span(__ompTranslate("text{0}", `${size(asset.byteLength)}`))];
 		case "image":
-			return [span(`image ${asset.image.widthPx}×${asset.image.heightPx}${size(asset.image.byteLength)}`)];
+			return [
+				span(
+					__ompTranslate(
+						"image {0}×{1}{2}",
+						`${asset.image.widthPx}`,
+						`${asset.image.heightPx}`,
+						`${size(asset.image.byteLength)}`,
+					),
+				),
+			];
 		case "binary":
-			return [span(`binary${size(asset.byteLength)}`)];
+			return [span(__ompTranslate("binary{0}", `${size(asset.byteLength)}`))];
 		case "tooLarge":
-			return [span(`too large to diff${size(asset.byteLength)}`)];
+			return [span(__ompTranslate("too large to diff{0}", `${size(asset.byteLength)}`))];
 		case "lfsMissing":
-			return [span(`LFS object ${asset.oid.slice(0, 12)} not fetched${size(asset.byteLength)}`)];
+			return [
+				span(
+					__ompTranslate(
+						"LFS object {0} not fetched{1}",
+						`${asset.oid.slice(0, 12)}`,
+						`${size(asset.byteLength)}`,
+					),
+				),
+			];
 	}
 }
 

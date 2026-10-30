@@ -15,6 +15,7 @@
  * work, which is the failure mode this whole feature exists to avoid.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
@@ -105,7 +106,11 @@ export async function evaluateLoopCondition(
 		logger.error("loop condition failed to start", { command: condition.command, error: String(error) });
 		return {
 			kind: "error",
-			message: `Loop condition ${quoteCommand(condition.command)} could not run: ${truncateToWidth(sanitizeStatusText(String(error)), OUTPUT_PREVIEW_WIDTH)}. Loop mode disabled.`,
+			message: __ompTranslate(
+				"Loop condition {0} could not run: {1}. Loop mode disabled.",
+				`${quoteCommand(condition.command)}`,
+				`${truncateToWidth(sanitizeStatusText(String(error)), OUTPUT_PREVIEW_WIDTH)}`,
+			),
 		};
 	}
 
@@ -114,7 +119,11 @@ export async function evaluateLoopCondition(
 	if (result.timedOut) {
 		return {
 			kind: "error",
-			message: `Loop condition ${quoteCommand(condition.command)} timed out after ${formatTimeout(options.timeoutMs)}. Loop mode disabled.`,
+			message: __ompTranslate(
+				"Loop condition {0} timed out after {1}. Loop mode disabled.",
+				`${quoteCommand(condition.command)}`,
+				`${formatTimeout(options.timeoutMs)}`,
+			),
 		};
 	}
 	if (result.cancelled) return { kind: "aborted" };
@@ -124,24 +133,35 @@ export async function evaluateLoopCondition(
 		if (!condition.until) return { kind: "continue" };
 		return {
 			kind: "halt",
-			message: `Loop condition ${quoteCommand(condition.command)} is now satisfied. Loop mode disabled.`,
+			message: __ompTranslate(
+				"Loop condition {0} is now satisfied. Loop mode disabled.",
+				`${quoteCommand(condition.command)}`,
+			),
 		};
 	}
 	if (exitCode === 1) {
 		if (condition.until) return { kind: "continue" };
 		return {
 			kind: "halt",
-			message: `Loop condition ${quoteCommand(condition.command)} no longer holds. Loop mode disabled.`,
+			message: __ompTranslate(
+				"Loop condition {0} no longer holds. Loop mode disabled.",
+				`${quoteCommand(condition.command)}`,
+			),
 		};
 	}
 
 	// Exit >1 (or a missing status) is the condition breaking, not answering.
 	const preview = previewOutput(result.output);
 	const detail = preview ? `: ${preview}` : "";
-	const status = exitCode === undefined ? "no exit status" : `exit ${exitCode}`;
+	const status = exitCode === undefined ? __ompTranslate("no exit status") : __ompTranslate("exit {0}", `${exitCode}`);
 	logger.warn("loop condition command failed", { command: condition.command, exitCode });
 	return {
 		kind: "error",
-		message: `Loop condition ${quoteCommand(condition.command)} failed (${status})${detail}. Loop mode disabled.`,
+		message: __ompTranslate(
+			"Loop condition {0} failed ({1}){2}. Loop mode disabled.",
+			`${quoteCommand(condition.command)}`,
+			`${status}`,
+			`${detail}`,
+		),
 	};
 }

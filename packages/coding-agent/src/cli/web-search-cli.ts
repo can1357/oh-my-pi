@@ -4,6 +4,7 @@
  * Handles `omp q`/`omp web-search` subcommands for testing web search models.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
@@ -63,18 +64,20 @@ export function parseSearchArgs(args: string[]): SearchCommandArgs | undefined {
 
 export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 	if (!cmd.query) {
-		process.stderr.write(`${chalk.red("Error: Query is required")}\n`);
+		process.stderr.write(`${chalk.red(__ompTranslate("Error: Query is required"))}\n`);
 		process.exit(1);
 	}
 
 	if (cmd.recency && !RECENCY_OPTIONS.includes(cmd.recency)) {
-		process.stderr.write(`${chalk.red(`Error: Invalid recency "${cmd.recency}"`)}\n`);
-		process.stderr.write(`${chalk.dim(`Valid recency values: ${RECENCY_OPTIONS.join(", ")}`)}\n`);
+		process.stderr.write(`${chalk.red(__ompTranslate('Error: Invalid recency "{0}"', `${cmd.recency}`))}\n`);
+		process.stderr.write(
+			`${chalk.dim(__ompTranslate("Valid recency values: {0}", `${RECENCY_OPTIONS.join(", ")}`))}\n`,
+		);
 		process.exit(1);
 	}
 
 	if (cmd.limit !== undefined && Number.isNaN(cmd.limit)) {
-		process.stderr.write(`${chalk.red("Error: --limit must be a number")}\n`);
+		process.stderr.write(`${chalk.red(__ompTranslate("Error: --limit must be a number"))}\n`);
 		process.exit(1);
 	}
 
@@ -104,31 +107,21 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 }
 
 export function printSearchHelp(): void {
-	process.stdout.write(`${chalk.bold(`${APP_NAME} q`)} - Test web search models
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} q [options] <query>
-  ${APP_NAME} web-search [options] <query>
-
-${chalk.bold("Arguments:")}
-  query      Search query text
-
-${chalk.bold("Options:")}
-  --model <selector>  Catalog model selector (for example, web/duckduckgo)
-  --recency <value>   Recency filter (when supported): ${RECENCY_OPTIONS.join(", ")}
-  -l, --limit <n>     Max results to return
-  --compact           Render condensed output
-  -h, --help          Show this help
-
-${chalk.bold("Query directives:")}
-  site:/-site:  after:/before: (YYYY-MM-DD)  inurl:  intitle:  filetype:
-  "exact phrase"  -term  OR
-  Mapped to native provider filters where available, otherwise applied as a
-  lenient post-filter (a constraint matching nothing is relaxed, not fatal).
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} q --model=web/duckduckgo "what's the color of the sky"
-  ${APP_NAME} q --model=openrouter/google/gemini-2.5-flash --recency=week "latest TypeScript changes"
-  ${APP_NAME} q 'transformer scaling site:arxiv.org after:2024 -site:reddit.com'
-`);
+	process.stdout.write(
+		__ompTranslate(
+			'{0} - Test web search models\n\n{1}\n  {2} q [options] <query>\n  {3} web-search [options] <query>\n\n{4}\n  query      Search query text\n\n{5}\n  --model <selector>  Catalog model selector (for example, web/duckduckgo)\n  --recency <value>   Recency filter (when supported): {6}\n  -l, --limit <n>     Max results to return\n  --compact           Render condensed output\n  -h, --help          Show this help\n\n{7}\n  site:/-site:  after:/before: (YYYY-MM-DD)  inurl:  intitle:  filetype:\n  "exact phrase"  -term  OR\n  Mapped to native provider filters where available, otherwise applied as a\n  lenient post-filter (a constraint matching nothing is relaxed, not fatal).\n\n{8}\n  {9} q --model=web/duckduckgo "what\'s the color of the sky"\n  {10} q --model=openrouter/google/gemini-2.5-flash --recency=week "latest TypeScript changes"\n  {11} q \'transformer scaling site:arxiv.org after:2024 -site:reddit.com\'\n',
+			`${chalk.bold(`${APP_NAME} q`)}`,
+			`${chalk.bold(__ompTranslate("Usage:"))}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${chalk.bold(__ompTranslate("Arguments:"))}`,
+			`${chalk.bold(__ompTranslate("Options:"))}`,
+			`${RECENCY_OPTIONS.join(", ")}`,
+			`${chalk.bold(__ompTranslate("Query directives:"))}`,
+			`${chalk.bold(__ompTranslate("Examples:\u0004help.command.examples"))}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+		),
+	);
 }

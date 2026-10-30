@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
@@ -80,8 +81,8 @@ export class ConfigError extends Error {
 		let klass: string;
 
 		if (schemaErrors) {
-			klass = "Schema";
-			messages = schemaErrors.map(e => `${e.instancePath || "root"}: ${e.message}`);
+			klass = __ompTranslate("Schema");
+			messages = schemaErrors.map(e => `${e.instancePath || __ompTranslate("root")}: ${e.message}`);
 		} else if (other) {
 			klass = other.stage;
 			if (other.err instanceof Error) {
@@ -91,10 +92,10 @@ export class ConfigError extends Error {
 				messages = [String(other.err)];
 			}
 		} else {
-			klass = "Unknown";
+			klass = __ompTranslate("Unknown");
 		}
 
-		const title = `Failed to load config file ${id}, ${klass} error:`;
+		const title = __ompTranslate("Failed to load config file {0}, {1} error:", `${id}`, `${klass}`);
 		let message: string;
 		switch (messages?.length ?? 0) {
 			case 0:
@@ -156,7 +157,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			this.#jsonMigrationPath = null;
 		} else {
 			this.#yamlFallbackPath = null;
-			throw new Error(`Invalid config file path: ${configPath}`);
+			throw new Error(__ompTranslate("Invalid config file path: {0}", `${configPath}`));
 		}
 	}
 
@@ -225,7 +226,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		const fallback = this.schema(undefined);
 		if (!(fallback instanceof Error)) return fallback as T;
 		throw new ConfigError(this.id, undefined, {
-			err: new Error("Schema produced no default value"),
+			err: new Error(__ompTranslate("Schema produced no default value")),
 			stage: "createDefault",
 		});
 	}
@@ -244,7 +245,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			} else if (readPath.endsWith(".yml") || readPath.endsWith(".yaml")) {
 				parsed = YAML.parse(content);
 			} else {
-				throw new Error(`Invalid config file path: ${readPath}`);
+				throw new Error(__ompTranslate("Invalid config file path: {0}", `${readPath}`));
 			}
 
 			const checked = this.schema(parsed);

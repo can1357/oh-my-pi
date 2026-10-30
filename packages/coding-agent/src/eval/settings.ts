@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 // Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
@@ -13,7 +14,7 @@ export const cfgEvalPy = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Python Eval Backend",
+		label: __ompTranslate("Python Eval Backend"),
 		description: "Allow the eval tool to dispatch Python cells to the IPython kernel",
 	},
 });
@@ -26,7 +27,7 @@ export const cfgEvalJs = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "JavaScript Eval Backend",
+		label: __ompTranslate("JavaScript Eval Backend"),
 		description: "Allow the eval tool to dispatch JavaScript cells to the in-process runtime",
 	},
 });
@@ -38,7 +39,7 @@ export const cfgEvalAutoProvision = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Eval Environment Provisioning",
+		label: __ompTranslate("Eval Environment Provisioning"),
 		description: "Automatically create the managed JavaScript eval package environment on first install",
 	},
 });
@@ -50,7 +51,7 @@ export const cfgEvalToolsEnabled = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Eval-Defined Tools",
+		label: __ompTranslate("Eval-Defined Tools"),
 		description:
 			"Let eval cells define tools (@tool in Python, tool(fn) in JS) that task, agent(), and workpool() subagents can call",
 	},
@@ -63,7 +64,7 @@ export const cfgEvalWorkpoolFreshAgents = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Fresh Workpool Agents",
+		label: __ompTranslate("Fresh Workpool Agents"),
 		description: "Spawn a new subagent for every workpool item instead of reusing workers or batching queued items",
 	},
 });
@@ -76,7 +77,7 @@ export const cfgEvalAutoBackgroundEnabled = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Eval Auto-Background",
+		label: __ompTranslate("Eval Auto-Background"),
 		description: "Automatically background long-running eval cells and deliver the result later",
 	},
 });
@@ -97,7 +98,7 @@ export const cfgPythonKernelMode = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Python Kernel Mode",
+		label: __ompTranslate("Python Kernel Mode"),
 		description: "Keep the IPython kernel alive across eval calls or start fresh each time",
 	},
 });
@@ -109,7 +110,7 @@ export const cfgPythonInterpreter = register({
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
-		label: "Python Interpreter",
+		label: __ompTranslate("Python Interpreter"),
 		description:
 			"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
 	},

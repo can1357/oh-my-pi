@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, Ellipsis, matchesKey, ScrollView, Text, truncateToWidth } from "../index";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel } from "../keybinding-matchers";
@@ -120,7 +121,7 @@ export class SessionInfoOverlay implements Component {
 		role: "omp.overlay.sessionInfo",
 		size: "md",
 		anchor: "center",
-		head: "Session info",
+		head: __ompTranslate("Session info"),
 	} as const;
 	readonly #host: SessionInfoOverlayHost;
 	readonly #onClose: () => void;
@@ -153,7 +154,7 @@ export class SessionInfoOverlay implements Component {
 		});
 		this.#footer = new PanelRows();
 		this.#footer.setHeight(1);
-		this.#panel = new OverlayPanel("Session Info");
+		this.#panel = new OverlayPanel(__ompTranslate("Session Info"));
 		this.#panel.addChild(this.#scrollView);
 		this.#panel.addChild(new PanelDivider());
 		this.#panel.addChild(this.#footer);
@@ -225,13 +226,20 @@ export class SessionInfoOverlay implements Component {
 				for (const entry of entries) {
 					if (!("k" in entry)) rest.push(text(entry.line, { wrap: "word", role: "omp.info.note" }));
 					else if (entry.k === "ID")
-						identity.unshift(identityField("ID", [span(joined(entry.v), "mono")], "id", "Copy session ID"));
+						identity.unshift(
+							identityField("ID", [span(joined(entry.v), "mono")], "id", __ompTranslate("Copy session ID")),
+						);
 					else if (entry.k === "File") {
 						const path = joined(entry.v);
 						identity.push(
 							path.includes("/")
-								? identityField("File", [span(path, "path")], "file", `Copy ${path}`)
-								: identityField("File", [span(path, "muted")], "file"),
+								? identityField(
+										__ompTranslate("File"),
+										[span(path, "path")],
+										"file",
+										__ompTranslate("Copy {0}", `${path}`),
+									)
+								: identityField(__ompTranslate("File"), [span(path, "muted")], "file"),
 						);
 					} else rest.push(node("kv", { items: [{ k: entry.k, v: entry.v }], role: "omp.info.kv" }));
 				}
@@ -269,7 +277,7 @@ export class SessionInfoOverlay implements Component {
 			);
 		}
 		flushStats();
-		body.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
+		body.push(actionBar([null, actionButton(__ompTranslate("Close"), "close", { keys: "escape" })]));
 		const described = col(body, { gap: "md" });
 		this.#nativeNode = { meter, node: described };
 		return described;
@@ -343,7 +351,7 @@ export class SessionInfoOverlay implements Component {
 					"row",
 					{ align: "baseline", role: "omp.info.contextHead" },
 					[
-						text([span("Context window")], { grow: 1, shrink: 1, truncate: "end" }),
+						text([span(__ompTranslate("Context window"))], { grow: 1, shrink: 1, truncate: "end" }),
 						text(
 							[
 								span(`${formatNumber(context.tokens)} / ${formatNumber(context.contextWindow)}`, "mono muted"),

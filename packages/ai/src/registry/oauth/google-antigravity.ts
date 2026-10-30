@@ -2,6 +2,7 @@
  * Google Antigravity OAuth flow (Gemini, Claude, GPT-OSS via Google Cloud)
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../../error";
@@ -146,11 +147,20 @@ async function requestCloudCodeAssist({
 	const response = await oauthFetch(url, init, { provider: PROVIDER, signal, timeoutMs });
 	if (response.status !== 200) {
 		const errorText = await response.text();
-		throw new AIError.OAuthError(`${label} failed: ${response.status} ${response.statusText}: ${errorText}`, {
-			kind: "provisioning",
-			provider: PROVIDER,
-			status: response.status,
-		});
+		throw new AIError.OAuthError(
+			__ompTranslate(
+				"{0} failed: {1} {2}: {3}",
+				`${label}`,
+				`${response.status}`,
+				`${response.statusText}`,
+				`${errorText}`,
+			),
+			{
+				kind: "provisioning",
+				provider: PROVIDER,
+				status: response.status,
+			},
+		);
 	}
 	return response.json();
 }
@@ -270,16 +280,16 @@ async function discoverProject(
 		signal,
 	};
 
-	onProgress?.("Checking Cloud Code Assist account status...");
+	onProgress?.(__ompTranslate("Checking Cloud Code Assist account status..."));
 	try {
 		const initial = await loadCodeAssist(context);
 		assertFreeTierEligible(initial);
 		if (!hasMessageField(initial, "currentTier")) {
-			onProgress?.("Provisioning the Antigravity free tier...");
+			onProgress?.(__ompTranslate("Provisioning the Antigravity free tier..."));
 			await onboardUser(context);
 		}
 
-		onProgress?.("Refreshing Cloud Code Assist project...");
+		onProgress?.(__ompTranslate("Refreshing Cloud Code Assist project..."));
 		const refreshed = await loadCodeAssist(context);
 		const projectId = extractProjectId(refreshed);
 		if (projectId) return projectId;
@@ -293,7 +303,10 @@ async function discoverProject(
 			throw error;
 		}
 		throw new AIError.OAuthError(
-			`Could not discover an Antigravity project. ${error instanceof Error ? error.message : String(error)}`,
+			__ompTranslate(
+				"Could not discover an Antigravity project. {0}",
+				`${error instanceof Error ? error.message : String(error)}`,
+			),
 			{ kind: "discovery", provider: PROVIDER, cause: error },
 		);
 	}
@@ -311,7 +324,7 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 		typeof (raw as Record<string, unknown>).refresh_token !== "string" ||
 		(raw as Record<string, unknown>).refresh_token === ""
 	) {
-		throw new AIError.OAuthError("No refresh token received. Please try again.", {
+		throw new AIError.OAuthError(__ompTranslate("No refresh token received. Please try again."), {
 			kind: "validation",
 			provider: context.provider,
 		});

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -335,7 +336,7 @@ export function createSecurityPublicationTool(
 	let published = false;
 	return {
 		name: "security_publish",
-		label: "Publish Security Scan",
+		label: __ompTranslate("Publish Security Scan"),
 		description: securityPublishDescription.trim(),
 		parameters: securityPublishSchema,
 		approval: "write",

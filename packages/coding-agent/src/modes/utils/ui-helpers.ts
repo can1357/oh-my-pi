@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -1255,8 +1256,8 @@ export class UiHelpers {
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const title = "Update Available";
-		const prefix = `New version ${newVersion} is available. Run: `;
+		const title = __ompTranslate("Update Available");
+		const prefix = __ompTranslate("New version {0} is available. Run: ", `${newVersion}`);
 		const command = "omp update";
 		const native = noticeRow(
 			"info",
@@ -1294,8 +1295,8 @@ export class UiHelpers {
 		}
 
 		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
+			{ label: __ompTranslate("Steering"), messages: steeringMessages },
+			{ label: __ompTranslate("After yield"), messages: followUpMessages },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {
 			const dequeueKey = this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up";
@@ -1318,7 +1319,9 @@ export class UiHelpers {
 		else this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
-			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",
+			queuedImages
+				? __ompTranslate("Queued message with image for after compaction")
+				: __ompTranslate("Queued message for after compaction\u0004context-compression.message.queued"),
 		);
 	}
 

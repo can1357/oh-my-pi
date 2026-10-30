@@ -1,6 +1,7 @@
 /**
  * Tool wrappers for extensions.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type AgentTool,
 	type AgentToolContext,
@@ -325,7 +326,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (err instanceof Error) {
 					throw err;
 				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+				throw new Error(__ompTranslate("Extension failed, blocking execution: {0}", `${String(err)}`));
 			}
 		}
 		if (!loopDispatchedToolCall) {
@@ -336,7 +337,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				context,
 			);
 			if (preflight?.block) {
-				throw new Error(preflight.reason || "Tool execution was blocked by a preflight rule");
+				throw new Error(preflight.reason || __ompTranslate("Tool execution was blocked by a preflight rule"));
 			}
 		}
 
@@ -480,12 +481,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				cancelPreflight();
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				throw new Error(__ompTranslate("Tool call denied by user: {0}", `${this.tool.name}`));
 			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) {
 					cancelPreflight();
-					throw new Error("Provider safety approval context is unavailable");
+					throw new Error(__ompTranslate("Provider safety approval context is unavailable"));
 				}
 				context.providerSafetyApproved = true;
 			}

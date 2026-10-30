@@ -4,6 +4,7 @@
  * Handles `omp update` to check for and install updates.
  * Uses the installer that owns the active omp executable when it can be detected.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -212,7 +213,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		throw err;
 	}
 	if (!response.ok || !response.body) {
-		throw new Error(`Download failed: ${response.statusText}`);
+		throw new Error(__ompTranslate("Download failed: {0}", `${response.statusText}`));
 	}
 
 	const hash = new Bun.SHA256();
@@ -223,7 +224,11 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 			if (size > options.expectedSize) {
 				callback(
 					new Error(
-						`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${size}`,
+						__ompTranslate(
+							"Downloaded binary size mismatch: expected {0} bytes, received at least {1}",
+							`${options.expectedSize}`,
+							`${size}`,
+						),
 					),
 				);
 				return;
@@ -237,10 +242,22 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
 		const digest = `sha256:${hash.digest("hex")}`;
 		if (size !== options.expectedSize) {
-			throw new Error(`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`);
+			throw new Error(
+				__ompTranslate(
+					"Downloaded binary size mismatch: expected {0} bytes, received {1}",
+					`${options.expectedSize}`,
+					`${size}`,
+				),
+			);
 		}
 		if (digest !== options.expectedDigest) {
-			throw new Error(`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`);
+			throw new Error(
+				__ompTranslate(
+					"Downloaded binary digest mismatch: expected {0}, received {1}",
+					`${options.expectedDigest}`,
+					`${digest}`,
+				),
+			);
 		}
 		await fs.promises.chmod(options.targetPath, 0o755);
 	} catch (err) {
@@ -282,7 +299,7 @@ export function parseUpdateArgs(
 
 	const canary = args.includes("--canary");
 	const stable = args.includes("--stable");
-	if (canary && stable) throw new Error("--canary and --stable are mutually exclusive");
+	if (canary && stable) throw new Error(__ompTranslate("--canary and --stable are mutually exclusive"));
 
 	return {
 		force: args.includes("--force") || args.includes("-f"),
@@ -692,7 +709,7 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 
 	if (bunBinDir) return { method: "bun" };
 
-	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
+	throw new Error(__ompTranslate("Could not resolve {0} binary path in PATH", `${APP_NAME}`));
 }
 
 /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
@@ -714,7 +731,12 @@ async function fetchLatestManifest(
 		} catch (err) {
 			if (isTimeoutError(err)) {
 				throw new Error(
-					`Timed out fetching release info for ${pkg}${origin} after ${Math.round(timeoutMs / 1000)}s`,
+					__ompTranslate(
+						"Timed out fetching release info for {0}{1} after {2}s",
+						`${pkg}`,
+						`${origin}`,
+						`${Math.round(timeoutMs / 1000)}`,
+					),
 					{ cause: err },
 				);
 			}
@@ -723,19 +745,39 @@ async function fetchLatestManifest(
 		}
 	};
 	const noCanary = () =>
-		new Error(`No canary release has been published for ${pkg} yet. Try \`${APP_NAME} update --stable\`.`);
+		new Error(
+			__ompTranslate(
+				"No canary release has been published for {0} yet. Try `{1} update --stable`.",
+				`${pkg}`,
+				`${APP_NAME}`,
+			),
+		);
 
 	const fromPackument = (packument: unknown): Record<string, unknown> => {
 		const distTags = isRecord(packument) ? packument["dist-tags"] : undefined;
 		const version = isRecord(distTags) ? distTags[tag] : undefined;
 		if (typeof version !== "string") {
 			if (channel === "canary") throw noCanary();
-			throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing dist-tags.${tag}`);
+			throw new Error(
+				__ompTranslate(
+					"Malformed npm registry response for {0}{1}: missing dist-tags.{2}",
+					`${pkg}`,
+					`${origin}`,
+					`${tag}`,
+				),
+			);
 		}
 		const versions = isRecord(packument) ? packument.versions : undefined;
 		const manifest = isRecord(versions) ? versions[version] : undefined;
 		if (!isRecord(manifest)) {
-			throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing versions.${version}`);
+			throw new Error(
+				__ompTranslate(
+					"Malformed npm registry response for {0}{1}: missing versions.{2}",
+					`${pkg}`,
+					`${origin}`,
+					`${version}`,
+				),
+			);
 		}
 		return manifest;
 	};
@@ -776,14 +818,25 @@ async function fetchLatestManifest(
 	if (!response.ok) {
 		if (response.status === 404 && channel === "canary") throw noCanary();
 		const authHint =
-			response.status === 401 || response.status === 403 ? "; check the registry credentials in your .npmrc" : "";
+			response.status === 401 || response.status === 403
+				? __ompTranslate("; check the registry credentials in your .npmrc")
+				: "";
 		throw new Error(
-			`Failed to fetch release info for ${pkg}${origin}: ${response.status} ${response.statusText}${authHint}`,
+			__ompTranslate(
+				"Failed to fetch release info for {0}{1}: {2} {3}{4}",
+				`${pkg}`,
+				`${origin}`,
+				`${response.status}`,
+				`${response.statusText}`,
+				`${authHint}`,
+			),
 		);
 	}
 
 	if (!isRecord(data) || typeof data.version !== "string") {
-		throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing version`);
+		throw new Error(
+			__ompTranslate("Malformed npm registry response for {0}{1}: missing version", `${pkg}`, `${origin}`),
+		);
 	}
 	return { version: data.version, manifest: data };
 }
@@ -1134,10 +1187,15 @@ async function validateExistingUpdateTarget(targetPath: string): Promise<void> {
 	if (!hasShebang && (await reportedVersionAtPath(targetPath)) !== undefined) return;
 
 	const reason = hasShebang
-		? "is a shebang script, not an OMP binary"
-		: "does not report an OMP version when run directly";
+		? __ompTranslate("is a shebang script, not an OMP binary")
+		: __ompTranslate("does not report an OMP version when run directly");
 	throw new Error(
-		`Refusing to replace ${targetPath}: the resolved foreign symlink target ${reason}. Point PATH directly at the OMP binary you want to update, or reinstall with: ${installerHint()}`,
+		__ompTranslate(
+			"Refusing to replace {0}: the resolved foreign symlink target {1}. Point PATH directly at the OMP binary you want to update, or reinstall with: {2}",
+			`${targetPath}`,
+			`${reason}`,
+			`${installerHint()}`,
+		),
 	);
 }
 
@@ -1153,15 +1211,18 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 
 function printVerifiedVersion(expectedVersion: string, binaryPath?: string): void {
 	const icon = theme?.status?.success ?? "✔";
-	const location = binaryPath ? ` at ${binaryPath}` : "";
-	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}${location}`));
+	const location = binaryPath ? __ompTranslate(" at {0}", `${binaryPath}`) : "";
+	console.log(chalk.green(__ompTranslate("\n{0} Updated to {1}{2}", `${icon}`, `${expectedVersion}`, `${location}`)));
 }
 
 function formatVerificationFailure(result: InstalledVersionVerification, expectedVersion: string): string {
 	if (result.actual) {
 		return `${APP_NAME} at ${result.path} still reports ${result.actual} (expected ${expectedVersion})`;
 	}
-	return `could not verify updated version${result.path ? ` at ${result.path}` : ""}`;
+	return __ompTranslate(
+		"could not verify updated version{0}",
+		`${result.path ? __ompTranslate(" at {0}", `${result.path}`) : ""}`,
+	);
 }
 
 /**
@@ -1172,8 +1233,8 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
 		printVerifiedVersion(expectedVersion, result.path);
 		return;
 	}
-	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
-	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
+	console.log(chalk.yellow(__ompTranslate("\nWarning: {0}", `${formatVerificationFailure(result, expectedVersion)}`)));
+	console.log(chalk.yellow(__ompTranslate("You may need to reinstall: {0}", `${installerHint()}`)));
 }
 
 /** Verify the PATH-resolved launcher and print the outcome. */
@@ -1314,7 +1375,11 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 		const verification = await options.verifyInstalledVersion(options.expectedVersion);
 		if (!verification.ok) {
 			throw new Error(
-				`${formatVerificationFailure(verification, options.expectedVersion)}; restored previous ${APP_NAME} binary`,
+				__ompTranslate(
+					"{0}; restored previous {1} binary",
+					`${formatVerificationFailure(verification, options.expectedVersion)}`,
+					`${APP_NAME}`,
+				),
 			);
 		}
 
@@ -1558,17 +1623,27 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
  *    and verify again; only a repeated failure aborts, with a recovery hint.
  */
 export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameMigrationSteps): Promise<void> {
-	console.log(chalk.dim(`npm package renamed to ${release.packages.pkg}; migrating this install.`));
+	console.log(
+		chalk.dim(__ompTranslate("npm package renamed to {0}; migrating this install.", `${release.packages.pkg}`)),
+	);
 	const installExit = await steps.install();
 	if (installExit !== 0) {
 		throw new Error(
-			`install of ${release.packages.pkg} failed with exit code ${installExit}; the existing install was left untouched`,
+			__ompTranslate(
+				"install of {0} failed with exit code {1}; the existing install was left untouched",
+				`${release.packages.pkg}`,
+				`${installExit}`,
+			),
 		);
 	}
 
 	const removeExit = await steps.removeOld();
 	if (removeExit !== 0) {
-		console.log(chalk.yellow(`Warning: could not remove the old ${PACKAGE} package; remove it manually later.`));
+		console.log(
+			chalk.yellow(
+				__ompTranslate("Warning: could not remove the old {0} package; remove it manually later.", `${PACKAGE}`),
+			),
+		);
 	}
 
 	let verification = await steps.verify();
@@ -1581,7 +1656,11 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 	}
 	if (!verification.ok) {
 		throw new Error(
-			`${formatVerificationFailure(verification, release.version)}; reinstall with: ${installerHint()}`,
+			__ompTranslate(
+				"{0}; reinstall with: {1}",
+				`${formatVerificationFailure(verification, release.version)}`,
+				`${installerHint()}`,
+			),
 		);
 	}
 	printVerifiedVersion(release.version);
@@ -1612,7 +1691,7 @@ async function npmSupportsReleaseAgeOverride(): Promise<boolean> {
  * verified and reported its own result.
  */
 async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerification | undefined> {
-	console.log(chalk.dim("Updating via bun..."));
+	console.log(chalk.dim(__ompTranslate("Updating via bun...")));
 	let verification: InstalledVersionVerification | undefined;
 	if (release.packages.pkg !== PACKAGE) {
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release));
@@ -1623,23 +1702,23 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 		});
 		const result = await $`bun ${args}`.nothrow();
 		if (result.exitCode !== 0) {
-			throw new Error(`bun install failed with exit code ${result.exitCode}`);
+			throw new Error(__ompTranslate("bun install failed with exit code {0}", `${result.exitCode}`));
 		}
 		verification = await verifyInstalledVersion(release.version);
 	}
 	try {
 		const pruneResult = await pruneBunCacheAfterGlobalInstall();
 		if (pruneResult && pruneResult.removedEntries > 0) {
-			console.log(chalk.dim(`Pruned ${pruneResult.removedEntries} stale Bun cache entries`));
+			console.log(chalk.dim(__ompTranslate("Pruned {0} stale Bun cache entries", `${pruneResult.removedEntries}`)));
 		}
 	} catch (err) {
-		console.log(chalk.yellow(`Warning: could not prune stale Bun cache entries: ${err}`));
+		console.log(chalk.yellow(__ompTranslate("Warning: could not prune stale Bun cache entries: {0}", `${err}`)));
 	}
 	return verification;
 }
 
 async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerification | undefined> {
-	console.log(chalk.dim("Updating via npm..."));
+	console.log(chalk.dim(__ompTranslate("Updating via npm...")));
 	if (release.packages.pkg !== PACKAGE) {
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release));
 		return undefined;
@@ -1651,7 +1730,7 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
 		.nothrow();
 	if (result.exitCode !== 0) {
-		throw new Error(`npm install failed with exit code ${result.exitCode}`);
+		throw new Error(__ompTranslate("npm install failed with exit code {0}", `${result.exitCode}`));
 	}
 
 	return await verifyInstalledVersion(release.version);
@@ -1742,56 +1821,74 @@ export async function updateViaManager(
 	}
 	console.log(
 		chalk.yellow(
-			`\n${steps.manager} did not install a working ${APP_NAME} ${release.version} launcher (${formatVerificationFailure(result, release.version)}); installing the standalone binary at ${launcherPath}.`,
+			__ompTranslate(
+				"\n{0} did not install a working {1} {2} launcher ({3}); installing the standalone binary at {4}.",
+				`${steps.manager}`,
+				`${APP_NAME}`,
+				`${release.version}`,
+				`${formatVerificationFailure(result, release.version)}`,
+				`${launcherPath}`,
+			),
 		),
 	);
 	try {
 		await steps.repair(launcherPath);
 	} catch (err) {
-		throw new Error(`${steps.manager} update did not produce a working launcher and binary repair failed: ${err}`, {
-			cause: installError ?? err,
-		});
+		throw new Error(
+			__ompTranslate(
+				"{0} update did not produce a working launcher and binary repair failed: {1}",
+				`${steps.manager}`,
+				`${err}`,
+			),
+			{
+				cause: installError ?? err,
+			},
+		);
 	}
 	console.log(
 		chalk.yellow(
-			`This install is no longer managed by ${steps.manager}. Removing the old global package may delete this launcher; if it does, reinstall with: ${installerHint()}`,
+			__ompTranslate(
+				"This install is no longer managed by {0}. Removing the old global package may delete this launcher; if it does, reinstall with: {1}",
+				`${steps.manager}`,
+				`${installerHint()}`,
+			),
 		),
 	);
 }
 
 async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating Homebrew formulae..."));
+	console.log(chalk.dim(__ompTranslate("Updating Homebrew formulae...")));
 	const update = await $`brew update`.nothrow();
 	if (update.exitCode !== 0) {
-		throw new Error(`brew update failed with exit code ${update.exitCode}`);
+		throw new Error(__ompTranslate("brew update failed with exit code {0}", `${update.exitCode}`));
 	}
 
-	console.log(chalk.dim("Updating via Homebrew..."));
+	console.log(chalk.dim(__ompTranslate("Updating via Homebrew...")));
 	const args = buildHomebrewUpdateArgs(force);
 	const result = await $`brew ${args}`.nothrow();
 	if (result.exitCode !== 0) {
-		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
+		throw new Error(__ompTranslate("brew {0} failed with exit code {1}", `${args[0]}`, `${result.exitCode}`));
 	}
 
 	await printVerification(expectedVersion);
 }
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating via mise..."));
+	console.log(chalk.dim(__ompTranslate("Updating via mise...")));
 	const env = buildMiseUpdateEnv();
 	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
 	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
 	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
 	const result = await $`mise ${args}`.env(env).nothrow();
 	if (result.exitCode !== 0) {
-		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
+		throw new Error(__ompTranslate("mise upgrade failed with exit code {0}", `${result.exitCode}`));
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
 		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
 		if (forceResult.exitCode !== 0) {
-			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
+			throw new Error(__ompTranslate("mise install --force failed with exit code {0}", `${forceResult.exitCode}`));
 		}
 	}
 
@@ -1846,8 +1943,10 @@ async function installFromPatch(
 	} catch {
 		return false;
 	}
-	const from = patch.fromVersion ? ` from ${patch.fromVersion}` : "";
-	console.log(chalk.dim(`Downloading patch${from} (${formatBytes(patch.size)})…`));
+	const from = patch.fromVersion
+		? __ompTranslate(" from {0}\u0004update.patch.source-version", `${patch.fromVersion}`)
+		: "";
+	console.log(chalk.dim(__ompTranslate("Downloading patch{0} ({1})…", `${from}`, `${formatBytes(patch.size)}`)));
 	try {
 		await downloadVerifiedBinary({
 			url: patch.url,
@@ -1860,16 +1959,27 @@ async function installFromPatch(
 		const result = await fileDigest(paths.tempPath);
 		if (result.size !== build.file.size || result.sha256 !== build.file.sha256) {
 			throw new Error(
-				`patched file is ${result.size} bytes sha256:${result.sha256}, expected ${build.file.size} bytes sha256:${build.file.sha256}`,
+				__ompTranslate(
+					"patched file is {0} bytes sha256:{1}, expected {2} bytes sha256:{3}",
+					`${result.size}`,
+					`${result.sha256}`,
+					`${build.file.size}`,
+					`${build.file.sha256}`,
+				),
 			);
 		}
 		await fs.promises.chmod(paths.tempPath, 0o755);
-		console.log(chalk.dim(`Patched and verified sha256:${build.file.sha256}`));
+		console.log(chalk.dim(__ompTranslate("Patched and verified sha256:{0}", `${build.file.sha256}`)));
 		return true;
 	} catch (err) {
 		await unlinkIfExists(paths.tempPath).catch(() => {});
 		console.log(
-			chalk.dim(`Patch unusable (${err instanceof Error ? err.message : err}); downloading the whole file instead.`),
+			chalk.dim(
+				__ompTranslate(
+					"Patch unusable ({0}); downloading the whole file instead.",
+					`${err instanceof Error ? err.message : err}`,
+				),
+			),
 		);
 		return false;
 	} finally {
@@ -1892,7 +2002,9 @@ async function downloadBuild(
 	options: BuildDownloadOptions,
 ): Promise<void> {
 	if (build.patch && (await installFromPatch(build, build.patch, paths, options))) return;
-	console.log(chalk.dim(`Downloading ${build.file.name} (${formatBytes(build.file.size)})…`));
+	console.log(
+		chalk.dim(__ompTranslate("Downloading {0} ({1})…", `${build.file.name}`, `${formatBytes(build.file.size)}`)),
+	);
 	await downloadVerifiedBinary({
 		url: build.download,
 		targetPath: paths.tempPath,
@@ -1900,7 +2012,7 @@ async function downloadBuild(
 		expectedDigest: `sha256:${build.file.sha256}`,
 		fetchImpl: options.fetchImpl,
 	});
-	console.log(chalk.dim(`Verified sha256:${build.file.sha256}`));
+	console.log(chalk.dim(__ompTranslate("Verified sha256:{0}", `${build.file.sha256}`)));
 }
 
 /**
@@ -1936,7 +2048,7 @@ export async function updateViaBinaryAt(
 	// or reclaim each other's live backup/temp files. The download above writes
 	// to a unique temp path and is safe to overlap; only the swap is shared.
 	const verification = await withFileLock(targetPath, async () => {
-		console.log(chalk.dim("Installing update..."));
+		console.log(chalk.dim(__ompTranslate("Installing update...")));
 		const result = await replaceBinaryForUpdate({
 			targetPath,
 			tempPath,
@@ -1959,7 +2071,7 @@ export async function updateViaBinaryAt(
 		return result;
 	});
 	printVerifiedVersion(build.version, verification.path ?? targetPath);
-	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
+	console.log(chalk.dim(__ompTranslate("Restart {0} to use the new version", `${APP_NAME}`)));
 }
 
 /**
@@ -2007,7 +2119,7 @@ export async function updateViaShimTakeover(
 	// never retire the same shims or reclaim a live run's backup before its
 	// verification can roll it back.
 	await withFileLock(exePath, async () => {
-		console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
+		console.log(chalk.dim(__ompTranslate("Installing {0}.exe beside the script launcher...", `${APP_NAME}`)));
 		await fs.promises.rename(tempPath, exePath);
 		// Retire the shims so PATH resolution lands on the new exe. Renamed, not
 		// deleted: restorable on verification failure, and Windows permits
@@ -2053,7 +2165,11 @@ export async function updateViaShimTakeover(
 			}
 			await unlinkIfExists(exePath);
 			throw new Error(
-				`${formatVerificationFailure(verification, build.version)}; restored previous ${APP_NAME} launcher`,
+				__ompTranslate(
+					"{0}; restored previous {1} launcher",
+					`${formatVerificationFailure(verification, build.version)}`,
+					`${APP_NAME}`,
+				),
 			);
 		}
 		for (const { backup } of retired) {
@@ -2065,17 +2181,20 @@ export async function updateViaShimTakeover(
 		}
 	});
 	for (const { launcher } of forwarded) {
-		console.log(chalk.dim(`Converted ${launcher} to a forwarder (it could not be removed).`));
+		console.log(chalk.dim(__ompTranslate("Converted {0} to a forwarder (it could not be removed).", `${launcher}`)));
 	}
 	for (const launcher of stuck) {
 		console.log(
 			chalk.yellow(
-				`Could not retire ${launcher}; shells that prefer it may keep launching the old version until it is deleted manually.`,
+				__ompTranslate(
+					"Could not retire {0}; shells that prefer it may keep launching the old version until it is deleted manually.",
+					`${launcher}`,
+				),
 			),
 		);
 	}
 	printVerifiedVersion(build.version);
-	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
+	console.log(chalk.dim(__ompTranslate("Restart {0} to use the new version", `${APP_NAME}`)));
 }
 
 /**
@@ -2132,19 +2251,24 @@ function announceOffer(version: string, request: UpdateRequest): boolean {
 	const comparison = compareVersions(version, VERSION);
 	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
 		const icon = theme?.status?.success ?? "✔";
-		console.log(chalk.green(`${icon} Already up to date`));
+		console.log(chalk.green(__ompTranslate("{0} Already up to date", `${icon}`)));
 		return false;
 	}
 	if (request.isChannelSwitch) {
 		console.log(
 			chalk.yellow(
-				`Switching to ${request.channel} ${version}${comparison < 0 ? ` (downgrade from ${VERSION})` : ""}`,
+				__ompTranslate(
+					"Switching to {0} {1}{2}",
+					`${request.channel}`,
+					`${version}`,
+					`${comparison < 0 ? __ompTranslate(" (downgrade from {0})", `${VERSION}`) : ""}`,
+				),
 			),
 		);
 	} else if (comparison > 0) {
-		console.log(chalk.cyan(`New version available: ${version}`));
+		console.log(chalk.cyan(__ompTranslate("New version available: {0}", `${version}`)));
 	} else {
-		console.log(chalk.yellow(`Forcing reinstall of ${version}`));
+		console.log(chalk.yellow(__ompTranslate("Forcing reinstall of {0}", `${version}`)));
 	}
 	return true;
 }
@@ -2164,7 +2288,7 @@ async function runBinaryUpdate(
 		const fromVersion = target ? await installedBuildVersion(target.path) : VERSION;
 		build = await fetchBuild({ channel: request.channel }, { fromVersion });
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
+		console.error(chalk.red(__ompTranslate("Failed to check for updates: {0}", `${err}`)));
 		process.exit(1);
 	}
 	if (!announceOffer(build.version, request) || request.check) return;
@@ -2174,7 +2298,7 @@ async function runBinaryUpdate(
 		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
 		if (request.persistChannel) persistChannel(request.channel);
 	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
+		console.error(chalk.red(__ompTranslate("Update failed: {0}", `${err}`)));
 		process.exit(1);
 	}
 }
@@ -2200,16 +2324,28 @@ async function updateToStandaloneBinary(
 	const build = await fetchBuild({ channel }, { fromVersion });
 	if (compareVersions(build.version, release.version) < 0 && compareVersions(build.version, VERSION) <= 0) {
 		throw new Error(
-			`${release.version} ships as a standalone binary, but the newest ${channel} build of it published for this platform is ${build.version}; retry in a few minutes once it finishes uploading, or reinstall with: ${installerHint()}`,
+			__ompTranslate(
+				"{0} ships as a standalone binary, but the newest {1} build of it published for this platform is {2}; retry in a few minutes once it finishes uploading, or reinstall with: {3}",
+				`${release.version}`,
+				`${channel}`,
+				`${build.version}`,
+				`${installerHint()}`,
+			),
 		);
 	}
 	if (build.version !== release.version) {
-		console.log(chalk.dim(`Installing the newest published ${channel} build, ${build.version}.`));
+		console.log(
+			chalk.dim(__ompTranslate("Installing the newest published {0} build, {1}.", `${channel}`, `${build.version}`)),
+		);
 	}
-	const unmanaged = `This install is no longer managed by ${manager}. Removing the old global package may delete this launcher; if it does, reinstall with: ${installerHint()}`;
+	const unmanaged = __ompTranslate(
+		"This install is no longer managed by {0}. Removing the old global package may delete this launcher; if it does, reinstall with: {1}",
+		`${manager}`,
+		`${installerHint()}`,
+	);
 	if (target.method === "binary") {
 		if (target.replacesSymlink) {
-			console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
+			console.log(chalk.dim(__ompTranslate("Replacing the package-manager launcher with the standalone binary.")));
 		}
 		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
 		if (target.replacesSymlink) console.log(chalk.yellow(unmanaged));
@@ -2217,8 +2353,9 @@ async function updateToStandaloneBinary(
 	}
 	// Without package-manager routing only a Windows script launcher resolves
 	// to a manager (the bun/npm bin-dir probes are skipped), so its path is known.
-	if (target.method !== "npm" || !target.path) throw new Error(`Could not resolve ${APP_NAME} launcher path in PATH`);
-	console.log(chalk.dim("This release ships as a standalone binary; replacing the script launcher."));
+	if (target.method !== "npm" || !target.path)
+		throw new Error(__ompTranslate("Could not resolve {0} launcher path in PATH", `${APP_NAME}`));
+	console.log(chalk.dim(__ompTranslate("This release ships as a standalone binary; replacing the script launcher.")));
 	await updateViaShimTakeover(target.path, build);
 	console.log(chalk.yellow(unmanaged));
 }
@@ -2236,12 +2373,16 @@ async function runManagedUpdate(
 	try {
 		release = await getLatestRelease({ channel: request.channel });
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
+		console.error(chalk.red(__ompTranslate("Failed to check for updates: {0}", `${err}`)));
 		process.exit(1);
 	}
 	if (!announceOffer(release.version, request)) return;
 	if (release.packages.pkg !== PACKAGE) {
-		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
+		console.log(
+			chalk.cyan(
+				__ompTranslate("The npm package moved to {0}; updating migrates this install.", `${release.packages.pkg}`),
+			),
+		);
 	}
 	if (request.check) return;
 
@@ -2251,12 +2392,14 @@ async function runManagedUpdate(
 			request.channel === "canary" &&
 			(target.method === "nix" || target.method === "brew" || target.method === "mise")
 		) {
-			console.log(chalk.yellow("Canary updates are only supported for bun, npm, or binary installs."));
+			console.log(
+				chalk.yellow(__ompTranslate("Canary updates are only supported for bun, npm, or binary installs.")),
+			);
 			return;
 		}
 		if (target.method === "nix") {
-			console.log(chalk.yellow("This installation is managed by Nix and cannot update itself."));
-			console.log(chalk.dim("Update the flake input or profile that provides omp, then rebuild."));
+			console.log(chalk.yellow(__ompTranslate("This installation is managed by Nix and cannot update itself.")));
+			console.log(chalk.dim(__ompTranslate("Update the flake input or profile that provides omp, then rebuild.")));
 			return;
 		}
 		if (target.method === "brew") {
@@ -2270,7 +2413,7 @@ async function runManagedUpdate(
 		}
 		if (request.persistChannel) persistChannel(request.channel);
 	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
+		console.error(chalk.red(__ompTranslate("Update failed: {0}", `${err}`)));
 		process.exit(1);
 	}
 }
@@ -2292,16 +2435,23 @@ export async function runUpdateCommand(opts: {
 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
 	if (manager) {
 		console.log(
-			chalk.yellow(`${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`),
+			chalk.yellow(
+				__ompTranslate(
+					"{0} is installed and kept up to date by {1}; update it from {2}.",
+					`${ompPath}`,
+					`${manager}`,
+					`${manager}`,
+				),
+			),
 		);
 		return;
 	}
 	// `update.channel` picks the channel; --canary/--stable switch and persist it.
 	await Settings.init({ cwd: getProjectDir() });
-	console.log(chalk.dim(`Current version: ${VERSION}`));
+	console.log(chalk.dim(__ompTranslate("Current version: {0}", `${VERSION}`)));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
-	if (channel === "canary") console.log(chalk.dim("Current channel: canary"));
+	if (channel === "canary") console.log(chalk.dim(__ompTranslate("Current channel: canary")));
 	const request: UpdateRequest = {
 		force: opts.force,
 		check: opts.check,
@@ -2330,23 +2480,19 @@ export async function runUpdateCommand(opts: {
  * Print update command help.
  */
 export function printUpdateHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} update [options]
-
-${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
-  -l, --plugins   Update installed plugins
-  --canary        Switch to the canary channel and update
-  --stable        Switch back to the stable channel
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} update              Update to latest version
-  ${APP_NAME} update --check      Check if updates are available
-  ${APP_NAME} update --force      Force reinstall
-  ${APP_NAME} update -l           Update installed plugins
-  ${APP_NAME} update --canary    Switch to the canary channel and update
-`);
+	console.log(
+		__ompTranslate(
+			"{0} - Check for and install updates\n\n{1}\n  {2} update [options]\n\n{3}\n  -c, --check     Check for updates without installing\n  -f, --force     Force reinstall even if up to date\n  -l, --plugins   Update installed plugins\n  --canary        Switch to the canary channel and update\n  --stable        Switch back to the stable channel\n\n{4}\n  {5} update              Update to latest version\n  {6} update --check      Check if updates are available\n  {7} update --force      Force reinstall\n  {8} update -l           Update installed plugins\n  {9} update --canary    Switch to the canary channel and update\n",
+			`${chalk.bold(`${APP_NAME} update`)}`,
+			`${chalk.bold(__ompTranslate("Usage:"))}`,
+			`${APP_NAME}`,
+			`${chalk.bold(__ompTranslate("Options:"))}`,
+			`${chalk.bold(__ompTranslate("Examples:"))}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+			`${APP_NAME}`,
+		),
+	);
 }

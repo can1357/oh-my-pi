@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as AIError from "../../error";
 import type { OAuthController } from "./types";
@@ -11,22 +12,22 @@ export async function loginCloudflareWorkersAi(options: OAuthController): Promis
 	}
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: "Create an API token with Workers AI Read and Edit permissions, then copy it here.",
+		instructions: __ompTranslate("Create an API token with Workers AI Read and Edit permissions, then copy it here."),
 	});
 
 	const token = await options.onPrompt({
-		message: "Paste your Cloudflare API token",
-		placeholder: "Workers AI API token",
+		message: __ompTranslate("Paste your Cloudflare API token"),
+		placeholder: __ompTranslate("Workers AI API token"),
 	});
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
 	if (!token.trim()) throw new AIError.ApiKeyRequiredError();
 
 	const accountId = await options.onPrompt({
-		message: "Enter your Cloudflare account ID",
-		placeholder: "32-character account ID",
+		message: __ompTranslate("Enter your Cloudflare account ID"),
+		placeholder: __ompTranslate("32-character account ID"),
 	});
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!accountId.trim()) throw new AIError.ConfigurationError("Cloudflare account ID is required");
+	if (!accountId.trim()) throw new AIError.ConfigurationError(__ompTranslate("Cloudflare account ID is required"));
 
 	return serializeCloudflareCredential({ token, accountId });
 }

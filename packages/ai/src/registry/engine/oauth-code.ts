@@ -3,6 +3,7 @@
  * through the configured callback transport, followed by the declared token
  * exchange, credential projection, userinfo enrichment and after-exchange hook.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { CompiledAuthProvider, CompiledCallback, CompiledOAuthCodeLogin } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
@@ -54,7 +55,7 @@ export async function resolveCallbackOptions(
 	try {
 		parsed = new URL(redirectUri);
 	} catch {
-		throw new AIError.OAuthError(`Invalid redirect URI override: ${redirectUri}`, {
+		throw new AIError.OAuthError(__ompTranslate("Invalid redirect URI override: {0}", `${redirectUri}`), {
 			kind: "configuration",
 			provider,
 		});
@@ -67,10 +68,13 @@ export async function resolveCallbackOptions(
 	}
 	const loopback = isLoopbackHost(parsed.hostname);
 	if (loopback && parsed.protocol !== "http:") {
-		throw new AIError.OAuthError(`Loopback redirect URI overrides must use http://, got: ${redirectUri}`, {
-			kind: "configuration",
-			provider,
-		});
+		throw new AIError.OAuthError(
+			__ompTranslate("Loopback redirect URI overrides must use http://, got: {0}", `${redirectUri}`),
+			{
+				kind: "configuration",
+				provider,
+			},
+		);
 	}
 	const port = parsed.port ? Number.parseInt(parsed.port, 10) : parsed.protocol === "https:" ? 443 : 80;
 	return {

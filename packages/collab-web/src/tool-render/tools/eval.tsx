@@ -6,6 +6,7 @@
  * `===== info =====`); all render as discrete highlighted cells. When the result
  * carries typed per-cell details, each cell's output is interleaved beneath its code.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Markdown } from "../../components/transcript/Markdown";
 import { Badges, CodeBlock, InvalidArg, Note, Output, ResultImages, ResultText } from "../parts";
@@ -474,7 +475,7 @@ function Summary({ name, args, result }: ToolRenderProps): ReactNode {
 	return (
 		<>
 			{label && <span>{truncate(label, 72)}</span>}
-			<Badges items={[cells.length > 1 ? `${cells.length} cells` : null, ...langs]} />
+			<Badges items={[cells.length > 1 ? __ompTranslate("{0} cells", `${cells.length}`) : null, ...langs]} />
 		</>
 	);
 }
@@ -509,10 +510,16 @@ function Body({ name, args, result }: ToolRenderProps): ReactNode {
 					if (dc) {
 						if (dc.durationMs !== null) {
 							const ms = dc.durationMs;
-							titleParts.push(ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+							titleParts.push(
+								ms < 1000 ? `${Math.round(ms)}ms` : __ompTranslate("{0}s", `${(ms / 1000).toFixed(1)}`),
+							);
 						}
 						if (dc.status === "error")
-							titleParts.push(dc.exitCode !== null ? `error (exit ${dc.exitCode})` : "error");
+							titleParts.push(
+								dc.exitCode !== null
+									? __ompTranslate("error (exit {0})", `${dc.exitCode}`)
+									: __ompTranslate("error"),
+							);
 					}
 					return (
 						<div className="tv-cell" key={`c${i}`}>

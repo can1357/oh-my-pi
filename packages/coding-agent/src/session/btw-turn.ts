@@ -2,6 +2,7 @@
  * Headless `/btw` turn lifecycle shared by the TUI controller and RPC mode:
  * record bookkeeping for a new topic or follow-up, and the ephemeral model turn.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
@@ -70,7 +71,7 @@ export function runBtwTurn(
 	},
 ): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
 	const model = session.model;
-	if (!model) throw new Error("No active model available for /btw.");
+	if (!model) throw new Error(__ompTranslate("No active model available for /btw."));
 	const history: Message[] = [];
 	for (const turn of args.history ?? []) {
 		history.push({

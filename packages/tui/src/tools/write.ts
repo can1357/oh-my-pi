@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
@@ -389,7 +390,7 @@ function formatStreamingContent(
 	// the native-scrollback commit boundary at the top of the block, so a long
 	// expanded preview could never scroll-append mid-stream.
 	const spinner = spinnerFrame !== undefined ? `${formatStatusIcon("running", uiTheme, spinnerFrame)} ` : "";
-	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
+	return `${bodyText}${spinner}${uiTheme.fg("dim", __ompTranslate("… (streaming)"))}`;
 }
 
 function wrapWritePreviewRows(lines: string[], width: number): string[] {
@@ -470,7 +471,10 @@ interface WriteUrlCard {
 const WRITE_URL_CARDS: Record<string, WriteUrlCard> = {
 	agent: {
 		detailsKey: "message",
-		activity: target => ({ label: "Message", detail: target === "all" ? "broadcast" : target }),
+		activity: target => ({
+			label: __ompTranslate("Message"),
+			detail: target === "all" ? __ompTranslate("broadcast\u0004tool.write.agent.broadcast") : target,
+		}),
 		render: (_url, target, content, result, details, options, uiTheme) =>
 			renderAgentWrite(
 				target,
@@ -485,7 +489,7 @@ const WRITE_URL_CARDS: Record<string, WriteUrlCard> = {
 		detailsKey: "proc",
 		activity: target => {
 			const { id, action } = procWriteTarget(target);
-			return { label: "Process", detail: `${action} ${shortenPath(id)}` };
+			return { label: __ompTranslate("Process"), detail: `${action} ${shortenPath(id)}` };
 		},
 		render: (_url, target, content, result, details, options, uiTheme) => {
 			const { id, action } = procWriteTarget(target);
@@ -502,7 +506,7 @@ const WRITE_URL_CARDS: Record<string, WriteUrlCard> = {
 	},
 	cfg: {
 		detailsKey: "cfg",
-		activity: target => ({ label: "Config", detail: target }),
+		activity: target => ({ label: __ompTranslate("Config"), detail: target }),
 		render: (url, _target, content, result, details, options, uiTheme) =>
 			renderCfgWrite(url, typeof content === "string" ? content : undefined, result, details?.cfg, options, uiTheme),
 	},
@@ -572,11 +576,11 @@ function writeToolHead(
 ): NativeToolHead {
 	const lineCount = countLines(content);
 	const badges: { text: string; tone?: TspTone }[] = [];
-	if (details?.madeExecutable) badges.push({ text: "executable", tone: "success" });
+	if (details?.madeExecutable) badges.push({ text: __ompTranslate("executable"), tone: "success" });
 	const diagnostics = diagnosticsBadge([details?.diagnostics]);
 	if (diagnostics) badges.push(diagnostics);
 	return {
-		title: "Write",
+		title: __ompTranslate("Write\u0004tool.write.action"),
 		target: rawPath ? sanitizeText(displayPath(rawPath)) : undefined,
 		targetKind: "path",
 		href: fileHref(details?.resolvedPath),
@@ -649,7 +653,7 @@ export const writeToolRenderer = {
 		// noise. The liveness cue rides the trailing "(streaming)" line instead.
 		const header = renderStatusLine(
 			{
-				title: "Write",
+				title: __ompTranslate("Write\u0004tool.write.action"),
 				description: `${langIcon} ${pathDisplay}`,
 			},
 			uiTheme,
@@ -750,7 +754,7 @@ export const writeToolRenderer = {
 		const lineSuffix = formatLineCountSuffix(lineCount, uiTheme);
 		const execSuffix =
 			!isPartial && result.details?.madeExecutable
-				? `${uiTheme.fg("dim", " · ")}${uiTheme.fg("success", "made executable!")}`
+				? `${uiTheme.fg("dim", " · ")}${uiTheme.fg("success", __ompTranslate("made executable!"))}`
 				: "";
 		const header = renderStatusLine(
 			{

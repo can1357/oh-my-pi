@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ConfiguredThinkingLevel } from "./render/render-utils";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
@@ -21,30 +22,38 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 	[ThinkingLevel.Inherit]: {
 		value: ThinkingLevel.Inherit,
 		label: "inherit",
-		description: "Inherit session default",
+		description: __ompTranslate("Inherit session default"),
 	},
-	[ThinkingLevel.Off]: { value: ThinkingLevel.Off, label: "off", description: "No reasoning" },
+	[ThinkingLevel.Off]: { value: ThinkingLevel.Off, label: "off", description: __ompTranslate("No reasoning") },
 	[ThinkingLevel.Minimal]: {
 		value: ThinkingLevel.Minimal,
 		label: "min",
-		description: "Very brief reasoning (~1k tokens)",
+		description: __ompTranslate("Very brief reasoning (~1k tokens)"),
 	},
-	[ThinkingLevel.Low]: { value: ThinkingLevel.Low, label: "low", description: "Light reasoning (~2k tokens)" },
+	[ThinkingLevel.Low]: {
+		value: ThinkingLevel.Low,
+		label: "low",
+		description: __ompTranslate("Light reasoning (~2k tokens)"),
+	},
 	[ThinkingLevel.Medium]: {
 		value: ThinkingLevel.Medium,
 		label: "medium",
-		description: "Moderate reasoning (~8k tokens)",
+		description: __ompTranslate("Moderate reasoning (~8k tokens)"),
 	},
-	[ThinkingLevel.High]: { value: ThinkingLevel.High, label: "high", description: "Deep reasoning (~16k tokens)" },
+	[ThinkingLevel.High]: {
+		value: ThinkingLevel.High,
+		label: "high",
+		description: __ompTranslate("Deep reasoning (~16k tokens)"),
+	},
 	[ThinkingLevel.XHigh]: {
 		value: ThinkingLevel.XHigh,
 		label: "xhigh",
-		description: "Extended reasoning (~32k tokens)",
+		description: __ompTranslate("Extended reasoning (~32k tokens)"),
 	},
 	[ThinkingLevel.Max]: {
 		value: ThinkingLevel.Max,
 		label: "max",
-		description: "Maximum reasoning the model supports",
+		description: __ompTranslate("Maximum reasoning the model supports"),
 	},
 };
 
@@ -204,7 +213,7 @@ export interface ConfiguredThinkingLevelMetadata {
 const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
 	value: AUTO_THINKING,
 	label: "auto",
-	description: "Auto-detect per prompt",
+	description: __ompTranslate("Auto-detect per prompt"),
 };
 
 /**

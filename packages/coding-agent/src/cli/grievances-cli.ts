@@ -1,6 +1,7 @@
 /**
  * CLI handler for `omp grievances` — view, clean, and manually push reported tool issues.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { flushGrievances, openAutoQaDb } from "../tools/report-tool-issue";
@@ -19,9 +20,9 @@ interface GrievanceRow {
 
 /** Human-readable push state for a listed row. */
 function describeState(row: GrievanceRow): string {
-	if (row.pushed === 1) return chalk.green("pushed");
-	if (row.pushed === 0) return chalk.yellow("pending");
-	return chalk.red(`rejected${row.push_error ? `: ${row.push_error}` : ""}`);
+	if (row.pushed === 1) return chalk.green(__ompTranslate("pushed"));
+	if (row.pushed === 0) return chalk.yellow(__ompTranslate("pending"));
+	return chalk.red(__ompTranslate("rejected{0}", `${row.push_error ? `: ${row.push_error}` : ""}`));
 }
 
 export interface ListGrievancesOptions {
@@ -52,7 +53,11 @@ export async function listGrievances(options: ListGrievancesOptions): Promise<vo
 			console.log("[]");
 		} else {
 			console.log(
-				chalk.dim("No grievances database found. Auto-QA has not recorded any reports yet (or was disabled)."),
+				chalk.dim(
+					__ompTranslate(
+						"No grievances database found. Auto-QA has not recorded any reports yet (or was disabled).",
+					),
+				),
 			);
 		}
 		return;
@@ -77,7 +82,7 @@ export async function listGrievances(options: ListGrievancesOptions): Promise<vo
 		}
 
 		if (rows.length === 0) {
-			console.log(chalk.dim("No grievances recorded yet."));
+			console.log(chalk.dim(__ompTranslate("No grievances recorded yet.")));
 			return;
 		}
 
@@ -106,12 +111,12 @@ export async function listGrievances(options: ListGrievancesOptions): Promise<vo
 export async function cleanGrievances(options: CleanGrievancesOptions): Promise<void> {
 	const selectors = [options.id !== undefined, !!options.tool, !!options.all].filter(Boolean).length;
 	if (selectors === 0) {
-		console.error(chalk.red("Specify exactly one of --id, --tool, or --all."));
+		console.error(chalk.red(__ompTranslate("Specify exactly one of --id, --tool, or --all.")));
 		process.exitCode = 1;
 		return;
 	}
 	if (selectors > 1) {
-		console.error(chalk.red("--id, --tool, and --all are mutually exclusive."));
+		console.error(chalk.red(__ompTranslate("--id, --tool, and --all are mutually exclusive.")));
 		process.exitCode = 1;
 		return;
 	}
@@ -122,7 +127,11 @@ export async function cleanGrievances(options: CleanGrievancesOptions): Promise<
 			console.log(JSON.stringify({ deleted: 0 }));
 		} else {
 			console.log(
-				chalk.dim("No grievances database found. Auto-QA has not recorded any reports yet (or was disabled)."),
+				chalk.dim(
+					__ompTranslate(
+						"No grievances database found. Auto-QA has not recorded any reports yet (or was disabled).",
+					),
+				),
 			);
 		}
 		return;
@@ -154,12 +163,16 @@ export async function cleanGrievances(options: CleanGrievancesOptions): Promise<
 		}
 
 		if (deleted === 0) {
-			console.log(chalk.dim("No matching grievances to delete."));
+			console.log(chalk.dim(__ompTranslate("No matching grievances to delete.")));
 			return;
 		}
 
 		const scope =
-			options.id !== undefined ? `#${options.id}` : options.tool ? `for ${options.tool}` : "(all entries)";
+			options.id !== undefined
+				? `#${options.id}`
+				: options.tool
+					? __ompTranslate("for {0}", `${options.tool}`)
+					: __ompTranslate("(all entries)");
 		console.log(chalk.green(`Deleted ${deleted} grievance${deleted === 1 ? "" : "s"} ${scope}.`));
 	} finally {
 		db.close();
@@ -193,7 +206,7 @@ function makeProgressBar(total: number, width = 30): ProgressBar {
 		const pct = `${Math.floor(ratio * 100)
 			.toString()
 			.padStart(3, " ")}%`;
-		process.stdout.write(`\r${chalk.cyan("Pushing")} [${bar}] ${pct} ${done}/${total}`);
+		process.stdout.write(`\r${chalk.cyan(__ompTranslate("Pushing"))} [${bar}] ${pct} ${done}/${total}`);
 	};
 	render(0);
 	return {
@@ -215,7 +228,7 @@ export async function pushGrievances(options: PushGrievancesOptions): Promise<vo
 		if (options.json) {
 			console.log(JSON.stringify({ pushed: 0, ok: false, skipped: true, reason: "no_db" }));
 		} else {
-			console.log(chalk.dim("No grievances database found — nothing to push."));
+			console.log(chalk.dim(__ompTranslate("No grievances database found — nothing to push.")));
 		}
 		return;
 	}
@@ -242,34 +255,55 @@ export async function pushGrievances(options: PushGrievancesOptions): Promise<vo
 		if (result.skipped) {
 			console.log(
 				chalk.yellow(
-					"Push skipped — no endpoint configured. Set `dev.autoqaPush.endpoint` or `PI_AUTO_QA_PUSH_URL`.",
+					__ompTranslate(
+						"Push skipped — no endpoint configured. Set `dev.autoqaPush.endpoint` or `PI_AUTO_QA_PUSH_URL`.",
+					),
 				),
 			);
 			return;
 		}
 		if (total === 0) {
-			console.log(chalk.dim("Nothing to push — all grievances are already shipped."));
+			console.log(chalk.dim(__ompTranslate("Nothing to push — all grievances are already shipped.")));
 			return;
 		}
 		const rejected = result.rejected ?? 0;
 		if (rejected > 0) {
 			console.log(
 				chalk.yellow(
-					`${rejected} grievance${rejected === 1 ? " was" : "s were"} refused by the server and marked rejected (see \`omp grievances list\`).`,
+					__ompTranslate(
+						"{0} grievance{1} refused by the server and marked rejected (see `omp grievances list`).",
+						`${rejected}`,
+						`${rejected === 1 ? " was" : "s were"}`,
+					),
 				),
 			);
 		}
 		if (result.ok) {
-			console.log(chalk.green(`Pushed ${result.pushed}/${total} grievance${result.pushed === 1 ? "" : "s"}.`));
+			console.log(
+				chalk.green(
+					__ompTranslate(
+						"Pushed {0}/{1} grievance{2}.",
+						`${result.pushed}`,
+						`${total}`,
+						`${result.pushed === 1 ? "" : "s"}`,
+					),
+				),
+			);
 			return;
 		}
 		const remaining = total - result.pushed - rejected;
 		console.log(
 			chalk.red(
-				`Push failed after ${result.pushed}/${total}; ${remaining} grievance${remaining === 1 ? "" : "s"} remain unpushed.`,
+				__ompTranslate(
+					"Push failed after {0}/{1}; {2} grievance{3} remain unpushed.",
+					`${result.pushed}`,
+					`${total}`,
+					`${remaining}`,
+					`${remaining === 1 ? "" : "s"}`,
+				),
 			),
 		);
-		if (result.error) console.log(chalk.red(`Server said: ${result.error}`));
+		if (result.error) console.log(chalk.red(__ompTranslate("Server said: {0}", `${result.error}`)));
 		process.exitCode = 1;
 	} finally {
 		db.close();

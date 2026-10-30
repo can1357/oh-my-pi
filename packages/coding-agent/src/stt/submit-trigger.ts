@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 /**
  * TTS/STT Submit Trigger options and evaluation logic.
  */
@@ -9,23 +10,27 @@ export type SttSubmitTrigger = (typeof STT_SUBMIT_TRIGGER_VALUES)[number];
 export const STT_SUBMIT_TRIGGER_OPTIONS = [
 	{
 		value: "never",
-		label: "Never",
-		description: "Never automatically submit; insert dictation and remain in editor.",
+		label: __ompTranslate("Never\u0004speech.auto-submit.never"),
+		description: __ompTranslate("Never automatically submit; insert dictation and remain in editor."),
 	},
 	{
 		value: "release",
-		label: "Release",
-		description: "Submit on release if the utterance has 2+ words to avoid accidental sends.",
+		label: __ompTranslate("Release"),
+		description: __ompTranslate("Submit on release if the utterance has 2+ words to avoid accidental sends."),
 	},
 	{
 		value: "release-complete",
-		label: "Release with complete sentence",
-		description: "Submit on release if the utterance ends with sentence-terminal punctuation (. ? ! etc.).",
+		label: __ompTranslate("Release with complete sentence"),
+		description: __ompTranslate(
+			"Submit on release if the utterance ends with sentence-terminal punctuation (. ? ! etc.).",
+		),
 	},
 	{
 		value: "say-submit",
-		label: "When I Say Submit",
-		description: "Submit if the utterance ends with a word containing 'submit' (strips that word before submitting).",
+		label: __ompTranslate("When I Say Submit"),
+		description: __ompTranslate(
+			"Submit if the utterance ends with a word containing 'submit' (strips that word before submitting).",
+		),
 	},
 ] satisfies ReadonlyArray<{ value: SttSubmitTrigger; label: string; description: string }>;
 

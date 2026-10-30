@@ -1,4 +1,5 @@
 /** `glob` (legacy `find`) — glob-based file finder; results are paths sorted by mtime. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Note, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -35,22 +36,28 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		<>
 			<Badges
 				items={[
-					limit !== null && <Badge>limit {limit}</Badge>,
+					limit !== null && <Badge>{__ompTranslate("limit {0}", `${limit}`)}</Badge>,
 					args.gitignore === false && <Badge>no-gitignore</Badge>,
 					args.hidden === false && <Badge>no-hidden</Badge>,
-					timeout !== null && <Badge>timeout {timeout}s</Badge>,
+					timeout !== null && <Badge>{__ompTranslate("timeout {0}s", `${timeout}`)}</Badge>,
 					fileCount !== null && (
 						<Badge tone="accent">
-							{fileCount} file{fileCount === 1 ? "" : "s"}
+							{__ompTranslate("{0} file{1}", `${fileCount}`, fileCount === 1 ? "" : "s")}
 						</Badge>
 					),
-					scopePath !== null && <Badge>in {shortenPath(scopePath)}</Badge>,
+					scopePath !== null && <Badge>{__ompTranslate("in {0}", shortenPath(scopePath))}</Badge>,
 					truncated && (
-						<Badge tone="warn">{resultLimit !== null ? `truncated at ${resultLimit}` : "truncated"}</Badge>
+						<Badge tone="warn">
+							{resultLimit !== null
+								? __ompTranslate("truncated at {0}", `${resultLimit}`)
+								: __ompTranslate("truncated")}
+						</Badge>
 					),
 				]}
 			/>
-			{missing.length > 0 && <Note tone="warn">skipped missing: {missing.map(shortenPath).join(", ")}</Note>}
+			{missing.length > 0 && (
+				<Note tone="warn">{__ompTranslate("skipped missing: {0}", missing.map(shortenPath).join(", "))}</Note>
+			)}
 			{error !== null && !result?.isError && <Note tone="err">{error}</Note>}
 			<ResultText result={result} maxLines={12} />
 		</>

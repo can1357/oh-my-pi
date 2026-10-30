@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -53,7 +54,7 @@ export function collapseCommand(command: string | undefined): string {
 /** One-line daemon summary used by action results and detail views. */
 export function daemonLabel(daemon: DaemonSnapshot): string {
 	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
-	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
+	const exit = daemon.exitCode === undefined ? "" : __ompTranslate(" exit={0}", `${daemon.exitCode}`);
 	return `${daemon.name}: ${daemon.state}${pid}${exit}`;
 }
 
@@ -89,7 +90,15 @@ export function uptimeCell(snapshot: DaemonSnapshot): string {
 }
 
 /** Labels aligned with the process table's display cells. */
-export const TABLE_HEADER = ["NAME", "STATE", "PID", "UPTIME", "RESTARTS", "FLAGS", "COMMAND"];
+export const TABLE_HEADER = [
+	__ompTranslate("NAME"),
+	__ompTranslate("STATE"),
+	"PID",
+	__ompTranslate("UPTIME"),
+	__ompTranslate("RESTARTS"),
+	__ompTranslate("FLAGS"),
+	__ompTranslate("COMMAND"),
+];
 
 /** Raw (possibly colored) cells for one daemon row, aligned with {@link TABLE_HEADER}. */
 export function tableCells(row: PsDaemonRow): string[] {
@@ -108,9 +117,11 @@ export function tableCells(row: PsDaemonRow): string[] {
 export function scopeHeader(scope: PsScope): string {
 	const label =
 		scope.kind === "global"
-			? `global ${chalk.bold(scope.service ?? path.basename(scope.runtimeDir))}`
-			: `project ${chalk.bold(scope.projectDir ?? path.basename(scope.runtimeDir))}`;
+			? __ompTranslate("global {0}", `${chalk.bold(scope.service ?? path.basename(scope.runtimeDir))}`)
+			: __ompTranslate("project {0}", `${chalk.bold(scope.projectDir ?? path.basename(scope.runtimeDir))}`);
 	const broker =
-		scope.brokerPid !== undefined ? chalk.green(`broker pid ${scope.brokerPid}`) : chalk.dim("broker not running");
+		scope.brokerPid !== undefined
+			? chalk.green(__ompTranslate("broker pid {0}", `${scope.brokerPid}`))
+			: chalk.dim(__ompTranslate("broker not running"));
 	return `${label} ${chalk.dim("—")} ${broker}`;
 }

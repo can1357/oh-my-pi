@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
@@ -189,14 +190,14 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 	const stats = runtime.session.sessionManager.getUsageStatistics();
 	const orchestrationTokens = stats.orchestrationInput + stats.orchestrationOutput + stats.orchestrationCacheRead;
 	return [
-		"Usage",
-		`Input tokens: ${stats.input}`,
-		`Output tokens: ${stats.output}`,
-		`Cache read tokens: ${stats.cacheRead}`,
-		`Cache write tokens: ${stats.cacheWrite}`,
-		`Total tokens: ${stats.totalTokens}`,
-		...(orchestrationTokens > 0 ? [`Orchestration tokens: ${orchestrationTokens}`] : []),
-		`Premium requests: ${stats.premiumRequests}`,
-		`Cost: $${stats.cost.toFixed(6)}`,
+		__ompTranslate("Usage"),
+		__ompTranslate("Input tokens: {0}", `${stats.input}`),
+		__ompTranslate("Output tokens: {0}", `${stats.output}`),
+		__ompTranslate("Cache read tokens: {0}", `${stats.cacheRead}`),
+		__ompTranslate("Cache write tokens: {0}", `${stats.cacheWrite}`),
+		__ompTranslate("Total tokens: {0}", `${stats.totalTokens}`),
+		...(orchestrationTokens > 0 ? [__ompTranslate("Orchestration tokens: {0}", `${orchestrationTokens}`)] : []),
+		__ompTranslate("Premium requests: {0}", `${stats.premiumRequests}`),
+		__ompTranslate("Cost: ${0}", `${stats.cost.toFixed(6)}`),
 	].join("\n");
 }

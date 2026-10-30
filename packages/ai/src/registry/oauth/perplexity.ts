@@ -2,6 +2,7 @@
  * Perplexity login via legacy macOS session borrowing, host-managed browser SSO,
  * or HTTP email OTP (including authenticator challenges).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as os from "node:os";
 import { $env } from "@oh-my-pi/pi-utils";
 import { $, Cookie, CookieMap } from "bun";
@@ -98,12 +99,12 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 		throw new AIError.OnPromptRequiredError("Perplexity");
 	}
 	const email = await ctrl.onPrompt({
-		message: "Enter your Perplexity email address",
+		message: __ompTranslate("Enter your Perplexity email address"),
 		placeholder: "user@example.com",
 	});
 	const trimmedEmail = email.trim();
 	if (!trimmedEmail)
-		throw new AIError.OAuthError("Email is required for Perplexity login", {
+		throw new AIError.OAuthError(__ompTranslate("Email is required for Perplexity login"), {
 			kind: "validation",
 			provider: "perplexity",
 		});
@@ -118,7 +119,7 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 		return response;
 	};
 
-	ctrl.onProgress?.("Fetching Perplexity CSRF token...");
+	ctrl.onProgress?.(__ompTranslate("Fetching Perplexity CSRF token..."));
 	const csrfResponse = await request("https://www.perplexity.ai/api/auth/csrf", {
 		headers: {
 			"User-Agent": APP_USER_AGENT,
@@ -129,19 +130,19 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 
 	if (!csrfResponse.ok) {
 		throw new AIError.ProviderHttpError(
-			`Perplexity CSRF request failed: ${csrfResponse.status}`,
+			__ompTranslate("Perplexity CSRF request failed: {0}", `${csrfResponse.status}`),
 			csrfResponse.status,
 		);
 	}
 
 	const csrfData = (await csrfResponse.json()) as { csrfToken?: string };
 	if (!csrfData.csrfToken) {
-		throw new AIError.OAuthError("Perplexity CSRF response missing csrfToken", {
+		throw new AIError.OAuthError(__ompTranslate("Perplexity CSRF response missing csrfToken"), {
 			kind: "validation",
 			provider: "perplexity",
 		});
 	}
-	ctrl.onProgress?.("Sending login code to your email...");
+	ctrl.onProgress?.(__ompTranslate("Sending login code to your email..."));
 	const sendResponse = await request("https://www.perplexity.ai/api/auth/signin-email", {
 		method: "POST",
 		headers: {
@@ -159,19 +160,22 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 	if (!sendResponse.ok) {
 		const body = await sendResponse.text();
 		throw new AIError.ProviderHttpError(
-			`Perplexity send login code failed (${sendResponse.status}): ${body}`,
+			__ompTranslate("Perplexity send login code failed ({0}): {1}", `${sendResponse.status}`, `${body}`),
 			sendResponse.status,
 		);
 	}
 	const otp = await ctrl.onPrompt({
-		message: "Enter the code sent to your email",
+		message: __ompTranslate("Enter the code sent to your email"),
 		placeholder: "123456",
 	});
 	const trimmedOtp = otp.trim();
 	if (!trimmedOtp)
-		throw new AIError.OAuthError("OTP code is required", { kind: "validation", provider: "perplexity" });
+		throw new AIError.OAuthError(__ompTranslate("OTP code is required"), {
+			kind: "validation",
+			provider: "perplexity",
+		});
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
-	ctrl.onProgress?.("Verifying login code...");
+	ctrl.onProgress?.(__ompTranslate("Verifying login code..."));
 	const verifyResponse = await request("https://www.perplexity.ai/api/auth/signin-otp", {
 		method: "POST",
 		headers: {
@@ -197,8 +201,9 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 	};
 
 	if (!verifyResponse.ok) {
-		const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "OTP verification failed";
-		throw new AIError.OAuthError(`Perplexity OTP verification failed: ${reason}`, {
+		const reason =
+			verifyData.text ?? verifyData.error_code ?? verifyData.status ?? __ompTranslate("OTP verification failed");
+		throw new AIError.OAuthError(__ompTranslate("Perplexity OTP verification failed: {0}", `${reason}`), {
 			kind: "validation",
 			provider: "perplexity",
 			status: verifyResponse.status,
@@ -207,18 +212,18 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 
 	if (verifyData.status === "totp_challenge_required" && verifyData.challenge_token) {
 		const totp = await ctrl.onPrompt({
-			message: "Enter the code from your authenticator app",
+			message: __ompTranslate("Enter the code from your authenticator app"),
 			placeholder: "123456",
 		});
 		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 		const trimmedTotp = totp.trim();
 		if (!trimmedTotp) {
-			throw new AIError.OAuthError("Authenticator code is required", {
+			throw new AIError.OAuthError(__ompTranslate("Authenticator code is required"), {
 				kind: "validation",
 				provider: "perplexity",
 			});
 		}
-		ctrl.onProgress?.("Verifying authenticator code...");
+		ctrl.onProgress?.(__ompTranslate("Verifying authenticator code..."));
 		const totpResponse = await request("https://www.perplexity.ai/api/auth/totp/challenge-verify", {
 			method: "POST",
 			headers: {
@@ -234,12 +239,16 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 		});
 		verifyData = (await totpResponse.json()) as typeof verifyData;
 		if (!totpResponse.ok) {
-			const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "TOTP verification failed";
-			throw new AIError.OAuthError(`Perplexity authenticator verification failed: ${reason}`, {
-				kind: "validation",
-				provider: "perplexity",
-				status: totpResponse.status,
-			});
+			const reason =
+				verifyData.text ?? verifyData.error_code ?? verifyData.status ?? __ompTranslate("TOTP verification failed");
+			throw new AIError.OAuthError(
+				__ompTranslate("Perplexity authenticator verification failed: {0}", `${reason}`),
+				{
+					kind: "validation",
+					provider: "perplexity",
+					status: totpResponse.status,
+				},
+			);
 		}
 		if (!verifyData.token) {
 			verifyData = {
@@ -252,8 +261,8 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 
 	const token = verifyData.token ?? verifyData.challenge_token;
 	if (!token || verifyData.error_code || (verifyData.status && verifyData.status !== "success")) {
-		const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "missing token";
-		throw new AIError.OAuthError(`Perplexity OTP verification response rejected: ${reason}`, {
+		const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? __ompTranslate("missing token");
+		throw new AIError.OAuthError(__ompTranslate("Perplexity OTP verification response rejected: {0}", `${reason}`), {
 			kind: "validation",
 			provider: "perplexity",
 		});
@@ -276,7 +285,9 @@ async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials>
 			provider: "perplexity",
 		});
 	}
-	ctrl.onProgress?.("Complete Perplexity sign-in in the browser window. Choose SSO for your organization.");
+	ctrl.onProgress?.(
+		__ompTranslate("Complete Perplexity sign-in in the browser window. Choose SSO for your organization."),
+	);
 	const token = (
 		await ctrl.onBrowserSession(
 			{
@@ -294,7 +305,7 @@ async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials>
 		});
 	}
 
-	ctrl.onProgress?.("Validating Perplexity session...");
+	ctrl.onProgress?.(__ompTranslate("Validating Perplexity session..."));
 	const response = await (ctrl.fetch ?? fetch)(`${PERPLEXITY_BASE_URL}/api/auth/session`, {
 		headers: {
 			Cookie: `${SESSION_COOKIE_NAME}=${token}`,
@@ -305,7 +316,10 @@ async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials>
 		signal: ctrl.signal,
 	});
 	if (!response.ok) {
-		throw new AIError.ProviderHttpError(`Perplexity session validation failed (${response.status})`, response.status);
+		throw new AIError.ProviderHttpError(
+			__ompTranslate("Perplexity session validation failed ({0})", `${response.status}`),
+			response.status,
+		);
 	}
 	let email: unknown;
 	try {
@@ -314,14 +328,14 @@ async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials>
 	} catch (error) {
 		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 		if (!(error instanceof SyntaxError)) throw error;
-		throw new AIError.OAuthError("Perplexity returned an invalid session response", {
+		throw new AIError.OAuthError(__ompTranslate("Perplexity returned an invalid session response"), {
 			kind: "validation",
 			provider: "perplexity",
 		});
 	}
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 	if (typeof email !== "string" || !email.trim()) {
-		throw new AIError.OAuthError("Perplexity session is invalid or expired. Sign in again.", {
+		throw new AIError.OAuthError(__ompTranslate("Perplexity session is invalid or expired. Sign in again."), {
 			kind: "validation",
 			provider: "perplexity",
 		});
@@ -339,11 +353,11 @@ export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCrede
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 
 	if (!$env.PI_AUTH_NO_BORROW) {
-		ctrl.onProgress?.("Checking for Perplexity desktop app...");
+		ctrl.onProgress?.(__ompTranslate("Checking for Perplexity desktop app..."));
 		const nativeJwt = await extractFromNativeApp();
 		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 		if (nativeJwt) {
-			ctrl.onProgress?.("Found Perplexity JWT from native app");
+			ctrl.onProgress?.(__ompTranslate("Found Perplexity JWT from native app"));
 			return jwtToCredentials(nativeJwt);
 		}
 	}
@@ -351,7 +365,7 @@ export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCrede
 	if (ctrl.onBrowserSession) {
 		const method = (
 			await ctrl.onPrompt({
-				message: "Login method: sso (browser) or email; blank for sso",
+				message: __ompTranslate("Login method: sso (browser) or email; blank for sso"),
 				placeholder: "sso / email",
 				allowEmpty: true,
 			})
@@ -361,7 +375,7 @@ export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCrede
 		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 		if (!method || method === "sso") return browserSsoLogin(ctrl);
 		if (method !== "email") {
-			throw new AIError.OAuthError("Choose sso or email for Perplexity login", {
+			throw new AIError.OAuthError(__ompTranslate("Choose sso or email for Perplexity login"), {
 				kind: "validation",
 				provider: "perplexity",
 			});

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -89,13 +90,13 @@ export class CheckpointTool implements AgentTool<typeof checkpointSchema, Checkp
 export class RewindTool implements AgentTool<typeof rewindSchema, RewindToolDetails> {
 	readonly name = "rewind";
 	readonly approval = "read" as const;
-	readonly label = "Rewind";
+	readonly label = __ompTranslate("Rewind");
 	readonly summary = "Rewind to a previously created checkpoint";
 	readonly description: string;
 	readonly parameters = rewindSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
-	readonly intent = (): string => "rewinding";
+	readonly intent = (): string => __ompTranslate("rewinding");
 
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(rewindDescription);

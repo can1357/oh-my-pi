@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -436,7 +437,7 @@ function describeGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused:
 		default:
 			break;
 	}
-	let label = "Goal";
+	let label = __ompTranslate("Goal");
 	if (ctx.goalStatusInFooter === true && goal) label += ` ${formatGoalBudget(goal.tokensUsed, goal.tokenBudget)}`;
 	const token = color === "accent" ? accentToken(ctx, color) : color;
 	return segView([span(label, token)], icon, toneOf(color));
@@ -469,7 +470,7 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 			break;
 	}
 
-	const parts: string[] = [withIcon(icon, "Goal")];
+	const parts: string[] = [withIcon(icon, __ompTranslate("Goal"))];
 	const showBudget = ctx.goalStatusInFooter === true;
 	if (showBudget && goal) {
 		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
@@ -503,7 +504,7 @@ const modeSegment: StatusLineSegment = {
 
 		const plan = ctx.planMode;
 		if (plan && (plan.enabled || plan.paused)) {
-			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
+			const label = plan.paused ? `Plan${pauseSuffix}` : __ompTranslate("Plan");
 			const content = withIcon(theme.icon.plan, label);
 			return {
 				content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
@@ -549,8 +550,8 @@ const modeSegment: StatusLineSegment = {
 		const plan = ctx.planMode;
 		if (plan && (plan.enabled || plan.paused)) {
 			return plan.paused
-				? segView([span("Plan (paused)", "warning")], "plan", "warning")
-				: segView([span("Plan", accentToken(ctx, "accent"))], "plan");
+				? segView([span(__ompTranslate("Plan (paused)"), "warning")], "plan", "warning")
+				: segView([span(__ompTranslate("Plan"), accentToken(ctx, "accent"))], "plan");
 		}
 		if (ctx.prewalk?.enabled) return segView([span("Prewalk", accentToken(ctx, "accent"))], "prewalk");
 		const goal = ctx.goalMode;

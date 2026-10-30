@@ -13,6 +13,7 @@
  *     the broker already has.
  *   - `status` — health-pings the configured remote broker.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -192,7 +193,9 @@ async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	if (flags.via && !flags.provider) {
-		throw new Error("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)");
+		throw new Error(
+			__ompTranslate("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)"),
+		);
 	}
 	const providers = getOAuthProviders();
 	// One interface for picker + login prompts; closed before `--via` hands
@@ -203,10 +206,14 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		providerArg = flags.provider ?? (await pickOAuthProvider(rl, providers));
 		if (!providers.some(p => p.id === providerArg)) {
 			throw new Error(
-				`Unknown OAuth provider '${providerArg}'. Known: ${providers
-					.map(p => p.id)
-					.sort()
-					.join(", ")}`,
+				__ompTranslate(
+					"Unknown OAuth provider '{0}'. Known: {1}",
+					`${providerArg}`,
+					`${providers
+						.map(p => p.id)
+						.sort()
+						.join(", ")}`,
+				),
 			);
 		}
 		if (!flags.via) {
@@ -227,7 +234,7 @@ async function runLocalLogin(rl: readline.Interface, provider: string): Promise<
 	await storage.credentials.reload();
 	try {
 		await runTerminalOAuthLogin(rl, storage, provider);
-		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
+		process.stdout.write(__ompTranslate("\nCredentials saved to {0}\n", `${getAgentDbPath()}`));
 	} finally {
 		store.close();
 	}
@@ -237,7 +244,10 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 	const port = CALLBACK_PORTS[provider];
 	if (port === undefined) {
 		throw new Error(
-			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
+			__ompTranslate(
+				"No known OAuth callback port for '{0}'. Use device-code flow on the broker host directly.",
+				`${provider}`,
+			),
 		);
 	}
 	const sshArgs = [
@@ -254,7 +264,7 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 	}
 	const sshBin = $which("ssh");
 	if (!sshBin) {
-		throw new Error("ssh binary not found in PATH");
+		throw new Error(__ompTranslate("ssh binary not found in PATH"));
 	}
 	const proc = Bun.spawn({
 		cmd: [sshBin, ...sshArgs],
@@ -264,7 +274,7 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 	});
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) {
-		throw new Error(`ssh exited with code ${exitCode}`);
+		throw new Error(__ompTranslate("ssh exited with code {0}", `${exitCode}`));
 	}
 }
 
@@ -275,18 +285,18 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		if (!providerArg) {
 			const stored = store.listProviders();
 			if (stored.length === 0) {
-				process.stdout.write("No credentials stored.\n");
+				process.stdout.write(__ompTranslate("No credentials stored.\n"));
 				return;
 			}
 			const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 			try {
-				providerArg = stored[await pickIndex(rl, "Select a provider to logout:", stored)];
+				providerArg = stored[await pickIndex(rl, __ompTranslate("Select a provider to logout:"), stored)];
 			} finally {
 				rl.close();
 			}
 		}
 		await store.deleteAuthCredentials(providerArg, "logged out by user");
-		process.stdout.write(`Logged out of ${providerArg}\n`);
+		process.stdout.write(__ompTranslate("Logged out of {0}\n", `${providerArg}`));
 	} finally {
 		store.close();
 	}
@@ -298,7 +308,7 @@ async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		process.stdout.write(`${JSON.stringify(providers.map(p => ({ id: p.id, name: p.name })))}\n`);
 		return;
 	}
-	process.stdout.write("Available providers:\n\n");
+	process.stdout.write(__ompTranslate("Available providers:\n\n"));
 	for (const p of providers) {
 		process.stdout.write(`  ${p.id.padEnd(20)} ${p.name}\n`);
 	}
@@ -366,7 +376,7 @@ async function collectImportSources(target: string): Promise<string[]> {
 	const stat = await fs.stat(target);
 	if (stat.isFile()) return [target];
 	if (!stat.isDirectory()) {
-		throw new Error(`Import source is neither file nor directory: ${target}`);
+		throw new Error(__ompTranslate("Import source is neither file nor directory: {0}", `${target}`));
 	}
 	const entries = await fs.readdir(target, { withFileTypes: true });
 	const files: string[] = [];
@@ -440,16 +450,25 @@ async function loadImportPlan(
 }
 
 function describeImportEntry(entry: ImportPlanEntry): string {
-	const ident = entry.email ?? entry.accountId ?? "(no identity)";
-	const stale = entry.expiresAt < Date.now() ? " [expired]" : "";
-	const disabled = entry.disabled ? " [disabled]" : "";
-	return `${entry.provider}: ${ident}${stale}${disabled} from ${entry.sourceFile}`;
+	const ident = entry.email ?? entry.accountId ?? __ompTranslate("(no identity)");
+	const stale = entry.expiresAt < Date.now() ? __ompTranslate(" [expired]") : "";
+	const disabled = entry.disabled ? __ompTranslate(" [disabled]") : "";
+	return __ompTranslate(
+		"{0}: {1}{2}{3} from {4}",
+		`${entry.provider}`,
+		`${ident}`,
+		`${stale}`,
+		`${disabled}`,
+		`${entry.sourceFile}`,
+	);
 }
 
 async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const target = flags.source;
 	if (!target) {
-		throw new Error("Usage: omp auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
+		throw new Error(
+			__ompTranslate("Usage: omp auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]"),
+		);
 	}
 	const resolvedTarget = path.resolve(target.startsWith("~") ? target.replace(/^~/, os.homedir()) : target);
 	const { entries, skipped } = await loadImportPlan(resolvedTarget, flags.provider, flags.includeDisabled === true);
@@ -476,18 +495,18 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	if (!flags.json) {
 		for (const skip of skipped) {
-			process.stdout.write(`${chalk.yellow("skip")} ${skip.file}: ${skip.reason}\n`);
+			process.stdout.write(`${chalk.yellow(__ompTranslate("skip"))} ${skip.file}: ${skip.reason}\n`);
 		}
 	}
 
 	if (entries.length === 0) {
-		if (!flags.json) process.stdout.write(`No importable credentials in ${resolvedTarget}.\n`);
+		if (!flags.json) process.stdout.write(__ompTranslate("No importable credentials in {0}.\n", `${resolvedTarget}`));
 		return;
 	}
 
 	if (flags.dryRun === true) {
 		if (!flags.json) {
-			process.stdout.write(`Dry run — would import ${entries.length} credential(s):\n`);
+			process.stdout.write(__ompTranslate("Dry run — would import {0} credential(s):\n", `${entries.length}`));
 			for (const entry of entries) process.stdout.write(`  ${describeImportEntry(entry)}\n`);
 		}
 		return;
@@ -500,14 +519,18 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			try {
 				await client.uploadCredential(entry.provider, entry.credential);
 				if (!flags.json) {
-					process.stdout.write(`${chalk.green("uploaded")} ${describeImportEntry(entry)} → ${brokerConfig.url}\n`);
+					process.stdout.write(
+						`${chalk.green(__ompTranslate("uploaded"))} ${describeImportEntry(entry)} → ${brokerConfig.url}\n`,
+					);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				if (flags.json) {
 					process.stdout.write(`${JSON.stringify({ error: message, file: entry.sourceFile })}\n`);
 				} else {
-					process.stdout.write(`${chalk.red("failed")} ${describeImportEntry(entry)}: ${message}\n`);
+					process.stdout.write(
+						`${chalk.red(__ompTranslate("failed"))} ${describeImportEntry(entry)}: ${message}\n`,
+					);
 				}
 				process.exitCode = 1;
 			}
@@ -519,7 +542,8 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	try {
 		for (const entry of entries) {
 			await store.upsertAuthCredential(entry.provider, entry.credential);
-			if (!flags.json) process.stdout.write(`${chalk.green("imported")} ${describeImportEntry(entry)}\n`);
+			if (!flags.json)
+				process.stdout.write(`${chalk.green(__ompTranslate("imported"))} ${describeImportEntry(entry)}\n`);
 		}
 	} finally {
 		store.close();
@@ -575,18 +599,22 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
-			"OMP_AUTH_BROKER_URL must be set (or `auth.broker.url` in config.yml). `migrate` uploads local credentials to a configured broker.",
+			__ompTranslate(
+				"OMP_AUTH_BROKER_URL must be set (or `auth.broker.url` in config.yml). `migrate` uploads local credentials to a configured broker.",
+			),
 		);
 	}
 	if (flags.fromLocal !== true) {
 		throw new Error(
-			"`omp auth-broker migrate` requires an explicit source. Pass `--from-local` to migrate from the local SQLite store and env vars.",
+			__ompTranslate(
+				"`omp auth-broker migrate` requires an explicit source. Pass `--from-local` to migrate from the local SQLite store and env vars.",
+			),
 		);
 	}
 
 	const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 	const snapshotResult = await client.fetchSnapshot();
-	if (snapshotResult.status !== 200) throw new Error("Auth broker returned no snapshot");
+	if (snapshotResult.status !== 200) throw new Error(__ompTranslate("Auth broker returned no snapshot"));
 	const existing = snapshotResult.snapshot.credentials;
 
 	const plan: MigratePlanEntry[] = [];
@@ -693,13 +721,13 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	}
 
 	if (plan.length === 0) {
-		if (!flags.json) process.stdout.write("Nothing to migrate.\n");
+		if (!flags.json) process.stdout.write(__ompTranslate("Nothing to migrate.\n"));
 		return;
 	}
 
 	if (flags.dryRun === true) {
 		if (!flags.json) {
-			process.stdout.write(`Dry run — would upload ${plan.length} credential(s):\n`);
+			process.stdout.write(__ompTranslate("Dry run — would upload {0} credential(s):\n", `${plan.length}`));
 			for (const entry of plan) {
 				process.stdout.write(`  [${entry.source}] ${entry.provider} ${entry.identity}\n`);
 			}
@@ -728,7 +756,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 async function runStatus(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const cfg = await resolveAuthBrokerConfig();
 	if (!cfg) {
-		const message = "No auth-broker configured (set OMP_AUTH_BROKER_URL to enable).";
+		const message = __ompTranslate("No auth-broker configured (set OMP_AUTH_BROKER_URL to enable).");
 		if (flags.json) process.stdout.write(`${JSON.stringify({ ok: false, reason: "not_configured" })}\n`);
 		else process.stdout.write(`${chalk.yellow(message)}\n`);
 		return;
@@ -739,14 +767,21 @@ async function runStatus(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ url: cfg.url, ...health })}\n`);
 		} else {
-			process.stdout.write(`${chalk.green("OK")} ${cfg.url} (version=${health.version ?? "unknown"})\n`);
+			process.stdout.write(
+				__ompTranslate(
+					"{0} {1} (version={2})\n",
+					`${chalk.green(__ompTranslate("OK"))}`,
+					`${cfg.url}`,
+					`${health.version ?? __ompTranslate("unknown")}`,
+				),
+			);
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ ok: false, url: cfg.url, error: message })}\n`);
 		} else {
-			process.stdout.write(`${chalk.red("FAILED")} ${cfg.url}: ${message}\n`);
+			process.stdout.write(`${chalk.red(__ompTranslate("FAILED"))} ${cfg.url}: ${message}\n`);
 		}
 		process.exitCode = 1;
 	}
@@ -781,7 +816,7 @@ export async function runAuthBrokerCommand(cmd: AuthBrokerCommandArgs): Promise<
 		default: {
 			// Exhaustive check.
 			const _exhaustive: never = cmd.action;
-			throw new Error(`Unknown auth-broker action: ${String(_exhaustive)}`);
+			throw new Error(__ompTranslate("Unknown auth-broker action: {0}", `${String(_exhaustive)}`));
 		}
 	}
 }

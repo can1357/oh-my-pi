@@ -18,6 +18,7 @@
  * Expand / Close actions; without `picker` it describes a page with the same
  * parts. Pointer events run the key paths above.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspPickerAction, TspPickerColumn, TspPickerScope } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
 import { col, keyed, node, span, text } from "../../native/describe";
@@ -111,7 +112,7 @@ export function buildTabBarTabs(tabs: ProviderTab[]): Tab[] {
 }
 
 /** The sheet/page title, shared by the ANSI frame and the native views. */
-const DASHBOARD_TITLE = "Extension Control Center";
+const DASHBOARD_TITLE = __ompTranslate("Extension Control Center");
 
 /** The kind column shown when rows are not grouped under kind headers (a provider scope or a search). */
 const KIND_COLUMNS: readonly TspPickerColumn[] = [{ id: "kind", format: "dim", priority: 1 }];
@@ -133,16 +134,16 @@ function providerInitials(label: string): string {
  */
 export function buildPickerScopes(tabs: ProviderTab[]): TspPickerScope[] {
 	return tabs.map(tab => {
-		if (tab.id === "all") return { id: tab.id, label: "All", icon: "extension", count: tab.count };
+		if (tab.id === "all") return { id: tab.id, label: __ompTranslate("All"), icon: "extension", count: tab.count };
 		const emptyEnabled = tab.count === 0 && tab.enabled;
 		return {
 			id: tab.id,
 			label: tab.label,
 			mark: { text: providerInitials(tab.label), seed: tab.id },
 			count: tab.count,
-			group: "Providers",
+			group: __ompTranslate("Providers"),
 			dot: !tab.enabled ? "muted" : emptyEnabled ? "warning" : "success",
-			disabled: emptyEnabled ? "No extensions" : undefined,
+			disabled: emptyEnabled ? __ompTranslate("No extensions") : undefined,
 		};
 	});
 }
@@ -650,12 +651,12 @@ export class ExtensionDashboard implements Component {
 			{
 				title: DASHBOARD_TITLE,
 				icon: "extension",
-				noun: "extensions",
+				noun: __ompTranslate("extensions"),
 				size: "lg",
 				layout: "rows",
 				preview: "side",
 				...this.#mainList.nativeQuery(),
-				placeholder: "Search extensions…",
+				placeholder: __ompTranslate("Search extensions…"),
 				scopes: buildPickerScopes(this.#state.tabs),
 				scope: activeTab?.id ?? "all",
 				columns: view.grouped ? undefined : KIND_COLUMNS,
@@ -664,7 +665,7 @@ export class ExtensionDashboard implements Component {
 				hits: view.hits,
 				selected: view.selected,
 				total: this.#state.tabFiltered.length,
-				empty: "No extensions found for this provider.",
+				empty: __ompTranslate("No extensions found for this provider."),
 				actions: this.#pickerActions(this.#mainList.selectedSwitch()),
 				focus: "list",
 			},
@@ -684,12 +685,14 @@ export class ExtensionDashboard implements Component {
 	#pickerActions(selected: ExtensionListSwitch | undefined): TspPickerAction[] {
 		const expanded = this.#inspector.isExpanded();
 		return [
-			pickerAction("toggle", "Toggle", "space", {
+			pickerAction("toggle", __ompTranslate("Toggle"), "space", {
 				primary: true,
 				on: selected?.on,
-				disabled: selected ? selected.blocked : "Select an extension",
+				disabled: selected ? selected.blocked : __ompTranslate("Select an extension"),
 			}),
-			pickerAction("expand", expanded ? "Collapse" : "Expand", this.#expandKey(), { on: expanded }),
+			pickerAction("expand", expanded ? __ompTranslate("Collapse") : __ompTranslate("Expand"), this.#expandKey(), {
+				on: expanded,
+			}),
 			CLOSE_ACTION,
 		];
 	}
@@ -715,7 +718,7 @@ export class ExtensionDashboard implements Component {
 					name: "x",
 					role: "omp.app.ibtn",
 					title: `Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
-					aria: "Close",
+					aria: __ompTranslate("Close"),
 					actions: { click: "close" },
 				}),
 			],
@@ -738,15 +741,17 @@ export class ExtensionDashboard implements Component {
 		);
 		const expanded = this.#inspector.isExpanded();
 		const buttons: (NativeNode | null)[] = [
-			actionButton(selected?.on === false ? "Enable" : selected ? "Disable" : "Toggle", "toggle", {
+			actionButton(selected?.on === false ? "Enable" : selected ? "Disable" : __ompTranslate("Toggle"), "toggle", {
 				keys: "space",
 				tone: "accent",
-				title: selected?.blocked ?? (selected ? undefined : "Select an extension"),
+				title: selected?.blocked ?? (selected ? undefined : __ompTranslate("Select an extension")),
 			}),
-			actionButton(expanded ? "Collapse" : "Expand", "expand", { keys: this.#expandKey() }),
+			actionButton(expanded ? __ompTranslate("Collapse") : __ompTranslate("Expand"), "expand", {
+				keys: this.#expandKey(),
+			}),
 		];
-		if (query) buttons.push(actionButton("Clear search", "clear", { keys: "escape" }));
-		buttons.push(null, actionButton("Close", "close", { keys: "escape" }));
+		if (query) buttons.push(actionButton(__ompTranslate("Clear search"), "clear", { keys: "escape" }));
+		buttons.push(null, actionButton(__ompTranslate("Close"), "close", { keys: "escape" }));
 		return col([head, this.#tabBar, keyed(search, "search"), body, actionBar(buttons)], { gap: "md", grow: 1 });
 	}
 

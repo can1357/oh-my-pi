@@ -3,6 +3,7 @@
  * user code, show the verification URL, poll the token endpoint until the
  * grant completes, then project / enrich the credentials.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { CompiledDeviceCodeLogin } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
 import { type OAuthDeviceCodePollResult, pollOAuthDeviceCodeFlow } from "../oauth/device-code";
@@ -48,7 +49,7 @@ export function createDeviceCodeLogin(
 		const context = { provider, fetch: fetchImpl, signal, headers: hookHeaders };
 		const vars: TemplateVars = { client_id: clientId, scope, base };
 
-		ctrl.onProgress?.("Requesting device authorization...");
+		ctrl.onProgress?.(__ompTranslate("Requesting device authorization..."));
 		const device = await postTokenRequest(rule.device, { client_id: clientId, scope }, vars, context, "device-auth");
 		if (!device.response.ok) {
 			throw new AIError.OAuthError(
@@ -71,7 +72,7 @@ export function createDeviceCodeLogin(
 			url: verificationUriComplete ?? verificationUri,
 			instructions: template(rule.instructions, { user_code: userCode }),
 		});
-		ctrl.onProgress?.("Waiting for device authorization...");
+		ctrl.onProgress?.(__ompTranslate("Waiting for device authorization..."));
 
 		const pollVars: TemplateVars = { ...vars, device_code: deviceCode };
 		// Resolve the token endpoint once (it may come from OIDC discovery) rather than per poll.

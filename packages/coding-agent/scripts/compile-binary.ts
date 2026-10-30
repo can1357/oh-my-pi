@@ -1,10 +1,12 @@
 // Deep import: the pi-utils barrel loads the host native addon, which is
 // absent on cross-compiling release runners.
+import * as path from "node:path";
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { embeddedAddonFiles, type NativeEmbedTarget } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
+import { stageLanguagePack } from "./stage-language-pack";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
@@ -87,6 +89,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		if (!output.success) {
 			throw new Error(`Coding-agent binary bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
 		}
+		await stageLanguagePack(path.dirname(options.outfile));
 	} finally {
 		if (previousCodesignSetting === undefined) {
 			delete Bun.env.BUN_NO_CODESIGN_MACHO_BINARY;

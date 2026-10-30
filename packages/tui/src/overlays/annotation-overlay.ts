@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import {
 	type Focusable,
 	Editor,
@@ -56,8 +57,8 @@ function fit(text: string, width: number): string {
 	return truncatedWidth < width ? truncated + padding(width - truncatedWidth) : truncated;
 }
 
-export const CONTINUE_CODE_REVIEW_ACTION = "Continue with LLM review";
-export const PASTE_CODE_REVIEW_ACTION = "Paste annotations into prompt";
+export const CONTINUE_CODE_REVIEW_ACTION = __ompTranslate("Continue with LLM review");
+export const PASTE_CODE_REVIEW_ACTION = __ompTranslate("Paste annotations into prompt");
 
 export interface AnnotationOverlayCallbacks {
 	onComplete(result: CodeReviewOverlayResult | TextReviewOverlayResult | undefined): void;
@@ -120,8 +121,8 @@ interface NativeBody {
 
 const SOURCE_SELECTION_GUTTER_WIDTH = 2;
 
-const OVERLAY_TITLE = "Code Review";
-const TEXT_OVERLAY_TITLE = "Annotate Text";
+const OVERLAY_TITLE = __ompTranslate("Code Review");
+const TEXT_OVERLAY_TITLE = __ompTranslate("Annotate Text");
 const MIN_BODY_ROWS = 3;
 const SIDEBAR_MIN_TOTAL_WIDTH = 64;
 const SIDEBAR_MIN_BODY_WIDTH = 40;
@@ -164,10 +165,10 @@ interface NativeSheet {
 	readonly size: "full";
 	readonly head: TspSpan[];
 }
-const DIFF_SHEET_TITLE = "Code review";
-const TEXT_SHEET_TITLE = "Annotate text";
+const DIFF_SHEET_TITLE = __ompTranslate("Code review");
+const TEXT_SHEET_TITLE = __ompTranslate("Annotate text");
 
-const NOTE_PLACEHOLDER = "Write a note…";
+const NOTE_PLACEHOLDER = __ompTranslate("Write a note…");
 
 type FileStatus = "added" | "deleted" | "renamed" | "modified";
 const FILE_STATUS_ICON: Record<FileStatus, string> = {
@@ -295,7 +296,7 @@ export class AnnotationOverlay implements Focusable {
 		if (isTextSource(filesOrSource)) {
 			this.#files = [];
 			this.#actions = TEXT_REVIEW_ACTIONS;
-			this.#mode = "Annotating text";
+			this.#mode = __ompTranslate("Annotating text");
 			this.#callbacks = modeOrCallbacks as TextReviewOverlayCallbacks;
 			this.#textSource = { ...filesOrSource };
 			this.#textLines = splitTextLines(filesOrSource.text);
@@ -774,7 +775,7 @@ export class AnnotationOverlay implements Focusable {
 		const file = this.#currentFile();
 		const source = this.#currentSourceRows()[this.#sourceIndex];
 		if (!file || (scope === "line" && (file.isBinary || !source))) {
-			this.#callbacks.onWarning?.("This file has no annotatable diff rows");
+			this.#callbacks.onWarning?.(__ompTranslate("This file has no annotatable diff rows"));
 			return;
 		}
 		const existing = existingIndex === undefined ? undefined : this.#annotations[existingIndex];
@@ -974,13 +975,22 @@ export class AnnotationOverlay implements Focusable {
 	}
 
 	#annotationLocation(entry: CommittedAnnotation): string {
-		if (entry.annotation.scope === "file") return `${displayFileLabel(this.#files[entry.fileIndex]!)} · file`;
+		if (entry.annotation.scope === "file")
+			return __ompTranslate("{0} · file", `${displayFileLabel(this.#files[entry.fileIndex]!)}`);
 		return `${displayFileLabel(this.#files[entry.fileIndex]!)} · ${entry.annotation.oldLine ?? "-"}/${entry.annotation.newLine ?? "-"}`;
 	}
 
 	#textAnnotationLocation(entry: CommittedTextAnnotation): string {
-		if (entry.annotation.scope === "text") return `${sanitizeStatusText(this.#textSource?.label ?? "text")} · text`;
-		return `${sanitizeStatusText(this.#textSource?.label ?? "text")} · line ${entry.annotation.line}`;
+		if (entry.annotation.scope === "text")
+			return __ompTranslate(
+				"{0} · text",
+				`${sanitizeStatusText(this.#textSource?.label ?? __ompTranslate("text"))}`,
+			);
+		return __ompTranslate(
+			"{0} · line {1}",
+			`${sanitizeStatusText(this.#textSource?.label ?? __ompTranslate("text"))}`,
+			`${entry.annotation.line}`,
+		);
 	}
 
 	#pushUndo(): void {
@@ -1000,7 +1010,7 @@ export class AnnotationOverlay implements Focusable {
 		if (this.#externalOperation || !this.#annotating) return;
 		const openEditor = this.#callbacks.onAnnotationExternalEditor;
 		if (!openEditor) {
-			this.#callbacks.onWarning?.("External editor is unavailable in this UI host.");
+			this.#callbacks.onWarning?.(__ompTranslate("External editor is unavailable in this UI host."));
 			return;
 		}
 		const draft = this.#editor.getExpandedText();
@@ -1011,7 +1021,10 @@ export class AnnotationOverlay implements Focusable {
 			});
 		} catch (error) {
 			this.#callbacks.onWarning?.(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
+				__ompTranslate(
+					"Failed to open external editor: {0}\u0004todo.editor.failure",
+					`${error instanceof Error ? error.message : String(error)}`,
+				),
 			);
 		} finally {
 			this.#externalOperation = false;
@@ -1027,7 +1040,10 @@ export class AnnotationOverlay implements Focusable {
 			await openEditor();
 		} catch (error) {
 			this.#callbacks.onWarning?.(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
+				__ompTranslate(
+					"Failed to open external editor: {0}\u0004todo.editor.failure",
+					`${error instanceof Error ? error.message : String(error)}`,
+				),
 			);
 		} finally {
 			this.#externalOperation = false;
@@ -1046,7 +1062,7 @@ export class AnnotationOverlay implements Focusable {
 		const file = this.#currentFile();
 		if (!file)
 			return {
-				lines: [this.#theme.fg("dim", "No reviewable files")],
+				lines: [this.#theme.fg("dim", __ompTranslate("No reviewable files"))],
 				renderedRowBySource: [],
 			};
 		const staticBody = this.#getStaticRenderedBody(file, contentWidth);
@@ -1057,7 +1073,7 @@ export class AnnotationOverlay implements Focusable {
 		// status rows (including binary and rename-only files).
 		for (const entry of this.#annotations) {
 			if (entry.fileIndex === this.#fileIndex && entry.annotation.scope === "file") {
-				this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth, "file note");
+				this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth, __ompTranslate("file note"));
 			}
 		}
 
@@ -1094,7 +1110,7 @@ export class AnnotationOverlay implements Focusable {
 
 		for (const entry of this.#textAnnotations) {
 			if (entry.annotation.scope === "text") {
-				this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth, "text note");
+				this.#appendAnnotationCallout(lines, entry.annotation.note, contentWidth, __ompTranslate("text note"));
 			}
 		}
 
@@ -1134,9 +1150,9 @@ export class AnnotationOverlay implements Focusable {
 			selectedSourceLines.push(undefined);
 		};
 		if (file.isBinary) {
-			pushStaticLine(this.#theme.fg("dim", "Binary diff; no annotatable source rows"));
+			pushStaticLine(this.#theme.fg("dim", __ompTranslate("Binary diff; no annotatable source rows")));
 		} else if (file.rows.length === 0) {
-			pushStaticLine(this.#theme.fg("dim", "No diff hunks; this may be a rename-only change"));
+			pushStaticLine(this.#theme.fg("dim", __ompTranslate("No diff hunks; this may be a rename-only change")));
 		} else {
 			let sourceIndex = 0;
 			for (const diffRow of file.rows) {
@@ -1180,7 +1196,7 @@ export class AnnotationOverlay implements Focusable {
 		return body;
 	}
 
-	#appendAnnotationCallout(lines: string[], note: string, width: number, label = "note"): void {
+	#appendAnnotationCallout(lines: string[], note: string, width: number, label = __ompTranslate("note")): void {
 		const gutter = this.#theme.fg("warning", "▎ ");
 		const labelText = this.#theme.fg("dim", `${label}: `);
 		const continuation = `${gutter}${" ".repeat(visibleWidth(labelText))}`;
@@ -1203,7 +1219,7 @@ export class AnnotationOverlay implements Focusable {
 			);
 		}
 		const file = this.#currentFile();
-		if (!file) return this.#theme.fg("dim", "No reviewable files");
+		if (!file) return this.#theme.fg("dim", __ompTranslate("No reviewable files"));
 		const count = this.#annotationCount(this.#fileIndex);
 		const suffix = `  +${file.linesAdded}/-${file.linesRemoved}${count ? `  ✎${count}` : ""}`;
 		return truncateToWidth(
@@ -1249,11 +1265,21 @@ export class AnnotationOverlay implements Focusable {
 		const options = chooser.entries
 			.slice(start, start + optionLimit)
 			.map((index, windowIndex) => this.#renderAnnotationChooserEntry(chooser, index, start + windowIndex, width));
-		const keysHint = `${this.#key("tui.select.up")}/${this.#key("tui.select.down")} choose · ${this.#key("tui.select.confirm")} edit · ${this.#key("tui.select.cancel")} cancel`;
+		const keysHint = __ompTranslate(
+			"{0}/{1} choose · {2} edit · {3} cancel",
+			`${this.#key("tui.select.up")}`,
+			`${this.#key("tui.select.down")}`,
+			`${this.#key("tui.select.confirm")}`,
+			`${this.#key("tui.select.cancel")}`,
+		);
 		const lines =
 			availableRows === 2
-				? [this.#theme.fg("dim", `Edit annotation · ${keysHint}`), ...options.slice(0, 1)]
-				: [this.#theme.fg("dim", `Edit annotation · ${keysHint}`), ...options, this.#theme.fg("dim", keysHint)];
+				? [this.#theme.fg("dim", __ompTranslate("Edit annotation · {0}", `${keysHint}`)), ...options.slice(0, 1)]
+				: [
+						this.#theme.fg("dim", __ompTranslate("Edit annotation · {0}", `${keysHint}`)),
+						...options,
+						this.#theme.fg("dim", keysHint),
+					];
 		return Number.isFinite(availableRows) ? lines.slice(0, availableRows) : lines;
 	}
 
@@ -1291,11 +1317,11 @@ export class AnnotationOverlay implements Focusable {
 				Ellipsis.Unicode,
 			);
 			const hints = [
-				`${editorKey("tui.input.submit")} save`,
-				`${editorKey("tui.input.newLine")} newline`,
-				`${this.#key("tui.select.cancel")} close, keep note`,
+				__ompTranslate("{0} save", `${editorKey("tui.input.submit")}`),
+				__ompTranslate("{0} newline", `${editorKey("tui.input.newLine")}`),
+				__ompTranslate("{0} close, keep note", `${this.#key("tui.select.cancel")}`),
 			];
-			hints.push(`${formatKeyHint(appExternalEditorKey())} editor`);
+			hints.push(__ompTranslate("{0} editor", `${formatKeyHint(appExternalEditorKey())}`));
 			return [caption, ...this.#editor.render(width), this.#theme.fg("dim", hints.join(" · "))];
 		}
 		return [this.#theme.fg("dim", this.#helpText())];
@@ -1307,30 +1333,33 @@ export class AnnotationOverlay implements Focusable {
 		let action: string;
 		if (this.#textSource) {
 			const label = sanitizeStatusText(this.#textSource.label);
-			location = this.#annotationScope === "text" ? `${label} · text` : `${label} · line ${this.#sourceIndex + 1}`;
+			location =
+				this.#annotationScope === "text"
+					? __ompTranslate("{0} · text", `${label}`)
+					: __ompTranslate("{0} · line {1}", `${label}`, `${this.#sourceIndex + 1}`);
 			action =
 				this.#editingAnnotationIndex === undefined
 					? this.#annotationScope === "text"
-						? "Annotate text"
-						: "Annotate line"
-					: "Edit annotation";
+						? __ompTranslate("Annotate text")
+						: __ompTranslate("Annotate line")
+					: __ompTranslate("Edit annotation");
 		} else {
 			const file = this.#currentFile();
 			const source = this.#currentSourceRows()[this.#sourceIndex];
 			location =
 				this.#annotationScope === "file"
 					? file
-						? `${displayFileLabel(file)} · file`
-						: "file"
+						? __ompTranslate("{0} · file", `${displayFileLabel(file)}`)
+						: __ompTranslate("file\u0004tool.lsp.file")
 					: source && file
 						? `${displayFileLabel(file)} · ${source.oldLine ?? "-"}/${source.newLine ?? "-"}`
-						: "diff row";
+						: __ompTranslate("diff row");
 			action =
 				this.#editingAnnotationIndex === undefined
 					? this.#annotationScope === "file"
-						? "Annotate file"
-						: "Annotate line"
-					: "Edit annotation";
+						? __ompTranslate("Annotate file")
+						: __ompTranslate("Annotate line")
+					: __ompTranslate("Edit annotation");
 		}
 		return { action, location: sanitizeStatusText(location) };
 	}
@@ -1339,15 +1368,41 @@ export class AnnotationOverlay implements Focusable {
 	#helpText(): string {
 		const upDown = `${this.#key("tui.select.up")}/${this.#key("tui.select.down")}`;
 		const confirm = this.#key("tui.select.confirm");
-		const editNote = `${formatKeyHint("e")} edit note`;
+		const editNote = __ompTranslate("{0} edit note", `${formatKeyHint("e")}`);
 		const focusHelp =
 			this.#focus === "files"
-				? `${upDown} file · ${confirm} diff · ${formatKeyHints(["a", "shift+a"])} file note · ${editNote}`
+				? __ompTranslate(
+						"{0} file · {1} diff · {2} file note · {3}",
+						`${upDown}`,
+						`${confirm}`,
+						`${formatKeyHints(["a", "shift+a"])}`,
+						`${editNote}`,
+					)
 				: this.#focus === "diff"
-					? `${upDown} line · ${formatKeyHint("shift")} faster · ${this.#key("tui.select.pageUp")}/${this.#key("tui.select.pageDown")} · ${formatKeyHints(["g", "shift+g"])} ends · ${formatKeyHint("a")} line note · ${formatKeyHint("shift+a")} ${this.#textSource ? "text" : "file"} note · ${editNote}`
-					: `${upDown} select · ${confirm} confirm`;
-		const editorHint = this.#callbacks.onExternalEditor ? ` · ${formatKeyHint(appExternalEditorKey())} editor` : "";
-		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions${editorHint} · ${this.#key("tui.select.cancel")} cancel`;
+					? __ompTranslate(
+							"{0} line · {1} faster · {2}/{3} · {4} ends · {5} line note · {6} {7} note · {8}",
+							`${upDown}`,
+							`${formatKeyHint("shift")}`,
+							`${this.#key("tui.select.pageUp")}`,
+							`${this.#key("tui.select.pageDown")}`,
+							`${formatKeyHints(["g", "shift+g"])}`,
+							`${formatKeyHint("a")}`,
+							`${formatKeyHint("shift+a")}`,
+							`${this.#textSource ? __ompTranslate("text") : __ompTranslate("file\u0004tool.lsp.file")}`,
+							`${editNote}`,
+						)
+					: __ompTranslate("{0} select · {1} confirm", `${upDown}`, `${confirm}`);
+		const editorHint = this.#callbacks.onExternalEditor
+			? __ompTranslate(" · {0} editor", `${formatKeyHint(appExternalEditorKey())}`)
+			: "";
+		return __ompTranslate(
+			"{0} · {1} undo · {2} regions{3} · {4} cancel",
+			`${focusHelp}`,
+			`${formatKeyHint("u")}`,
+			`${formatKeyHint("tab")}`,
+			`${editorHint}`,
+			`${this.#key("tui.select.cancel")}`,
+		);
 	}
 
 	#ensureCursorVisible(renderedRowBySource: readonly number[]): boolean {
@@ -1507,7 +1562,12 @@ export class AnnotationOverlay implements Focusable {
 			selected: rowCount > 0 ? `l${this.#sourceIndex}` : null,
 			// Past 200 rows the terminal virtualizes the list itself (fixed one-line rows).
 			max: { lines: this.#bodyHeight },
-			empty: [span(this.#textSource ? "This text is empty" : "Nothing to review", "muted")],
+			empty: [
+				span(
+					this.#textSource ? __ompTranslate("This text is empty") : __ompTranslate("Nothing to review"),
+					"muted",
+				),
+			],
 			role: this.#textSource ? "omp.review.text" : "omp.review.diff",
 			tone: this.#focus === "diff" && !editing ? "accent" : undefined,
 		});
@@ -1617,7 +1677,8 @@ export class AnnotationOverlay implements Focusable {
 			items.push(item(key, { label: [span(label, "muted")], icon, disabled: true, tone: "muted" }));
 		if (this.#textSource) {
 			for (const [index, entry] of this.#textAnnotations.entries()) {
-				if (entry.annotation.scope === "text") note(`n${index}`, entry.annotation.note, "Whole text");
+				if (entry.annotation.scope === "text")
+					note(`n${index}`, entry.annotation.note, __ompTranslate("Whole text"));
 			}
 			const mono = this.#textSource.kind !== "message" && this.#textSource.kind !== "prompt";
 			const width = String(this.#textLines.length).length;
@@ -1639,13 +1700,13 @@ export class AnnotationOverlay implements Focusable {
 			if (file) {
 				for (const [index, entry] of this.#annotations.entries()) {
 					if (entry.fileIndex === this.#fileIndex && entry.annotation.scope === "file") {
-						note(`n${index}`, entry.annotation.note, "File note");
+						note(`n${index}`, entry.annotation.note, __ompTranslate("File note"));
 					}
 				}
 				if (file.isBinary) {
-					notice("binary", "Binary file: no lines to annotate, but a file note works", "binary");
+					notice("binary", __ompTranslate("Binary file: no lines to annotate, but a file note works"), "binary");
 				} else if (file.rows.length === 0) {
-					notice("empty", "No hunks: this looks like a rename-only change", "forward");
+					notice("empty", __ompTranslate("No hunks: this looks like a rename-only change"), "forward");
 				}
 				let lineWidth = 1;
 				for (const diffRow of file.isBinary ? [] : file.rows) {
@@ -1670,7 +1731,7 @@ export class AnnotationOverlay implements Focusable {
 						} else {
 							items.push(
 								item(`r${rowIndex}`, {
-									label: [span("No newline at end of file", "muted")],
+									label: [span(__ompTranslate("No newline at end of file"), "muted")],
 									value: blankGutter,
 									disabled: true,
 									tone: "muted",
@@ -1755,7 +1816,7 @@ export class AnnotationOverlay implements Focusable {
 			{
 				selected: this.#files.length > 0 ? `f${this.#fileIndex}` : null,
 				max: { lines: this.#bodyHeight },
-				empty: [span("No files", "muted")],
+				empty: [span(__ompTranslate("No files"), "muted")],
 				role: "omp.review.files",
 				tone: this.#focus === "files" && !editing ? "accent" : undefined,
 			},
@@ -1782,18 +1843,18 @@ export class AnnotationOverlay implements Focusable {
 			return node("row", props, children, "head");
 		}
 		const file = this.#currentFile();
-		if (!file) return node("row", props, [text([span("No reviewable files", "muted")])], "head");
+		if (!file) return node("row", props, [text([span(__ompTranslate("No reviewable files"), "muted")])], "head");
 		const status = fileStatus(file);
 		children.push(
 			text([span(sanitizeStatusText(displayFileLabel(file)), "path")], { truncate: "middle", min: { w: 0 } }),
 		);
 		const what =
 			status === "renamed" && file.oldPath
-				? `Renamed from ${sanitizeStatusText(file.oldPath)}`
+				? __ompTranslate("Renamed from {0}", `${sanitizeStatusText(file.oldPath)}`)
 				: status === "added"
-					? "New file"
+					? __ompTranslate("New file")
 					: status === "deleted"
-						? "Deleted"
+						? __ompTranslate("Deleted")
 						: file.isBinary
 							? "Binary"
 							: undefined;
@@ -1836,14 +1897,14 @@ export class AnnotationOverlay implements Focusable {
 				const location = !annotation
 					? ""
 					: annotation.scope === "file"
-						? "File note"
+						? __ompTranslate("File note")
 						: annotation.scope === "text"
-							? "Whole text"
+							? __ompTranslate("Whole text")
 							: "line" in annotation
-								? `Line ${annotation.line}`
+								? __ompTranslate("Line {0}", `${annotation.line}`)
 								: annotation.newLine !== undefined
-									? `Line ${annotation.newLine}`
-									: `Removed line ${annotation.oldLine ?? ""}`.trim();
+									? __ompTranslate("Line {0}", `${annotation.newLine}`)
+									: __ompTranslate("Removed line {0}", `${annotation.oldLine ?? ""}`).trim();
 				return item(`c${i}`, {
 					label: sanitizeStatusText(annotation?.note.split(/\r?\n/, 1)[0] ?? ""),
 					value: location,
@@ -1854,7 +1915,7 @@ export class AnnotationOverlay implements Focusable {
 				"col",
 				{ role: "omp.review.composer" },
 				[
-					keyed(text([span("Edit which note?", "strong")]), "caption"),
+					keyed(text([span(__ompTranslate("Edit which note?"), "strong")]), "caption"),
 					selectList("chooser", entries, { selected: `c${chooser.selected}`, tone: "accent" }),
 				],
 				"chooser",
@@ -1871,20 +1932,23 @@ export class AnnotationOverlay implements Focusable {
 
 	/** Where the open note lands: `Note on line 42 in src/app.ts`, `Edit note on src/app.ts`, `Note on the whole text`. */
 	#noteCaption(): TspSpan[] {
-		const verb = span(this.#editingAnnotationIndex === undefined ? "Note on " : "Edit note on ", "muted");
+		const verb = span(
+			this.#editingAnnotationIndex === undefined ? __ompTranslate("Note on ") : __ompTranslate("Edit note on "),
+			"muted",
+		);
 		if (this.#textSource) {
 			return this.#annotationScope === "text"
-				? [verb, span("the whole text", "strong")]
-				: [verb, span(`line ${this.#sourceIndex + 1}`, "strong")];
+				? [verb, span(__ompTranslate("the whole text"), "strong")]
+				: [verb, span(__ompTranslate("line {0}\u0004annotation.line.label", `${this.#sourceIndex + 1}`), "strong")];
 		}
 		const file = this.#currentFile();
-		const path = file ? sanitizeStatusText(displayFileLabel(file)) : "file";
+		const path = file ? sanitizeStatusText(displayFileLabel(file)) : __ompTranslate("file\u0004tool.lsp.file");
 		if (this.#annotationScope === "file") return [verb, span(path, "path")];
 		const source = this.#currentSourceRows()[this.#sourceIndex];
 		const where =
 			source?.kind === "removed"
-				? `removed line ${source.oldLine ?? ""}`
-				: `line ${source?.newLine ?? source?.oldLine ?? ""}`;
+				? __ompTranslate("removed line {0}", `${source.oldLine ?? ""}`)
+				: __ompTranslate("line {0}\u0004annotation.line.label", `${source?.newLine ?? source?.oldLine ?? ""}`);
 		return [verb, span(where.trim(), "strong"), span(" in ", "muted"), span(path, "path")];
 	}
 
@@ -1903,25 +1967,35 @@ export class AnnotationOverlay implements Focusable {
 		const marked = (button: NativeNode, mark: "pick" | "drop" | undefined): NativeNode =>
 			mark ? ({ ...button, p: { ...button.p, mark } } as NativeNode) : button;
 		const hasNotes = this.#textSource ? this.#textAnnotations.length > 0 : this.#annotations.length > 0;
-		const pasteTitle = hasNotes ? PASTE_CODE_REVIEW_ACTION : "Add a note to paste it into the prompt";
+		const pasteTitle = hasNotes ? PASTE_CODE_REVIEW_ACTION : __ompTranslate("Add a note to paste it into the prompt");
 		const buttons: NativeNode[] = [
-			actionButton("Cancel", "close", { keys: "escape" }),
+			actionButton(__ompTranslate("Cancel"), "close", { keys: "escape" }),
 			marked(
-				actionButton(this.#discardArmed ? "Confirm discard" : "Discard", "discard", {
-					title: DISCARD_ANNOTATIONS_ACTION,
-				}),
+				actionButton(
+					this.#discardArmed ? __ompTranslate("Confirm discard") : __ompTranslate("Discard"),
+					"discard",
+					{
+						title: DISCARD_ANNOTATIONS_ACTION,
+					},
+				),
 				pick(this.#actions.indexOf(DISCARD_ANNOTATIONS_ACTION)),
 			),
 		];
 		if (this.#textSource) {
 			buttons.push(
-				marked(actionButton("Paste into prompt", "paste", { tone: "accent", title: pasteTitle }), pick(0)),
+				marked(
+					actionButton(__ompTranslate("Paste into prompt"), "paste", { tone: "accent", title: pasteTitle }),
+					pick(0),
+				),
 			);
 		} else {
 			buttons.push(
-				marked(actionButton("Paste into prompt", "paste", { title: pasteTitle }), pick(1)),
+				marked(actionButton(__ompTranslate("Paste into prompt"), "paste", { title: pasteTitle }), pick(1)),
 				marked(
-					actionButton("Review with LLM", "review", { tone: "accent", title: CONTINUE_CODE_REVIEW_ACTION }),
+					actionButton(__ompTranslate("Review with LLM"), "review", {
+						tone: "accent",
+						title: CONTINUE_CODE_REVIEW_ACTION,
+					}),
 					pick(0),
 				),
 			);
@@ -1942,37 +2016,50 @@ export class AnnotationOverlay implements Focusable {
 		});
 		const upDown = (label: string) => this.#hint(["tui.select.up", "tui.select.down"], label);
 		if (this.#annotationChooser) {
-			return [upDown("choose"), this.#hint("tui.select.confirm", "edit"), this.#hint("tui.select.cancel", "back")];
+			return [
+				upDown(__ompTranslate("choose")),
+				this.#hint("tui.select.confirm", __ompTranslate("edit")),
+				this.#hint("tui.select.cancel", __ompTranslate("back")),
+			];
 		}
 		if (this.#annotating) {
 			return [
-				this.#hint("tui.input.submit", "save"),
-				this.#hint("tui.input.newLine", "new line"),
-				this.#hint("tui.select.cancel", "close, keep note"),
-				this.#callbacks.onAnnotationExternalEditor ? key(appExternalEditorKey(), "editor") : undefined,
+				this.#hint("tui.input.submit", __ompTranslate("save")),
+				this.#hint("tui.input.newLine", __ompTranslate("new line")),
+				this.#hint("tui.select.cancel", __ompTranslate("close, keep note")),
+				this.#callbacks.onAnnotationExternalEditor
+					? key(appExternalEditorKey(), __ompTranslate("editor"))
+					: undefined,
 			];
 		}
-		const undo = this.#undoStack.length > 0 ? key("u", "undo") : undefined;
+		const undo = this.#undoStack.length > 0 ? key("u", __ompTranslate("undo")) : undefined;
 		if (this.#focus === "files") {
 			return [
-				upDown("file"),
-				this.#hint("tui.select.confirm", "open"),
-				key("a", "file note"),
+				upDown(__ompTranslate("file\u0004tool.lsp.file")),
+				this.#hint("tui.select.confirm", __ompTranslate("open")),
+				key("a", __ompTranslate("file note")),
 				undo,
-				key("tab", "pane"),
+				key("tab", __ompTranslate("pane")),
 			];
 		}
 		if (this.#focus === "diff") {
 			return [
-				upDown("line"),
-				key("a", "note"),
-				key("shift+a", this.#textSource ? "note on all" : "file note"),
-				this.#annotationCandidates().length > 0 ? key("e", "edit note") : undefined,
+				upDown(__ompTranslate("line")),
+				key("a", __ompTranslate("note")),
+				key("shift+a", this.#textSource ? __ompTranslate("note on all") : __ompTranslate("file note")),
+				this.#annotationCandidates().length > 0 ? key("e", __ompTranslate("edit note")) : undefined,
 				undo,
-				key("tab", this.#textSource ? "actions" : "pane"),
+				key(
+					"tab",
+					this.#textSource ? __ompTranslate("actions\u0004annotation.actions.hint") : __ompTranslate("pane"),
+				),
 			];
 		}
-		return [upDown("choose"), this.#hint("tui.select.confirm", "run"), key("tab", "pane")];
+		return [
+			upDown(__ompTranslate("choose")),
+			this.#hint("tui.select.confirm", __ompTranslate("run")),
+			key("tab", __ompTranslate("pane")),
+		];
 	}
 
 	/** Keycap hint for the primary keys this overlay's keybindings bind to `actions`. */

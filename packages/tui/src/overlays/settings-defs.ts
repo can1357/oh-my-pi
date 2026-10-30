@@ -1,4 +1,5 @@
 /** Schema-independent display definitions for the settings overlay. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { SymbolKey } from "../theme/symbols";
 
 export type SettingTab =
@@ -32,30 +33,30 @@ export const SETTING_TABS: SettingTab[] = [
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
 export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
-	appearance: { label: "Appearance", icon: "tab.appearance" },
-	model: { label: "Model", icon: "tab.model" },
-	interaction: { label: "Interaction", icon: "tab.interaction" },
-	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
-	files: { label: "Files", icon: "tab.files" },
-	shell: { label: "Shell", icon: "tab.shell" },
-	tools: { label: "Tools", icon: "tab.tools" },
-	tasks: { label: "Tasks", icon: "tab.tasks" },
-	providers: { label: "Providers", icon: "tab.providers" },
+	appearance: { label: __ompTranslate("Appearance"), icon: "tab.appearance" },
+	model: { label: __ompTranslate("Model"), icon: "tab.model" },
+	interaction: { label: __ompTranslate("Interaction"), icon: "tab.interaction" },
+	context: { label: __ompTranslate("Context"), icon: "tab.context" },
+	memory: { label: __ompTranslate("Memory"), icon: "tab.memory" },
+	files: { label: __ompTranslate("Files"), icon: "tab.files" },
+	shell: { label: __ompTranslate("Shell"), icon: "tab.shell" },
+	tools: { label: __ompTranslate("Tools"), icon: "tab.tools" },
+	tasks: { label: __ompTranslate("Tasks"), icon: "tab.tasks" },
+	providers: { label: __ompTranslate("Providers"), icon: "tab.providers" },
 };
 
 /** One-sentence lead per tab, under the page title of the native settings page. */
 export const TAB_LEADS: Record<SettingTab, string> = {
-	appearance: "Theme, composer, status line and how the transcript renders.",
-	model: "Thinking, sampling, the system prompt, retries and the helper models.",
-	interaction: "Input, approvals, notifications, speech and what happens at startup.",
-	context: "What the model sees, and when and how the conversation compacts.",
-	memory: "What omp remembers across sessions and where it keeps it.",
-	files: "How files are read, summarized and edited, and the language servers.",
-	shell: "The bash tool and the eval runtimes.",
-	tools: "Which tools the model has, their limits and the external integrations.",
-	tasks: "Modes, subagents, isolation and custom commands.",
-	providers: "Services, provider protocols, timeouts and privacy.",
+	appearance: __ompTranslate("Theme, composer, status line and how the transcript renders."),
+	model: __ompTranslate("Thinking, sampling, the system prompt, retries and the helper models."),
+	interaction: __ompTranslate("Input, approvals, notifications, speech and what happens at startup."),
+	context: __ompTranslate("What the model sees, and when and how the conversation compacts."),
+	memory: __ompTranslate("What omp remembers across sessions and where it keeps it."),
+	files: __ompTranslate("How files are read, summarized and edited, and the language servers."),
+	shell: __ompTranslate("The bash tool and the eval runtimes."),
+	tools: __ompTranslate("Which tools the model has, their limits and the external integrations."),
+	tasks: __ompTranslate("Modes, subagents, isolation and custom commands."),
+	providers: __ompTranslate("Services, provider protocols, timeouts and privacy."),
 };
 
 /**

@@ -5,6 +5,7 @@
  * (see `cli/completion-gen.ts`), so it never drifts from the actual CLI surface.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { APP_NAME, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { Args, type CliConfig, Command, type CommandCtor } from "@oh-my-pi/pi-utils/cli";
 import { completionsHelp as commandHelp } from "../cli/command-help";
@@ -34,14 +35,17 @@ export default class Completions extends Command {
 	static description = commandHelp.description;
 	static args = {
 		shell: Args.string({
-			description: "Target shell",
+			description: __ompTranslate("Target shell"),
 			required: true,
 			options: SHELLS,
 		}),
 	};
 
 	static examples = [
-		`# zsh — eval at startup, or write to a file in $fpath\n  eval "$(${APP_NAME} completions zsh)"`,
+		__ompTranslate(
+			'# zsh — eval at startup, or write to a file in $fpath\n  eval "$({0} completions zsh)"',
+			`${APP_NAME}`,
+		),
 		`# bash\n  eval "$(${APP_NAME} completions bash)"`,
 		`# fish\n  ${APP_NAME} completions fish > ~/.config/fish/completions/${APP_NAME}.fish`,
 	];
@@ -49,7 +53,7 @@ export default class Completions extends Command {
 	async run(): Promise<void> {
 		const shell = this.argv[0];
 		if (!isShell(shell)) {
-			process.stderr.write(`Usage: ${APP_NAME} completions <${SHELLS.join("|")}>\n`);
+			process.stderr.write(__ompTranslate("Usage: {0} completions <{1}>\n", `${APP_NAME}`, `${SHELLS.join("|")}`));
 			process.exitCode = 1;
 			return;
 		}

@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -699,7 +700,7 @@ const noOpUIContext: ExtensionUIContext = {
 	},
 	getAllThemes: () => Promise.resolve([]),
 	getTheme: () => Promise.resolve(undefined),
-	setTheme: _theme => Promise.resolve({ success: false, error: "UI not available" }),
+	setTheme: _theme => Promise.resolve({ success: false, error: __ompTranslate("UI not available") }),
 	setFooter: () => {},
 	setHeader: () => {},
 	setEditorComponent: () => {},
@@ -2979,7 +2980,7 @@ export class AgentSession implements SettingsScope {
 	#resolveDefaultPrewalk(): Prewalk | undefined {
 		const resolved = this.#resolvePrewalkTarget(cfgPrewalkInto.get(this.settings));
 		if (typeof resolved !== "string") return resolved;
-		this.emitNotice("warning", `Prewalk not armed: ${resolved}.`, "prewalk");
+		this.emitNotice("warning", __ompTranslate("Prewalk not armed: {0}.", `${resolved}`), "prewalk");
 		return undefined;
 	}
 
@@ -2987,7 +2988,11 @@ export class AgentSession implements SettingsScope {
 		const selector = cfgPrewalkAutoTarget.get(this.settings);
 		const resolved = this.#resolvePrewalkTarget(selector);
 		if (typeof resolved !== "string") return resolved;
-		this.emitNotice("warning", `Auto-prewalk not armed: target "${selector}": ${resolved}.`, "prewalk");
+		this.emitNotice(
+			"warning",
+			__ompTranslate('Auto-prewalk not armed: target "{0}": {1}.', `${selector}`, `${resolved}`),
+			"prewalk",
+		);
 		return undefined;
 	}
 
@@ -3025,7 +3030,7 @@ export class AgentSession implements SettingsScope {
 			try {
 				await this.#tools.reconcileThinkTool();
 			} catch (error) {
-				this.emitNotice("error", `Failed to apply external thinking: ${error}`);
+				this.emitNotice("error", __ompTranslate("Failed to apply external thinking: {0}", `${error}`));
 			}
 		});
 		this.#skillfulApplied = cfgSkillful.get(this.settings);
@@ -3149,12 +3154,12 @@ export class AgentSession implements SettingsScope {
 	 */
 	setForcedToolChoice(toolName: string): void {
 		if (!this.getActiveToolNames().includes(toolName)) {
-			throw new Error(`Tool "${toolName}" is not currently active.`);
+			throw new Error(__ompTranslate('Tool "{0}" is not currently active.', `${toolName}`));
 		}
 
 		const forced = buildNamedToolChoice(toolName, this.model);
 		if (!forced || typeof forced === "string") {
-			throw new Error("Current model does not support forcing a specific tool.");
+			throw new Error(__ompTranslate("Current model does not support forcing a specific tool."));
 		}
 
 		this.#toolChoiceQueue.pushSequence([forced, "none"], {
@@ -4000,7 +4005,7 @@ export class AgentSession implements SettingsScope {
 			// surface keeps showing a working turn that will never finish.
 			const message = toError(error).message;
 			logger.error("agent_end maintenance failed", { error: message });
-			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
+			this.emitNotice("warning", __ompTranslate("Post-turn maintenance failed: {0}", `${message}`), "agent-end");
 			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
 		} finally {
 			this.#inFlightAgentEndMaintenance.delete(promise);
@@ -4713,7 +4718,9 @@ export class AgentSession implements SettingsScope {
 					this.setServiceTierFamily("anthropic", undefined);
 					this.emitNotice(
 						"warning",
-						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+						__ompTranslate(
+							"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+						),
 						"priority",
 					);
 				}
@@ -8806,9 +8813,12 @@ export class AgentSession implements SettingsScope {
 			const model = this.model;
 			if (!model) {
 				throw new Error(
-					"No model selected.\n\n" +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
-						"Then use /model to select a model.",
+					__ompTranslate("No model selected.\n\n") +
+						__ompTranslate(
+							"Use /login, set an API key environment variable, or create {0}\n\n",
+							`${getAgentDbPath()}`,
+						) +
+						__ompTranslate("Then use /model to select a model."),
 				);
 			}
 
@@ -9900,7 +9910,10 @@ export class AgentSession implements SettingsScope {
 
 		if (command) {
 			throw new Error(
-				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
+				__ompTranslate(
+					'Extension command "/{0}" cannot be queued. Use prompt() or execute the command when not streaming.',
+					`${commandName}`,
+				),
 			);
 		}
 	}
@@ -11410,7 +11423,7 @@ export class AgentSession implements SettingsScope {
 		const requireIdleFor = entryId !== undefined || options?.requireIdle ? "fork the session" : undefined;
 		if (entryId !== undefined) {
 			if (this.sessionManager.getEntry(entryId)?.type !== "message") {
-				throw new Error(`Invalid entry ID for forking: ${entryId}`);
+				throw new Error(__ompTranslate("Invalid entry ID for forking: {0}", `${entryId}`));
 			}
 			const leafId = this.#resolveForkLeaf(entryId);
 			// Await inside the `using` scope so the transition stays open until it settles.
@@ -12630,7 +12643,7 @@ export class AgentSession implements SettingsScope {
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		const model = this.model;
 		if (!model) {
-			throw new Error("No active model on session");
+			throw new Error(__ompTranslate("No active model on session"));
 		}
 		const modelDescription = `${model.provider}/${model.id} (${model.api})`;
 		const sessionGeneration = this.#sessionGeneration;
@@ -12966,7 +12979,7 @@ export class AgentSession implements SettingsScope {
 	): Promise<boolean> {
 		const explicitModel = options?.model;
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
-			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
+			throw new Error(__ompTranslate("No API key for {0}/{1}", `${explicitModel.provider}`, `${explicitModel.id}`));
 		}
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
@@ -13112,12 +13125,17 @@ export class AgentSession implements SettingsScope {
 					// Like startup resume: never hand the transcript to a model the
 					// session did not choose unless a UI can say so.
 					if (!this.#allowSessionModelFallback || !cfgRetryModelFallback.get(this.settings)) {
-						throw new Error(`Could not restore model ${targetModelStrings[0]}`);
+						throw new Error(__ompTranslate("Could not restore model {0}", `${targetModelStrings[0]}`));
 					}
 					const currentModel = this.model;
 					modelFallbackWarning = currentModel
-						? `Could not restore model ${targetModelStrings[0]}. Using ${currentModel.provider}/${currentModel.id}`
-						: `Could not restore model ${targetModelStrings[0]}`;
+						? __ompTranslate(
+								"Could not restore model {0}. Using {1}/{2}",
+								`${targetModelStrings[0]}`,
+								`${currentModel.provider}`,
+								`${currentModel.id}`,
+							)
+						: __ompTranslate("Could not restore model {0}", `${targetModelStrings[0]}`);
 				}
 			}
 			// The first build used the departing model's frame budget; size the
@@ -13405,7 +13423,7 @@ export class AgentSession implements SettingsScope {
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
-			throw new Error("Invalid entry ID for branching");
+			throw new Error(__ompTranslate("Invalid entry ID for branching"));
 		}
 
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
@@ -13542,7 +13560,7 @@ export class AgentSession implements SettingsScope {
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
-			throw new Error("Cannot branch /btw: session is not persisted");
+			throw new Error(__ompTranslate("Cannot branch /btw: session is not persisted"));
 		}
 
 		if (!leafId || this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
@@ -13707,7 +13725,7 @@ export class AgentSession implements SettingsScope {
 
 		const targetEntry = this.sessionManager.getEntry(targetId);
 		if (!targetEntry) {
-			throw new Error(`Entry ${targetId} not found`);
+			throw new Error(__ompTranslate("Entry {0} not found", `${targetId}`));
 		}
 		const targetIsAskResult =
 			targetEntry.type === "message" &&
@@ -13731,7 +13749,7 @@ export class AgentSession implements SettingsScope {
 
 		// Model required for summarization
 		if (options.summarize && !this.model) {
-			throw new Error("No model available for summarization");
+			throw new Error(__ompTranslate("No model available for summarization"));
 		}
 
 		// `ask` toolResult, first pass: hand control back to the caller to
@@ -13816,7 +13834,7 @@ export class AgentSession implements SettingsScope {
 			const model = this.model!;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
+				throw new Error(__ompTranslate("No API key for {0}", `${model.provider}`));
 			}
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,

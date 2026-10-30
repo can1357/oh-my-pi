@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Component } from "../tui";
 import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
@@ -327,32 +328,44 @@ function bashStatsParts(
 	const wallTimeMs = details?.wallTimeMs;
 	const statsParts: string[] = [];
 	if (details?.async?.state === "running") {
-		statsParts.push(`Backgrounded: ${details.async.jobId}`);
+		statsParts.push(__ompTranslate("Backgrounded: {0}", `${details.async.jobId}`));
 	}
 	if (details?.service) {
 		const service = details.service;
-		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
-		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
+		statsParts.push(
+			__ompTranslate("Service: {0}", `${service.name}`),
+			__ompTranslate("State: {0}", `${service.state}`),
+		);
+		statsParts.push(
+			__ompTranslate(
+				"Ready: {0}",
+				`${service.ready ? __ompTranslate("yes") : service.timedOut ? __ompTranslate("timed out") : __ompTranslate("no")}`,
+			),
+		);
 		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
 	}
 	if (wallTimeMs !== undefined) {
-		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
+		statsParts.push(__ompTranslate("Wall: {0}s", `${formatWallTimeSeconds(wallTimeMs)}`));
 	}
 	if (timeoutDisabled) {
-		statsParts.push("Timeout: disabled");
+		statsParts.push(__ompTranslate("Timeout: disabled"));
 	}
 	if (typeof timeoutSeconds === "number") {
 		statsParts.push(
 			requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
-				? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
-				: `Timeout: ${timeoutSeconds}s`,
+				? __ompTranslate(
+						"Timeout: {0}s (requested {1}s clamped)",
+						`${timeoutSeconds}`,
+						`${requestedTimeoutSeconds}`,
+					)
+				: __ompTranslate("Timeout: {0}s", `${timeoutSeconds}`),
 		);
 	}
 	if (artifactId) {
-		statsParts.push(`Artifact: ${artifactId}`);
+		statsParts.push(__ompTranslate("Artifact: {0}", `${artifactId}`));
 	}
 	if (isError && typeof details?.exitCode === "number") {
-		statsParts.push(`Exit: ${details.exitCode}`);
+		statsParts.push(__ompTranslate("Exit: {0}", `${details.exitCode}`));
 	}
 	return statsParts;
 }
@@ -377,7 +390,7 @@ function shellToolHead(
 		targetKind: intent ? "text" : undefined,
 		command,
 		exit,
-		note: settled && details?.timedOut === true ? "timed out" : undefined,
+		note: settled && details?.timedOut === true ? __ompTranslate("timed out") : undefined,
 	};
 }
 
@@ -392,14 +405,20 @@ function callIntent(args: unknown): string | undefined {
 /** The run foot's facts under shell output: background job, service state and the full-output artifact. */
 function shellFootParts(details: BashToolDetails | undefined, artifactId: string | undefined): string[] {
 	const parts: string[] = [];
-	if (details?.async?.state === "running") parts.push(`Job ${details.async.jobId}`);
+	if (details?.async?.state === "running") parts.push(__ompTranslate("Job {0}", `${details.async.jobId}`));
 	const service = details?.service;
 	if (service) {
-		parts.push(`Service ${service.name}`, service.state);
-		parts.push(service.ready ? "ready" : service.timedOut ? "ready timed out" : "not ready");
+		parts.push(__ompTranslate("Service {0}", `${service.name}`), service.state);
+		parts.push(
+			service.ready
+				? __ompTranslate("ready")
+				: service.timedOut
+					? __ompTranslate("ready timed out")
+					: __ompTranslate("not ready\u0004tool.shell.state"),
+		);
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
 	}
-	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	if (artifactId) parts.push(__ompTranslate("Artifact {0}", `${artifactId}`));
 	return parts;
 }
 
@@ -462,7 +481,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					footerMeta:
 						elapsedMs === undefined || elapsedMs < 1000
 							? undefined
-							: uiTheme.fg("dim", `elapsed ${formatDuration(Math.floor(elapsedMs / 1000) * 1000)}`),
+							: uiTheme.fg(
+									"dim",
+									__ompTranslate("elapsed {0}", `${formatDuration(Math.floor(elapsedMs / 1000) * 1000)}`),
+								),
 					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
 				};
 			});
@@ -575,7 +597,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						isError,
 					);
 					if (elapsedSecond !== undefined && elapsedSecond > 0) {
-						statsParts.unshift(`elapsed ${formatDuration(elapsedSecond * 1000)}`);
+						statsParts.unshift(__ompTranslate("elapsed {0}", `${formatDuration(elapsedSecond * 1000)}`));
 					}
 					const footerMeta =
 						statsParts.length > 0 ? uiTheme.fg("dim", statsParts.join(uiTheme.sep.dot)) : undefined;
@@ -622,7 +644,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									{ expanded },
 								),
 							},
-							{ label: uiTheme.fg("toolTitle", "Output"), content: outputLines },
+							{ label: uiTheme.fg("toolTitle", __ompTranslate("Output")), content: outputLines },
 						],
 					};
 

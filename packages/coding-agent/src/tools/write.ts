@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
@@ -578,18 +579,25 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<WriteParams>;
-		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
+		const targetPath =
+			typeof params.path === "string" ? params.path : __ompTranslate("(missing)\u0004tool.shell.command.missing");
 		const content = typeof params.content === "string" ? params.content : "";
 		const unwrapped = unwrapHashlineHeaderPath(targetPath);
 		if (extractUriScheme(unwrapped) === "xd") {
 			try {
 				const parsed: unknown = JSON.parse(content);
-				return [`Path: ${truncateForPrompt(targetPath)}`, ...formatApprovalArguments(parsed, { showEmpty: true })];
+				return [
+					__ompTranslate("Path: {0}", `${truncateForPrompt(targetPath)}`),
+					...formatApprovalArguments(parsed, { showEmpty: true }),
+				];
 			} catch {
 				// Non-JSON payload falls back to raw content
 			}
 		}
-		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
+		return [
+			__ompTranslate("Path: {0}", `${truncateForPrompt(targetPath)}`),
+			__ompTranslate("Content:\n{0}", `${truncateForPrompt(content)}`),
+		];
 	};
 	/**
 	 * `always-ask-cached` key: the path this write targets, unwrapped from a

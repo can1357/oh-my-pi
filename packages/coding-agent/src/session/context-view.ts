@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AnthropicServerToolContent, AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -15,7 +16,7 @@ import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { type ContextViewMessage, convertMessagesForContextView } from "./messages";
 
-const ENCRYPTED_THINKING = "[Encrypted thinking]";
+const ENCRYPTED_THINKING = __ompTranslate("[Encrypted thinking]");
 
 /** Provider ciphertext is shown as its size, never its bytes. */
 function opaqueSize(name: string, value: string): string {
@@ -111,7 +112,7 @@ function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildSt
 	for (const [index, block] of session.systemPrompt.entries()) {
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
-			label: `System Block ${index + 1}`,
+			label: __ompTranslate("System Block {0}", `${index + 1}`),
 			text: block,
 			tokens: session.agent.tokenizer.countTokens(block),
 		});
@@ -141,7 +142,7 @@ function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuild
 			id: `${categoryId}/${index}`,
 			label: tool.name,
 			text: shown.join("\n\n"),
-			info: source?.source ?? "unknown",
+			info: source?.source ?? __ompTranslate("unknown"),
 			path: source?.path,
 			tokens,
 		});
@@ -194,7 +195,7 @@ function appendServerToolEntry(
 				2,
 			) ?? "";
 	} catch {
-		text = "[Content unavailable]";
+		text = __ompTranslate("[Content unavailable]");
 	}
 	const entry: ContextViewEntry = {
 		id: `${categoryId}/${entryIdSuffix}`,
@@ -225,7 +226,7 @@ function appendAssistantMessageEntries(
 		thinkingBlockCount > 1
 			? {
 					id: `assistant-thinking/${entryIdPrefix}`,
-					label: `Message ${sourceIndex + 1}`,
+					label: __ompTranslate("Message {0}\u0004context.message.label", `${sourceIndex + 1}`),
 					tokens: reasoningReplayTokens,
 					interrupted: isInterruptedThinkingPlaceholder,
 				}
@@ -236,7 +237,7 @@ function appendAssistantMessageEntries(
 	if (reasoningReplayTokens > 0 && thinkingBlockCount === 0) {
 		appendEntry(state, "assistant-thinking", {
 			id: `assistant-thinking/${entryIdPrefix}/payload`,
-			label: `Thinking 1/1 · message ${sourceIndex + 1}`,
+			label: __ompTranslate("Thinking 1/1 · message {0}", `${sourceIndex + 1}`),
 			info,
 			text: ENCRYPTED_THINKING,
 			timestamp: sourceMessage.timestamp,
@@ -268,7 +269,7 @@ function appendAssistantMessageEntries(
 			try {
 				text = stringifyJson(block.arguments, 2) ?? "null";
 			} catch {
-				text = "[Arguments unavailable]";
+				text = __ompTranslate("[Arguments unavailable]");
 			}
 		} else if (block.type === "fallback") {
 			text = `[provider fallback: ${block.from.model} to ${block.to.model}]`;

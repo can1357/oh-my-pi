@@ -13,6 +13,7 @@
  * historical entries cannot leave stale components behind. Collab guests use the
  * same append path over the host's byte-capped transcript reads.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -766,7 +767,7 @@ export class AgentTranscriptViewer implements Component {
 				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
 			]),
 		);
-		const head = [span("Agent Hub", "accent"), span(` ${theme.sep.dot} `, "dim"), span(id, "accent")];
+		const head = [span(__ompTranslate("Agent Hub"), "accent"), span(` ${theme.sep.dot} `, "dim"), span(id, "accent")];
 		const described = overlayCard("omp.hub.transcript", head, children);
 		this.#nativeCache = { signature, node: described };
 		return described;
@@ -814,7 +815,9 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#headerLines(status: AgentStatus | undefined, kind: string | undefined, parentId: string | undefined): string[] {
-		const lines = [theme.fg("accent", `Agent Hub ${theme.sep.dot} ${this.#deps.agentId}`)];
+		const lines = [
+			theme.fg("accent", __ompTranslate("Agent Hub {0} {1}", `${theme.sep.dot}`, `${this.#deps.agentId}`)),
+		];
 		if (status && kind) {
 			const kindTag = theme.fg("dim", ` ${parentId ? `${kind} ${theme.sep.dot} of ${parentId}` : kind}`);
 			const modelLabel = this.#model ? theme.fg("muted", `${theme.sep.dot}${this.#model}`) : "";
@@ -861,10 +864,13 @@ export class AgentTranscriptViewer implements Component {
 	#placeholder(maxWidth: number): string {
 		if (this.#deps.remote) {
 			if (this.#remoteError) return sanitizeErrorLine(this.#remoteError, maxWidth);
-			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
-			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
+			if (this.#remoteUnavailable) return __ompTranslate("Transcript lives on the host — not available.");
+			return this.#hasRemoteData
+				? __ompTranslate("No messages yet.")
+				: __ompTranslate("Loading transcript from host…");
 		}
-		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";
-		return "No messages yet.";
+		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile)
+			return __ompTranslate("No session file available yet.");
+		return __ompTranslate("No messages yet.");
 	}
 }

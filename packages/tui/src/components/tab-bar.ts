@@ -8,6 +8,7 @@
  * - Tab / Arrow Right: Next tab (wraps around)
  * - Shift+Tab / Arrow Left: Previous tab (wraps around)
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatKeyHint } from "../app-keybindings";
 import { matchesKey } from "../keys";
 import { compactText, styledSpans, styleSpans } from "../native/spans";
@@ -191,7 +192,11 @@ export class TabBar implements Component {
 		if (this.#label) parts.push(node("text", { spans: styleSpans(`${this.#label}:`, this.#theme.label) }));
 		parts.push(tabs);
 		if (this.showHint) {
-			parts.push(node("text", { spans: styleSpans(`(${formatKeyHint("tab")} to cycle)`, this.#theme.hint) }));
+			parts.push(
+				node("text", {
+					spans: styleSpans(__ompTranslate("({0} to cycle)", `${formatKeyHint("tab")}`), this.#theme.hint),
+				}),
+			);
 		}
 		const described = parts.length === 1 ? tabs : row(parts, { gap: "md", align: "center" });
 		this.#native = { signature, node: described };
@@ -262,7 +267,7 @@ export class TabBar implements Component {
 			// Navigation hint
 			if (this.showHint) {
 				chunks.push({ text: "  " });
-				chunks.push({ text: this.#theme.hint(`(${formatKeyHint("tab")} to cycle)`) });
+				chunks.push({ text: this.#theme.hint(__ompTranslate("({0} to cycle)", `${formatKeyHint("tab")}`)) });
 			}
 			return chunks;
 		};

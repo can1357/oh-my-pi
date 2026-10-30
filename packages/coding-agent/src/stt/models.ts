@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TinyModelDtype } from "../tiny/dtype";
 
 /**
@@ -63,8 +64,10 @@ export const STT_MODELS = [
 		repo: "onnx-community/whisper-base",
 		dtype: "q8",
 		englishOnly: false,
-		label: "Fast (Whisper base)",
-		description: "Whisper base, multilingual. Smallest + fastest; lowest accuracy. Best for low-resource machines.",
+		label: __ompTranslate("Fast (Whisper base)"),
+		description: __ompTranslate(
+			"Whisper base, multilingual. Smallest + fastest; lowest accuracy. Best for low-resource machines.",
+		),
 		sizeHint: "~60 MB",
 	},
 	{
@@ -73,8 +76,8 @@ export const STT_MODELS = [
 		repo: "onnx-community/whisper-small",
 		dtype: "q8",
 		englishOnly: false,
-		label: "Balanced (Whisper small)",
-		description: "Whisper small, multilingual. More accurate than Fast, still light on CPU/RAM.",
+		label: __ompTranslate("Balanced (Whisper small)"),
+		description: __ompTranslate("Whisper small, multilingual. More accurate than Fast, still light on CPU/RAM."),
 		sizeHint: "~190 MB",
 	},
 	{
@@ -83,8 +86,10 @@ export const STT_MODELS = [
 		repo: "onnx-community/whisper-large-v3-turbo",
 		dtype: "q4",
 		englishOnly: false,
-		label: "Turbo (Whisper large-v3)",
-		description: "Whisper large-v3-turbo, 99 languages. Widest language coverage; large download, slower.",
+		label: __ompTranslate("Turbo (Whisper large-v3)"),
+		description: __ompTranslate(
+			"Whisper large-v3-turbo, 99 languages. Widest language coverage; large download, slower.",
+		),
 		sizeHint: "~600 MB",
 	},
 	{
@@ -100,9 +105,10 @@ export const STT_MODELS = [
 			tokens: "tokens.txt",
 		},
 		englishOnly: false,
-		label: "Parakeet TDT v3 (SoTA)",
-		description:
+		label: __ompTranslate("Parakeet TDT v3 (SoTA)"),
+		description: __ompTranslate(
 			"NVIDIA Parakeet TDT 0.6B v3, 25 languages. Open ASR Leaderboard leader — best accuracy and far fastest decoding. Default.",
+		),
 		sizeHint: "~680 MB",
 	},
 	{
@@ -118,9 +124,10 @@ export const STT_MODELS = [
 			tokens: "tokens.txt",
 		},
 		englishOnly: true,
-		label: "Nemotron 0.6B (live streaming, English)",
-		description:
+		label: __ompTranslate("Nemotron 0.6B (live streaming, English)"),
+		description: __ompTranslate(
 			"NVIDIA Nemotron Speech 0.6B, English only. Native streaming recognition with live words while you speak; 160 ms audio chunks.",
+		),
 		sizeHint: "~630 MB",
 	},
 ] as const satisfies readonly SttModelSpec[];

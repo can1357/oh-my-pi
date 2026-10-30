@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { SessionHeader, SessionState } from "@oh-my-pi/pi-wire";
 import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
@@ -37,7 +38,7 @@ export const HeaderBar = memo(function HeaderBar({
 	onToggleRail,
 	onLeave,
 }: HeaderBarProps): ReactNode {
-	const title = header?.title ?? state?.sessionName ?? "session";
+	const title = header?.title ?? state?.sessionName ?? __ompTranslate("session");
 	const usage = state?.contextUsage;
 	let pct: number | null = null;
 	if (usage) {
@@ -51,7 +52,7 @@ export const HeaderBar = memo(function HeaderBar({
 	return (
 		<header className="sh-header">
 			<div className="sh-header-left">
-				<span className="sh-brand" aria-label="omp collab">
+				<span className="sh-brand" aria-label={__ompTranslate("omp collab")}>
 					<OmpMark />
 					<span className="sh-brand-slash">/</span>
 				</span>
@@ -67,11 +68,11 @@ export const HeaderBar = memo(function HeaderBar({
 			<div className="sh-header-right">
 				<span className={`sh-status sh-status-${phase}`} title={`connection: ${phase}`}>
 					<span className={`sh-dot sh-dot-${phase}`} />
-					{PHASE_LABEL[phase]}
+					{__ompTranslate(PHASE_LABEL[phase])}
 				</span>
 				{readOnly && (
-					<span className="sh-chip" title="you joined with a read-only link — watching only">
-						read-only
+					<span className="sh-chip" title={__ompTranslate("you joined with a read-only link — watching only")}>
+						{__ompTranslate("read-only")}
 					</span>
 				)}
 				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
@@ -79,7 +80,7 @@ export const HeaderBar = memo(function HeaderBar({
 				{pct != null && (
 					<span
 						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}
-						title={`context · ${fmtPercent(pct)}`}
+						title={__ompTranslate("context · {0}", `${fmtPercent(pct)}`)}
 					>
 						<span className="sh-gauge-track">
 							<span className="sh-gauge-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
@@ -105,12 +106,17 @@ export const HeaderBar = memo(function HeaderBar({
 					type="button"
 					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
 					onClick={onToggleRail}
-					title={railOpen ? "hide agents" : "show agents"}
+					title={railOpen ? __ompTranslate("hide agents") : __ompTranslate("show agents")}
 				>
 					<PanelRight size={14} />
 					{subCount > 0 && <span className="sh-badge">{subCount}</span>}
 				</button>
-				<button type="button" className="sh-btn sh-btn-icon" onClick={onLeave} title="leave session">
+				<button
+					type="button"
+					className="sh-btn sh-btn-icon"
+					onClick={onLeave}
+					title={__ompTranslate("leave session")}
+				>
 					<LogOut size={14} />
 				</button>
 			</div>

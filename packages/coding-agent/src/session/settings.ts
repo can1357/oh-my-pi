@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -59,30 +60,33 @@ export const cfgPowerSleepPrevention = register({
 	ui: {
 		tab: "interaction",
 		group: "Power",
-		label: "Sleep Prevention",
+		label: __ompTranslate("Sleep Prevention"),
 		description:
 			"Prevent the system sleeping while the agent is running a turn; an idle session, including one waiting on background jobs, does not hold it. Each level is cumulative — it adds the flags of all lower levels.",
 		options: [
 			{
 				value: "off",
-				label: "Off",
-				description: "Do not prevent any sleep",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Do not prevent any sleep"),
 			},
 			{
 				value: "idle",
-				label: "Prevent Idle Sleep",
-				description: "Keep the system awake while the agent is running a turn (macOS `caffeinate -i`)",
+				label: __ompTranslate("Prevent Idle Sleep"),
+				description: __ompTranslate(
+					"Keep the system awake while the agent is running a turn (macOS `caffeinate -i`)",
+				),
 			},
 			{
 				value: "display",
-				label: "Prevent Display Sleep",
-				description: "Also keep the display from idle-sleeping (macOS `caffeinate -i -d`)",
+				label: __ompTranslate("Prevent Display Sleep"),
+				description: __ompTranslate("Also keep the display from idle-sleeping (macOS `caffeinate -i -d`)"),
 			},
 			{
 				value: "system",
-				label: "Prevent System Sleep",
-				description:
+				label: __ompTranslate("Prevent System Sleep"),
+				description: __ompTranslate(
 					"Also block all system sleep on AC and declare the user active (macOS `caffeinate -i -d -s -u`)",
+				),
 			},
 		],
 	},
@@ -95,7 +99,7 @@ export const cfgPrewalkEnabled = register({
 	ui: {
 		tab: "model",
 		group: "Prewalk",
-		label: "Enable Prewalk",
+		label: __ompTranslate("Enable Prewalk"),
 		description:
 			"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
 	},
@@ -134,21 +138,26 @@ export const cfgPrewalkAuto = register({
 	ui: {
 		tab: "model",
 		group: "Prewalk",
-		label: "Auto Prewalk",
+		label: __ompTranslate("Auto Prewalk"),
 		description:
 			"Ask the native judge resolved through the 'judge' role whether each new top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
 		options: [
-			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
+			{
+				value: "off",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Never classify prompts for prewalk"),
+			},
 			{
 				value: "suggest",
-				label: "Suggest",
-				description: "Classify each task and report the decision without arming prewalk",
+				label: __ompTranslate("Suggest"),
+				description: __ompTranslate("Classify each task and report the decision without arming prewalk"),
 			},
 			{
 				value: "on",
-				label: "On",
-				description:
+				label: __ompTranslate("On"),
+				description: __ompTranslate(
 					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+				),
 			},
 		],
 	},
@@ -161,7 +170,7 @@ export const cfgPrewalkAutoTarget = register({
 	ui: {
 		tab: "model",
 		group: "Prewalk",
-		label: "Auto-prewalk target",
+		label: __ompTranslate("Auto-prewalk target"),
 		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
 	},
 });
@@ -195,7 +204,9 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
-			throw new Error(`Provider request limits must be positive numbers: ${invalidProviders.join(", ")}`);
+			throw new Error(
+				__ompTranslate("Provider request limits must be positive numbers: {0}", `${invalidProviders.join(", ")}`),
+			);
 		}
 	}
 	return normalizeProviderMaxInFlightRequests(value);
@@ -210,7 +221,7 @@ export const cfgProvidersMaxInFlightRequests = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Max In-Flight Requests",
+		label: __ompTranslate("Max In-Flight Requests"),
 		description:
 			'Maximum concurrent LLM requests per provider id (for example "openai" or "anthropic"), shared across local OMP processes with this config root. Omitted providers are unlimited.',
 	},
@@ -226,7 +237,7 @@ export const cfgImagesDescribeForTextModels = register({
 	ui: {
 		tab: "model",
 		group: "Vision",
-		label: "Describe Images for Text Models",
+		label: __ompTranslate("Describe Images for Text Models"),
 		description:
 			"When an image is attached to a model without vision support, save it under local:// and inject a description from a vision-capable model instead of dropping it",
 	},
@@ -245,7 +256,7 @@ export const cfgDefaultThinkingLevel = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Thinking Level",
+		label: __ompTranslate("Thinking Level"),
 		description: "Reasoning depth for thinking-capable models",
 		options: [getConfiguredThinkingLevelMetadata(AUTO_THINKING), ...THINKING_EFFORTS.map(getThinkingLevelMetadata)],
 	},
@@ -258,7 +269,7 @@ export const cfgHideThinkingBlock = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Hide Thinking Blocks",
+		label: __ompTranslate("Hide Thinking Blocks"),
 		description: "Hide thinking blocks in assistant responses",
 	},
 });
@@ -270,7 +281,7 @@ export const cfgExpandThinkingBlocks = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Expand Thinking Blocks",
+		label: __ompTranslate("Expand Thinking Blocks"),
 		description: "Keep finished thinking blocks expanded instead of collapsing them when the turn ends",
 		condition: "nativeRendering",
 	},
@@ -283,7 +294,7 @@ export const cfgProseOnlyThinking = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Prose Only Thinking",
+		label: __ompTranslate("Prose Only Thinking"),
 		description: "Omit code blocks from thinking summaries and replace them with an ellipsis",
 	},
 });
@@ -295,7 +306,7 @@ export const cfgOmitThinking = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Omit Thinking summaries",
+		label: __ompTranslate("Omit Thinking summaries"),
 		description: "Instruct upstream providers to completely omit thinking summaries from responses (where supported)",
 	},
 });
@@ -307,9 +318,11 @@ export const cfgExternalThinking = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "External Thinking",
+		label: __ompTranslate("External Thinking"),
 		description: "Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning",
-		warning: "At your own risk: providers have flagged this request shape as abuse, up to account-level enforcement",
+		warning: __ompTranslate(
+			"At your own risk: providers have flagged this request shape as abuse, up to account-level enforcement",
+		),
 	},
 });
 
@@ -322,7 +335,7 @@ export const cfgModelLoopGuardEnabled = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Loop Guard",
+		label: __ompTranslate("Loop Guard"),
 		description: "Enable automatic stream loop detection for model reasoning and prose",
 	},
 });
@@ -334,7 +347,7 @@ export const cfgModelLoopGuardCheckAssistantContent = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Loop Guard Scan Prose",
+		label: __ompTranslate("Loop Guard Scan Prose"),
 		description: "Apply loop guard to assistant prose messages in addition to thinking logs",
 	},
 });
@@ -346,7 +359,7 @@ export const cfgModelLoopGuardToolCallReminder = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Loop Guard Tool-Call Reminder",
+		label: __ompTranslate("Loop Guard Tool-Call Reminder"),
 		description:
 			"When a Gemini reasoning stream emits many consecutive planning headers without calling a tool, interrupt it and inject a reminder to issue a tool call (requires Loop Guard)",
 	},
@@ -359,7 +372,7 @@ export const cfgModelToolCallLoopGuardEnabled = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Tool-Call Loop Guard",
+		label: __ompTranslate("Tool-Call Loop Guard"),
 		description: "Detect consecutive identical tool calls across turns and inject a corrective steer",
 	},
 });
@@ -371,7 +384,7 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Tool-Call Loop Threshold",
+		label: __ompTranslate("Tool-Call Loop Threshold"),
 		description: "Consecutive identical tool calls required before the corrective steer is injected",
 	},
 });
@@ -383,7 +396,7 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Tool-Call Loop Exempt Tools",
+		label: __ompTranslate("Tool-Call Loop Exempt Tools"),
 		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
@@ -396,17 +409,25 @@ export const cfgInlineToolDescriptors = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "Inline Tool Descriptors",
+		label: __ompTranslate("Inline Tool Descriptors"),
 		description:
 			"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once. Auto enables this for Gemini models and disables it otherwise",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description: "Inline descriptors for Gemini models; keep them in tool schemas otherwise",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Inline descriptors for Gemini models; keep them in tool schemas otherwise"),
 			},
-			{ value: "on", label: "On", description: "Always inline descriptors in the system prompt" },
-			{ value: "off", label: "Off", description: "Keep descriptors in provider tool schemas only" },
+			{
+				value: "on",
+				label: __ompTranslate("On"),
+				description: __ompTranslate("Always inline descriptors in the system prompt"),
+			},
+			{
+				value: "off",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Keep descriptors in provider tool schemas only"),
+			},
 		],
 	},
 });
@@ -418,7 +439,7 @@ export const cfgIncludeModelInPrompt = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "Include Model in Prompt",
+		label: __ompTranslate("Include Model in Prompt"),
 		description: "Surface the active model identifier in the system prompt so the agent knows which model it is",
 	},
 });
@@ -430,7 +451,7 @@ export const cfgIncludeWorkspaceTree = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "Include Workspace Tree",
+		label: __ompTranslate("Include Workspace Tree"),
 		description:
 			"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
 	},
@@ -443,7 +464,7 @@ export const cfgSkillful = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "List Skills in Prompt",
+		label: __ompTranslate("List Skills in Prompt"),
 		description:
 			"List available skills in the system prompt; disable to save context and toggle per-session with /skillful",
 	},
@@ -460,25 +481,29 @@ export const cfgPersonality = register({
 	ui: {
 		tab: "model",
 		group: "Prompt",
-		label: "Personality",
+		label: __ompTranslate("Personality"),
 		description: "Communication style rendered into the system prompt's personality block",
 		options: [
 			{
 				value: "default",
-				label: "Default",
-				description: "Terse, evidence-first engineer; dense, action-oriented replies",
+				label: __ompTranslate("Default"),
+				description: __ompTranslate("Terse, evidence-first engineer; dense, action-oriented replies"),
 			},
 			{
 				value: "friendly",
-				label: "Friendly",
-				description: "Warm, encouraging collaborator focused on momentum and morale",
+				label: __ompTranslate("Friendly"),
+				description: __ompTranslate("Warm, encouraging collaborator focused on momentum and morale"),
 			},
 			{
 				value: "pragmatic",
-				label: "Pragmatic",
-				description: "Direct, efficient engineer focused on clarity and rigor",
+				label: __ompTranslate("Pragmatic"),
+				description: __ompTranslate("Direct, efficient engineer focused on clarity and rigor"),
 			},
-			{ value: "none", label: "None", description: "Omit the personality block entirely" },
+			{
+				value: "none",
+				label: __ompTranslate("None"),
+				description: __ompTranslate("Omit the personality block entirely"),
+			},
 		],
 	},
 });
@@ -491,15 +516,19 @@ export const cfgTemperature = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Temperature",
+		label: __ompTranslate("Temperature"),
 		description: "Sampling temperature (0 = deterministic, 1 = creative, -1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "0", label: "0", description: "Deterministic" },
-			{ value: "0.2", label: "0.2", description: "Focused" },
-			{ value: "0.5", label: "0.5", description: "Balanced" },
-			{ value: "0.7", label: "0.7", description: "Creative" },
-			{ value: "1", label: "1", description: "Maximum variety" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "0", label: "0", description: __ompTranslate("Deterministic") },
+			{ value: "0.2", label: "0.2", description: __ompTranslate("Focused") },
+			{ value: "0.5", label: "0.5", description: __ompTranslate("Balanced") },
+			{ value: "0.7", label: "0.7", description: __ompTranslate("Creative") },
+			{ value: "1", label: "1", description: __ompTranslate("Maximum variety") },
 		],
 	},
 });
@@ -511,15 +540,19 @@ export const cfgTopP = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Top P",
+		label: __ompTranslate("Top P"),
 		description: "Nucleus sampling cutoff (0-1, -1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "0.1", label: "0.1", description: "Very focused" },
-			{ value: "0.3", label: "0.3", description: "Focused" },
-			{ value: "0.5", label: "0.5", description: "Balanced" },
-			{ value: "0.9", label: "0.9", description: "Broad" },
-			{ value: "1", label: "1", description: "No nucleus filtering" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "0.1", label: "0.1", description: __ompTranslate("Very focused") },
+			{ value: "0.3", label: "0.3", description: __ompTranslate("Focused") },
+			{ value: "0.5", label: "0.5", description: __ompTranslate("Balanced") },
+			{ value: "0.9", label: "0.9", description: __ompTranslate("Broad") },
+			{ value: "1", label: "1", description: __ompTranslate("No nucleus filtering") },
 		],
 	},
 });
@@ -531,14 +564,18 @@ export const cfgTopK = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Top K",
+		label: __ompTranslate("Top K"),
 		description: "Sample from top-K tokens (-1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "1", label: "1", description: "Greedy top token" },
-			{ value: "20", label: "20", description: "Focused" },
-			{ value: "40", label: "40", description: "Balanced" },
-			{ value: "100", label: "100", description: "Broad" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "1", label: "1", description: __ompTranslate("Greedy top token") },
+			{ value: "20", label: "20", description: __ompTranslate("Focused") },
+			{ value: "40", label: "40", description: __ompTranslate("Balanced") },
+			{ value: "100", label: "100", description: __ompTranslate("Broad") },
 		],
 	},
 });
@@ -550,13 +587,17 @@ export const cfgMinP = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Min P",
+		label: __ompTranslate("Min P"),
 		description: "Minimum probability threshold (0-1, -1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "0.01", label: "0.01", description: "Very permissive" },
-			{ value: "0.05", label: "0.05", description: "Balanced" },
-			{ value: "0.1", label: "0.1", description: "Strict" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "0.01", label: "0.01", description: __ompTranslate("Very permissive") },
+			{ value: "0.05", label: "0.05", description: __ompTranslate("Balanced") },
+			{ value: "0.1", label: "0.1", description: __ompTranslate("Strict") },
 		],
 	},
 });
@@ -568,14 +609,18 @@ export const cfgPresencePenalty = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Presence Penalty",
+		label: __ompTranslate("Presence Penalty"),
 		description: "Penalty for introducing already-present tokens (-1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "0", label: "0", description: "No penalty" },
-			{ value: "0.5", label: "0.5", description: "Mild novelty" },
-			{ value: "1", label: "1", description: "Encourage novelty" },
-			{ value: "2", label: "2", description: "Strong novelty" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "0", label: "0", description: __ompTranslate("No penalty") },
+			{ value: "0.5", label: "0.5", description: __ompTranslate("Mild novelty") },
+			{ value: "1", label: "1", description: __ompTranslate("Encourage novelty") },
+			{ value: "2", label: "2", description: __ompTranslate("Strong novelty") },
 		],
 	},
 });
@@ -587,15 +632,19 @@ export const cfgRepetitionPenalty = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Repetition Penalty",
+		label: __ompTranslate("Repetition Penalty"),
 		description: "Penalty for repeated tokens (-1 = provider default)",
 		options: [
-			{ value: "-1", label: "Default", description: "Use provider default" },
-			{ value: "0.8", label: "0.8", description: "Allow repetition" },
-			{ value: "1", label: "1", description: "No penalty" },
-			{ value: "1.1", label: "1.1", description: "Mild penalty" },
-			{ value: "1.2", label: "1.2", description: "Balanced" },
-			{ value: "1.5", label: "1.5", description: "Strong penalty" },
+			{
+				value: "-1",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("Use provider default"),
+			},
+			{ value: "0.8", label: "0.8", description: __ompTranslate("Allow repetition") },
+			{ value: "1", label: "1", description: __ompTranslate("No penalty") },
+			{ value: "1.1", label: "1.1", description: __ompTranslate("Mild penalty") },
+			{ value: "1.2", label: "1.2", description: __ompTranslate("Balanced") },
+			{ value: "1.5", label: "1.5", description: __ompTranslate("Strong penalty") },
 		],
 	},
 });
@@ -632,12 +681,16 @@ export const cfgTextVerbosity = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Text Verbosity",
+		label: __ompTranslate("Text Verbosity"),
 		description: "OpenAI Responses and Codex response verbosity (low, medium, or high)",
 		options: [
-			{ value: "low", label: "Low", description: "Prefer concise responses" },
-			{ value: "medium", label: "Medium", description: "Balance brevity and detail (default)" },
-			{ value: "high", label: "High", description: "Prefer detailed responses" },
+			{ value: "low", label: __ompTranslate("Low"), description: __ompTranslate("Prefer concise responses") },
+			{
+				value: "medium",
+				label: __ompTranslate("Medium"),
+				description: __ompTranslate("Balance brevity and detail (default)"),
+			},
+			{ value: "high", label: __ompTranslate("High"), description: __ompTranslate("Prefer detailed responses") },
 		],
 	},
 });
@@ -650,7 +703,7 @@ export const cfgTierOpenai = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Service Tier — OpenAI",
+		label: __ompTranslate("Service Tier — OpenAI"),
 		description:
 			"Processing tier for OpenAI / OpenAI-Codex requests, and OpenAI-family models routed via OpenRouter (none = omit). Sent as `service_tier`.",
 		options: SERVICE_TIER_OPENAI_OPTIONS,
@@ -665,7 +718,7 @@ export const cfgTierAnthropic = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Service Tier — Anthropic",
+		label: __ompTranslate("Service Tier — Anthropic"),
 		description:
 			'Processing tier for Claude requests. `priority` realizes fast mode (`speed: "fast"`) on supported direct Anthropic models; ignored on Bedrock/Vertex Claude and via OpenRouter.',
 		options: SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -680,7 +733,7 @@ export const cfgTierGoogle = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Service Tier — Google",
+		label: __ompTranslate("Service Tier — Google"),
 		description:
 			"Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.",
 		options: SERVICE_TIER_GOOGLE_OPTIONS,
@@ -695,7 +748,7 @@ export const cfgTierSubagent = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Service Tier — Subagent",
+		label: __ompTranslate("Service Tier — Subagent"),
 		description:
 			"Service Tier for spawned task/eval subagents. Inherit = match the main agent's live per-family tiers (tracks /fast); pick a value to apply it to whichever family the subagent's model belongs to.",
 		options: SERVICE_TIER_INHERIT_OPTIONS,
@@ -711,7 +764,7 @@ export const cfgTierAdvisor = register({
 	ui: {
 		tab: "model",
 		group: "Sampling",
-		label: "Service Tier — Advisor",
+		label: __ompTranslate("Service Tier — Advisor"),
 		description:
 			"Service Tier for the advisor model. None = standard processing; Inherit = match the main agent's live per-family tiers; pick a value to apply it to the advisor model's family.",
 		options: SERVICE_TIER_INHERIT_OPTIONS,
@@ -729,14 +782,14 @@ export const cfgRetryMaxRetries = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Retry Attempts",
+		label: __ompTranslate("Retry Attempts"),
 		description: "Maximum retry attempts on API errors",
 		options: [
-			{ value: "1", label: "1 retry" },
-			{ value: "2", label: "2 retries" },
-			{ value: "3", label: "3 retries" },
-			{ value: "5", label: "5 retries" },
-			{ value: "10", label: "10 retries" },
+			{ value: "1", label: __ompTranslate("1 retry") },
+			{ value: "2", label: __ompTranslate("2 retries") },
+			{ value: "3", label: __ompTranslate("3 retries") },
+			{ value: "5", label: __ompTranslate("5 retries") },
+			{ value: "10", label: __ompTranslate("10 retries") },
 		],
 	},
 });
@@ -750,7 +803,7 @@ export const cfgRetryMaxDelayMs = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Max Retry Delay",
+		label: __ompTranslate("Max Retry Delay"),
 		description:
 			"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
 	},
@@ -763,9 +816,12 @@ export const cfgRetryWaitForUsageReset = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Wait For Usage Reset",
+		label: __ompTranslate("Wait For Usage Reset"),
 		get description() {
-			return `When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
+			return __ompTranslate(
+				"When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable ({0}) but also hold subagents, so leave off for unattended runs.",
+				`${formatKeyHint("escape")}`,
+			);
 		},
 	},
 });
@@ -777,7 +833,7 @@ export const cfgRetryModelFallback = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Retry Model Fallback",
+		label: __ompTranslate("Retry Model Fallback"),
 		description:
 			"Allow retry recovery to switch to models in retry.fallbackChains after provider errors. Independent of Auto-Promote Context",
 	},
@@ -791,19 +847,25 @@ export const cfgRetryFallbackOn = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Fallback Trigger",
+		label: __ompTranslate("Fallback Trigger"),
 		description: "Which failed requests may switch to a configured fallback model",
 		options: [
-			{ value: "any", label: "Any error", description: "Every provider error may switch models" },
+			{
+				value: "any",
+				label: __ompTranslate("Any error"),
+				description: __ompTranslate("Every provider error may switch models"),
+			},
 			{
 				value: "usage-limit",
-				label: "Usage limits only",
-				description: "Switch only on a usage limit; retry other errors on the same model, then surface them",
+				label: __ompTranslate("Usage limits only"),
+				description: __ompTranslate(
+					"Switch only on a usage limit; retry other errors on the same model, then surface them",
+				),
 			},
 			{
 				value: "except-usage-limit",
-				label: "All but usage limits",
-				description: "Wait out or surface a usage limit; switch on other errors",
+				label: __ompTranslate("All but usage limits"),
+				description: __ompTranslate("Wait out or surface a usage limit; switch on other errors"),
 			},
 		],
 	},
@@ -829,7 +891,7 @@ export const cfgRetryUsageAwareFallback = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Usage-Aware Fallback",
+		label: __ompTranslate("Usage-Aware Fallback"),
 		description:
 			"Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. Ordinary configured API keys are excluded.",
 	},
@@ -842,16 +904,16 @@ export const cfgRetryUsageReservePct = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Reserve Margin",
+		label: __ompTranslate("Reserve Margin"),
 		description:
 			"Treat a coding-plan model as near its limit below this remaining percentage. Unknown or unmapped usage keeps the primary model.",
 		condition: "usageAwareFallbackEnabled",
 		options: [
-			{ value: "5", label: "5%", description: "Act only when nearly exhausted" },
-			{ value: "10", label: "10%", description: "Balanced safety margin" },
-			{ value: "15", label: "15%", description: "Conservative" },
-			{ value: "20", label: "20%", description: "Early protection" },
-			{ value: "25", label: "25%", description: "Very conservative" },
+			{ value: "5", label: "5%", description: __ompTranslate("Act only when nearly exhausted") },
+			{ value: "10", label: "10%", description: __ompTranslate("Balanced safety margin") },
+			{ value: "15", label: "15%", description: __ompTranslate("Conservative") },
+			{ value: "20", label: "20%", description: __ompTranslate("Early protection") },
+			{ value: "25", label: "25%", description: __ompTranslate("Very conservative") },
 		],
 	},
 });
@@ -864,24 +926,26 @@ export const cfgRetryUsageReservePolicy = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Reserve Policy",
+		label: __ompTranslate("Reserve Policy"),
 		description: "What to do when every same-provider coding-plan account is inside the reserve margin.",
 		condition: "usageAwareFallbackEnabled",
 		options: [
 			{
 				value: "confirm",
-				label: "Confirm interactively",
-				description: "Keep interactive sessions on the primary until confirmed; background agents auto-fallback",
+				label: __ompTranslate("Confirm interactively"),
+				description: __ompTranslate(
+					"Keep interactive sessions on the primary until confirmed; background agents auto-fallback",
+				),
 			},
 			{
 				value: "auto",
-				label: "Auto-fallback",
-				description: "Always select the next eligible configured fallback",
+				label: __ompTranslate("Auto-fallback"),
+				description: __ompTranslate("Always select the next eligible configured fallback"),
 			},
 			{
 				value: "fail-closed",
-				label: "Fail closed",
-				description: "Do not spend reserve quota or select a fallback",
+				label: __ompTranslate("Fail closed"),
+				description: __ompTranslate("Do not spend reserve quota or select a fallback"),
 			},
 		],
 	},
@@ -894,7 +958,7 @@ export const cfgRetryFallbackChains = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Retry Fallback Chains",
+		label: __ompTranslate("Retry Fallback Chains"),
 		description:
 			'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
 	},
@@ -908,15 +972,19 @@ export const cfgRetryFallbackRevertPolicy = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Fallback Revert Policy",
+		label: __ompTranslate("Fallback Revert Policy"),
 		description: "When to return to the primary model after a fallback",
 		options: [
 			{
 				value: "cooldown-expiry",
-				label: "Cooldown expiry",
-				description: "Return to the primary model after its suppression window ends",
+				label: __ompTranslate("Cooldown expiry"),
+				description: __ompTranslate("Return to the primary model after its suppression window ends"),
 			},
-			{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
+			{
+				value: "never",
+				label: __ompTranslate("Never\u0004model.fallback-revert.never"),
+				description: __ompTranslate("Stay on the fallback model until manually changed"),
+			},
 		],
 	},
 });
@@ -946,7 +1014,7 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
-		label: "Anthropic Server-Side Fallback (Fable 5)",
+		label: __ompTranslate("Anthropic Server-Side Fallback (Fable 5)"),
 		description:
 			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
 	},
@@ -974,7 +1042,7 @@ export const cfgProvidersOllamaCloudMaxConcurrency = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Ollama Cloud Max Concurrency",
+		label: __ompTranslate("Ollama Cloud Max Concurrency"),
 		description: "Maximum concurrent Ollama Cloud subagent runs per process; 0 disables the provider-specific limit",
 	},
 });
@@ -986,14 +1054,14 @@ export const cfgProvidersWebSearchTimeoutSeconds = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Web Search Timeout",
+		label: __ompTranslate("Web Search Timeout"),
 		description: `Hard timeout for each provider's search transport before web_search advances to the next fallback, in seconds (maximum ${MAX_WEB_SEARCH_TIMEOUT_SECONDS})`,
 		options: [
-			{ value: "30", label: "30 seconds" },
-			{ value: "60", label: "1 minute" },
-			{ value: "120", label: "2 minutes" },
-			{ value: "180", label: "3 minutes" },
-			{ value: "300", label: "5 minutes" },
+			{ value: "30", label: __ompTranslate("30 seconds") },
+			{ value: "60", label: __ompTranslate("1 minute") },
+			{ value: "120", label: __ompTranslate("2 minutes") },
+			{ value: "180", label: __ompTranslate("3 minutes") },
+			{ value: "300", label: __ompTranslate("5 minutes") },
 		],
 	},
 });
@@ -1006,23 +1074,23 @@ export const cfgProvidersAntigravityEndpoint = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Antigravity Endpoint Mode",
+		label: __ompTranslate("Antigravity Endpoint Mode"),
 		description: "Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description: "Try production endpoint, fail over to sandbox on 5xx/429",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Try production endpoint, fail over to sandbox on 5xx/429"),
 			},
 			{
 				value: "production",
-				label: "Production Only",
-				description: "Force production endpoint only",
+				label: __ompTranslate("Production Only"),
+				description: __ompTranslate("Force production endpoint only"),
 			},
 			{
 				value: "sandbox",
-				label: "Sandbox Only",
-				description: "Force sandbox endpoint only",
+				label: __ompTranslate("Sandbox Only"),
+				description: __ompTranslate("Force sandbox endpoint only"),
 			},
 		],
 	},
@@ -1036,15 +1104,19 @@ export const cfgProvidersFireworksTier = register({
 	ui: {
 		tab: "providers",
 		group: "Fireworks",
-		label: "Fireworks Tier",
+		label: __ompTranslate("Fireworks Tier"),
 		description:
 			'Serving path for Fireworks requests. Priority sends `service_tier: "priority"` for higher reliability during peak traffic at a higher price; Standard omits it. Fast (`-fast`) models ignore this — Fast is its own serving path.',
 		options: [
-			{ value: "standard", label: "Standard", description: "Default serving path (no service_tier)" },
+			{
+				value: "standard",
+				label: __ompTranslate("Standard"),
+				description: __ompTranslate("Default serving path (no service_tier)"),
+			},
 			{
 				value: "priority",
-				label: "Priority",
-				description: "Priority serving path: higher reliability, premium per-token pricing",
+				label: __ompTranslate("Priority"),
+				description: __ompTranslate("Priority serving path: higher reliability, premium per-token pricing"),
 			},
 		],
 	},
@@ -1062,7 +1134,7 @@ export const cfgProvidersTinyModelDevice = register({
 	ui: {
 		tab: "providers",
 		group: "Tiny Model",
-		label: "Tiny Model Device",
+		label: __ompTranslate("Tiny Model Device"),
 		description:
 			"Inference backend for local tiny models (titles + memory): an ONNX execution provider, or `mlx` to download MLX weights and run them through mlx-lm on Apple silicon. Default uses CPU-only ONNX. The PI_TINY_DEVICE env var overrides this.",
 		options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -1081,7 +1153,7 @@ export const cfgProvidersTinyModelDtype = register({
 	ui: {
 		tab: "providers",
 		group: "Tiny Model",
-		label: "Tiny Model Precision",
+		label: __ompTranslate("Tiny Model Precision"),
 		description:
 			"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 		options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
@@ -1096,13 +1168,17 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 	ui: {
 		tab: "model",
 		group: "Thinking",
-		label: "Auto Thinking Ceiling",
+		label: __ompTranslate("Auto Thinking Ceiling"),
 		description:
 			"Highest effort the `auto` classifier may resolve. `xhigh` keeps the classifier one tier below the top, so only an explicit `ultrathink` reaches `max`; `max` lets a turn the classifier judges exceptional bill the top tier on models that expose it.",
 		condition: "autoThinkingActive",
 		options: [
-			{ value: "xhigh", label: "xhigh", description: "Classifier stops at xhigh (default)" },
-			{ value: "max", label: "max", description: "Classifier may resolve max where the model supports it" },
+			{ value: "xhigh", label: "xhigh", description: __ompTranslate("Classifier stops at xhigh (default)") },
+			{
+				value: "max",
+				label: "max",
+				description: __ompTranslate("Classifier may resolve max where the model supports it"),
+			},
 		],
 	},
 });
@@ -1115,20 +1191,26 @@ export const cfgFeaturesUnexpectedStopDetection = register({
 	ui: {
 		tab: "interaction",
 		group: "Agent",
-		label: "Unexpected Stops",
+		label: __ompTranslate("Unexpected Stops"),
 		description:
 			"Automatically recover when the assistant stops without a visible message. Smart also classifies text-only stops with a small model.",
 		options: [
-			{ value: "none", label: "None", description: "Disabled" },
+			{
+				value: "none",
+				label: __ompTranslate("None"),
+				description: __ompTranslate("Disabled\u0004display.shimmer.disabled"),
+			},
 			{
 				value: "mechanical",
-				label: "Mechanical",
-				description: "Retry stops with no visible assistant message; tool calls are excluded (default)",
+				label: __ompTranslate("Mechanical"),
+				description: __ompTranslate(
+					"Retry stops with no visible assistant message; tool calls are excluded (default)",
+				),
 			},
 			{
 				value: "smart",
-				label: "Smart",
-				description: "Mechanical + small-model classification of text-only stops",
+				label: __ompTranslate("Smart\u0004session.stop-detection.smart"),
+				description: __ompTranslate("Mechanical + small-model classification of text-only stops"),
 			},
 		],
 	},
@@ -1142,10 +1224,14 @@ export const cfgProvidersKimiApiFormat = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "Kimi API Format",
+		label: __ompTranslate("Kimi API Format"),
 		description: "API format for Kimi Code provider (auto follows live model metadata)",
 		options: [
-			{ value: "auto", label: "Auto", description: "Use the model's server-declared protocol" },
+			{
+				value: "auto",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Use the model's server-declared protocol"),
+			},
 			{ value: "openai", label: "OpenAI", description: "api.kimi.com" },
 			{ value: "anthropic", label: "Anthropic", description: "api.moonshot.ai" },
 		],
@@ -1163,9 +1249,21 @@ export const cfgProvidersOpenaiWebsockets = register({
 		label: "OpenAI WebSockets",
 		description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
 		options: [
-			{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
-			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
-			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
+			{
+				value: "auto",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Use model/provider default websocket behavior"),
+			},
+			{
+				value: "off",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Disable websockets for OpenAI Codex models"),
+			},
+			{
+				value: "on",
+				label: __ompTranslate("On"),
+				description: __ompTranslate("Force websockets for OpenAI Codex models"),
+			},
 		],
 	},
 });
@@ -1177,7 +1275,7 @@ export const cfgProvidersOpenaiLiveSteering = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "OpenAI Live Steering",
+		label: __ompTranslate("OpenAI Live Steering"),
 		description:
 			"Deliver messages typed while a GPT-6 response streams into that response over the Codex WebSocket, instead of waiting for the next tool boundary",
 	},
@@ -1191,7 +1289,7 @@ export const cfgProvidersMuseCodeStoreResponses = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "Muse Code Stored Responses",
+		label: __ompTranslate("Muse Code Stored Responses"),
 		description:
 			"Store Muse Code results on Meta's servers so a turn whose connection drops is recovered instead of re-run. Stored runs keep prompts and outputs on Meta's side.",
 	},
@@ -1208,28 +1306,36 @@ export const cfgProvidersCacheRetention = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "Prompt Cache Retention",
+		label: __ompTranslate("Prompt Cache Retention"),
 		description:
 			"Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI)",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description:
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate(
 					"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m; PI_CACHE_RETENTION still applies",
+				),
 			},
 			{
 				value: "short",
-				label: "Short (5m)",
-				description: "Cheapest cache writes; pair with cache warming to keep short entries alive while idle",
+				label: __ompTranslate("Short (5m)"),
+				description: __ompTranslate(
+					"Cheapest cache writes; pair with cache warming to keep short entries alive while idle",
+				),
 			},
 			{
 				value: "long",
-				label: "Long (1h+)",
-				description:
+				label: __ompTranslate("Long (1h+)"),
+				description: __ompTranslate(
 					"Longer TTL where supported (Anthropic/Bedrock 1h, OpenAI GPT-5.6+ Responses 12h); pricier writes, only warmed during active runs",
+				),
 			},
-			{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
+			{
+				value: "none",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Disable prompt caching and cache-affinity routing"),
+			},
 		],
 	},
 });
@@ -1242,21 +1348,24 @@ export const cfgProvidersCacheWarming = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "Cache Warming",
+		label: __ompTranslate("Cache Warming"),
 		description:
 			"Re-send the last request with a one-token output budget shortly before its prompt-cache entry expires",
 		options: [
-			{ value: "off", label: "Off", description: "Disable cache warming" },
+			{ value: "off", label: __ompTranslate("Off"), description: __ompTranslate("Disable cache warming") },
 			{
 				value: "streaming",
-				label: "Streaming",
-				description: "Protect expensive prefixes during long tool executions; stops when the agent settles",
+				label: __ompTranslate("Streaming"),
+				description: __ompTranslate(
+					"Protect expensive prefixes during long tool executions; stops when the agent settles",
+				),
 			},
 			{
 				value: "idle",
-				label: "Idle",
-				description:
+				label: __ompTranslate("Idle\u0004provider.cache-warming.idle"),
+				description: __ompTranslate(
 					"Also refresh 5-minute entries between runs while the expected savings stay above the cost floor",
+				),
 			},
 		],
 	},
@@ -1269,15 +1378,19 @@ export const cfgProvidersStreamFirstEventTimeoutSeconds = register({
 	ui: {
 		tab: "providers",
 		group: "Timeouts",
-		label: "Stream First Event Timeout",
+		label: __ompTranslate("Stream First Event Timeout"),
 		description:
 			"Seconds to wait for the first model stream event; -1 uses provider/env defaults, 0 disables the watchdog",
 		options: [
-			{ value: "-1", label: "Auto", description: "Use provider defaults and PI_* timeout env vars" },
-			{ value: "0", label: "Off", description: "Disable first-event timeout" },
-			{ value: "300", label: "5 minutes" },
-			{ value: "600", label: "10 minutes" },
-			{ value: "1800", label: "30 minutes" },
+			{
+				value: "-1",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Use provider defaults and PI_* timeout env vars"),
+			},
+			{ value: "0", label: __ompTranslate("Off"), description: __ompTranslate("Disable first-event timeout") },
+			{ value: "300", label: __ompTranslate("5 minutes") },
+			{ value: "600", label: __ompTranslate("10 minutes") },
+			{ value: "1800", label: __ompTranslate("30 minutes") },
 		],
 	},
 });
@@ -1289,15 +1402,19 @@ export const cfgProvidersStreamIdleTimeoutSeconds = register({
 	ui: {
 		tab: "providers",
 		group: "Timeouts",
-		label: "Stream Idle Timeout",
+		label: __ompTranslate("Stream Idle Timeout"),
 		description:
 			"Seconds a model stream may stay silent between events; -1 uses provider/env defaults, 0 disables the watchdog",
 		options: [
-			{ value: "-1", label: "Auto", description: "Use provider defaults and PI_* timeout env vars" },
-			{ value: "0", label: "Off", description: "Disable idle timeout" },
-			{ value: "300", label: "5 minutes" },
-			{ value: "600", label: "10 minutes" },
-			{ value: "1800", label: "30 minutes" },
+			{
+				value: "-1",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Use provider defaults and PI_* timeout env vars"),
+			},
+			{ value: "0", label: __ompTranslate("Off"), description: __ompTranslate("Disable idle timeout") },
+			{ value: "300", label: __ompTranslate("5 minutes") },
+			{ value: "600", label: __ompTranslate("10 minutes") },
+			{ value: "1800", label: __ompTranslate("30 minutes") },
 		],
 	},
 });
@@ -1310,18 +1427,22 @@ export const cfgProvidersOpenrouterVariant = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "OpenRouter Routing",
+		label: __ompTranslate("OpenRouter Routing"),
 		description:
 			"Default routing-variant suffix appended to OpenRouter model IDs (overridden when the selector already names a variant)",
 		options: [
-			{ value: "default", label: "Default", description: "No suffix; use OpenRouter's default routing" },
-			{ value: "nitro", label: ":nitro", description: "Prioritize throughput / lowest latency" },
-			{ value: "floor", label: ":floor", description: "Prioritize cheapest available provider" },
-			{ value: "online", label: ":online", description: "Enable OpenRouter's web-search plugin" },
+			{
+				value: "default",
+				label: __ompTranslate("Default\u0004settings.value.default"),
+				description: __ompTranslate("No suffix; use OpenRouter's default routing"),
+			},
+			{ value: "nitro", label: ":nitro", description: __ompTranslate("Prioritize throughput / lowest latency") },
+			{ value: "floor", label: ":floor", description: __ompTranslate("Prioritize cheapest available provider") },
+			{ value: "online", label: ":online", description: __ompTranslate("Enable OpenRouter's web-search plugin") },
 			{
 				value: "exacto",
 				label: ":exacto",
-				description: "Cherry-picked high-quality providers (only defined for select models)",
+				description: __ompTranslate("Cherry-picked high-quality providers (only defined for select models)"),
 			},
 		],
 	},
@@ -1335,20 +1456,24 @@ export const cfgProvidersFetch = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Fetch Provider",
+		label: __ompTranslate("Fetch Provider"),
 		description: "Reader backend priority for the fetch/read URL tool",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description: "Priority: native > trafilatura > lynx > parallel > firecrawl > jina",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Priority: native > trafilatura > lynx > parallel > firecrawl > jina"),
 			},
-			{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
-			{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
-			{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
-			{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
-			{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
-			{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
+			{
+				value: "native",
+				label: __ompTranslate("Native"),
+				description: __ompTranslate("In-process HTML→Markdown converter (always available)"),
+			},
+			{ value: "trafilatura", label: "Trafilatura", description: __ompTranslate("Auto-installs via uv/pip") },
+			{ value: "lynx", label: "Lynx", description: __ompTranslate("Requires lynx system package") },
+			{ value: "parallel", label: "Parallel", description: __ompTranslate("Requires PARALLEL_API_KEY") },
+			{ value: "firecrawl", label: "Firecrawl", description: __ompTranslate("Requires FIRECRAWL_API_KEY") },
+			{ value: "jina", label: "Jina", description: __ompTranslate("Uses r.jina.ai reader (JINA_API_KEY optional)") },
 		],
 	},
 });
@@ -1362,18 +1487,27 @@ export const cfgCodexResetsAutoRedeem = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Auto-Redeem Saved Resets",
+		label: __ompTranslate("Codex Auto-Redeem Saved Resets"),
 		description:
 			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
 		options: [
 			{
 				value: "unset",
-				label: "Unset",
-				description:
+				label: __ompTranslate("Unset"),
+				description: __ompTranslate(
 					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
+				),
 			},
-			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
+			{
+				value: "yes",
+				label: __ompTranslate("Yes"),
+				description: __ompTranslate("Spend eligible saved resets without prompting."),
+			},
+			{
+				value: "no",
+				label: __ompTranslate("No"),
+				description: __ompTranslate("Do not run the saved-reset auto-redeem check."),
+			},
 		],
 	},
 });
@@ -1385,7 +1519,7 @@ export const cfgCodexResetsMinBlockedMinutes = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Auto-Redeem Min Block",
+		label: __ompTranslate("Codex Auto-Redeem Min Block"),
 		description:
 			"Only auto-redeem when the natural unblock — the latest reset among the exhausted 5h/weekly windows — is at least this many minutes away (don't spend a scarce credit to save a short wait). Raise it (e.g. 360) to ignore 5h-only blocks.",
 	},
@@ -1398,7 +1532,7 @@ export const cfgCodexResetsKeepCredits = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Auto-Redeem Reserve",
+		label: __ompTranslate("Codex Auto-Redeem Reserve"),
 		description:
 			"Never auto-spend below this many saved resets (0 = the last credit may be spent automatically). Credits about to expire are exempt — a reserved credit that expires preserves nothing.",
 	},
@@ -1411,7 +1545,7 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Reset Salvage Horizon",
+		label: __ompTranslate("Codex Reset Salvage Horizon"),
 		description:
 			"With auto-redeem enabled, spend a saved Codex reset within this many hours of expiry when either chat window has meaningful usage. 0 disables early salvage; credits expiring within 5 minutes are still attempted regardless of usage.",
 	},
@@ -1437,18 +1571,27 @@ export const cfgClaudeResetsAutoRedeem = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Claude Auto-Redeem Resets",
+		label: __ompTranslate("Claude Auto-Redeem Resets"),
 		description:
 			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
 		options: [
 			{
 				value: "unset",
-				label: "Unset",
-				description:
+				label: __ompTranslate("Unset"),
+				description: __ompTranslate(
 					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
+				),
 			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
+			{
+				value: "yes",
+				label: __ompTranslate("Yes"),
+				description: __ompTranslate("Spend eligible Claude resets without prompting."),
+			},
+			{
+				value: "no",
+				label: __ompTranslate("No"),
+				description: __ompTranslate("Do not run Claude reset auto-redeem checks."),
+			},
 		],
 	},
 });
@@ -1460,7 +1603,7 @@ export const cfgClaudeResetsMinBlockedMinutes = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Claude Auto-Redeem Min Block",
+		label: __ompTranslate("Claude Auto-Redeem Min Block"),
 		description:
 			"Only auto-redeem when the natural unblock — the latest reset among the exhausted covered windows — is at least this many minutes away. A 5-hour-only reset is never used for a weekly or model-scoped block.",
 	},
@@ -1473,7 +1616,7 @@ export const cfgClaudeResetsKeepCredits = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Claude Auto-Redeem Reserve",
+		label: __ompTranslate("Claude Auto-Redeem Reserve"),
 		description:
 			"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve applies to early salvage, but not to eligible resets expiring within 5 minutes.",
 	},
@@ -1486,7 +1629,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Claude Reset Salvage Horizon",
+		label: __ompTranslate("Claude Reset Salvage Horizon"),
 		description:
 			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
 	},
@@ -1508,13 +1651,17 @@ export const cfgProviderAppendOnlyContext = register({
 	ui: {
 		tab: "providers",
 		group: "Protocol",
-		label: "Append-Only Context",
+		label: __ompTranslate("Append-Only Context"),
 		description:
 			"Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic) hit at maximum rate. Auto enables for known prefix-cache providers.",
 		options: [
-			{ value: "auto", label: "Auto", description: "Enable for known prefix-cache providers (recommended)" },
-			{ value: "on", label: "On", description: "Always enable append-only context" },
-			{ value: "off", label: "Off", description: "Disable append-only context" },
+			{
+				value: "auto",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Enable for known prefix-cache providers (recommended)"),
+			},
+			{ value: "on", label: __ompTranslate("On"), description: __ompTranslate("Always enable append-only context") },
+			{ value: "off", label: __ompTranslate("Off"), description: __ompTranslate("Disable append-only context") },
 		],
 	},
 });

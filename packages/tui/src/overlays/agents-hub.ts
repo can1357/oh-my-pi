@@ -10,6 +10,7 @@
  * every per-agent knob is picked instead of memorized.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerScope, TspSpan } from "@oh-my-pi/pi-wire";
 import {
@@ -83,11 +84,16 @@ const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, bundled
 const SOURCES = ["project", "user", "bundled"] as const satisfies readonly AgentSource[];
 /** Per-agent override columns of the config picker; lower priorities hide first. */
 const AGENT_COLUMNS: readonly TspPickerColumn[] = [
-	{ id: "model", head: "Model", format: "text", priority: 4, min: 8 },
+	{ id: "model", head: __ompTranslate("Model"), format: "text", priority: 4, min: 8 },
 	{ id: "prewalk", head: "Prewalk", format: "text", priority: 2 },
-	{ id: "advisor", head: "Advisor", format: "text", priority: 3 },
+	{ id: "advisor", head: __ompTranslate("Advisor"), format: "text", priority: 3 },
 ];
-const SOURCE_COLUMN: TspPickerColumn = { id: "source", head: "Source", format: "dim", priority: 1 };
+const SOURCE_COLUMN: TspPickerColumn = {
+	id: "source",
+	head: __ompTranslate("Source\u0004agent.source.label"),
+	format: "dim",
+	priority: 1,
+};
 
 interface SidebarEntry extends HubSidebarEntry<"all" | "source" | "new" | "separator"> {
 	source?: AgentSource;
@@ -165,26 +171,26 @@ function extractJsonObject(raw: string): string {
 export function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
 	const parsed = JSON.parse(extractJsonObject(raw)) as Partial<GeneratedAgentSpec>;
 	if (!parsed || typeof parsed !== "object") {
-		throw new Error("Model output is not a JSON object");
+		throw new Error(__ompTranslate("Model output is not a JSON object"));
 	}
 	if (
 		typeof parsed.identifier !== "string" ||
 		typeof parsed.whenToUse !== "string" ||
 		typeof parsed.systemPrompt !== "string"
 	) {
-		throw new Error("Model output is missing required fields (identifier, whenToUse, systemPrompt)");
+		throw new Error(__ompTranslate("Model output is missing required fields (identifier, whenToUse, systemPrompt)"));
 	}
 	const identifier = parsed.identifier.trim();
 	const whenToUse = parsed.whenToUse.trim();
 	const systemPrompt = parsed.systemPrompt.trim();
 	if (!IDENTIFIER_PATTERN.test(identifier)) {
-		throw new Error("Generated identifier is invalid (must be lowercase kebab-case, 2+ words)");
+		throw new Error(__ompTranslate("Generated identifier is invalid (must be lowercase kebab-case, 2+ words)"));
 	}
 	if (!whenToUse.toLowerCase().startsWith("use this agent when")) {
-		throw new Error("Generated whenToUse must start with 'Use this agent when...'");
+		throw new Error(__ompTranslate("Generated whenToUse must start with 'Use this agent when...'"));
 	}
 	if (!systemPrompt) {
-		throw new Error("Generated systemPrompt is empty");
+		throw new Error(__ompTranslate("Generated systemPrompt is empty"));
 	}
 	return { identifier, whenToUse, systemPrompt };
 }
@@ -262,7 +268,7 @@ export class AgentsHubComponent implements Component {
 		return lines.slice(0, rows);
 	};
 	readonly #frame: HubFrame = new HubFrame(
-		"Agents",
+		__ompTranslate("Agents"),
 		{ min: 16, max: 24 },
 		(width, rows) =>
 			this.#frame.renderSidebar(
@@ -343,7 +349,7 @@ export class AgentsHubComponent implements Component {
 		const counts: Record<AgentSource, number> = { project: 0, user: 0, bundled: 0 };
 		for (const agent of this.#allAgents) counts[agent.source]++;
 		const entries: SidebarEntry[] = [
-			{ id: "all", kind: "all", label: "All agents", annotation: String(this.#allAgents.length) },
+			{ id: "all", kind: "all", label: __ompTranslate("All agents"), annotation: String(this.#allAgents.length) },
 		];
 		const sources = (["project", "user", "bundled"] as const).filter(source => counts[source] > 0);
 		if (sources.length > 0) {
@@ -359,7 +365,7 @@ export class AgentsHubComponent implements Component {
 			}
 		}
 		entries.push({ id: "sep:actions", kind: "separator", label: "" });
-		entries.push({ id: "new", kind: "new", label: "New agent" });
+		entries.push({ id: "new", kind: "new", label: __ompTranslate("New agent") });
 		this.#entries = entries;
 		if (!entries.some(entry => entry.id === this.#activeEntryId)) this.#activeEntryId = "all";
 	}
@@ -664,7 +670,7 @@ export class AgentsHubComponent implements Component {
 		const description = rawDescription.trim();
 		this.#createDescription = description;
 		if (!description) {
-			this.#createError = "Description is required.";
+			this.#createError = __ompTranslate("Description is required.");
 			this.#requestRender();
 			return;
 		}
@@ -698,7 +704,7 @@ export class AgentsHubComponent implements Component {
 		if (!spec) return;
 		const filePath = await this.#deps.saveAgent(this.#createScope, spec);
 		this.#clearCreateFlow();
-		this.#notice = `Created agent ${spec.identifier} at ${shortenPath(filePath)}`;
+		this.#notice = __ompTranslate("Created agent {0} at {1}", `${spec.identifier}`, `${shortenPath(filePath)}`);
 		await this.#reload();
 	}
 
@@ -1043,7 +1049,8 @@ export class AgentsHubComponent implements Component {
 		}
 		if (this.#notice) return truncateToWidth(theme.fg("success", ` ${this.#notice}`), width);
 		const entry = this.#activeEntry();
-		const scopeLabel = entry.kind === "source" ? `${entry.label} agents` : "All agents";
+		const scopeLabel =
+			entry.kind === "source" ? __ompTranslate("{0} agents", `${entry.label}`) : __ompTranslate("All agents");
 		const count = this.#rows.filter(rowDef => rowDef.kind === "agent").length;
 		return truncateToWidth(theme.fg("muted", ` ${scopeLabel} · ${count}`), width);
 	}
@@ -1136,7 +1143,7 @@ export class AgentsHubComponent implements Component {
 				.join("   ");
 			lines.push(truncateToWidth(` ${flagLine}`, width));
 		} else {
-			lines.push(theme.fg("dim", " Select an agent to inspect"));
+			lines.push(theme.fg("dim", __ompTranslate(" Select an agent to inspect")));
 			lines.push("");
 			lines.push("");
 		}
@@ -1148,7 +1155,7 @@ export class AgentsHubComponent implements Component {
 		lines.push("");
 		if (this.#createSpec) {
 			const spec = this.#createSpec;
-			lines.push(truncateToWidth(theme.bold(theme.fg("accent", " Review generated agent")), width));
+			lines.push(truncateToWidth(theme.bold(theme.fg("accent", __ompTranslate(" Review generated agent"))), width));
 			lines.push("");
 			lines.push(truncateToWidth(theme.fg("muted", ` Identifier: ${spec.identifier}`), width));
 			lines.push(truncateToWidth(theme.fg("muted", ` Scope: ${this.#createScope}`), width));
@@ -1172,11 +1179,12 @@ export class AgentsHubComponent implements Component {
 				lines.push(theme.fg("dim", `   … ${wrapped.length - budget} more lines`));
 			}
 		} else {
-			lines.push(truncateToWidth(theme.bold(theme.fg("accent", " Create new agent")), width));
+			lines.push(truncateToWidth(theme.bold(theme.fg("accent", __ompTranslate(" Create new agent"))), width));
 			lines.push("");
 			lines.push(
 				truncateToWidth(
-					theme.fg("muted", " Describe what the agent should do; scope: ") + theme.fg("accent", this.#createScope),
+					theme.fg("muted", __ompTranslate(" Describe what the agent should do; scope: ")) +
+						theme.fg("accent", this.#createScope),
 					width,
 				),
 			);
@@ -1290,7 +1298,7 @@ export class AgentsHubComponent implements Component {
 		footer.push(hintsRow(this.#footerHints()));
 		const described = describeHubFrame(
 			"omp.hub.agents",
-			"Agents",
+			__ompTranslate("Agents"),
 			describeHubSidebar(this.#entries, this.#activeEntryId, this.#sidebarStyle, "scopes"),
 			this.#describeBody(),
 			node("col", { gap: "xs" }, footer, "footer"),
@@ -1412,13 +1420,13 @@ export class AgentsHubComponent implements Component {
 		const counts: Record<AgentSource, number> = { project: 0, user: 0, bundled: 0 };
 		for (const agent of this.#allAgents) counts[agent.source]++;
 		const scopes: TspPickerScope[] = [
-			{ id: "all", label: "All agents", icon: "users", count: this.#allAgents.length },
+			{ id: "all", label: __ompTranslate("All agents"), icon: "users", count: this.#allAgents.length },
 			...SOURCES.map((source): TspPickerScope => ({
 				id: `source:${source}`,
 				label: SOURCE_LABEL[source],
 				icon: source === "project" ? "folder" : source === "user" ? "user" : "box",
 				count: counts[source],
-				group: "Source",
+				group: __ompTranslate("Source\u0004agent.source.label"),
 				disabled: counts[source] === 0 ? `No ${source} agents` : undefined,
 			})),
 		];
@@ -1429,37 +1437,47 @@ export class AgentsHubComponent implements Component {
 		if (strip) {
 			actions = [
 				{ id: "apply", label: strip.property ? "Apply" : "Open", keys: ["enter"], primary: true },
-				{ id: "back", label: strip.property ? "Back" : "Cancel", keys: ["esc"], end: true },
+				{
+					id: "back",
+					label: strip.property ? __ompTranslate("Back") : __ompTranslate("Cancel"),
+					keys: ["esc"],
+					end: true,
+				},
 			];
 		} else {
-			const noAgent = agent ? undefined : "Select an agent";
+			const noAgent = agent ? undefined : __ompTranslate("Select an agent");
 			actions = [
-				{ id: "configure", label: agent ? "Configure" : "Create", keys: ["enter"], primary: true },
+				{
+					id: "configure",
+					label: agent ? __ompTranslate("Configure") : __ompTranslate("Create"),
+					keys: ["enter"],
+					primary: true,
+				},
 				{
 					id: "toggle",
-					label: "Toggle",
+					label: __ompTranslate("Toggle"),
 					keys: ["space"],
 					on: agent ? !agent.disabled : undefined,
 					disabled: noAgent,
 				},
-				{ id: "model", label: "Model", disabled: noAgent },
-				{ id: "new", label: "New agent" },
-				{ id: "reload", label: "Reload", keys: ["ctrl", "r"] },
+				{ id: "model", label: __ompTranslate("Model"), disabled: noAgent },
+				{ id: "new", label: __ompTranslate("New agent") },
+				{ id: "reload", label: __ompTranslate("Reload"), keys: ["ctrl", "r"] },
 				CLOSE_ACTION,
 			];
 		}
 		const selectedRow = this.#rows[this.#rowIndex];
 		return picker(
 			{
-				title: "Agents",
+				title: __ompTranslate("Agents"),
 				subtitle: this.#notice ?? undefined,
 				icon: "users",
-				noun: "agents",
+				noun: __ompTranslate("agents"),
 				size: "lg",
 				layout: "rows",
 				preview: "side",
 				...pickerQuery(this.#search),
-				placeholder: "Search agents…",
+				placeholder: __ompTranslate("Search agents…"),
 				scopes,
 				scope: entry.kind === "source" ? entry.id : "all",
 				columns: entry.kind === "source" ? AGENT_COLUMNS : [...AGENT_COLUMNS, SOURCE_COLUMN],
@@ -1488,7 +1506,7 @@ export class AgentsHubComponent implements Component {
 
 	#pickerItem(rowDef: ListRow): TspPickerItem {
 		if (rowDef.kind === "new") {
-			return { id: listRowId(rowDef), label: "New agent…", icon: "plus", tone: "muted" };
+			return { id: listRowId(rowDef), label: __ompTranslate("New agent…"), icon: "plus", tone: "muted" };
 		}
 		const agent = rowDef.agent;
 		const prewalk = this.#deps.effectivePrewalkPattern(agent);
@@ -1528,9 +1546,11 @@ export class AgentsHubComponent implements Component {
 		if (!rowDef) return [];
 		if (rowDef.kind === "new") {
 			return [
-				text("New agent", { role: "omp.picker.title" }),
+				text(__ompTranslate("New agent"), { role: "omp.picker.title" }),
 				md(
-					"Describe what the agent should do; the architect drafts its name, when to use it and its system prompt.",
+					__ompTranslate(
+						"Describe what the agent should do; the architect drafts its name, when to use it and its system prompt.",
+					),
 				),
 			];
 		}
@@ -1542,11 +1562,18 @@ export class AgentsHubComponent implements Component {
 		const prewalk = this.#deps.effectivePrewalkPattern(agent);
 		const advisor = this.#deps.effectiveAdvisorPattern(agent);
 		const facts: { k: string; v: TspSpan[] | string }[] = [
-			{ k: "Model", v: model },
+			{ k: __ompTranslate("Model"), v: model },
 			{ k: "Prewalk", v: [prewalk ? span(prewalk, "mono") : span("off", "dim")] },
-			{ k: "Advisor", v: [advisor ? span(advisor, "mono") : span("off", "dim")] },
-			{ k: "Status", v: [agent.disabled ? span("Disabled", "warning") : span("Enabled", "success")] },
-			{ k: "Source", v: SOURCE_LABEL[agent.source] },
+			{ k: __ompTranslate("Advisor"), v: [advisor ? span(advisor, "mono") : span("off", "dim")] },
+			{
+				k: __ompTranslate("Status"),
+				v: [
+					agent.disabled
+						? span(__ompTranslate("Disabled\u0004mcp.server.state"), "warning")
+						: span(__ompTranslate("Enabled\u0004advisor.setting.enabled"), "success"),
+				],
+			},
+			{ k: __ompTranslate("Source\u0004agent.source.label"), v: SOURCE_LABEL[agent.source] },
 		];
 		if (agent.filePath) {
 			// Bundled agents live in the binary (`embedded:…`): nothing to open.
@@ -1562,7 +1589,7 @@ export class AgentsHubComponent implements Component {
 			out.push(
 				node(
 					"section",
-					{ head: "System prompt", role: "omp.agents.prompt" },
+					{ head: __ompTranslate("System prompt"), role: "omp.agents.prompt" },
 					[code(agent.systemPrompt, { lang: "md", wrap: true })],
 					"prompt",
 				),
@@ -1594,10 +1621,12 @@ export class AgentsHubComponent implements Component {
 			const what = property === "model" ? "model override" : `${property} model`;
 			return [span(`Picking ${what} for `, "accent"), span(agent.name, "accent strong")];
 		}
-		if (this.#createActive) return [span("New agent — describe it and let the architect draft it", "accent")];
+		if (this.#createActive)
+			return [span(__ompTranslate("New agent — describe it and let the architect draft it"), "accent")];
 		if (this.#notice) return [span(this.#notice, "success")];
 		const entry = this.#activeEntry();
-		const scopeLabel = entry.kind === "source" ? `${entry.label} agents` : "All agents";
+		const scopeLabel =
+			entry.kind === "source" ? __ompTranslate("{0} agents", `${entry.label}`) : __ompTranslate("All agents");
 		const count = this.#rows.filter(rowDef => rowDef.kind === "agent").length;
 		return [span(`${scopeLabel} · ${count}`, "muted")];
 	}
@@ -1629,7 +1658,7 @@ export class AgentsHubComponent implements Component {
 				virtual: true,
 				grow: 1,
 				tone: this.#focus === "list" ? "accent" : undefined,
-				aria: "Agents",
+				aria: __ompTranslate("Agents"),
 			},
 			items,
 			"agents",
@@ -1668,7 +1697,7 @@ export class AgentsHubComponent implements Component {
 	#describeDetail(): NativeNode {
 		const agent = this.#selectedAgent();
 		if (!agent) {
-			return node("section", {}, [text([span("Select an agent to inspect", "dim")])], "detail");
+			return node("section", {}, [text([span(__ompTranslate("Select an agent to inspect"), "dim")])], "detail");
 		}
 		const patterns = this.#deps.effectiveModelPatterns(agent);
 		const resolved = this.#deps.resolvePatterns(patterns);
@@ -1696,7 +1725,7 @@ export class AgentsHubComponent implements Component {
 		const spec = this.#createSpec;
 		if (spec) {
 			nodes.push(
-				text([span("Review generated agent", "accent strong")]),
+				text([span(__ompTranslate("Review generated agent"), "accent strong")]),
 				node("kv", {
 					items: [
 						{ k: [span("Identifier", "muted")], v: [span(spec.identifier, "code")] },
@@ -1707,7 +1736,7 @@ export class AgentsHubComponent implements Component {
 				node(
 					"card",
 					{
-						head: [span("System prompt", "muted")],
+						head: [span(__ompTranslate("System prompt"), "muted")],
 						collapsible: true,
 						collapsed: this.#promptCollapsed,
 						preview: { lines: 8 },
@@ -1718,10 +1747,16 @@ export class AgentsHubComponent implements Component {
 			);
 		} else {
 			nodes.push(
-				text([span("Create new agent", "accent strong")]),
-				text([span("Describe what the agent should do; scope: ", "muted"), span(this.#createScope, "accent")], {
-					wrap: "word",
-				}),
+				text([span(__ompTranslate("Create new agent"), "accent strong")]),
+				text(
+					[
+						span(__ompTranslate("Describe what the agent should do; scope: "), "muted"),
+						span(this.#createScope, "accent"),
+					],
+					{
+						wrap: "word",
+					},
+				),
 			);
 			if (this.#createInput && !this.#createGenerating) {
 				nodes.push(this.#createInput);

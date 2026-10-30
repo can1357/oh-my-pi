@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { combine, register, type SettingValueOf } from "../config/registry";
 
 // TTSR
@@ -25,17 +26,25 @@ export const cfgTtsrJudge = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "Judged Rules",
+		label: __ompTranslate("Judged Rules"),
 		description:
 			"Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning",
 		options: [
 			{
 				value: "auto",
-				label: "Auto",
-				description: "Judge only when the judge role resolves to a native TypeSafe jev model",
+				label: __ompTranslate("Auto"),
+				description: __ompTranslate("Judge only when the judge role resolves to a native TypeSafe jev model"),
 			},
-			{ value: "on", label: "On", description: "Always judge, whichever model the judge role resolves to" },
-			{ value: "off", label: "Off", description: "Never judge; question rules stay inactive" },
+			{
+				value: "on",
+				label: __ompTranslate("On"),
+				description: __ompTranslate("Always judge, whichever model the judge role resolves to"),
+			},
+			{
+				value: "off",
+				label: __ompTranslate("Off"),
+				description: __ompTranslate("Never judge; question rules stay inactive"),
+			},
 		],
 	},
 });
@@ -48,7 +57,7 @@ export const cfgTtsrContextMode = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "TTSR Context Mode",
+		label: __ompTranslate("TTSR Context Mode"),
 		description: "What to do with partial output when TTSR triggers",
 	},
 });
@@ -61,13 +70,29 @@ export const cfgTtsrInterruptMode = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "TTSR Interrupt Mode",
+		label: __ompTranslate("TTSR Interrupt Mode"),
 		description: "When to interrupt mid-stream vs inject warning after completion",
 		options: [
-			{ value: "always", label: "always", description: "Interrupt on prose and tool streams" },
-			{ value: "prose-only", label: "prose-only", description: "Interrupt only on reply/thinking matches" },
-			{ value: "tool-only", label: "tool-only", description: "Interrupt only on tool-call argument matches" },
-			{ value: "never", label: "never", description: "Never interrupt; inject warning after completion" },
+			{
+				value: "always",
+				label: __ompTranslate("always"),
+				description: __ompTranslate("Interrupt on prose and tool streams"),
+			},
+			{
+				value: "prose-only",
+				label: __ompTranslate("prose-only"),
+				description: __ompTranslate("Interrupt only on reply/thinking matches"),
+			},
+			{
+				value: "tool-only",
+				label: __ompTranslate("tool-only"),
+				description: __ompTranslate("Interrupt only on tool-call argument matches"),
+			},
+			{
+				value: "never",
+				label: __ompTranslate("never"),
+				description: __ompTranslate("Never interrupt; inject warning after completion"),
+			},
 		],
 	},
 });
@@ -80,7 +105,7 @@ export const cfgTtsrRepeatMode = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "TTSR Repeat Mode",
+		label: __ompTranslate("TTSR Repeat Mode"),
 		description: "How rules can repeat: once per session or after a message gap",
 	},
 });
@@ -92,14 +117,14 @@ export const cfgTtsrRepeatGap = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "TTSR Repeat Gap",
+		label: __ompTranslate("TTSR Repeat Gap"),
 		description: "Messages before a rule can trigger again",
 		options: [
-			{ value: "5", label: "5 messages" },
-			{ value: "10", label: "10 messages" },
-			{ value: "15", label: "15 messages" },
-			{ value: "20", label: "20 messages" },
-			{ value: "30", label: "30 messages" },
+			{ value: "5", label: __ompTranslate("5 messages") },
+			{ value: "10", label: __ompTranslate("10 messages") },
+			{ value: "15", label: __ompTranslate("15 messages") },
+			{ value: "20", label: __ompTranslate("20 messages") },
+			{ value: "30", label: __ompTranslate("30 messages") },
 		],
 	},
 });
@@ -111,7 +136,7 @@ export const cfgTtsrBuiltinRules = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "Built-in Rules",
+		label: __ompTranslate("Built-in Rules"),
 		description: "Load the default rules shipped with the agent (override individually with ttsr.disabledRules)",
 	},
 });
@@ -123,7 +148,7 @@ export const cfgTtsrDisabledRules = register({
 	ui: {
 		tab: "context",
 		group: "Rules (TTSR)",
-		label: "Disabled Rules",
+		label: __ompTranslate("Disabled Rules"),
 		description: "Rule names to ignore entirely (applies to bundled defaults and your own rules)",
 	},
 });

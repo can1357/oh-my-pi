@@ -15,6 +15,7 @@
  * {@link WatchdogConfigDoc} and only touches disk + the live advisors via the host
  * `save` callback.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Model, resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
@@ -183,18 +184,18 @@ export function formatCompactQuota(
 		const windowLabel = limit.window?.label ?? limit.scope.windowId ?? "—";
 		const identity = limit.label.trim();
 		const header = identity && identity !== windowLabel ? `${windowLabel} (${identity})` : windowLabel;
-		const parts = [`${header}: ${pct}% used`];
+		const parts = [__ompTranslate("{0}: {1}% used", `${header}`, `${pct}`)];
 		const window = limit.window;
 		if (window?.resetsAt !== undefined && Number.isFinite(window.resetsAt) && window.resetsAt > nowMs) {
 			parts.push(`${window.resetLabel ?? "resets"} in ${formatDuration(window.resetsAt - nowMs)}`);
 		}
 		lines.push(parts.join(" · "));
 	}
-	return `Quota: ${lines.join(" │ ")}`;
+	return __ompTranslate("Quota: {0}", `${lines.join(" │ ")}`);
 }
 
 function previewLineOrNone(text: string | undefined): string {
-	if (!text?.trim()) return "(none)";
+	if (!text?.trim()) return __ompTranslate("(none)");
 	const first = text.trim().split("\n", 1)[0] ?? "";
 	return first.length > PREVIEW_WIDTH ? `${first.slice(0, PREVIEW_WIDTH - 1)}…` : first;
 }
@@ -220,7 +221,7 @@ function commitTools(
 }
 
 function formatAdvisorTools(tools: readonly string[] | undefined, emptyLabel: string): string {
-	if (tools === undefined) return "read, grep, glob (default)";
+	if (tools === undefined) return __ompTranslate("read, grep, glob (default)");
 	return tools.length > 0 ? tools.join(", ") : emptyLabel;
 }
 
@@ -264,18 +265,23 @@ function sameDeps(a: readonly unknown[], b: readonly unknown[]): boolean {
 /** One-line cadence label: mode plus interval. */
 function formatReviewCadence(advisor: AdvisorConfig): string {
 	const reviewInterval = advisor.reviewInterval ?? 1;
-	return `${advisor.reviewMode ?? "turn"} · every ${reviewInterval} eligible update${reviewInterval === 1 ? "" : "s"}`;
+	return __ompTranslate(
+		"{0} · every {1} eligible update{2}",
+		`${advisor.reviewMode ?? "turn"}`,
+		`${reviewInterval}`,
+		`${reviewInterval === 1 ? "" : "s"}`,
+	);
 }
 
 /** Picker description for one explicit catch-up policy value. */
 function describeSyncBacklogMode(mode: AdvisorSyncBacklog): string {
 	switch (mode) {
 		case "off":
-			return "Never wait for this advisor's backlog.";
+			return __ompTranslate("Never wait for this advisor's backlog.");
 		case "strict":
-			return "Wait for all of this advisor's scheduled reviews; no wall-clock cap.";
+			return __ompTranslate("Wait for all of this advisor's scheduled reviews; no wall-clock cap.");
 		default:
-			return `Wait until fewer than ${mode} scheduled reviews remain (30s cap).`;
+			return __ompTranslate("Wait until fewer than {0} scheduled reviews remain (30s cap).", `${mode}`);
 	}
 }
 
@@ -302,31 +308,37 @@ function screenHints(screen: Screen): (NativeHint | undefined)[] {
 	switch (screen) {
 		case "list":
 			return [
-				actionHint(["tui.select.up", "tui.select.down"], "move"),
-				actionHint("tui.select.confirm", "select"),
-				actionHint("tui.select.cancel", "close"),
+				actionHint(["tui.select.up", "tui.select.down"], __ompTranslate("move")),
+				actionHint("tui.select.confirm", __ompTranslate("select")),
+				actionHint("tui.select.cancel", __ompTranslate("close")),
 			];
 		case "detail":
-			return [actionHint("tui.select.confirm", "edit field"), actionHint("tui.select.cancel", "back")];
+			return [
+				actionHint("tui.select.confirm", __ompTranslate("edit field")),
+				actionHint("tui.select.cancel", __ompTranslate("back")),
+			];
 		case "name":
 			return [actionHint("tui.input.submit", "save"), actionHint("tui.select.cancel", "cancel")];
 		case "model":
 			return [
-				{ keys: [], label: "type to search" },
-				{ keys: ["enter"], label: "pick" },
-				actionHint("tui.select.cancel", "back"),
+				{ keys: [], label: __ompTranslate("type to search") },
+				{ keys: ["enter"], label: __ompTranslate("pick") },
+				actionHint("tui.select.cancel", __ompTranslate("back")),
 			];
 		case "thinking":
 		case "review-mode":
 		case "sync-backlog":
-			return [actionHint("tui.select.confirm", "pick"), actionHint("tui.select.cancel", "back")];
+			return [
+				actionHint("tui.select.confirm", __ompTranslate("pick")),
+				actionHint("tui.select.cancel", __ompTranslate("back")),
+			];
 		case "review-interval":
 			return [actionHint("tui.input.submit", "save"), actionHint("tui.select.cancel", "cancel")];
 		case "tools":
 			return [
-				actionHint("tui.select.confirm", "toggle"),
-				{ keys: [], label: "Done applies (empty = no tools; read/grep/glob = default)" },
-				actionHint("tui.select.cancel", "apply"),
+				actionHint("tui.select.confirm", __ompTranslate("toggle")),
+				{ keys: [], label: __ompTranslate("Done applies (empty = no tools; read/grep/glob = default)") },
+				actionHint("tui.select.cancel", __ompTranslate("apply")),
 			];
 		case "instructions":
 			return [];
@@ -454,7 +466,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const height = Math.max(14, process.stdout.rows || 40);
 		const bodyRows = Math.max(3, height - 4);
 		this.#bodyRowsLast = bodyRows;
-		const title = `Advisor configuration · ${this.#scope}${this.#dirty ? "  ● unsaved" : ""}`;
+		const title = __ompTranslate(
+			"Advisor configuration · {0}{1}",
+			`${this.#scope}`,
+			`${this.#dirty ? __ompTranslate("  ● unsaved") : ""}`,
+		);
 		this.#split.setNarrowPane(this.#screen === "list" ? undefined : "left");
 		this.#split.setSplitAt(this.#screen === "list" ? 0 : Number.MAX_SAFE_INTEGER);
 		this.#split.setHeight(bodyRows);
@@ -503,22 +519,27 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const advisor = shared ? undefined : doc.advisors[index];
 		const pages: TspPrefsProps["pages"][number][] = doc.advisors.map((a, i) => ({
 			id: `advisor:${i}`,
-			label: a.name || "(unnamed)",
+			label: a.name || __ompTranslate("(unnamed)"),
 			icon: "advisor",
-			group: "Advisors",
+			group: __ompTranslate("Advisors"),
 		}));
-		pages.push({ id: "shared", label: "Shared instructions", icon: "doc", group: "All advisors" });
+		pages.push({
+			id: "shared",
+			label: __ompTranslate("Shared instructions"),
+			icon: "doc",
+			group: __ompTranslate("All advisors"),
+		});
 
 		const sections: TspPrefsProps["sections"][number][] = [];
 		if (doc.warnings?.length) {
 			sections.push({
 				id: "warnings",
-				title: "Config problems",
+				title: __ompTranslate("Config problems"),
 				rows: sanitizeDisplayWarnings(doc.warnings).map((warning, i) => ({
 					id: `warning:${i}`,
-					label: "Dropped while loading",
+					label: __ompTranslate("Dropped while loading"),
 					warning,
-					control: { k: "action", label: "Save to rewrite", act: "save" },
+					control: { k: "action", label: __ompTranslate("Save to rewrite"), act: "save" },
 				})),
 			});
 		}
@@ -528,23 +549,32 @@ export class AdvisorConfigOverlayComponent implements Component {
 			const rows: TspPrefsRow[] = [
 				{
 					id: "toggleEnabled",
-					label: "Enabled",
-					hint: "Run this advisor alongside the session.",
+					label: __ompTranslate("Enabled\u0004advisor.setting.enabled"),
+					hint: __ompTranslate("Run this advisor alongside the session."),
 					control: { k: "switch", on: advisor.enabled !== false },
 				},
-				{ id: "name", label: "Name", control: { k: "text", value: advisor.name } },
+				{ id: "name", label: __ompTranslate("Name"), control: { k: "text", value: advisor.name } },
 				{
 					id: "model",
-					label: "Model",
-					hint: model ? undefined : `Uses the advisor role default (${this.#defaultModelLabel ?? "unset"}).`,
+					label: __ompTranslate("Model"),
+					hint: model
+						? undefined
+						: __ompTranslate(
+								"Uses the advisor role default ({0}).",
+								`${this.#defaultModelLabel ?? __ompTranslate("unset")}`,
+							),
 					changed: model ? true : undefined,
-					defaultLabel: model ? (this.#defaultModelLabel ?? "advisor role default") : undefined,
-					control: { k: "action", label: model || this.#defaultModelLabel || "advisor role default", act: "edit" },
+					defaultLabel: model ? (this.#defaultModelLabel ?? __ompTranslate("advisor role default")) : undefined,
+					control: {
+						k: "action",
+						label: model || this.#defaultModelLabel || __ompTranslate("advisor role default"),
+						act: "edit",
+					},
 				},
 				{
 					id: "reviewMode",
-					label: "Review mode",
-					hint: "turn reviews every primary turn; agent-end reviews only final yields.",
+					label: __ompTranslate("Review mode"),
+					hint: __ompTranslate("turn reviews every primary turn; agent-end reviews only final yields."),
 					changed: advisor.reviewMode !== undefined ? true : undefined,
 					control: {
 						k: "choice",
@@ -555,21 +585,24 @@ export class AdvisorConfigOverlayComponent implements Component {
 				},
 				{
 					id: "reviewInterval",
-					label: "Review interval",
-					hint: "Review every Nth eligible update; skipped updates join the next review.",
+					label: __ompTranslate("Review interval"),
+					hint: __ompTranslate("Review every Nth eligible update; skipped updates join the next review."),
 					changed: advisor.reviewInterval !== undefined ? true : undefined,
 					control: { k: "number", value: advisor.reviewInterval ?? 1, min: 1, step: 1 },
 				},
 				{
 					id: "syncBacklog",
-					label: "Sync backlog",
-					hint: `Catch-up policy; inherit follows advisor.syncBacklog (currently ${this.#deps.syncBacklog ?? "off"}).`,
+					label: __ompTranslate("Sync backlog"),
+					hint: __ompTranslate(
+						"Catch-up policy; inherit follows advisor.syncBacklog (currently {0}).",
+						`${this.#deps.syncBacklog ?? "off"}`,
+					),
 					changed: advisor.syncBacklog !== undefined ? true : undefined,
 					control: {
 						k: "choice",
 						value: advisor.syncBacklog ?? SYNC_BACKLOG_INHERIT,
 						options: [
-							{ value: SYNC_BACKLOG_INHERIT, label: "inherit" },
+							{ value: SYNC_BACKLOG_INHERIT, label: __ompTranslate("inherit") },
 							...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
 								value: mode,
 								label: mode,
@@ -581,8 +614,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 				},
 				{
 					id: "tools",
-					label: "Tools",
-					hint: "None means no tools; read, grep and glob are the default.",
+					label: __ompTranslate("Tools"),
+					hint: __ompTranslate("None means no tools; read, grep and glob are the default."),
 					control: {
 						k: "multi",
 						values: tools,
@@ -591,23 +624,27 @@ export class AdvisorConfigOverlayComponent implements Component {
 				},
 				{
 					id: "instructions",
-					label: "Instructions",
+					label: __ompTranslate("Instructions"),
 					hint: previewLineOrNone(advisor.instructions),
-					control: { k: "action", label: "Edit…", act: "edit" },
+					control: { k: "action", label: __ompTranslate("Edit…"), act: "edit" },
 				},
-				{ id: "delete", label: "Delete this advisor", control: { k: "action", label: "Delete", act: "delete" } },
+				{
+					id: "delete",
+					label: __ompTranslate("Delete this advisor"),
+					control: { k: "action", label: __ompTranslate("Delete"), act: "delete" },
+				},
 			];
-			sections.push({ id: "advisor", title: advisor.name || "Advisor", rows });
+			sections.push({ id: "advisor", title: advisor.name || __ompTranslate("Advisor"), rows });
 		} else {
 			sections.push({
 				id: "shared",
-				title: "Shared instructions",
+				title: __ompTranslate("Shared instructions"),
 				rows: [
 					{
 						id: "shared",
-						label: "Instructions",
+						label: __ompTranslate("Instructions"),
 						hint: previewLineOrNone(doc.instructions),
-						control: { k: "action", label: "Edit…", act: "edit" },
+						control: { k: "action", label: __ompTranslate("Edit…"), act: "edit" },
 					},
 				],
 			});
@@ -618,22 +655,26 @@ export class AdvisorConfigOverlayComponent implements Component {
 			rows: [
 				{
 					id: "save",
-					label: "Save & apply",
-					hint: "Write this file and reload the live advisors without a restart.",
-					warning: this.#dirty ? "Unsaved changes" : undefined,
-					control: { k: "action", label: "Save", act: "save" },
+					label: __ompTranslate("Save & apply"),
+					hint: __ompTranslate("Write this file and reload the live advisors without a restart."),
+					warning: this.#dirty ? __ompTranslate("Unsaved changes") : undefined,
+					control: { k: "action", label: __ompTranslate("Save"), act: "save" },
 				},
 				{
 					id: "add",
-					label: "Add advisor",
-					hint: "Create a new advisor entry, then set its model, tools and instructions.",
-					control: { k: "action", label: "Add", act: "add" },
+					label: __ompTranslate("Add advisor"),
+					hint: __ompTranslate("Create a new advisor entry, then set its model, tools and instructions."),
+					control: { k: "action", label: __ompTranslate("Add"), act: "add" },
 				},
 				{
 					id: "scope",
-					label: "Scope",
-					hint: `Editing the ${this.#scope} file. Switch to the ${this.#otherScope()} file.`,
-					control: { k: "action", label: `Open ${this.#otherScope()}`, act: "scope" },
+					label: __ompTranslate("Scope"),
+					hint: __ompTranslate(
+						"Editing the {0} file. Switch to the {1} file.",
+						`${this.#scope}`,
+						`${this.#otherScope()}`,
+					),
+					control: { k: "action", label: __ompTranslate("Open {0}", `${this.#otherScope()}`), act: "scope" },
 				},
 			],
 		});
@@ -657,12 +698,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 				? (this.#active.getSelectedItem()?.value ?? null)
 				: null;
 		const props: TspPrefsProps = {
-			title: this.#dirty ? "Advisors · unsaved" : "Advisors",
+			title: this.#dirty ? __ompTranslate("Advisors · unsaved") : __ompTranslate("Advisors"),
 			pages,
 			page: shared ? "shared" : `advisor:${index}`,
 			lead: shared
-				? "Instructions every advisor gets before its own."
-				: "An advisor watches the session and leaves notes; set its model, tools and instructions here.",
+				? __ompTranslate("Instructions every advisor gets before its own.")
+				: __ompTranslate(
+						"An advisor watches the session and leaves notes; set its model, tools and instructions here.",
+					),
 			sections,
 			focus,
 			editing,
@@ -692,7 +735,10 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const active = this.#active;
 		const memo = this.#nativeEditor;
 		if (active instanceof ModelBrowser) {
-			const order = active.pickerOrder({ providers: false, rest: active.query.trim() ? "Matches" : "All" });
+			const order = active.pickerOrder({
+				providers: false,
+				rest: active.query.trim() ? __ompTranslate("Matches") : __ompTranslate("All"),
+			});
 			const catalogue = active.pickerItems(this.#modelItems);
 			const preview = active.pickerPreview("compact", this.#modelCurrent);
 			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected];
@@ -714,8 +760,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 							...props,
 							items: props.items?.filter(item => item.id !== TOOLS_DONE),
 							actions: [
-								pickerAction("confirm", "Toggle", "enter"),
-								pickerAction("apply", "Apply", "escape", { primary: true, end: true }),
+								pickerAction("confirm", __ompTranslate("Toggle"), "enter"),
+								pickerAction("apply", __ompTranslate("Apply"), "escape", { primary: true, end: true }),
 							],
 						}
 					: props,
@@ -736,24 +782,24 @@ export class AdvisorConfigOverlayComponent implements Component {
 		catalogue: ModelPickerCatalogue,
 		preview: readonly NativeChild[],
 	): NativeNode {
-		const name = this.#doc.advisors[this.#detailIndex]?.name || "This advisor";
-		const fallback = this.#defaultModelLabel ?? "the advisor role default";
+		const name = this.#doc.advisors[this.#detailIndex]?.name || __ompTranslate("This advisor");
+		const fallback = this.#defaultModelLabel ?? __ompTranslate("the advisor role default");
 		return node(
 			"picker",
 			{
-				title: "Advisor model",
-				subtitle: `${name} reviews with this model. Unset, it uses ${fallback}.`,
+				title: __ompTranslate("Advisor model"),
+				subtitle: __ompTranslate("{0} reviews with this model. Unset, it uses {1}.", `${name}`, `${fallback}`),
 				icon: "model",
-				noun: "models",
+				noun: __ompTranslate("models"),
 				size: "md",
 				layout: "rows",
 				preview: "below",
-				placeholder: "Search models…",
+				placeholder: __ompTranslate("Search models…"),
 				...browser.pickerRows(catalogue, order, this.#modelCurrent),
-				empty: "No models available",
+				empty: __ompTranslate("No models available"),
 				actions: [
-					pickerAction("use", "Use for advisor", "enter", { primary: true }),
-					browser.query.length > 0 ? { ...CLOSE_ACTION, label: "Clear search" } : CLOSE_ACTION,
+					pickerAction("use", __ompTranslate("Use for advisor"), "enter", { primary: true }),
+					browser.query.length > 0 ? { ...CLOSE_ACTION, label: __ompTranslate("Clear search") } : CLOSE_ACTION,
 				],
 			},
 			preview,
@@ -762,16 +808,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	/** The review-interval field as a titled card: what the number means, the field, Cancel and Save. */
 	#intervalCard(input: Component): NativeNode {
-		const name = this.#doc.advisors[this.#detailIndex]?.name || "this advisor";
-		return overlayCard("omp.overlay.advisor.interval", `Review interval · ${name}`, [
-			text([span("Review every Nth eligible update; skipped updates join the next review.", "muted")], {
-				wrap: "word",
-			}),
+		const name = this.#doc.advisors[this.#detailIndex]?.name || __ompTranslate("this advisor");
+		return overlayCard("omp.overlay.advisor.interval", __ompTranslate("Review interval · {0}", `${name}`), [
+			text(
+				[span(__ompTranslate("Review every Nth eligible update; skipped updates join the next review."), "muted")],
+				{
+					wrap: "word",
+				},
+			),
 			input,
 			actionBar([
 				null,
-				actionButton("Cancel", "field-cancel", { keys: "escape" }),
-				actionButton("Save", "field-save", { keys: "enter", tone: "accent" }),
+				actionButton(__ompTranslate("Cancel"), "field-cancel", { keys: "escape" }),
+				actionButton(__ompTranslate("Save"), "field-save", { keys: "enter", tone: "accent" }),
 			]),
 		]);
 	}
@@ -885,7 +934,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#describeCard(): NativeNode {
-		const title = `Advisor configuration · ${this.#scope}${this.#dirty ? "  ● unsaved" : ""}`;
+		const title = __ompTranslate(
+			"Advisor configuration · {0}{1}",
+			`${this.#scope}`,
+			`${this.#dirty ? __ompTranslate("  ● unsaved") : ""}`,
+		);
 		const preview = this.#screen === "list" ? this.#describePreview() : undefined;
 		if (this.#nativeHints?.screen !== this.#screen) {
 			const hints = screenHints(this.#screen);
@@ -902,8 +955,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 		) {
 			return prev.node;
 		}
-		const head: TspSpan[] = [span(`Advisor configuration · ${this.#scope}`)];
-		if (this.#dirty) head.push(span("  ● unsaved", "warning"));
+		const head: TspSpan[] = [span(__ompTranslate("Advisor configuration · {0}", `${this.#scope}`))];
+		if (this.#dirty) head.push(span(__ompTranslate("  ● unsaved"), "warning"));
 		const body: NativeNode = preview
 			? node(
 					"row",
@@ -931,7 +984,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 					"col",
 					{ tone: "warning" },
 					[
-						text([span("⚠ Config problems — dropped while loading:", "warning")]),
+						text([span(__ompTranslate("⚠ Config problems — dropped while loading:"), "warning")]),
 						...sanitizeDisplayWarnings(this.#doc.warnings).map(warning =>
 							text([span(warning, "warning")], { wrap: "word" }),
 						),
@@ -949,19 +1002,22 @@ export class AdvisorConfigOverlayComponent implements Component {
 		} else if (value === "shared") {
 			const instructions = this.#doc.instructions?.trim();
 			children.push(
-				text([span("Shared instructions", "strong")]),
-				instructions ? text(instructions, { wrap: "word" }) : text([span("(none)", "muted")]),
+				text([span(__ompTranslate("Shared instructions"), "strong")]),
+				instructions ? text(instructions, { wrap: "word" }) : text([span(__ompTranslate("(none)"), "muted")]),
 			);
 		} else {
 			const help =
 				value === "add"
-					? "Create a new advisor entry, then edit its model, tools, and instructions."
+					? __ompTranslate("Create a new advisor entry, then edit its model, tools, and instructions.")
 					: value === "scope"
-						? `Switch between the project and user WATCHDOG.yml. Currently editing the ${this.#scope}-level file.`
+						? __ompTranslate(
+								"Switch between the project and user WATCHDOG.yml. Currently editing the {0}-level file.",
+								`${this.#scope}`,
+							)
 						: value === "save"
-							? "Write this scope's WATCHDOG.yml and reload the live advisors without a restart."
+							? __ompTranslate("Write this scope's WATCHDOG.yml and reload the live advisors without a restart.")
 							: value === "close"
-								? "Close the editor. Unsaved changes are discarded."
+								? __ompTranslate("Close the editor. Unsaved changes are discarded.")
 								: "";
 			if (help) children.push(text([span(help, "muted")], { wrap: "word" }));
 		}
@@ -973,39 +1029,46 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#describeAdvisorPreview(advisor: AdvisorConfig): NativeNode[] {
-		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
+		const model = advisor.model?.trim() || this.#defaultModelLabel || __ompTranslate("advisor role default");
 		const instructions = advisor.instructions?.trim();
 		const out: NativeNode[] = [
-			text([span(advisor.name || "(unnamed)", "strong")]),
+			text([span(advisor.name || __ompTranslate("(unnamed)"), "strong")]),
 			node("kv", {
 				items: [
-					{ k: "Enabled", v: advisor.enabled === false ? "○ off" : "● on" },
-					{ k: "Model", v: model },
-					{ k: "Tools", v: formatAdvisorTools(advisor.tools, "no tools") },
-					{ k: "Review", v: formatReviewCadence(advisor) },
-					{ k: "Sync backlog", v: this.#syncBacklogLabel(advisor) },
+					{
+						k: __ompTranslate("Enabled\u0004advisor.setting.enabled"),
+						v: advisor.enabled === false ? __ompTranslate("○ off") : __ompTranslate("● on"),
+					},
+					{ k: __ompTranslate("Model"), v: model },
+					{ k: __ompTranslate("Tools"), v: formatAdvisorTools(advisor.tools, __ompTranslate("no tools")) },
+					{ k: __ompTranslate("Review"), v: formatReviewCadence(advisor) },
+					{ k: __ompTranslate("Sync backlog"), v: this.#syncBacklogLabel(advisor) },
 				],
 			}),
-			text([span("Instructions:", "dim")]),
-			instructions ? text(instructions, { wrap: "word" }) : text([span("(none)", "muted")]),
+			text([span(__ompTranslate("Instructions:"), "dim")]),
+			instructions ? text(instructions, { wrap: "word" }) : text([span(__ompTranslate("(none)"), "muted")]),
 		];
 		const liveStat = this.#cb.getAdvisorStats?.()?.find(s => s.name === (advisor.name || "default"));
 		if (liveStat && (liveStat.status === "running" || liveStat.status === "quota_exhausted")) {
 			const spendParts = [
-				`${liveStat.tokens.input.toLocaleString()} in`,
-				`${liveStat.tokens.output.toLocaleString()} out`,
+				__ompTranslate("{0} in", `${liveStat.tokens.input.toLocaleString()}`),
+				__ompTranslate("{0} out", `${liveStat.tokens.output.toLocaleString()}`),
 			];
-			if (liveStat.tokens.cacheRead > 0) spendParts.push(`${liveStat.tokens.cacheRead.toLocaleString()} cache`);
-			const usage: { k: string; v: string }[] = [{ k: "Tokens", v: spendParts.join(", ") }];
-			if (liveStat.cost > 0) usage.push({ k: "Cost", v: `$${liveStat.cost.toFixed(4)}` });
+			if (liveStat.tokens.cacheRead > 0)
+				spendParts.push(__ompTranslate("{0} cache", `${liveStat.tokens.cacheRead.toLocaleString()}`));
+			const usage: { k: string; v: string }[] = [{ k: __ompTranslate("Tokens"), v: spendParts.join(", ") }];
+			if (liveStat.cost > 0) usage.push({ k: __ompTranslate("Cost"), v: `$${liveStat.cost.toFixed(4)}` });
 			if (liveStat.contextWindow > 0) {
 				const pct = Math.round((liveStat.contextTokens / liveStat.contextWindow) * 100);
 				usage.push({
-					k: "Context",
+					k: __ompTranslate("Context"),
 					v: `${liveStat.contextTokens.toLocaleString()}/${liveStat.contextWindow.toLocaleString()} (${pct}%)`,
 				});
 			}
-			out.push(text([span("Usage:", "dim")]), node("kv", { items: usage }));
+			out.push(
+				text([span(__ompTranslate("Usage:\u0004advisor.preview.usage"), "dim")]),
+				node("kv", { items: usage }),
+			);
 		}
 		const quotaProvider =
 			(advisor.model?.includes("/") ? advisor.model.split("/")[0] : null) ?? liveStat?.model?.provider;
@@ -1068,8 +1131,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 		if (lines.length > rows) {
 			const marker =
 				start + rows < lines.length
-					? theme.fg("dim", `  ↓ ${lines.length - rows - start} more`)
-					: theme.fg("dim", "  (end)");
+					? theme.fg("dim", __ompTranslate("  ↓ {0} more", `${lines.length - rows - start}`))
+					: theme.fg("dim", __ompTranslate("  (end)"));
 			window[rows - 1] = marker;
 		}
 		return window;
@@ -1081,7 +1144,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		// until a successful save rewrites the file without them.
 		const warnings = this.#doc.warnings?.length
 			? [
-					theme.fg("warning", "⚠ Config problems — dropped while loading:"),
+					theme.fg("warning", __ompTranslate("⚠ Config problems — dropped while loading:")),
 					...sanitizeDisplayWarnings(this.#doc.warnings).flatMap(warning =>
 						wrap(warning, bodyWidth).map(line => theme.fg("warning", line)),
 					),
@@ -1096,58 +1159,68 @@ export class AdvisorConfigOverlayComponent implements Component {
 			if (advisor) return [...warnings, ...this.#advisorPreview(advisor, bodyWidth)];
 		}
 		if (value === "shared") {
-			const lines = [...warnings, theme.bold("Shared instructions"), ""];
+			const lines = [...warnings, theme.bold(__ompTranslate("Shared instructions")), ""];
 			const text = this.#doc.instructions?.trim();
-			lines.push(...(text ? wrap(text, bodyWidth) : [theme.fg("muted", "(none)")]));
+			lines.push(...(text ? wrap(text, bodyWidth) : [theme.fg("muted", __ompTranslate("(none)"))]));
 			return lines.map(line => truncateToWidth(line, bodyWidth));
 		}
 		const help =
 			value === "add"
-				? "Create a new advisor entry, then edit its model, tools, and instructions."
+				? __ompTranslate("Create a new advisor entry, then edit its model, tools, and instructions.")
 				: value === "scope"
-					? `Switch between the project and user WATCHDOG.yml. Currently editing the ${this.#scope}-level file.`
+					? __ompTranslate(
+							"Switch between the project and user WATCHDOG.yml. Currently editing the {0}-level file.",
+							`${this.#scope}`,
+						)
 					: value === "save"
-						? "Write this scope's WATCHDOG.yml and reload the live advisors without a restart."
+						? __ompTranslate("Write this scope's WATCHDOG.yml and reload the live advisors without a restart.")
 						: value === "close"
-							? "Close the editor. Unsaved changes are discarded."
+							? __ompTranslate("Close the editor. Unsaved changes are discarded.")
 							: "";
 		return [...warnings, ...wrap(help, bodyWidth).map(line => truncateToWidth(theme.fg("muted", line), bodyWidth))];
 	}
 
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
-		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const tools = formatAdvisorTools(advisor.tools, "no tools");
+		const model = advisor.model?.trim() || this.#defaultModelLabel || __ompTranslate("advisor role default");
+		const tools = formatAdvisorTools(advisor.tools, __ompTranslate("no tools"));
 		const syncBacklog = this.#syncBacklogLabel(advisor);
 		const lines = [
-			theme.bold(advisor.name || "(unnamed)"),
+			theme.bold(advisor.name || __ompTranslate("(unnamed)")),
 			"",
-			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
-			`${theme.fg("dim", "Model:")} ${model}`,
-			`${theme.fg("dim", "Tools:")} ${tools}`,
-			`${theme.fg("dim", "Review:")} ${formatReviewCadence(advisor)}`,
-			`${theme.fg("dim", "Sync backlog:")} ${syncBacklog}`,
+			`${theme.fg("dim", __ompTranslate("Enabled:"))} ${advisor.enabled === false ? __ompTranslate("○ off") : __ompTranslate("● on")}`,
+			`${theme.fg("dim", __ompTranslate("Model:"))} ${model}`,
+			`${theme.fg("dim", __ompTranslate("Tools:"))} ${tools}`,
+			`${theme.fg("dim", __ompTranslate("Review:"))} ${formatReviewCadence(advisor)}`,
+			`${theme.fg("dim", __ompTranslate("Sync backlog:"))} ${syncBacklog}`,
 			"",
-			theme.fg("dim", "Instructions:"),
+			theme.fg("dim", __ompTranslate("Instructions:")),
 		];
 		const instr = advisor.instructions?.trim();
-		lines.push(...(instr ? wrap(instr, bodyWidth) : [theme.fg("muted", "(none)")]));
+		lines.push(...(instr ? wrap(instr, bodyWidth) : [theme.fg("muted", __ompTranslate("(none)"))]));
 		// Show live usage stats when available from the session.
 		const liveStat = this.#cb.getAdvisorStats?.()?.find(s => s.name === (advisor.name || "default"));
 		if (liveStat && (liveStat.status === "running" || liveStat.status === "quota_exhausted")) {
-			lines.push("", theme.fg("dim", "Usage:"));
+			lines.push("", theme.fg("dim", __ompTranslate("Usage:\u0004advisor.preview.usage")));
 			const spendParts: string[] = [
-				`${liveStat.tokens.input.toLocaleString()} in`,
-				`${liveStat.tokens.output.toLocaleString()} out`,
+				__ompTranslate("{0} in", `${liveStat.tokens.input.toLocaleString()}`),
+				__ompTranslate("{0} out", `${liveStat.tokens.output.toLocaleString()}`),
 			];
-			if (liveStat.tokens.cacheRead > 0) spendParts.push(`${liveStat.tokens.cacheRead.toLocaleString()} cache`);
-			lines.push(theme.fg("dim", `  Tokens: ${spendParts.join(", ")}`));
-			if (liveStat.cost > 0) lines.push(theme.fg("dim", `  Cost: $${liveStat.cost.toFixed(4)}`));
+			if (liveStat.tokens.cacheRead > 0)
+				spendParts.push(__ompTranslate("{0} cache", `${liveStat.tokens.cacheRead.toLocaleString()}`));
+			lines.push(theme.fg("dim", __ompTranslate("  Tokens: {0}", `${spendParts.join(", ")}`)));
+			if (liveStat.cost > 0)
+				lines.push(theme.fg("dim", __ompTranslate("  Cost: ${0}", `${liveStat.cost.toFixed(4)}`)));
 			if (liveStat.contextWindow > 0) {
 				const pct = Math.round((liveStat.contextTokens / liveStat.contextWindow) * 100);
 				lines.push(
 					theme.fg(
 						"dim",
-						`  Context: ${liveStat.contextTokens.toLocaleString()}/${liveStat.contextWindow.toLocaleString()} (${pct}%)`,
+						__ompTranslate(
+							"  Context: {0}/{1} ({2}%)",
+							`${liveStat.contextTokens.toLocaleString()}`,
+							`${liveStat.contextWindow.toLocaleString()}`,
+							`${pct}`,
+						),
 					),
 				);
 			}
@@ -1205,14 +1278,20 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#advisorSummary(advisor: AdvisorConfig): string {
-		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools} · review ${advisor.reviewMode ?? "turn"}/${advisor.reviewInterval ?? 1}`;
+		const model = advisor.model?.trim() || this.#defaultModelLabel || __ompTranslate("advisor role default");
+		const tools = formatAdvisorTools(advisor.tools, __ompTranslate("no tools"));
+		return __ompTranslate(
+			"{0} · {1} · review {2}/{3}",
+			`${model}`,
+			`${tools}`,
+			`${advisor.reviewMode ?? "turn"}`,
+			`${advisor.reviewInterval ?? 1}`,
+		);
 	}
 
 	/** The advisor's explicit catch-up override, else the inherited global policy. */
 	#syncBacklogLabel(advisor: AdvisorConfig): string {
-		return advisor.syncBacklog ?? `${this.#deps.syncBacklog ?? "off"} (inherited)`;
+		return advisor.syncBacklog ?? __ompTranslate("{0} (inherited)", `${this.#deps.syncBacklog ?? "off"}`);
 	}
 
 	#showList(): void {
@@ -1220,18 +1299,22 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#ensureRosterVisible();
 		const items: SelectItem[] = this.#doc.advisors.map((advisor, index) => ({
 			value: `advisor:${index}`,
-			label: `${advisor.enabled === false ? "○" : "●"} ${advisor.name || "(unnamed)"}`,
+			label: `${advisor.enabled === false ? "○" : "●"} ${advisor.name || __ompTranslate("(unnamed)")}`,
 			description: this.#advisorSummary(advisor),
 		}));
-		items.push({ value: "add", label: "+ Add advisor" });
+		items.push({ value: "add", label: __ompTranslate("+ Add advisor") });
 		items.push({
 			value: "shared",
-			label: "Shared instructions",
+			label: __ompTranslate("Shared instructions"),
 			description: previewLineOrNone(this.#doc.instructions),
 		});
-		items.push({ value: "scope", label: `Scope: ${this.#scope}`, description: `→ ${this.#otherScope()}` });
-		items.push({ value: "save", label: "Save & apply" });
-		items.push({ value: "close", label: "Close" });
+		items.push({
+			value: "scope",
+			label: __ompTranslate("Scope: {0}", `${this.#scope}`),
+			description: `→ ${this.#otherScope()}`,
+		});
+		items.push({ value: "save", label: __ompTranslate("Save & apply") });
+		items.push({ value: "close", label: __ompTranslate("Close") });
 
 		// Show every row (no internal overflow-search); the split frame supplies height.
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
@@ -1241,13 +1324,20 @@ export class AdvisorConfigOverlayComponent implements Component {
 		};
 		list.onSelect = item =>
 			void this.#onListSelect(item.value).catch(err => {
-				this.#cb.notify(`Advisor config: ${err instanceof Error ? err.message : String(err)}`);
+				this.#cb.notify(
+					__ompTranslate("Advisor config: {0}", `${err instanceof Error ? err.message : String(err)}`),
+				);
 			});
 		list.onCancel = () => this.#cb.close();
 		this.#setScreen(
 			"list",
 			list,
-			`${editorKeys("tui.select.up", "tui.select.down")} move · ${editorKey("tui.select.confirm")} / click select · scroll preview on the right · ${editorKey("tui.select.cancel")} close`,
+			__ompTranslate(
+				"{0} move · {1} / click select · scroll preview on the right · {2} close",
+				`${editorKeys("tui.select.up", "tui.select.down")}`,
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 		);
 	}
 
@@ -1264,7 +1354,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		if (value === "scope") {
 			if (this.#dirty) {
-				this.#cb.notify('Unsaved changes — "Save & apply" or Close before switching scope.');
+				this.#cb.notify(__ompTranslate('Unsaved changes — "Save & apply" or Close before switching scope.'));
 				return;
 			}
 			const next = this.#otherScope();
@@ -1308,34 +1398,39 @@ export class AdvisorConfigOverlayComponent implements Component {
 			return;
 		}
 		this.#detailIndex = index;
-		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
+		const modelDescription =
+			advisor.model?.trim() || this.#defaultModelLabel || __ompTranslate("advisor role default");
+		const toolsDescription = formatAdvisorTools(advisor.tools, __ompTranslate("no tools"));
 		const reviewMode = advisor.reviewMode ?? "turn";
 		const reviewInterval = advisor.reviewInterval ?? 1;
 		const items: SelectItem[] = [
-			{ value: "name", label: "Name", description: advisor.name },
+			{ value: "name", label: __ompTranslate("Name"), description: advisor.name },
 			{
 				value: "toggleEnabled",
-				label: "Enabled",
-				description: advisor.enabled === false ? "○ off" : "● on",
+				label: __ompTranslate("Enabled\u0004advisor.setting.enabled"),
+				description: advisor.enabled === false ? __ompTranslate("○ off") : __ompTranslate("● on"),
 			},
-			{ value: "model", label: "Model", description: modelDescription },
-			{ value: "reviewMode", label: "Review mode", description: reviewMode },
-			{ value: "reviewInterval", label: "Review interval", description: String(reviewInterval) },
+			{ value: "model", label: __ompTranslate("Model"), description: modelDescription },
+			{ value: "reviewMode", label: __ompTranslate("Review mode"), description: reviewMode },
+			{ value: "reviewInterval", label: __ompTranslate("Review interval"), description: String(reviewInterval) },
 			{
 				value: "syncBacklog",
-				label: "Sync backlog",
+				label: __ompTranslate("Sync backlog"),
 				description: this.#syncBacklogLabel(advisor),
 			},
 		];
 		if (advisor.model?.trim()) {
-			items.push({ value: "resetModel", label: "Reset model to advisor-role default" });
+			items.push({ value: "resetModel", label: __ompTranslate("Reset model to advisor-role default") });
 		}
 		items.push(
-			{ value: "tools", label: "Tools", description: toolsDescription },
-			{ value: "instructions", label: "Instructions", description: previewLineOrNone(advisor.instructions) },
-			{ value: "delete", label: "Delete this advisor" },
-			{ value: "back", label: "Back" },
+			{ value: "tools", label: __ompTranslate("Tools"), description: toolsDescription },
+			{
+				value: "instructions",
+				label: __ompTranslate("Instructions"),
+				description: previewLineOrNone(advisor.instructions),
+			},
+			{ value: "delete", label: __ompTranslate("Delete this advisor") },
+			{ value: "back", label: __ompTranslate("Back") },
 		);
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		list.onSelect = item => this.#onDetailSelect(index, item.value);
@@ -1343,7 +1438,12 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"detail",
 			list,
-			`Editing "${advisor.name}" · ${editorKey("tui.select.confirm")} / click edit field · ${editorKey("tui.select.cancel")} back`,
+			__ompTranslate(
+				'Editing "{0}" · {1} / click edit field · {2} back',
+				`${advisor.name}`,
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 		);
 	}
 
@@ -1409,7 +1509,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"name",
 			input,
-			`Type a name · ${editorKey("tui.input.submit")} save · ${editorKey("tui.select.cancel")} cancel`,
+			__ompTranslate(
+				"Type a name · {0} save · {1} cancel",
+				`${editorKey("tui.input.submit")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 		);
 	}
 
@@ -1454,12 +1558,16 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"model",
 			picker,
-			`Type to search · ${formatKeyHint("enter")} / click twice picks · ${editorKey("tui.select.cancel")} back`,
+			__ompTranslate(
+				"Type to search · {0} / click twice picks · {1} back",
+				`${formatKeyHint("enter")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 		);
 	}
 
 	#showThinkingPicker(index: number, selector: string, efforts: readonly string[]): void {
-		const items: SelectItem[] = [{ value: "", label: "(model default thinking)" }];
+		const items: SelectItem[] = [{ value: "", label: __ompTranslate("(model default thinking)") }];
 		for (const effort of efforts) items.push({ value: effort, label: effort });
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		// The level the advisor already runs this model at, when it is this model.
@@ -1477,16 +1585,29 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"thinking",
 			list,
-			`Thinking effort for ${selector} · ${editorKey("tui.select.confirm")} / click pick · ${editorKey("tui.select.cancel")} back`,
+			__ompTranslate(
+				"Thinking effort for {0} · {1} / click pick · {2} back",
+				`${selector}`,
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 			{
-				title: "Thinking level",
-				subtitle: `How hard ${this.#doc.advisors[index]?.name || "the advisor"} reasons on ${selector}.`,
+				title: __ompTranslate("Thinking level"),
+				subtitle: __ompTranslate(
+					"How hard {0} reasons on {1}.",
+					`${this.#doc.advisors[index]?.name || __ompTranslate("the advisor")}`,
+					`${selector}`,
+				),
 				icon: "thinking",
-				noun: "levels",
+				noun: __ompTranslate("levels\u0004advisor.thinking.levels"),
 				current: current === undefined ? [] : [current],
-				confirm: "Use level",
+				confirm: __ompTranslate("Use level"),
 				decorate: item => {
-					if (!item.value) return { label: "Model default", detail: "No level; the provider decides." };
+					if (!item.value)
+						return {
+							label: __ompTranslate("Model default"),
+							detail: __ompTranslate("No level; the provider decides."),
+						};
 					const level = parseThinkingLevel(item.value);
 					const dot = `thinking${item.value.charAt(0).toUpperCase()}${item.value.slice(1)}`;
 					return {
@@ -1506,11 +1627,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const current = advisor.reviewMode ?? ADVISOR_REVIEW_MODES[0];
 		const items: SelectItem[] = ADVISOR_REVIEW_MODES.map(mode => ({
 			value: mode,
-			label: mode === current ? `${mode} (current)` : mode,
+			label: mode === current ? __ompTranslate("{0} (current)", `${mode}`) : mode,
 			description:
 				mode === "turn"
-					? "Review every primary turn (tool-call round)."
-					: "Review only at agent end (once per run).",
+					? __ompTranslate("Review every primary turn (tool-call round).")
+					: __ompTranslate("Review only at agent end (once per run)."),
 		}));
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		list.setSelectedIndex(ADVISOR_REVIEW_MODES.indexOf(current));
@@ -1523,12 +1644,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"review-mode",
 			list,
-			`${editorKey("tui.select.confirm")} / click choose review mode · ${editorKey("tui.select.cancel")} back`,
+			__ompTranslate(
+				"{0} / click choose review mode · {1} back",
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 			{
-				title: "Review mode",
-				subtitle: `When ${advisor.name || "the advisor"} reviews the session.`,
+				title: __ompTranslate("Review mode"),
+				subtitle: __ompTranslate(
+					"When {0} reviews the session.",
+					`${advisor.name || __ompTranslate("the advisor")}`,
+				),
 				icon: "review",
-				noun: "modes",
+				noun: __ompTranslate("modes"),
 				current: [current],
 				decorate: item => ({ label: item.value }),
 			},
@@ -1546,7 +1674,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		input.onSubmit = value => {
 			const interval = Number(value.trim());
 			if (!Number.isSafeInteger(interval) || interval < 1) {
-				this.#cb.notify("Review interval must be a positive integer.");
+				this.#cb.notify(__ompTranslate("Review interval must be a positive integer."));
 				return;
 			}
 			advisor.reviewInterval = interval === 1 ? undefined : interval;
@@ -1557,7 +1685,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"review-interval",
 			input,
-			`Type a positive integer · ${editorKey("tui.input.submit")} save · ${editorKey("tui.select.cancel")} cancel`,
+			__ompTranslate(
+				"Type a positive integer · {0} save · {1} cancel",
+				`${editorKey("tui.input.submit")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 		);
 	}
 
@@ -1572,12 +1704,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const items: SelectItem[] = [
 			{
 				value: SYNC_BACKLOG_INHERIT,
-				label: current === undefined ? "inherit (current)" : "inherit",
-				description: `Follow the global advisor.syncBacklog setting (currently "${global}").`,
+				label: current === undefined ? __ompTranslate("inherit (current)") : __ompTranslate("inherit"),
+				description: __ompTranslate(
+					'Follow the global advisor.syncBacklog setting (currently "{0}").',
+					`${global}`,
+				),
 			},
 			...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
 				value: mode,
-				label: mode === current ? `${mode} (current)` : mode,
+				label: mode === current ? __ompTranslate("{0} (current)", `${mode}`) : mode,
 				description: describeSyncBacklogMode(mode),
 			})),
 		];
@@ -1593,12 +1728,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"sync-backlog",
 			list,
-			`${editorKey("tui.select.confirm")} / click choose catch-up policy · ${editorKey("tui.select.cancel")} back`,
+			__ompTranslate(
+				"{0} / click choose catch-up policy · {1} back",
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 			{
-				title: "Sync backlog",
-				subtitle: `How long the session waits for ${advisor.name || "the advisor"}'s pending reviews.`,
+				title: __ompTranslate("Sync backlog"),
+				subtitle: __ompTranslate(
+					"How long the session waits for {0}'s pending reviews.",
+					`${advisor.name || __ompTranslate("the advisor")}`,
+				),
 				icon: "time",
-				noun: "policies",
+				noun: __ompTranslate("policies"),
 				current: [current ?? SYNC_BACKLOG_INHERIT],
 				decorate: item => ({ label: item.value }),
 			},
@@ -1611,7 +1753,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			value: name,
 			label: `${selected.has(name) ? "[x]" : "[ ]"} ${name}`,
 		}));
-		items.push({ value: TOOLS_DONE, label: "Done" });
+		items.push({ value: TOOLS_DONE, label: __ompTranslate("Done") });
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		list.setSelectedIndex(cursor);
 		let cursorIndex = cursor;
@@ -1637,12 +1779,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"tools",
 			list,
-			`${editorKey("tui.select.confirm")} / click toggle · select Done or ${editorKey("tui.select.cancel")} to apply (empty = no tools; read/grep/glob = default)`,
+			__ompTranslate(
+				"{0} / click toggle · select Done or {1} to apply (empty = no tools; read/grep/glob = default)",
+				`${editorKey("tui.select.confirm")}`,
+				`${editorKey("tui.select.cancel")}`,
+			),
 			{
-				title: "Tools",
-				subtitle: `What ${this.#doc.advisors[index]?.name || "the advisor"} may call. None grants no tools; read, grep and glob are the default.`,
+				title: __ompTranslate("Tools"),
+				subtitle: __ompTranslate(
+					"What {0} may call. None grants no tools; read, grep and glob are the default.",
+					`${this.#doc.advisors[index]?.name || __ompTranslate("the advisor")}`,
+				),
 				icon: "tools",
-				noun: "tools",
+				noun: __ompTranslate("tools"),
 				current: [...selected],
 				decorate: item => ({ label: item.value }),
 			},
@@ -1654,7 +1803,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const shared = index < 0;
 		this.#detailIndex = index;
 		const current = shared ? this.#doc.instructions : this.#doc.advisors[index].instructions;
-		const title = shared ? "Shared advisor instructions" : `Instructions — ${this.#doc.advisors[index].name}`;
+		const title = shared
+			? __ompTranslate("Shared advisor instructions")
+			: __ompTranslate("Instructions — {0}", `${this.#doc.advisors[index].name}`);
 		const editor = new HookEditorComponent(
 			this.#tui,
 			title,

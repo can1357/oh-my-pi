@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 // ────────────────────────────────────────────────────────────────────────
@@ -16,7 +17,7 @@ export const cfgPlanEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Plan Mode",
+		label: __ompTranslate("Plan Mode"),
 		description: "Enable plan mode for read-only exploration and planning before execution",
 	},
 });
@@ -28,7 +29,7 @@ export const cfgPlanDefaultOnStartup = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Start in Plan Mode",
+		label: __ompTranslate("Start in Plan Mode"),
 		description: "Automatically enter plan mode at the start of every new session",
 		condition: "planModeEnabled",
 	},
@@ -41,7 +42,7 @@ export const cfgPlanAutosave = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Autosave Plans",
+		label: __ompTranslate("Autosave Plans"),
 		description: "Automatically save approved plans to disk when plan mode completes",
 		condition: "planModeEnabled",
 	},
@@ -54,7 +55,7 @@ export const cfgPlanAutosaveDir = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Autosave Directory",
+		label: __ompTranslate("Autosave Directory"),
 		description:
 			"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
 		condition: "planAutosaveEnabled",

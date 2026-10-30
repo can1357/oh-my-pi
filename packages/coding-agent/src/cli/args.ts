@@ -1,6 +1,7 @@
 /**
  * CLI argument parsing and help display
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -135,10 +136,12 @@ export interface Args {
 export function validateGoalLaunch(args: Args, interactive: boolean): void {
 	if (args.goal === undefined) return;
 	if (!interactive) {
-		throw new CliUsageError("--goal requires an interactive terminal (not --print or --mode).");
+		throw new CliUsageError(__ompTranslate("--goal requires an interactive terminal (not --print or --mode)."));
 	}
 	if (args.continue || args.resume || args.fork || args.fromClaude || args.fromCodex) {
-		throw new CliUsageError("--goal requires a fresh session (no resume, continue, fork, or import).");
+		throw new CliUsageError(
+			__ompTranslate("--goal requires a fresh session (no resume, continue, fork, or import)."),
+		);
 	}
 }
 
@@ -150,11 +153,11 @@ export function validateGoalLaunch(args: Args, interactive: boolean): void {
 export function validateRestoreLaunch(args: Args, interactive: boolean): void {
 	if (!args.restore) return;
 	if (!interactive) {
-		throw new CliUsageError("--restore requires an interactive terminal (not --print or --mode).");
+		throw new CliUsageError(__ompTranslate("--restore requires an interactive terminal (not --print or --mode)."));
 	}
 	if (args.continue || args.fork || args.fromClaude || args.fromCodex || args.noSession || args.goal !== undefined) {
 		throw new CliUsageError(
-			"--restore resumes one existing session (no continue, fork, import, goal, or --no-session).",
+			__ompTranslate("--restore resumes one existing session (no continue, fork, import, goal, or --no-session)."),
 		);
 	}
 }
@@ -166,7 +169,9 @@ export function validateRestoreLaunch(args: Args, interactive: boolean): void {
  */
 export function validateRestorePrompt(args: Args): void {
 	if (args.restore && (args.messages.length > 0 || args.fileArgs.length > 0)) {
-		throw new CliUsageError("--restore takes no prompt: the session goes on with its interrupted turn.");
+		throw new CliUsageError(
+			__ompTranslate("--restore takes no prompt: the session goes on with its interrupted turn."),
+		);
 	}
 }
 
@@ -183,16 +188,20 @@ export function validateGoalStartup(
 ): void {
 	if (args.goal === undefined) return;
 	if (args.messages.length > 0 || args.fileArgs.length > 0 || pipedInput !== undefined) {
-		throw new CliUsageError("--goal cannot be combined with a positional message, @file, or stdin prompt.");
+		throw new CliUsageError(
+			__ompTranslate("--goal cannot be combined with a positional message, @file, or stdin prompt."),
+		);
 	}
 	if (args.planYolo || args.noTools) {
-		throw new CliUsageError("--goal cannot be combined with --plan-yolo or --no-tools.");
+		throw new CliUsageError(__ompTranslate("--goal cannot be combined with --plan-yolo or --no-tools."));
 	}
 	if (planStartsOnStartup) {
-		throw new CliUsageError("--goal cannot be combined with plan.defaultOnStartup; disable startup plan mode first.");
+		throw new CliUsageError(
+			__ompTranslate("--goal cannot be combined with plan.defaultOnStartup; disable startup plan mode first."),
+		);
 	}
 	if (!goalEnabled) {
-		throw new CliUsageError("--goal requires goal.enabled to be enabled.");
+		throw new CliUsageError(__ompTranslate("--goal requires goal.enabled to be enabled."));
 	}
 }
 
@@ -314,7 +323,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
 					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
 			) {
-				result.invalidFlagValues.push("--goal requires an objective.");
+				result.invalidFlagValues.push(__ompTranslate("--goal requires an objective."));
 				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
 				// value, never a flag of its own: `--goal --profile work` must not activate a profile.
 				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
@@ -433,19 +442,21 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		throw new CliUsageError("--trusted-extension requires a non-empty, non-flag value");
 	}
 	if (trustedFlagCount > 0 && ((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0)) {
-		throw new CliUsageError("--trusted-extension cannot be combined with --extension, -e, or --hook");
+		throw new CliUsageError(__ompTranslate("--trusted-extension cannot be combined with --extension, -e, or --hook"));
 	}
 	for (const trustedPath of result.trustedExtensions ?? []) {
 		if (trustedPath.length === 0) {
 			throw new CliUsageError("--trusted-extension requires a non-empty, non-flag value");
 		}
 		if (!path.isAbsolute(trustedPath)) {
-			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
+			throw new CliUsageError(
+				__ompTranslate("--trusted-extension requires an absolute path: {0}", `${trustedPath}`),
+			);
 		}
 	}
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
-		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
+		throw new CliUsageError(__ompTranslate("--system-prompt and --system-prompt-template cannot be combined"));
 	}
 	return result;
 }
@@ -472,8 +483,10 @@ export function validateToolNames(requested: readonly string[] | undefined, know
 		lines.push(`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}.`);
 		const otherRegistered = known.filter(name => !builtinNames.has(name));
 		lines.push(
-			`Built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}.` +
-				(otherRegistered.length > 0 ? ` Other registered tools: ${otherRegistered.join(", ")}.` : ""),
+			__ompTranslate("Built-in tools: {0}.", `${BUILTIN_TOOL_NAMES.join(", ")}`) +
+				(otherRegistered.length > 0
+					? __ompTranslate(" Other registered tools: {0}.", `${otherRegistered.join(", ")}`)
+					: ""),
 		);
 	}
 	if (unavailable.length > 0) {
@@ -498,7 +511,7 @@ export function reportUnrecognizedFlags(
 	const flags = args.unrecognizedFlags;
 	const plural = flags.length === 1 ? "" : "s";
 	write(`${chalk.red(`Error: unknown flag${plural}: ${flags.join(", ")}`)}\n`);
-	write(`Run \`${APP_NAME} --help\` for available flags.\n`);
+	write(__ompTranslate("Run `{0} --help` for available flags.\n", `${APP_NAME}`));
 	return true;
 }
 
@@ -512,7 +525,7 @@ export function reportInvalidFlagValues(
 	args: Pick<Args, "invalidFlagValues">,
 	write: (text: string) => void = text => process.stderr.write(text),
 ): boolean {
-	for (const message of args.invalidFlagValues) write(`${chalk.red(`Error: ${message}`)}\n`);
+	for (const message of args.invalidFlagValues) write(`${chalk.red(__ompTranslate("Error: {0}", `${message}`))}\n`);
 	return args.invalidFlagValues.length > 0;
 }
 
@@ -522,16 +535,16 @@ export function reportCliUsageError(
 	write: (text: string) => void = text => process.stderr.write(text),
 ): boolean {
 	if (!(error instanceof CliUsageError)) return false;
-	write(`${chalk.red(`Error: ${error.message}`)}\n`);
-	write(`Run \`${APP_NAME} --help\` for available flags.\n`);
+	write(`${chalk.red(__ompTranslate("Error: {0}", `${error.message}`))}\n`);
+	write(__ompTranslate("Run `{0} --help` for available flags.\n", `${APP_NAME}`));
 	return true;
 }
 
 export function printHelp(): void {
 	process.stdout.write(
-		`${chalk.bold(APP_NAME)} - AI coding assistant\n\n` +
-			`Run ${APP_NAME} --help for full command and option details.\n` +
-			`Run ${APP_NAME} <command> --help for command-specific help.\n\n` +
+		__ompTranslate("{0} - AI coding assistant\n\n", `${chalk.bold(APP_NAME)}`) +
+			__ompTranslate("Run {0} --help for full command and option details.\n", `${APP_NAME}`) +
+			__ompTranslate("Run {0} <command> --help for command-specific help.\n\n", `${APP_NAME}`) +
 			`${getExtraHelpText()}\n`,
 	);
 }

@@ -2,6 +2,7 @@
  * Automatic session-title settings: which generator names a session, how its
  * card icon shows, and whether a todo replan refreshes it.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 /** The `title.icons` styles. */
@@ -17,16 +18,22 @@ export const cfgTitleIcons = register({
 	ui: {
 		tab: "appearance",
 		group: "Display",
-		label: "Title Icons",
+		label: __ompTranslate("Title Icons"),
 		description: "Icon and short code that head new generated or /rename session titles",
 		options: [
 			{
 				value: "nf+emoji",
-				label: "Nerd Font + Emoji",
-				description: "Nerd Font glyph where the Nerd Font symbol preset renders it, else the emoji (default)",
+				label: __ompTranslate("Nerd Font + Emoji"),
+				description: __ompTranslate(
+					"Nerd Font glyph where the Nerd Font symbol preset renders it, else the emoji (default)",
+				),
 			},
-			{ value: "emoji", label: "Emoji", description: "Always the emoji" },
-			{ value: "boring", label: "Boring", description: "Plain title: no icon or code" },
+			{ value: "emoji", label: __ompTranslate("Emoji"), description: __ompTranslate("Always the emoji") },
+			{
+				value: "boring",
+				label: __ompTranslate("Boring"),
+				description: __ompTranslate("Plain title: no icon or code"),
+			},
 		],
 	},
 });
@@ -39,16 +46,21 @@ export const cfgTitleGenerator = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Title Generator",
+		label: __ompTranslate("Title Generator"),
 		description: "What names an untitled session from the user's messages",
 		options: [
 			{
 				value: "fork",
-				label: "Fork",
-				description:
+				label: __ompTranslate("Fork"),
+				description: __ompTranslate(
 					"A side turn of the reply on the session's model: reads its prompt cache, adds the card icon (default)",
+				),
 			},
-			{ value: "tiny", label: "Tiny", description: "The title model role only; plain titles without a card" },
+			{
+				value: "tiny",
+				label: __ompTranslate("Tiny"),
+				description: __ompTranslate("The title model role only; plain titles without a card"),
+			},
 		],
 	},
 });
@@ -60,7 +72,7 @@ export const cfgTitleRefreshOnReplan = register({
 	ui: {
 		tab: "tasks",
 		group: "Modes",
-		label: "Refresh Title on Replan",
+		label: __ompTranslate("Refresh Title on Replan"),
 		description: "Refresh generated session titles after todo init replans unless the title was set by the user",
 	},
 });

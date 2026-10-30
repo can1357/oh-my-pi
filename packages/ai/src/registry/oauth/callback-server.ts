@@ -10,6 +10,7 @@
  * - generateAuthUrl(): Build provider-specific authorization URL
  * - exchangeToken(): Exchange authorization code for tokens
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as os from "node:os";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
@@ -121,29 +122,33 @@ function parseNativeCallback(input: string, redirectUri: string, expectedState: 
 		callback = new URL(input);
 		expected = new URL(redirectUri);
 	} catch {
-		throw new AIError.OAuthError("OAuth application callback was not a valid URL", { kind: "device-auth" });
+		throw new AIError.OAuthError(__ompTranslate("OAuth application callback was not a valid URL"), {
+			kind: "device-auth",
+		});
 	}
 	if (
 		callback.protocol !== expected.protocol ||
 		callback.host !== expected.host ||
 		callback.pathname !== expected.pathname
 	) {
-		throw new AIError.OAuthError("OAuth application returned an unexpected callback target", {
+		throw new AIError.OAuthError(__ompTranslate("OAuth application returned an unexpected callback target"), {
 			kind: "device-auth",
 		});
 	}
 	const state = callback.searchParams.get("state") ?? "";
 	if (expectedState && state !== expectedState) {
-		throw new AIError.OAuthError("State mismatch - possible CSRF attack", { kind: "device-auth" });
+		throw new AIError.OAuthError(__ompTranslate("State mismatch - possible CSRF attack"), { kind: "device-auth" });
 	}
 	const error = callback.searchParams.get("error");
 	if (error) {
 		const description = callback.searchParams.get("error_description") || error;
-		throw new AIError.OAuthError(`Authorization failed: ${description}`, { kind: "device-auth" });
+		throw new AIError.OAuthError(__ompTranslate("Authorization failed: {0}", `${description}`), {
+			kind: "device-auth",
+		});
 	}
 	const code = callback.searchParams.get("code") ?? callback.searchParams.get("authCode");
 	if (!code)
-		throw new AIError.OAuthError("OAuth application callback omitted the authorization code", {
+		throw new AIError.OAuthError(__ompTranslate("OAuth application callback omitted the authorization code"), {
 			kind: "device-auth",
 		});
 	return { code, state };
@@ -226,7 +231,9 @@ export abstract class OAuthCallbackFlow {
 	}
 
 	#loginCancelledError(): AIError.LoginCancelledError {
-		return new AIError.LoginCancelledError(`OAuth callback cancelled: ${this.ctrl.signal?.reason}`);
+		return new AIError.LoginCancelledError(
+			__ompTranslate("OAuth callback cancelled: {0}", `${this.ctrl.signal?.reason}`),
+		);
 	}
 
 	#throwIfCancelled(): void {
@@ -263,7 +270,7 @@ export abstract class OAuthCallbackFlow {
 					} catch (error) {
 						this.#throwIfCancelled();
 						this.#reportNativeWarning(
-							"Native OAuth callback setup failed; paste the authorization code instead",
+							__ompTranslate("Native OAuth callback setup failed; paste the authorization code instead"),
 							error,
 						);
 					}
@@ -296,8 +303,8 @@ export abstract class OAuthCallbackFlow {
 			this.#throwIfCancelled();
 			this.ctrl.onProgress?.(
 				receiver || !this.#manualInputOnly
-					? "Waiting for browser authentication..."
-					: "Waiting for pasted authorization code...",
+					? __ompTranslate("Waiting for browser authentication...")
+					: __ompTranslate("Waiting for pasted authorization code..."),
 			);
 			this.#throwIfCancelled();
 
@@ -315,7 +322,7 @@ export abstract class OAuthCallbackFlow {
 
 			receiverAbort.abort("OAuth callback received");
 			await nativeCallback?.catch(() => undefined);
-			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
+			this.ctrl.onProgress?.(__ompTranslate("Exchanging authorization code for tokens..."));
 			this.#throwIfCancelled();
 
 			return await this.exchangeToken(callback.code, state, redirectUri);
@@ -328,7 +335,7 @@ export abstract class OAuthCallbackFlow {
 					await receiver.dispose();
 				} catch (error) {
 					this.#reportNativeWarning(
-						"Native OAuth callback cleanup failed; recovery information was retained",
+						__ompTranslate("Native OAuth callback cleanup failed; recovery information was retained"),
 						error,
 					);
 				}
@@ -383,13 +390,22 @@ export abstract class OAuthCallbackFlow {
 		} catch (cause) {
 			if (this.redirectUri) {
 				throw new AIError.ConfigurationError(
-					`OAuth callback port ${this.preferredPort} is in use, but oauth.redirectUri (${this.redirectUri}) requires this exact port. Free port ${this.preferredPort} (e.g. stop the process bound to it) and retry, or change oauth.redirectUri to point at an available port.`,
+					__ompTranslate(
+						"OAuth callback port {0} is in use, but oauth.redirectUri ({1}) requires this exact port. Free port {2} (e.g. stop the process bound to it) and retry, or change oauth.redirectUri to point at an available port.",
+						`${this.preferredPort}`,
+						`${this.redirectUri}`,
+						`${this.preferredPort}`,
+					),
 					{ cause },
 				);
 			}
 			if (!this.allowPortFallback) {
 				throw new AIError.ConfigurationError(
-					`OAuth callback port ${this.preferredPort} is in use. The OAuth provider validates redirect URIs against its registered callback, so falling back to a random port would be rejected. Free port ${this.preferredPort} (e.g. stop the process bound to it) and retry, or set oauth.callbackPort/oauth.redirectUri to a port the provider has registered.`,
+					__ompTranslate(
+						"OAuth callback port {0} is in use. The OAuth provider validates redirect URIs against its registered callback, so falling back to a random port would be rejected. Free port {1} (e.g. stop the process bound to it) and retry, or set oauth.callbackPort/oauth.redirectUri to a port the provider has registered.",
+						`${this.preferredPort}`,
+						`${this.preferredPort}`,
+					),
 					{ cause },
 				);
 			}
@@ -397,7 +413,9 @@ export abstract class OAuthCallbackFlow {
 			const actualPort = this.#resolveServerPort(server);
 			const redirectUri = `http://${this.callbackHostname}:${actualPort}${this.callbackPath}`;
 			const launchUrl = this.#launchUrlIfSafe(actualPort);
-			this.ctrl.onProgress?.(`Preferred port ${this.preferredPort} unavailable, using port ${actualPort}`);
+			this.ctrl.onProgress?.(
+				__ompTranslate("Preferred port {0} unavailable, using port {1}", `${this.preferredPort}`, `${actualPort}`),
+			);
 			return { server, redirectUri, launchUrl };
 		}
 	}
@@ -412,7 +430,9 @@ export abstract class OAuthCallbackFlow {
 		const port = server.port;
 		if (typeof port !== "number") {
 			throw new AIError.ConfigurationError(
-				"OAuth callback server bound to a non-TCP endpoint; expected a numeric port. Check `oauth.callbackPort`/`oauth.redirectUri`.",
+				__ompTranslate(
+					"OAuth callback server bound to a non-TCP endpoint; expected a numeric port. Check `oauth.callbackPort`/`oauth.redirectUri`.",
+				),
 			);
 		}
 		return port;
@@ -567,11 +587,11 @@ export abstract class OAuthCallbackFlow {
 		let resultState: OkState | ErrorState;
 
 		if (error) {
-			resultState = { ok: false, error: `Authorization failed: ${errorDescription}` };
+			resultState = { ok: false, error: __ompTranslate("Authorization failed: {0}", `${errorDescription}`) };
 		} else if (!code) {
-			resultState = { ok: false, error: "Missing authorization code" };
+			resultState = { ok: false, error: __ompTranslate("Missing authorization code") };
 		} else if (expectedState && state !== expectedState) {
-			resultState = { ok: false, error: "State mismatch - possible CSRF attack" };
+			resultState = { ok: false, error: __ompTranslate("State mismatch - possible CSRF attack") };
 		} else {
 			resultState = { ok: true, code, state };
 		}
@@ -588,7 +608,7 @@ export abstract class OAuthCallbackFlow {
 			// the 5-minute timeout. Errors WITHOUT the expected state stay
 			// ignored — any local process can forge those (#4106).
 			const reject = this.#callbackReject;
-			const message = resultState.error ?? `Authorization failed: ${errorDescription}`;
+			const message = resultState.error ?? __ompTranslate("Authorization failed: {0}", `${errorDescription}`);
 			queueMicrotask(() => {
 				reject?.(new AIError.OAuthError(message, { kind: "device-auth" }));
 			});

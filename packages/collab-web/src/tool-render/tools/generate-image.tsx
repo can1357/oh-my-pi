@@ -3,6 +3,7 @@
  * image(s). Generated images travel in `details.images` (kept out of model
  * context), so the body merges them into the result before thumbnailing.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Kv, KvGrid, Note, PathText, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps, ToolResultBlock, ToolResultLike } from "../types";
@@ -34,7 +35,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 				args.subject !== undefined && <InvalidArg what="subject" />
 			)}{" "}
 			{aspect && <Badge>{aspect}</Badge>}
-			{changes > 0 && <Badge tone="accent">edit ×{changes}</Badge>}
+			{changes > 0 && <Badge tone="accent">{__ompTranslate("edit ×{0}", `${changes}`)}</Badge>}
 		</>
 	);
 }
@@ -81,7 +82,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{changes && changes.length > 0 && (
 				<div className="tv-list">
 					{changes.map((change, i) => (
-						<Row key={i} k={i === 0 ? "changes" : undefined}>
+						<Row key={i} k={i === 0 ? __ompTranslate("changes") : undefined}>
 							{typeof change === "string" ? change : <InvalidArg what="change" />}
 						</Row>
 					))}
@@ -93,13 +94,13 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 						const path = isRecord(input) ? str(input.path) : null;
 						const mime = isRecord(input) ? str(input.mime_type) : null;
 						return (
-							<Row key={i} k={i === 0 ? "input" : undefined}>
+							<Row key={i} k={i === 0 ? __ompTranslate("input") : undefined}>
 								{!isRecord(input) ? (
 									<InvalidArg what="input" />
 								) : path ? (
 									<PathText path={path} />
 								) : (
-									`base64 image${mime ? ` (${mime})` : ""}`
+									__ompTranslate("base64 image{0}", `${mime ? ` (${mime})` : ""}`)
 								)}
 							</Row>
 						);
@@ -107,12 +108,12 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 				</div>
 			)}
 			{(provider || model) && <Badges items={[provider, model]} />}
-			{revised && <Note>revised: {truncate(revised, 400)}</Note>}
+			{revised && <Note>{__ompTranslate("revised: {0}", truncate(revised, 400))}</Note>}
 			<ResultImages result={merged} />
 			{paths.length > 0 && (
 				<div className="tv-list">
 					{paths.map((p, i) => (
-						<Row key={i} k={i === 0 ? "saved" : undefined}>
+						<Row key={i} k={i === 0 ? __ompTranslate("saved") : undefined}>
 							<PathText path={p} />
 						</Row>
 					))}

@@ -7,6 +7,7 @@
  * stay in their respective files.
  */
 
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Loader } from "../components/loader";
 import { Text } from "../components/text";
 import { Container, type TUI } from "../tui";
@@ -35,7 +36,11 @@ export function clampDisplayLine(line: string): string {
 		return line;
 	}
 	const omitted = visible - MAX_DISPLAY_LINE_CHARS;
-	return `${truncateToWidth(line, MAX_DISPLAY_LINE_CHARS, Ellipsis.Omit)}… [${omitted} visible columns omitted]`;
+	return __ompTranslate(
+		"{0}… [{1} visible columns omitted]",
+		`${truncateToWidth(line, MAX_DISPLAY_LINE_CHARS, Ellipsis.Omit)}`,
+		`${omitted}`,
+	);
 }
 
 export type ExecutionStatus = "running" | "complete" | "cancelled" | "error";
@@ -65,7 +70,7 @@ export function buildExecutionFrame(
 		ui,
 		spinner => theme.fg(colorKey, spinner),
 		text => theme.fg("muted", text),
-		`Running… (${interruptKey()} to cancel)`,
+		__ompTranslate("Running… ({0} to cancel)", `${interruptKey()}`),
 		getSymbolTheme().spinnerFrames,
 	);
 
@@ -90,12 +95,17 @@ export function buildStatusFooter(opts: {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
-		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
+		parts.push(
+			theme.fg(
+				"dim",
+				__ompTranslate("… {0} more lines ({1} to expand)", `${opts.hiddenLineCount}`, `${expandKeyHint()}`),
+			),
+		);
 	}
 	if (opts.status === "cancelled") {
-		parts.push(theme.fg("warning", "(cancelled)"));
+		parts.push(theme.fg("warning", __ompTranslate("(cancelled)")));
 	} else if (opts.status === "error") {
-		parts.push(theme.fg("error", `(exit ${opts.exitCode})`));
+		parts.push(theme.fg("error", __ompTranslate("(exit {0})", `${opts.exitCode}`)));
 	}
 	if (opts.truncation) {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));
@@ -159,7 +169,12 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	if (input.images) children.push(...input.images);
 	if (running) {
 		children.push(
-			node("spinner", { label: [span(`Running… (${interruptKey()} to cancel)`, "muted")] }, undefined, "running"),
+			node(
+				"spinner",
+				{ label: [span(__ompTranslate("Running… ({0} to cancel)", `${interruptKey()}`), "muted")] },
+				undefined,
+				"running",
+			),
 		);
 	}
 	const notes: TspSpan[] = [];
@@ -167,8 +182,8 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 		if (notes.length > 0) notes.push(span("\n"));
 		notes.push(span(value, token));
 	};
-	if (input.status === "cancelled") note("(cancelled)", "warning");
-	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
+	if (input.status === "cancelled") note(__ompTranslate("(cancelled)"), "warning");
+	else if (input.status === "error") note(__ompTranslate("(exit {0})", `${input.exitCode}`), "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
@@ -249,8 +264,9 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 		],
 		{ key: "run", tone: state === "failed" ? "error" : undefined },
 	);
-	const badges: { text: string; tone?: TspTone; title?: string }[] = [{ text: "you", tone: "user" }];
-	if (input.excluded) badges.push({ text: "not sent", title: "Not sent to the model", tone: "muted" });
+	const badges: { text: string; tone?: TspTone; title?: string }[] = [{ text: __ompTranslate("you"), tone: "user" }];
+	if (input.excluded)
+		badges.push({ text: __ompTranslate("not sent"), title: __ompTranslate("Not sent to the model"), tone: "muted" });
 	return node(
 		"tool",
 		{
@@ -263,7 +279,7 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 			age: running ? ms : undefined,
 			took: running ? undefined : ms,
 			exit: input.status === "error" ? input.exitCode : undefined,
-			note: input.status === "cancelled" ? "cancelled" : undefined,
+			note: input.status === "cancelled" ? __ompTranslate("cancelled") : undefined,
 			frame: "card",
 			collapsible: true,
 			collapsed: !input.expanded,

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -347,9 +348,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = isRecord(args) ? args : {};
 		const language =
-			typeof params.language === "string" ? formatEvalInputLanguage(params.language) : "javascript (default)";
+			typeof params.language === "string"
+				? formatEvalInputLanguage(params.language)
+				: __ompTranslate("javascript (default)");
 		const code = typeof params.code === "string" ? params.code : "";
-		return [`Language: ${language}`, `Code:\n${truncateForPrompt(code)}`];
+		return [
+			__ompTranslate("Language: {0}", `${language}`),
+			__ompTranslate("Code:\n{0}", `${truncateForPrompt(code)}`),
+		];
 	};
 	get summary(): string {
 		return summarizeEvalLanguages(this.#enabledLanguages());
@@ -432,7 +438,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly intent = (args: Partial<typeof evalSchema.infer>): string | undefined => {
 		const title = typeof args.title === "string" ? args.title : undefined;
 		const language = typeof args.language === "string" ? formatEvalInputLanguage(args.language) : "javascript";
-		return title || `running ${language}`;
+		return title || __ompTranslate("running {0}", `${language}`);
 	};
 
 	readonly speculation: ToolSpeculationPolicy = {

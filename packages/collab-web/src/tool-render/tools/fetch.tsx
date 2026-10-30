@@ -1,4 +1,6 @@
 /** `fetch` — reader-mode URL fetch; output is markdown with a metadata header. */
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, InvalidArg, Kv, KvGrid, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -49,13 +51,13 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 			{args.raw === true && (
 				<>
 					{" "}
-					<Badge>raw</Badge>
+					<Badge>{___ompTranslate("raw")}</Badge>
 				</>
 			)}
 			{details?.truncated && (
 				<>
 					{" "}
-					<Badge tone="warn">truncated</Badge>
+					<Badge tone="warn">{___ompTranslate("truncated")}</Badge>
 				</>
 			)}
 		</>
@@ -72,14 +74,16 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		<>
 			<KvGrid>
 				<Kv k="url">{url ?? <InvalidArg what="url" />}</Kv>
-				<Kv k="method">{method && method !== "GET" && <Badge tone="accent">{method}</Badge>}</Kv>
-				<Kv k="raw">{args.raw === true && <Badge>raw</Badge>}</Kv>
-				<Kv k="timeout">{timeout != null && `${timeout}s`}</Kv>
-				<Kv k="final url">{redirected && details?.finalUrl}</Kv>
+				<Kv k={__ompTranslate("method")}>{method && method !== "GET" && <Badge tone="accent">{method}</Badge>}</Kv>
+				<Kv k={__ompTranslate("raw")}>{args.raw === true && <Badge>{__ompTranslate("raw")}</Badge>}</Kv>
+				<Kv k={__ompTranslate("timeout")}>{timeout != null && `${timeout}s`}</Kv>
+				<Kv k={__ompTranslate("final url")}>{redirected && details?.finalUrl}</Kv>
 				<Kv k="content-type">{details?.contentType}</Kv>
-				<Kv k="via">{details?.method}</Kv>
-				<Kv k="notes">{details && details.notes.length > 0 && details.notes.join("; ")}</Kv>
-				<Kv k="truncated">{details?.truncated && <Badge tone="warn">output truncated</Badge>}</Kv>
+				<Kv k={__ompTranslate("via")}>{details?.method}</Kv>
+				<Kv k={__ompTranslate("notes")}>{details && details.notes.length > 0 && details.notes.join("; ")}</Kv>
+				<Kv k={__ompTranslate("truncated\u0004tool.fetch.truncated")}>
+					{details?.truncated && <Badge tone="warn">{__ompTranslate("output truncated")}</Badge>}
+				</Kv>
 			</KvGrid>
 			<ResultText result={result} maxLines={12} lang="markdown" />
 		</>

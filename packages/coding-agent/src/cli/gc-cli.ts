@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -331,10 +332,10 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 
 export function collectGcErrors(result: GcResult): string[] {
 	return [
-		...(result.stale?.errors ?? []).map(error => `stale: ${error}`),
-		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
-		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
-		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
+		...(result.stale?.errors ?? []).map(error => __ompTranslate("stale: {0}", `${error}`)),
+		...(result.blobs?.errors ?? []).map(error => __ompTranslate("blobs: {0}", `${error}`)),
+		...(result.archive?.errors ?? []).map(error => __ompTranslate("archive: {0}", `${error}`)),
+		...(result.compress?.errors ?? []).map(error => __ompTranslate("compress: {0}", `${error}`)),
 	];
 }
 
@@ -606,7 +607,9 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 		return;
 	} catch (error) {
 		if (!(await statIfPresent(canonical))) {
-			result.errors.push(`${canonical}: failed to restore reused blob: ${errorMessage(error)}`);
+			result.errors.push(
+				__ompTranslate("{0}: failed to restore reused blob: {1}", `${canonical}`, `${errorMessage(error)}`),
+			);
 			return;
 		}
 	}
@@ -1029,10 +1032,12 @@ async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<vo
 	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
 	const sourceArtifacts = sessionArtifactsPath(sourceSession);
 	const destArtifacts = sessionArtifactsPath(destSession);
-	if (await pathExists(destSession)) throw new Error(`archive destination exists: ${destSession}`);
-	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
+	if (await pathExists(destSession))
+		throw new Error(__ompTranslate("archive destination exists: {0}", `${destSession}`));
+	if (await pathExists(legacyDestSession))
+		throw new Error(__ompTranslate("archive destination exists: {0}", `${legacyDestSession}`));
 	if ((await pathExists(sourceArtifacts)) && (await pathExists(destArtifacts))) {
-		throw new Error(`archive artifacts destination exists: ${destArtifacts}`);
+		throw new Error(__ompTranslate("archive artifacts destination exists: {0}", `${destArtifacts}`));
 	}
 
 	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
@@ -1128,7 +1133,7 @@ async function cleanupHistoryRowsForArchivedSessions(
 	try {
 		for (const id of await collectArchivedSessionIds(archiveRoot)) cleanupIds.add(id);
 	} catch (error) {
-		result.errors.push(`history cleanup scan: ${errorMessage(error)}`);
+		result.errors.push(__ompTranslate("history cleanup scan: {0}", `${errorMessage(error)}`));
 	}
 
 	try {
@@ -1136,7 +1141,7 @@ async function cleanupHistoryRowsForArchivedSessions(
 		result.historyRowsDeleted = cleanup.deleted;
 		result.ftsRebuilt = cleanup.ftsRebuilt;
 	} catch (error) {
-		result.errors.push(`history cleanup: ${errorMessage(error)}`);
+		result.errors.push(__ompTranslate("history cleanup: {0}", `${errorMessage(error)}`));
 	}
 }
 
@@ -1652,7 +1657,7 @@ async function collectArchivedStatsSessions(
 		try {
 			const identities = createStatsIdentities();
 			const header = await scanArchivedSession(file, identities);
-			if (!header) throw new Error("archive is missing a valid session header");
+			if (!header) throw new Error(__ompTranslate("archive is missing a valid session header"));
 			sessions.push({
 				path: sourcePath,
 				id: header.id,
@@ -1697,7 +1702,7 @@ async function cleanupStatsRowsForArchivedSessions(
 	let retainedSessions: SessionInfo[];
 	try {
 		for (const session of await collectArchivedStatsSessions(archiveRoot, sessionsRoot, (file, error) => {
-			result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
+			result.errors.push(__ompTranslate("stats cleanup scan {0}: {1}", `${file}`, `${errorMessage(error)}`));
 		})) {
 			archivedByPath.set(path.resolve(session.path), session);
 		}
@@ -1717,7 +1722,9 @@ async function cleanupStatsRowsForArchivedSessions(
 				retainedSessions.map(async session => {
 					const header = await readSessionLineageHeader(session.path);
 					if (!header || header.id !== session.id) {
-						throw new Error(`session header changed during stats cleanup: ${session.path}`);
+						throw new Error(
+							__ompTranslate("session header changed during stats cleanup: {0}", `${session.path}`),
+						);
 					}
 					return {
 						path: session.path,
@@ -1733,7 +1740,7 @@ async function cleanupStatsRowsForArchivedSessions(
 			result.statsRowsDeleted = reconcileStatsRowsForSessions(dbPath, context.plans);
 		});
 	} catch (error) {
-		result.errors.push(`stats cleanup: ${errorMessage(error)}`);
+		result.errors.push(__ompTranslate("stats cleanup: {0}", `${errorMessage(error)}`));
 	}
 }
 
@@ -2081,7 +2088,14 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 		result.walBytes = 0;
 	}
 	if (checkpointAttempted && (result.busy > 0 || result.walBytes > 0)) {
-		throw new Error(`WAL checkpoint failed for ${dbPath}: busy=${result.busy}, walBytes=${result.walBytes}`);
+		throw new Error(
+			__ompTranslate(
+				"WAL checkpoint failed for {0}: busy={1}, walBytes={2}",
+				`${dbPath}`,
+				`${result.busy}`,
+				`${result.walBytes}`,
+			),
+		);
 	}
 	result.checkpointed = checkpointAttempted;
 	return result;
@@ -2279,55 +2293,88 @@ async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise
 }
 
 function renderText(result: GcResult): string {
-	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
+	const lines = [`GC ${result.apply ? __ompTranslate("applied") : __ompTranslate("dry-run")} (${result.agentDir})`];
 	if (result.stale) {
 		const stale = result.stale;
 		lines.push(
-			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas)`,
+			__ompTranslate(
+				"stale: {0}/{1} entries, {2} ({3} session markers, {4} breadcrumbs, {5} reports, {6} collab replicas)",
+				`${stale.deleted}`,
+				`${stale.wouldDelete}`,
+				`${formatBytes(stale.bytes)}`,
+				`${stale.danglingMarkers}`,
+				`${stale.staleBreadcrumbs}`,
+				`${stale.expiredReports}`,
+				`${stale.expiredReplicas}`,
+			),
 		);
-		if (stale.errors.length > 0) lines.push(`stale errors: ${stale.errors.length}`);
+		if (stale.errors.length > 0) lines.push(__ompTranslate("stale errors: {0}", `${stale.errors.length}`));
 	}
 	if (result.blobs) {
 		lines.push(
-			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
+			__ompTranslate(
+				"blobs: {0}/{1} files, {2}, {3} refs",
+				`${result.blobs.deleted}`,
+				`${result.blobs.wouldDelete}`,
+				`${formatBytes(result.blobs.bytes)}`,
+				`${result.blobs.referenced}`,
+			),
 		);
-		if (result.blobs.errors.length > 0) lines.push(`blob errors: ${result.blobs.errors.length}`);
+		if (result.blobs.errors.length > 0)
+			lines.push(__ompTranslate("blob errors: {0}", `${result.blobs.errors.length}`));
 	}
 	if (result.archive) {
 		lines.push(
-			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
+			__ompTranslate(
+				"sessions: {0}/{1} archived, {2} history rows and {3} stats rows removed",
+				`${result.archive.archived}`,
+				`${result.archive.wouldArchive}`,
+				`${result.archive.historyRowsDeleted}`,
+				`${result.archive.statsRowsDeleted}`,
+			),
 		);
-		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
+		if (result.archive.skippedActive > 0)
+			lines.push(__ompTranslate("sessions skipped active: {0}", `${result.archive.skippedActive}`));
 		if (result.archive.wouldDeleteTemps > 0) {
 			lines.push(
-				`session staging temps: ${result.archive.deletedTemps}/${result.archive.wouldDeleteTemps} files, ${formatBytes(result.archive.tempBytes)}`,
+				__ompTranslate(
+					"session staging temps: {0}/{1} files, {2}",
+					`${result.archive.deletedTemps}`,
+					`${result.archive.wouldDeleteTemps}`,
+					`${formatBytes(result.archive.tempBytes)}`,
+				),
 			);
 		}
-		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
+		if (result.archive.errors.length > 0)
+			lines.push(__ompTranslate("session errors: {0}", `${result.archive.errors.length}`));
 	}
 	if (result.compress) {
 		const compress = result.compress;
 		if (!compress.supported) {
-			lines.push("compress: unsupported on this filesystem (APFS or NTFS only)");
+			lines.push(__ompTranslate("compress: unsupported on this filesystem (APFS or NTFS only)"));
 		} else {
 			if (compress.probeFailure !== undefined) {
 				lines.push(`compress skipped: ${compress.probeFailure}`);
 			} else {
-				const after = result.apply ? `, ${formatBytes(compress.allocatedAfter)} after` : "";
+				const after = result.apply ? __ompTranslate(", {0} after", `${formatBytes(compress.allocatedAfter)}`) : "";
 				lines.push(
 					`compress: ${compress.compressed}/${compress.wouldCompress} files in ${compress.sessions} sessions, ${formatBytes(compress.allocatedBefore)} on disk before${after}`,
 				);
-				if (compress.skippedLive > 0) lines.push(`compress skipped live: ${compress.skippedLive}`);
+				if (compress.skippedLive > 0)
+					lines.push(__ompTranslate("compress skipped live: {0}", `${compress.skippedLive}`));
 			}
 			if (compress.leftoverScratchDirs > 0) {
-				const verb = result.apply ? "removed" : "found";
-				lines.push(`compress leftover scratch dirs ${verb}: ${compress.leftoverScratchDirs}`);
+				const verb = result.apply ? __ompTranslate("removed") : __ompTranslate("found");
+				lines.push(
+					__ompTranslate("compress leftover scratch dirs {0}: {1}", `${verb}`, `${compress.leftoverScratchDirs}`),
+				);
 			}
-			if (compress.errors.length > 0) lines.push(`compress errors: ${compress.errors.length}`);
+			if (compress.errors.length > 0)
+				lines.push(__ompTranslate("compress errors: {0}", `${compress.errors.length}`));
 		}
 	}
 	if (result.wal) {
-		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
+		const state = result.wal.checkpointed ? __ompTranslate("checkpointed") : __ompTranslate("checkpoint dry-run");
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
 	return `${lines.join("\n")}\n`;

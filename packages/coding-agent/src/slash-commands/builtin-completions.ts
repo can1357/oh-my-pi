@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -83,7 +84,7 @@ export function buildEffortArgumentCompletions(
 				return {
 					value: `${level} `,
 					label: level,
-					description: level === current ? `${description} (current)` : description,
+					description: level === current ? __ompTranslate("{0} (current)", `${description}`) : description,
 				};
 			});
 		return matches.length > 0 ? matches : null;
@@ -215,7 +216,7 @@ async function buildMcpRemoveCompletions(
 		.map(name =>
 			projectNameSet.has(name)
 				? { value: `${rawSubcommand} ${name} `, label: name }
-				: { value: `${rawSubcommand} ${name} --scope user `, label: `${name} (user)` },
+				: { value: `${rawSubcommand} ${name} --scope user `, label: __ompTranslate("{0} (user)", `${name}`) },
 		)
 		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
 	return matches.length > 0 ? matches : null;

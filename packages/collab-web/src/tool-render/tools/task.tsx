@@ -1,4 +1,6 @@
 /** `task` — spawn subagents: batch shape, streamed progress, per-agent results. */
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { AgentLink, Badge, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderHost, ToolRenderProps } from "../types";
@@ -46,8 +48,8 @@ function taskIdLabel(id: string): string {
 function fmtDuration(ms: number): string {
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	const s = ms / 1000;
-	if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`;
-	return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+	if (s < 60) return ___ompTranslate("{0}s", `${s < 10 ? s.toFixed(1) : Math.round(s)}`);
+	return ___ompTranslate("{0}m {1}s", `${Math.floor(s / 60)}`, `${Math.round(s % 60)}`);
 }
 
 function fmtCount(n: number): string {
@@ -72,9 +74,9 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 	return (
 		<>
 			{agent && <Badge tone="accent">{agent}</Badge>}
-			{!agent && resume && <Badge>resume {resume}</Badge>}
+			{!agent && resume && <Badge>{__ompTranslate("resume {0}", resume)}</Badge>}
 			{label && <span className="tv-muted">{truncate(normalizeWs(label), 72)}</span>}
-			{tasks.length > 1 && <Badge>{tasks.length} tasks</Badge>}
+			{tasks.length > 1 && <Badge>{__ompTranslate("{0} tasks", `${tasks.length}`)}</Badge>}
 		</>
 	);
 }
@@ -88,7 +90,7 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	const tokens = num(res.tokens);
 	if (tokens) stats.push(`${fmtCount(tokens)} tok`);
 	const requests = num(res.requests);
-	if (requests) stats.push(`${requests} req`);
+	if (requests) stats.push(__ompTranslate("{0} req", `${requests}`));
 	const durationMs = num(res.durationMs);
 	if (durationMs != null) stats.push(fmtDuration(durationMs));
 	const model = str(res.resolvedModel);
@@ -118,7 +120,8 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 					</AgentLink>
 				}
 			>
-				<Badge tone={tone}>{label}</Badge> {res.truncated === true && <Badge tone="warn">truncated</Badge>}{" "}
+				<Badge tone={tone}>{label}</Badge>{" "}
+				{res.truncated === true && <Badge tone="warn">{__ompTranslate("truncated")}</Badge>}{" "}
 				{description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
 				{stats.length > 0 && <span className="tv-faint">{stats.join(" · ")}</span>}
 			</Row>
@@ -126,8 +129,8 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 			{aborted && abortReason && <Note tone="err">{abortReason}</Note>}
 			{output.trim() !== "" && <Output text={output} maxLines={6} error={tone === "err"} />}
 			{error && !aborted && error !== abortReason && <Note tone={tone === "warn" ? "warn" : "err"}>{error}</Note>}
-			{patchPath && <div className="tv-faint">patch: {patchPath}</div>}
-			{!patchPath && branchName && <div className="tv-faint">branch: {branchName}</div>}
+			{patchPath && <div className="tv-faint">{__ompTranslate("patch: {0}", patchPath)}</div>}
+			{!patchPath && branchName && <div className="tv-faint">{__ompTranslate("branch: {0}", branchName)}</div>}
 		</>
 	);
 }
@@ -148,7 +151,7 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 	const intent = str(p.lastIntent) ?? str(p.currentTool);
 	const bits: string[] = [];
 	const toolCount = num(p.toolCount);
-	if (toolCount) bits.push(`${toolCount} tools`);
+	if (toolCount) bits.push(___ompTranslate("{0} tools", `${toolCount}`));
 	const tokens = num(p.tokens);
 	if (tokens) bits.push(`${fmtCount(tokens)} tok`);
 	const durationMs = num(p.durationMs);
@@ -194,10 +197,10 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 		const total = details ? num(details.totalDurationMs) : null;
 		footer = (
 			<Row>
-				{ok > 0 && <Badge tone="ok">{ok} succeeded</Badge>}{" "}
-				{mergeFailed > 0 && <Badge tone="warn">{mergeFailed} merge failed</Badge>}{" "}
-				{failed > 0 && <Badge tone="err">{failed} failed</Badge>}{" "}
-				{aborted > 0 && <Badge tone="err">{aborted} aborted</Badge>}{" "}
+				{ok > 0 && <Badge tone="ok">{__ompTranslate("{0} succeeded", `${ok}`)}</Badge>}{" "}
+				{mergeFailed > 0 && <Badge tone="warn">{__ompTranslate("{0} merge failed", `${mergeFailed}`)}</Badge>}{" "}
+				{failed > 0 && <Badge tone="err">{__ompTranslate("{0} failed", `${failed}`)}</Badge>}{" "}
+				{aborted > 0 && <Badge tone="err">{__ompTranslate("{0} aborted", `${aborted}`)}</Badge>}{" "}
 				{total != null && <span className="tv-faint">{fmtDuration(total)}</span>}
 			</Row>
 		);
@@ -210,8 +213,8 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 
 	return (
 		<>
-			{resume && <Badge>resume {resume}</Badge>}
-			{context && <Output text={context} maxLines={4} title="context" />}
+			{resume && <Badge>{__ompTranslate("resume {0}", resume)}</Badge>}
+			{context && <Output text={context} maxLines={4} title={__ompTranslate("context")} />}
 			{tasks.length > 0 && (
 				<div className="tv-list">
 					{tasks.map((t, i) => (
@@ -227,10 +230,10 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 									)
 								}
 							>
-								{t.isolated && <Badge>isolated</Badge>}{" "}
+								{t.isolated && <Badge>{__ompTranslate("isolated")}</Badge>}{" "}
 								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
 							</Row>
-							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
+							{t.assignment && <Output text={t.assignment} maxLines={6} title={__ompTranslate("assignment")} />}
 						</div>
 					))}
 				</div>

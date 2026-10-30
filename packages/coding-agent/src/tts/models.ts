@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TinyModelDtype } from "../tiny/dtype";
 
 /**
@@ -38,18 +39,18 @@ export interface TtsLocalModelSpec {
  * is the default voice. Grades are Kokoro's own `overallGrade` ratings.
  */
 export const KOKORO_VOICES: readonly TtsLocalVoiceSpec[] = [
-	{ id: "af_heart", label: "Heart (American female)" },
-	{ id: "af_bella", label: "Bella (American female)" },
-	{ id: "af_nicole", label: "Nicole (American female)" },
-	{ id: "af_aoede", label: "Aoede (American female)" },
-	{ id: "af_kore", label: "Kore (American female)" },
-	{ id: "af_sarah", label: "Sarah (American female)" },
-	{ id: "am_michael", label: "Michael (American male)" },
-	{ id: "am_fenrir", label: "Fenrir (American male)" },
-	{ id: "am_puck", label: "Puck (American male)" },
-	{ id: "bf_emma", label: "Emma (British female)" },
-	{ id: "bm_george", label: "George (British male)" },
-	{ id: "bm_fable", label: "Fable (British male)" },
+	{ id: "af_heart", label: __ompTranslate("Heart (American female)") },
+	{ id: "af_bella", label: __ompTranslate("Bella (American female)") },
+	{ id: "af_nicole", label: __ompTranslate("Nicole (American female)") },
+	{ id: "af_aoede", label: __ompTranslate("Aoede (American female)") },
+	{ id: "af_kore", label: __ompTranslate("Kore (American female)") },
+	{ id: "af_sarah", label: __ompTranslate("Sarah (American female)") },
+	{ id: "am_michael", label: __ompTranslate("Michael (American male)") },
+	{ id: "am_fenrir", label: __ompTranslate("Fenrir (American male)") },
+	{ id: "am_puck", label: __ompTranslate("Puck (American male)") },
+	{ id: "bf_emma", label: __ompTranslate("Emma (British female)") },
+	{ id: "bm_george", label: __ompTranslate("George (British male)") },
+	{ id: "bm_fable", label: __ompTranslate("Fable (British male)") },
 ] as const;
 
 /** Default voice within the default model — Kokoro's flagship grade-A voice. */
@@ -70,7 +71,7 @@ export const TTS_LOCAL_MODELS = [
 		dtype: "q8",
 		sampleRate: 24_000,
 		label: "Kokoro-82M",
-		description: "Kokoro-82M neural TTS — SoTA on-device quality, multi-voice, fully local",
+		description: __ompTranslate("Kokoro-82M neural TTS — SoTA on-device quality, multi-voice, fully local"),
 		voices: KOKORO_VOICES,
 	},
 ] as const satisfies readonly TtsLocalModelSpec[];
@@ -98,7 +99,8 @@ export function isTtsLocalModelKey(value: string): value is TtsLocalModelKey {
 export function resolveTtsRepo(modelKey: string | undefined): string {
 	const fallbackKey = TTS_LOCAL_MODELS[0].key;
 	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(fallbackKey);
-	if (!spec) throw new Error(`No local TTS model registered for key: ${modelKey ?? fallbackKey}`);
+	if (!spec)
+		throw new Error(__ompTranslate("No local TTS model registered for key: {0}", `${modelKey ?? fallbackKey}`));
 	return spec.repo;
 }
 
@@ -129,7 +131,7 @@ export const TTS_SPEED_MAX = 2.5;
 export const TTS_SPEED_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
 	{ value: "0.5", label: "0.5×" },
 	{ value: "0.75", label: "0.75×" },
-	{ value: "1", label: "1× (normal)" },
+	{ value: "1", label: __ompTranslate("1× (normal)") },
 	{ value: "1.25", label: "1.25×" },
 	{ value: "1.5", label: "1.5×" },
 	{ value: "1.75", label: "1.75×" },

@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 /**
@@ -23,41 +24,46 @@ export default class Ttsr extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
-			description: "TTSR action",
+			description: __ompTranslate("TTSR action"),
 			required: false,
 			options: TTSR_ACTIONS,
 		}),
 		snippet: Args.string({
-			description: "Inline snippet text to test (ttsr test) or directory to scan (ttsr scan)",
+			description: __ompTranslate("Inline snippet text to test (ttsr test) or directory to scan (ttsr scan)"),
 			required: false,
 		}),
 	};
 
 	static flags = {
-		file: Flags.string({ description: "Snippet file path, or - for stdin (ttsr test)" }),
+		file: Flags.string({ description: __ompTranslate("Snippet file path, or - for stdin (ttsr test)") }),
 		rule: Flags.string({
 			char: "r",
-			description: "Rule markdown file to test in isolation (skips project rule loading)",
+			description: __ompTranslate("Rule markdown file to test in isolation (skips project rule loading)"),
 		}),
 		source: Flags.string({
-			description: "Match source: text, thinking, or tool (inferred from --file when omitted)",
+			description: __ompTranslate("Match source: text, thinking, or tool (inferred from --file when omitted)"),
 			options: TTSR_SOURCES,
 		}),
 		tool: Flags.string({
-			description: "Tool name when source is tool (e.g. edit, write); defaults to edit",
+			description: __ompTranslate("Tool name when source is tool (e.g. edit, write); defaults to edit"),
 		}),
 		path: Flags.string({
 			char: "p",
-			description: "Candidate file path for scope/glob matching and AST language inference",
+			description: __ompTranslate("Candidate file path for scope/glob matching and AST language inference"),
 		}),
 		agent: Flags.string({
-			description: "Agent name to evaluate rule `agents` scoping as (ttsr test); defaults to main",
+			description: __ompTranslate("Agent name to evaluate rule `agents` scoping as (ttsr test); defaults to main"),
 		}),
-		verbose: Flags.boolean({ char: "v", description: "Show every evaluated rule, not just triggered ones" }),
-		json: Flags.boolean({ description: "Output JSON" }),
-		"no-gitignore": Flags.boolean({ description: "Include files excluded by .gitignore (ttsr scan)" }),
+		verbose: Flags.boolean({
+			char: "v",
+			description: __ompTranslate("Show every evaluated rule, not just triggered ones"),
+		}),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON\u0004cli.output.json") }),
+		"no-gitignore": Flags.boolean({
+			description: __ompTranslate("Include files excluded by .gitignore (ttsr scan)"),
+		}),
 		"max-bytes": Flags.integer({
-			description: "Maximum file size to scan in bytes; 0 disables the limit (ttsr scan)",
+			description: __ompTranslate("Maximum file size to scan in bytes; 0 disables the limit (ttsr scan)"),
 		}),
 	};
 

@@ -1,6 +1,7 @@
 /**
  * One-line text prompt an extension (hook) asks the user.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type Component, Spacer, Text, type TUI } from "../index";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 import { CountdownTimer } from "../chrome/countdown-timer";
@@ -75,7 +76,7 @@ export class HookInputComponent extends OverlayPanel {
 			this.#countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				s => (this.title = `${this.#baseTitle} (${s}s)`),
+				s => (this.title = __ompTranslate("{0} ({1}s)", `${this.#baseTitle}`, `${s}`)),
 				() => {
 					opts.onTimeout?.();
 					this.#onCancelCallback();
@@ -98,7 +99,11 @@ export class HookInputComponent extends OverlayPanel {
 			isCancel: matchesAppInterrupt,
 		});
 		this.addChild(this.#form);
-		this.addChild(new KeyLegend(`${editorKey("tui.input.submit")} submit  ${interruptKey()} cancel`));
+		this.addChild(
+			new KeyLegend(
+				__ompTranslate("{0} submit  {1} cancel", `${editorKey("tui.input.submit")}`, `${interruptKey()}`),
+			),
+		);
 		this.addChild(new Spacer(1));
 	}
 
@@ -157,7 +162,7 @@ export class HookInputComponent extends OverlayPanel {
 			titleRow.push(
 				node(
 					"row",
-					{ role: `${PART}.timer`, title: "Cancels when the time runs out; typing restarts it" },
+					{ role: `${PART}.timer`, title: __ompTranslate("Cancels when the time runs out; typing restarts it") },
 					[countdown],
 					"timer",
 				),
@@ -186,8 +191,11 @@ export class HookInputComponent extends OverlayPanel {
 		const cancelKey = boundKeys("app.interrupt", ["escape"])[0];
 		this.#nativeActions = actionBar([
 			null,
-			actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {}),
-			actionButton("Submit", "submit", { tone: "accent", ...(submitKey ? { keys: submitKey } : {}) }),
+			actionButton(__ompTranslate("Cancel"), "cancel", cancelKey ? { keys: cancelKey } : {}),
+			actionButton(__ompTranslate("Submit"), "submit", {
+				tone: "accent",
+				...(submitKey ? { keys: submitKey } : {}),
+			}),
 		]);
 		return this.#nativeActions;
 	}

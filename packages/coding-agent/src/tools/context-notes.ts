@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -81,7 +82,7 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 	readonly name = "context_notes";
 	readonly approval = (args: unknown): ToolApprovalDecision =>
 		args !== null && typeof args === "object" && Object.hasOwn(args, "text") ? "write" : "read";
-	readonly label = "Context Notes";
+	readonly label = __ompTranslate("Context Notes");
 	readonly description = contextNotesDescription;
 	readonly parameters = contextNotesSchema;
 	// Strict-mode providers mark every property required, so an optional `text`
@@ -154,7 +155,7 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 export class NewContextTool implements AgentTool<typeof newContextSchema, NewContextToolDetails> {
 	readonly name = "new_context";
 	readonly approval = "write" as const;
-	readonly label = "New Context";
+	readonly label = __ompTranslate("New Context");
 	readonly description = newContextDescription;
 	readonly parameters = newContextSchema;
 	readonly strict = true;

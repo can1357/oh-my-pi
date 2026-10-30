@@ -5,6 +5,7 @@
  * that toggles the entire provider. All items below are dimmed when the
  * master switch is off.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { TspPickerGroup, TspPickerItem, TspProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
 import { node, span, stableKey } from "../../native/describe";
@@ -377,7 +378,7 @@ export class ExtensionList implements Component {
 			"list",
 			{
 				selected: selected ? nativeItemId(selected) : null,
-				empty: "No extensions found for this provider.",
+				empty: __ompTranslate("No extensions found for this provider."),
 				virtual: true,
 				grow: 1,
 				basis: 0,
@@ -417,7 +418,7 @@ export class ExtensionList implements Component {
 			return providerOff ? { on: item.enabled, blocked: "Provider disabled" } : { on: item.enabled };
 		}
 		const on = item.item.state !== "disabled";
-		if (isShadowedExtension(item.item)) return { on, blocked: "Shadowed by another source" };
+		if (isShadowedExtension(item.item)) return { on, blocked: __ompTranslate("Shadowed by another source") };
 		if (this.#isMasterDisabled()) return { on, blocked: "Provider disabled" };
 		return { on };
 	}
@@ -452,7 +453,7 @@ export class ExtensionList implements Component {
 				label: `Enable ${sanitizeDisplayLine(entry.providerName)}`,
 				icon: "power",
 				dot: entry.enabled ? "success" : "muted",
-				badges: [{ text: "Master Switch", tone: "warning" }],
+				badges: [{ text: __ompTranslate("Master Switch"), tone: "warning" }],
 				tone: entry.enabled ? undefined : "muted",
 			};
 		}
@@ -785,25 +786,25 @@ export class ExtensionList implements Component {
 	#getKindLabel(kind: ExtensionKind): string {
 		switch (kind) {
 			case "extension-module":
-				return "Extension Modules";
+				return __ompTranslate("Extension Modules");
 			case "skill":
-				return "Skills";
+				return __ompTranslate("Skills");
 			case "tool":
-				return "Tools";
+				return __ompTranslate("Tools");
 			case "slash-command":
 				return "Commands";
 			case "rule":
 				return "Rules";
 			case "mcp":
-				return "MCP Servers";
+				return __ompTranslate("MCP Servers");
 			case "hook":
-				return "Hooks";
+				return __ompTranslate("Hooks");
 			case "prompt":
-				return "Prompts";
+				return __ompTranslate("Prompts");
 			case "context-file":
-				return "Context";
+				return __ompTranslate("Context");
 			case "instruction":
-				return "Instructions";
+				return __ompTranslate("Instructions");
 			default:
 				return kind;
 		}

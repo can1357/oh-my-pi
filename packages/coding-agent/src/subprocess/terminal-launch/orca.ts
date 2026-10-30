@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { quotePosixArgvAsciiSafe } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
@@ -203,7 +204,7 @@ const launchOrca: TerminalLaunchBackend<"orca", typeof capabilities> = async (
 		placement: "window",
 		id,
 		...(background
-			? { warning: "Orca could not show the tab; the command is running in a background terminal." }
+			? { warning: __ompTranslate("Orca could not show the tab; the command is running in a background terminal.") }
 			: {}),
 	};
 };

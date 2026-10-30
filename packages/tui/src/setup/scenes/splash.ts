@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { centerLine, visibleWidth } from "../../utils";
 import { padToWidth } from "../../render/utils";
 import { APP_NAME, VERSION } from "@oh-my-pi/pi-utils";
@@ -28,7 +29,7 @@ const MIN_SCENE_HEIGHT = 22;
 
 /** Skip affordance; built at render time so it follows the live symbol preset. */
 function skipHint(): string {
-	return `press ${formatKeyHint("enter")} to skip`;
+	return __ompTranslate("press {0} to skip", `${formatKeyHint("enter")}`);
 }
 
 function starAt(x: number, y: number, frame: number): string {

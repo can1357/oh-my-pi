@@ -1,4 +1,5 @@
 /** `read` — file/URL/archive reads: path + selector summary, highlighted content, image thumbnails. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, Kv, KvGrid, PathText, ResultImages, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -79,18 +80,18 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{d.elidedSpans} elided span{d.elidedSpans === 1 ? "" : "s"}
 		</Badge>
 	);
-	const truncatedBadge = d.truncated && <Badge tone="warn">truncated</Badge>;
+	const truncatedBadge = d.truncated && <Badge tone="warn">{__ompTranslate("truncated")}</Badge>;
 	const resolved = d.suffixTo ?? d.resolvedPath;
 	return (
 		<>
 			{(resolved !== null || d.suffixFrom !== null) && (
 				<KvGrid>
 					{resolved !== null && (
-						<Kv k="resolved">
+						<Kv k={__ompTranslate("resolved")}>
 							<PathText path={resolved} />
 						</Kv>
 					)}
-					{d.suffixFrom !== null && <Kv k="corrected from">{shortenPath(d.suffixFrom)}</Kv>}
+					{d.suffixFrom !== null && <Kv k={__ompTranslate("corrected from")}>{shortenPath(d.suffixFrom)}</Kv>}
 				</KvGrid>
 			)}
 			<Badges items={[conflictBadge, elidedBadge, truncatedBadge]} />

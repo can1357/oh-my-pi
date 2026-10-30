@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { effect, register } from "../config/registry";
 
@@ -13,7 +14,7 @@ export const cfgMcpEnableProjectConfig = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "MCP Project Config",
+		label: __ompTranslate("MCP Project Config"),
 		description: "Load .mcp.json/mcp.json from project root",
 	},
 });
@@ -25,7 +26,7 @@ export const cfgMcpStartupTimeoutMs = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "MCP Startup Window",
+		label: __ompTranslate("MCP Startup Window"),
 		description: "Wait this many milliseconds for initial MCP tool discovery; 0 waits until connections settle",
 	},
 });
@@ -37,7 +38,7 @@ export const cfgMcpRenderMarkdownResults = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "MCP Markdown Results",
+		label: __ompTranslate("MCP Markdown Results"),
 		description: "Render non-JSON MCP text results as Markdown in the transcript",
 	},
 });
@@ -50,7 +51,7 @@ export const cfgMcpNotifications = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "MCP Update Injection",
+		label: __ompTranslate("MCP Update Injection"),
 		description: "Inject MCP resource updates into the agent conversation",
 	},
 });
@@ -62,7 +63,7 @@ export const cfgMcpNotificationDebounceMs = register({
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "MCP Notification Debounce",
+		label: __ompTranslate("MCP Notification Debounce"),
 		description:
 			"Debounce window in milliseconds for MCP resource updates before injecting them into the conversation",
 	},

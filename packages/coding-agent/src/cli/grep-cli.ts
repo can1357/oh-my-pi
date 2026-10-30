@@ -3,6 +3,7 @@
  *
  * Handles `omp grep` subcommand for testing grep tool on Windows.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import { GrepOutputMode, grep } from "@oh-my-pi/pi-natives";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
@@ -70,15 +71,23 @@ export function parseGrepArgs(args: string[]): GrepCommandArgs | undefined {
 
 export async function runGrepCommand(cmd: GrepCommandArgs): Promise<void> {
 	if (!cmd.pattern) {
-		console.error(chalk.red("Error: Pattern is required"));
+		console.error(chalk.red(__ompTranslate("Error: Pattern is required")));
 		process.exit(1);
 	}
 
 	const searchPath = path.resolve(expandPath(cmd.path));
-	console.log(chalk.dim(`Searching in: ${searchPath}`));
-	console.log(chalk.dim(`Pattern: ${cmd.pattern}`));
+	console.log(chalk.dim(__ompTranslate("Searching in: {0}", `${searchPath}`)));
+	console.log(chalk.dim(__ompTranslate("Pattern: {0}", `${cmd.pattern}`)));
 	console.log(
-		chalk.dim(`Mode: ${cmd.mode}, Limit: ${cmd.limit}, Context: ${cmd.context}, Gitignore: ${cmd.gitignore}`),
+		chalk.dim(
+			__ompTranslate(
+				"Mode: {0}, Limit: {1}, Context: {2}, Gitignore: {3}",
+				`${cmd.mode}`,
+				`${cmd.limit}`,
+				`${cmd.context}`,
+				`${cmd.gitignore}`,
+			),
+		),
 	);
 
 	console.log("");
@@ -95,11 +104,11 @@ export async function runGrepCommand(cmd: GrepCommandArgs): Promise<void> {
 			gitignore: cmd.gitignore,
 		});
 
-		console.log(chalk.green(`Total matches: ${result.totalMatches}`));
-		console.log(chalk.green(`Files with matches: ${result.filesWithMatches}`));
-		console.log(chalk.green(`Files searched: ${result.filesSearched}`));
+		console.log(chalk.green(__ompTranslate("Total matches: {0}", `${result.totalMatches}`)));
+		console.log(chalk.green(__ompTranslate("Files with matches: {0}", `${result.filesWithMatches}`)));
+		console.log(chalk.green(__ompTranslate("Files searched: {0}", `${result.filesSearched}`)));
 		if (result.limitReached) {
-			console.log(chalk.yellow(`Limit reached: true`));
+			console.log(chalk.yellow(__ompTranslate("Limit reached: true")));
 		}
 		console.log("");
 
@@ -120,13 +129,13 @@ export async function runGrepCommand(cmd: GrepCommandArgs): Promise<void> {
 				}
 				console.log("");
 			} else if (cmd.mode === GrepOutputMode.Count) {
-				console.log(`${chalk.cyan(displayPath)}: ${match.matchCount ?? 0} matches`);
+				console.log(__ompTranslate("{0}: {1} matches", `${chalk.cyan(displayPath)}`, `${match.matchCount ?? 0}`));
 			} else {
 				console.log(chalk.cyan(displayPath));
 			}
 		}
 	} catch (err) {
-		console.error(chalk.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
+		console.error(chalk.red(__ompTranslate("Error: {0}", `${err instanceof Error ? err.message : String(err)}`)));
 		process.exit(1);
 	}
 }

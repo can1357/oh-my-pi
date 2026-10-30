@@ -5,6 +5,7 @@
  * identity → runtime/enablement → description → origin →
  * kind-specific surface → contents → boring config.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as os from "node:os";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
@@ -142,7 +143,10 @@ export class InspectorPanel implements Component {
 
 	render(width: number): readonly string[] {
 		if (!this.#extension) {
-			return [theme.fg("muted", "Select an extension"), theme.fg("dim", "to view details")];
+			return [
+				theme.fg("muted", __ompTranslate("Select an extension")),
+				theme.fg("dim", __ompTranslate("to view details")),
+			];
 		}
 		this.#width = width;
 		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
@@ -158,7 +162,7 @@ export class InspectorPanel implements Component {
 	describePreview(): NativeNode[] {
 		const ext = this.#extension;
 		if (!ext) {
-			return [text([span("Select an extension to view details", "muted")], { wrap: "word" })];
+			return [text([span(__ompTranslate("Select an extension to view details"), "muted")], { wrap: "word" })];
 		}
 		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		const view = this.#nativeKindView(ext);
@@ -168,10 +172,10 @@ export class InspectorPanel implements Component {
 		const filePath = sanitizeDisplayText(ext.path);
 		const facts = kv([
 			...view.runtime,
-			["Status", view.health && ext.state === "active" ? undefined : this.#nativeStatus(ext)],
+			[__ompTranslate("Status"), view.health && ext.state === "active" ? undefined : this.#nativeStatus(ext)],
 			["Origin", `via ${sanitizeDisplayLine(ext.source.providerName)} (${levelLabel})`],
 			[
-				"Path",
+				__ompTranslate("Path"),
 				[
 					span(
 						sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
@@ -309,7 +313,7 @@ export class InspectorPanel implements Component {
 						description: data.description,
 						sections: [
 							this.#nativeSection(
-								"Tools",
+								__ompTranslate("Tools"),
 								data.factory.map(tool =>
 									this.#nativeCatalogEntry(tool.name, tool.label, tool.description, tool.parameters),
 								),
@@ -464,10 +468,10 @@ export class InspectorPanel implements Component {
 				this.#nativeCatalogEntry(tool.name, tool.title, tool.description, tool.parameters),
 			);
 			if (hidden > 0) entries.push(this.#nativeMore(hidden, "tools"));
-			sections.push(this.#nativeSection("Tools", entries));
+			sections.push(this.#nativeSection(__ompTranslate("Tools"), entries));
 		}
 		if (snap && snap.resources.length > 0) sections.push(this.#nativeNameList("Resources", snap.resources));
-		if (snap && snap.prompts.length > 0) sections.push(this.#nativeNameList("Prompts", snap.prompts));
+		if (snap && snap.prompts.length > 0) sections.push(this.#nativeNameList(__ompTranslate("Prompts"), snap.prompts));
 		return {
 			title: snap?.title,
 			description: snap?.description,
@@ -479,7 +483,10 @@ export class InspectorPanel implements Component {
 				["Command", snap?.command ? [span(shortenPath(snap.command, os.homedir()), "mono")] : undefined],
 				["URL", snap?.url ? [span(snap.url, "mono", { href: snap.url })] : undefined],
 				["Args", snap?.args && snap.args.length > 0 ? [span(snap.args.join(" "), "mono dim")] : undefined],
-				["Env vars", snap && snap.envCount > 0 ? [span(`${snap.envCount} defined`, "dim")] : undefined],
+				[
+					__ompTranslate("Env vars"),
+					snap && snap.envCount > 0 ? [span(`${snap.envCount} defined`, "dim")] : undefined,
+				],
 			],
 		};
 	}
@@ -588,7 +595,7 @@ export class InspectorPanel implements Component {
 				toolsBody.push(theme.fg("dim", `  … args (${expandKeyHint()} to expand)`));
 				toolsBody.push("");
 			}
-			contents.push(...this.#section("Tools", toolsBody, width));
+			contents.push(...this.#section(__ompTranslate("Tools"), toolsBody, width));
 		}
 
 		if (snap && snap.resources.length > 0) {
@@ -620,7 +627,7 @@ export class InspectorPanel implements Component {
 				promptsBody.push(theme.fg("dim", `  … ${hidden} more (${expandKeyHint()} to expand)`));
 			}
 			promptsBody.push("");
-			contents.push(...this.#section("Prompts", promptsBody, width));
+			contents.push(...this.#section(__ompTranslate("Prompts"), promptsBody, width));
 		}
 
 		if (snap?.command)
@@ -628,7 +635,7 @@ export class InspectorPanel implements Component {
 		if (snap?.url) this.#pushLabeled(config, "URL", snap.url, width, "success");
 		if (snap?.args && snap.args.length > 0) this.#pushLabeled(config, "Args", snap.args.join(" "), width, "dim");
 		if (snap && snap.envCount > 0) {
-			this.#pushLabeled(config, "Env vars", `${snap.envCount} defined`, width, "dim");
+			this.#pushLabeled(config, __ompTranslate("Env vars"), `${snap.envCount} defined`, width, "dim");
 		}
 		if (config.length > 0) config.push("");
 
@@ -672,7 +679,7 @@ export class InspectorPanel implements Component {
 				factoryBody.push(theme.fg("dim", `  … args (${expandKeyHint()} to expand)`));
 				factoryBody.push("");
 			}
-			surface.push(...this.#section("Tools", factoryBody, width));
+			surface.push(...this.#section(__ompTranslate("Tools"), factoryBody, width));
 			return { description: data.description, surface, contents: [], config: [] };
 		}
 		if (lives.length === 0 && data.params.length === 0) {

@@ -1,4 +1,5 @@
 /** Fallback renderer for tools without a dedicated view. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Output, ResultImages, ResultText } from "./parts";
 import type { ToolRenderer, ToolRenderProps } from "./types";
@@ -18,7 +19,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	return (
 		<>
 			{argText && argText !== "{}" && (
-				<Output text={argText} lang="json" variant="code" maxLines={12} title="args" />
+				<Output text={argText} lang="json" variant="code" maxLines={12} title={__ompTranslate("args")} />
 			)}
 			<ResultImages result={result} />
 			<ResultText result={result} maxLines={10} />

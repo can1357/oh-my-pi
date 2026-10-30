@@ -2,6 +2,7 @@
  * Count a file or text through every embedded offline tokenizer and print a
  * per-encoding stats table (see `crates/pi-natives/src/utok`).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -32,7 +33,8 @@ async function resolveInput(input: string): Promise<{ source: Source; text: stri
 	const filePath = path.resolve(input);
 	// Unstattable (missing, name too long, invalid chars) means it is text, not a path.
 	const stat = await fs.stat(filePath).catch(() => undefined);
-	if (stat?.isDirectory()) throw new CliUsageError(`${input} is a directory; pass a file or text`);
+	if (stat?.isDirectory())
+		throw new CliUsageError(__ompTranslate("{0} is a directory; pass a file or text", `${input}`));
 	if (stat?.isFile()) return { source: { kind: "file", path: filePath }, text: await Bun.file(filePath).text() };
 	return { source: { kind: "text" }, text: input };
 }
@@ -61,13 +63,13 @@ export default class Toks extends Command {
 	static description = commandHelp.description;
 	static args = {
 		input: Args.string({
-			description: "File path, or literal text when it does not name a file",
+			description: __ompTranslate("File path, or literal text when it does not name a file"),
 			required: true,
 			multiple: true,
 		}),
 	};
 	static flags = {
-		json: Flags.boolean({ description: "Output JSON" }),
+		json: Flags.boolean({ description: __ompTranslate("Output JSON\u0004cli.output.json") }),
 	};
 
 	static examples = [
@@ -79,7 +81,7 @@ export default class Toks extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Toks);
 		const input = (args.input ?? []).join(" ");
-		if (input.length === 0) throw new CliUsageError("toks requires a file path or text");
+		if (input.length === 0) throw new CliUsageError(__ompTranslate("toks requires a file path or text"));
 
 		const { source, text } = await resolveInput(input);
 		const bytes = Buffer.byteLength(text, "utf-8");
@@ -97,7 +99,8 @@ export default class Toks extends Command {
 		}
 
 		const baseline = rows.find(row => row.encoding === natives.Encoding.O200kBase)?.tokens ?? 0;
-		const label = source.kind === "file" ? path.relative(process.cwd(), source.path) || source.path : "text";
+		const label =
+			source.kind === "file" ? path.relative(process.cwd(), source.path) || source.path : __ompTranslate("text");
 		const out = [
 			`${chalk.dim("input")}  ${label}`,
 			`${chalk.dim("size")}   ${formatBytes(bytes)} · ${count(chars, "char")} · ${count(lines, "line")}`,

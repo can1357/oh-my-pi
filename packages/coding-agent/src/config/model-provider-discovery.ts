@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
@@ -65,7 +66,7 @@ export function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiK
 export async function withModelDiscoveryTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
 	const { promise: timeoutPromise, reject: timeoutReject } = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		timeoutReject(new Error(`model discovery timed out after ${timeoutMs}ms`));
+		timeoutReject(new Error(__ompTranslate("model discovery timed out after {0}ms", `${timeoutMs}`)));
 	}, timeoutMs);
 	try {
 		return await Promise.race([run(), timeoutPromise]);

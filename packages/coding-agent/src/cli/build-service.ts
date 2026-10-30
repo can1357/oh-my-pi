@@ -26,6 +26,7 @@
  * file still installs. `404 {"error":"no_build"}` means nothing is published
  * for the target (on the channel, or at the version).
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as fs from "node:fs";
 import { $env, APP_NAME, isRecord, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -80,7 +81,7 @@ export function resolveBuildHost(platform: NodeJS.Platform, arch: string, musl: 
 			fileOs = "windows";
 			break;
 		default:
-			throw new Error(`Unsupported platform: ${platform}`);
+			throw new Error(__ompTranslate("Unsupported platform: {0}", `${platform}`));
 	}
 	let targetArch: string;
 	switch (arch) {
@@ -91,7 +92,7 @@ export function resolveBuildHost(platform: NodeJS.Platform, arch: string, musl: 
 			targetArch = "arm64";
 			break;
 		default:
-			throw new Error(`Unsupported architecture: ${arch}`);
+			throw new Error(__ompTranslate("Unsupported architecture: {0}", `${arch}`));
 	}
 	return {
 		target: `${targetOs}-${targetArch}`,
@@ -262,9 +263,17 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
 
 	const mapError = (err: unknown): unknown => {
 		if (isTimeoutError(err)) {
-			return new Error(`Timed out asking ${origin} for the ${what} after ${Math.round(timeoutMs / 1000)}s`, {
-				cause: err,
-			});
+			return new Error(
+				__ompTranslate(
+					"Timed out asking {0} for the {1} after {2}s",
+					`${origin}`,
+					`${what}`,
+					`${Math.round(timeoutMs / 1000)}`,
+				),
+				{
+					cause: err,
+				},
+			);
 		}
 		if (isUnsupportedProxyError(err)) return new Error(unsupportedProxyMessage(), { cause: err });
 		return err;
@@ -298,6 +307,13 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
 	try {
 		return parseBuildAnswer(body, host.fileName, options.fromVersion);
 	} catch (err) {
-		throw new Error(`Invalid answer from ${origin} for the ${what}: ${err instanceof Error ? err.message : err}`);
+		throw new Error(
+			__ompTranslate(
+				"Invalid answer from {0} for the {1}: {2}",
+				`${origin}`,
+				`${what}`,
+				`${err instanceof Error ? err.message : err}`,
+			),
+		);
 	}
 }

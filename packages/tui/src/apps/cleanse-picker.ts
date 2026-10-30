@@ -5,6 +5,7 @@
  * prompts, resolved on select/submit/cancel so the command can keep writing
  * plain stdout afterwards.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type SelectItem } from "../components/select-list";
 import { promptStandaloneText, selectStandaloneItem } from "./standalone-picker";
 
@@ -28,7 +29,11 @@ export async function pickCleanseTarget(checkers: readonly CleanseCheckerChoice[
 	const items: SelectItem[] = [
 		{
 			value: "all",
-			label: `Run all ${checkers.length} discovered checker${checkers.length === 1 ? "" : "s"}`,
+			label: __ompTranslate(
+				"Run all {0} discovered checker{1}\u0004diagnostics.checkers.run-all",
+				`${checkers.length}`,
+				`${checkers.length === 1 ? "" : "s"}`,
+			),
 		},
 		...checkers.map(checker => ({
 			value: `checker:${checker.id}`,
@@ -37,17 +42,17 @@ export async function pickCleanseTarget(checkers: readonly CleanseCheckerChoice[
 		})),
 		{
 			value: "request",
-			label: "Describe what to fix…",
-			description: "A discovery agent figures out the command to run",
+			label: __ompTranslate("Describe what to fix…"),
+			description: __ompTranslate("A discovery agent figures out the command to run"),
 		},
 	];
-	const selection = await selectStandaloneItem("Select what to cleanse:", items, {
+	const selection = await selectStandaloneItem(__ompTranslate("Select what to cleanse:"), items, {
 		maxVisible: 12,
 		picker: {
 			icon: "wand",
-			noun: "checkers",
-			subtitle: "Run the checkers, then repair what they find",
-			confirm: "Cleanse",
+			noun: __ompTranslate("checkers"),
+			subtitle: __ompTranslate("Run the checkers, then repair what they find"),
+			confirm: __ompTranslate("Cleanse"),
 		},
 	});
 	if (selection === null) return { kind: "cancel" };
@@ -61,5 +66,5 @@ export async function pickCleanseTarget(checkers: readonly CleanseCheckerChoice[
 
 /** One-shot text prompt for a free-form cleanse request; `null` when cancelled or left empty. */
 export async function promptCleanseRequest(): Promise<string | null> {
-	return promptStandaloneText('Describe what to detect and fix (e.g. "ts errors"):');
+	return promptStandaloneText(__ompTranslate('Describe what to detect and fix (e.g. "ts errors"):'));
 }

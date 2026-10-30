@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { register } from "../config/registry";
 
 // Memory backend selector — picks between local memories pipeline,
@@ -18,22 +19,31 @@ export const cfgMemoryBackend = register({
 	ui: {
 		tab: "memory",
 		group: "General",
-		label: "Memory Backend",
+		label: __ompTranslate("Memory Backend"),
 		description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
 		options: [
-			{ value: "off", label: "Off", description: "No memory subsystem runs" },
-			{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
-			{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
+			{ value: "off", label: __ompTranslate("Off"), description: __ompTranslate("No memory subsystem runs") },
+			{
+				value: "local",
+				label: __ompTranslate("Local"),
+				description: __ompTranslate("Local rollout summarisation pipeline (memory_summary.md)"),
+			},
+			{
+				value: "hindsight",
+				label: "Hindsight",
+				description: __ompTranslate("Vectorize Hindsight remote memory service"),
+			},
 			{
 				value: "mnemopi",
 				label: "Mnemopi",
-				description: "Local SQLite recall/retain backend with optional embeddings",
+				description: __ompTranslate("Local SQLite recall/retain backend with optional embeddings"),
 			},
 			{
 				value: "sharpshooter",
 				label: "Sharpshooter",
-				description:
+				description: __ompTranslate(
 					"Friction-gated project decision files (architecture/product/style), consolidated in the background",
+				),
 			},
 		],
 	},

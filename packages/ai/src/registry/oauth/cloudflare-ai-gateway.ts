@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import * as AIError from "../../error";
 import type { OAuthController } from "./types";
@@ -11,29 +12,29 @@ export async function loginCloudflareAiGateway(options: OAuthController): Promis
 	}
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: "Create an AI Gateway token with Run permission, then copy it here.",
+		instructions: __ompTranslate("Create an AI Gateway token with Run permission, then copy it here."),
 	});
 
 	const apiKey = await options.onPrompt({
-		message: "Paste your Cloudflare AI Gateway token/API key",
+		message: __ompTranslate("Paste your Cloudflare AI Gateway token/API key"),
 		placeholder: "cfut_...",
 	});
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
 	if (!apiKey.trim()) throw new AIError.ApiKeyRequiredError();
 
 	const accountId = await options.onPrompt({
-		message: "Enter your Cloudflare account ID",
-		placeholder: "32-character account ID",
+		message: __ompTranslate("Enter your Cloudflare account ID"),
+		placeholder: __ompTranslate("32-character account ID"),
 	});
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!accountId.trim()) throw new AIError.ConfigurationError("Cloudflare account ID is required");
+	if (!accountId.trim()) throw new AIError.ConfigurationError(__ompTranslate("Cloudflare account ID is required"));
 
 	const gatewayId = await options.onPrompt({
-		message: "Enter your Cloudflare AI Gateway ID",
+		message: __ompTranslate("Enter your Cloudflare AI Gateway ID"),
 		placeholder: "default",
 	});
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
-	if (!gatewayId.trim()) throw new AIError.ConfigurationError("Cloudflare AI Gateway ID is required");
+	if (!gatewayId.trim()) throw new AIError.ConfigurationError(__ompTranslate("Cloudflare AI Gateway ID is required"));
 
 	return serializeCloudflareCredential({ token: apiKey, accountId, gatewayId });
 }

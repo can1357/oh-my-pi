@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
@@ -74,7 +75,7 @@ export async function pollCursorAuth(
 				};
 			}
 
-			throw new AIError.OAuthError(`Poll failed: ${response.status}`, {
+			throw new AIError.OAuthError(__ompTranslate("Poll failed: {0}", `${response.status}`), {
 				kind: "polling",
 				provider: "cursor",
 				status: response.status,
@@ -82,7 +83,7 @@ export async function pollCursorAuth(
 		} catch {
 			consecutiveErrors++;
 			if (consecutiveErrors >= 3) {
-				throw new AIError.OAuthError("Too many consecutive errors during Cursor auth polling", {
+				throw new AIError.OAuthError(__ompTranslate("Too many consecutive errors during Cursor auth polling"), {
 					kind: "polling",
 					provider: "cursor",
 				});
@@ -90,7 +91,7 @@ export async function pollCursorAuth(
 		}
 	}
 
-	throw new AIError.OAuthError("Cursor authentication polling timeout", {
+	throw new AIError.OAuthError(__ompTranslate("Cursor authentication polling timeout"), {
 		kind: "timeout",
 		provider: "cursor",
 	});
@@ -119,7 +120,9 @@ export async function loginCursor(
 export async function loginCursorHook(callbacks: OAuthController): Promise<OAuthCredentials> {
 	const credentials = await loginCursor(
 		url => callbacks.onAuth?.({ url }),
-		callbacks.onProgress ? () => callbacks.onProgress?.("Waiting for browser authentication...") : undefined,
+		callbacks.onProgress
+			? () => callbacks.onProgress?.(__ompTranslate("Waiting for browser authentication..."))
+			: undefined,
 	);
 	return withCursorAccountEmail(credentials, callbacks.fetch ?? fetch, callbacks.signal);
 }
@@ -134,7 +137,7 @@ export async function refreshCursorToken(refreshToken: string, signal?: AbortSig
 
 	if (!response.ok) {
 		const error = await response.text();
-		throw new AIError.OAuthError(`Cursor token refresh failed: ${error}`, {
+		throw new AIError.OAuthError(__ompTranslate("Cursor token refresh failed: {0}", `${error}`), {
 			kind: "token-refresh",
 			provider: "cursor",
 		});
@@ -143,13 +146,16 @@ export async function refreshCursorToken(refreshToken: string, signal?: AbortSig
 	const data = (await response.json()) as { access_token?: string; refresh_token?: string; shouldLogout?: boolean };
 	// Cursor answers a session it will not renew with 200, an empty token and `shouldLogout`.
 	if (data.shouldLogout === true) {
-		throw new AIError.OAuthError("invalid_grant: Cursor ended this session; run /login cursor again", {
-			kind: "token-refresh",
-			provider: "cursor",
-		});
+		throw new AIError.OAuthError(
+			__ompTranslate("invalid_grant: Cursor ended this session; run /login cursor again"),
+			{
+				kind: "token-refresh",
+				provider: "cursor",
+			},
+		);
 	}
 	if (!data.access_token) {
-		throw new AIError.OAuthError("Cursor token refresh returned no access token", {
+		throw new AIError.OAuthError(__ompTranslate("Cursor token refresh returned no access token"), {
 			kind: "token-refresh",
 			provider: "cursor",
 		});
@@ -209,7 +215,10 @@ export async function fetchCursorAccountEmail(
 	if (!subject) return undefined;
 	const response = await fetchImpl(CURSOR_GET_ME_URL, cursorConnectRequest(accessToken, signal));
 	if (!response.ok) {
-		throw new AIError.ProviderHttpError(`Cursor profile request failed: ${response.status}`, response.status);
+		throw new AIError.ProviderHttpError(
+			__ompTranslate("Cursor profile request failed: {0}", `${response.status}`),
+			response.status,
+		);
 	}
 	const payload: unknown = await response.json();
 	if (!isRecord(payload) || payload.authId !== subject || typeof payload.email !== "string") return undefined;

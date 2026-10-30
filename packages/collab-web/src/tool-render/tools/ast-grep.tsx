@@ -1,4 +1,5 @@
 /** `ast_grep` — structural AST pattern search across files. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import { Badge, Badges, CodeBlock, InvalidArg, Kv, KvGrid, Output, PathText, ResultText } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -60,18 +61,18 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			? [
 					matchCount !== null && (
 						<Badge key="matches" tone={matchCount === 0 ? "warn" : "ok"}>
-							{matchCount} {matchCount === 1 ? "match" : "matches"}
+							{__ompTranslate(matchCount === 1 ? "{0} match" : "{0} matches", `${matchCount}`)}
 						</Badge>
 					),
 					fileCount !== null && fileCount > 0 && (
-						<Badge key="files">
-							{fileCount} {fileCount === 1 ? "file" : "files"}
-						</Badge>
+						<Badge key="files">{__ompTranslate("{0} file{1}", `${fileCount}`, fileCount === 1 ? "" : "s")}</Badge>
 					),
-					filesSearched !== null && <Badge key="searched">searched {filesSearched}</Badge>,
+					filesSearched !== null && (
+						<Badge key="searched">{__ompTranslate("searched {0}", `${filesSearched}`)}</Badge>
+					),
 					limitReached && (
 						<Badge key="limit" tone="warn">
-							limit reached
+							{__ompTranslate("limit reached")}
 						</Badge>
 					),
 				]
@@ -88,7 +89,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 						key={i}
 						code={pat}
 						lang={lang ?? undefined}
-						title={patterns.length > 1 ? `pattern ${i + 1}` : "pattern"}
+						title={patterns.length > 1 ? __ompTranslate("pattern {0}", `${i + 1}`) : __ompTranslate("pattern")}
 						maxLines={12}
 					/>
 				))
@@ -96,7 +97,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 			{(paths.length > 0 || scopePath) && (
 				<KvGrid>
 					{paths.length > 0 && (
-						<Kv k={paths.length === 1 ? "path" : "paths"}>
+						<Kv k={__ompTranslate(paths.length === 1 ? "path" : "paths")}>
 							{paths.map((p, i) => (
 								<span key={i}>
 									{i > 0 && ", "}
@@ -106,7 +107,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 						</Kv>
 					)}
 					{scopePath && (
-						<Kv k="scope">
+						<Kv k={__ompTranslate("scope")}>
 							<PathText path={scopePath} />
 						</Kv>
 					)}
@@ -117,7 +118,9 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 					text={parseErrors.join("\n")}
 					maxLines={6}
 					title={
-						parseErrorsTotal > parseErrors.length ? `parse issues (${parseErrorsTotal} total)` : "parse issues"
+						parseErrorsTotal > parseErrors.length
+							? __ompTranslate("parse issues ({0} total)", `${parseErrorsTotal}`)
+							: __ompTranslate("parse issues")
 					}
 				/>
 			)}

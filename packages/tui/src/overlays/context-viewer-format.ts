@@ -2,6 +2,7 @@
  * Display text for context entries. Each header has an ANSI-string form (`render`)
  * and a span form (`describe`); keep the twins visually identical.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { CONTEXT_PRESENTATION } from "../chrome/context-presentation";
@@ -39,7 +40,7 @@ export function safeLine(value: string): string {
 export function tokenEstimate(item: ContextViewEntry | ContextThinkingGroup): string {
 	// A grouped entry shares its group's estimate, which the group heading shows.
 	if ("thinkingGroup" in item && item.thinkingGroup) return "—";
-	if (item.interrupted) return "N/A · Interrupted";
+	if (item.interrupted) return __ompTranslate("N/A · Interrupted");
 	return `${item.tokens.toLocaleString("en-US")} ${item.tokens === 1 ? "token" : "tokens"}`;
 }
 

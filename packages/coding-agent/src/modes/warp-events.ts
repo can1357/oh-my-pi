@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
@@ -200,7 +201,7 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 			emitter?.emit({
 				event: "permission_request",
 				tool_name: event.toolName,
-				summary: `omp wants to run ${event.toolName}`,
+				summary: __ompTranslate("omp wants to run {0}", `${event.toolName}`),
 			});
 		});
 
@@ -210,7 +211,7 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 
 		api.on("tool_execution_start", event => {
 			if (event.toolName === "ask") {
-				emitter?.emit({ event: "question_asked", summary: "Waiting for your answer" });
+				emitter?.emit({ event: "question_asked", summary: __ompTranslate("Waiting for your answer") });
 			}
 		});
 

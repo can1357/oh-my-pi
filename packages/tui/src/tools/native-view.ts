@@ -3,6 +3,7 @@
  * card heads, error views, notes and notices. No layout: every helper returns
  * semantic nodes/spans only, with ANSI-free, sanitized text.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import * as path from "node:path";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
@@ -149,7 +150,7 @@ export function errorView(title: string, message: string, ...meta: readonly (str
 	return {
 		head: toolHead(title, ...meta),
 		tone: "error",
-		body: [errorText(plainText(message).trim() || `${title} failed`)],
+		body: [errorText(plainText(message).trim() || __ompTranslate("{0} failed\u0004tool.error.message", `${title}`))],
 	};
 }
 
@@ -200,12 +201,12 @@ export const RUN_INPUT_PREVIEW_LINES = 6;
 export type RunState = "running" | "background" | "done" | "failed" | "cancelled" | "timed-out";
 
 const RUN_STATE: Record<RunState, { readonly word: string; readonly tone: TspTone }> = {
-	running: { word: "Running", tone: "pending" },
-	background: { word: "In background", tone: "pending" },
-	done: { word: "Done", tone: "success" },
-	failed: { word: "Failed", tone: "error" },
-	cancelled: { word: "Cancelled", tone: "muted" },
-	"timed-out": { word: "Timed out", tone: "warning" },
+	running: { word: __ompTranslate("Running"), tone: "pending" },
+	background: { word: __ompTranslate("In background"), tone: "pending" },
+	done: { word: __ompTranslate("Done"), tone: "success" },
+	failed: { word: __ompTranslate("Failed"), tone: "error" },
+	cancelled: { word: __ompTranslate("Cancelled"), tone: "muted" },
+	"timed-out": { word: __ompTranslate("Timed out"), tone: "warning" },
 };
 
 /** Inputs of {@link runFoot}. */
@@ -229,7 +230,7 @@ export interface RunFootInput {
 export function runFoot(input: RunFootInput): NativeNode {
 	const failedWithCode = input.state === "failed" && input.exitCode !== undefined && input.exitCode !== 0;
 	const state = failedWithCode
-		? { word: `exit ${input.exitCode}`, tone: RUN_STATE.failed.tone }
+		? { word: __ompTranslate("exit {0}", `${input.exitCode}`), tone: RUN_STATE.failed.tone }
 		: RUN_STATE[input.state];
 	const facts = (input.facts ?? []).map(fact => plainText(fact).trim()).filter(fact => fact.length > 0);
 	const notices: string[] = [];
@@ -363,12 +364,17 @@ export function diagnosticsSection(
 	const shown = rows.slice(0, DIAGNOSTIC_ROWS);
 	const hidden = rows.length - shown.length;
 	if (hidden > 0) {
-		shown.push(text([span(`+${hidden} more`, "muted")], { role: "omp.tool.stats", key: "more" }));
+		shown.push(
+			text([span(__ompTranslate("+{0} more\u0004tool.diagnostics.more", `${hidden}`), "muted")], {
+				role: "omp.tool.stats",
+				key: "more",
+			}),
+		);
 	}
 	return node(
 		"section",
 		{
-			head: [span("Diagnostics")],
+			head: [span(__ompTranslate("Diagnostics"))],
 			tone: diagnostics.errored ? "error" : "warning",
 			role: "omp.tool.diagnostics",
 		},

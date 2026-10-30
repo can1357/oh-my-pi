@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { resolveReadPath } from "../../../../tools/path-utils";
 import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
@@ -12,7 +13,7 @@ export async function readFileTextReviewSource(
 	sessionId: string,
 ): Promise<TextReviewSource> {
 	const filePath = inputPath.trim();
-	if (!filePath) throw new Error("Enter a file path to annotate.");
+	if (!filePath) throw new Error(__ompTranslate("Enter a file path to annotate."));
 	const resolvedPath = resolveReadPath(filePath, cwd);
 	const file = Bun.file(resolvedPath);
 	const readFailure = (error: unknown) => {
@@ -25,7 +26,7 @@ export async function readFileTextReviewSource(
 	} catch (error) {
 		throw readFailure(error);
 	}
-	if (!isFile) throw new Error(`Cannot annotate "${filePath}": it is not a regular file.`);
+	if (!isFile) throw new Error(__ompTranslate('Cannot annotate "{0}": it is not a regular file.', `${filePath}`));
 	let text: string;
 	try {
 		text = await file.text();

@@ -1,0 +1,886 @@
+{
+	"messages": {
+		"restart": "재시작",
+		"kill\u0004job.action.kill": "강제 종료",
+		"stop": "중지",
+		"completed\u0004job.state.completed": "완료",
+		"failed": "실패",
+		"cancelled\u0004job.state.cancelled": "취소",
+		"correct": "올바름",
+		"incorrect": "문제 있음",
+		"({0}% confidence)": "(신뢰도 {0}%)",
+		"enable\u0004runtime-action": "활성화",
+		"disable\u0004runtime-action": "비활성화",
+		"resets\u0004runtime-action": "초기화",
+		"close\u0004runtime-action": "종료",
+		"abandoned\u0004runtime-state": "포기",
+		"project": "프로젝트",
+		"user": "사용자",
+		"size": "크기",
+		"Auto-compact buf": "자동 압축 버퍼",
+		"Free": "여유"
+	},
+	"resolutions": [
+		{
+			"file": "packages/coding-agent/src/advisor/settings.ts",
+			"korean": "\"미처리 검토 1개 미만\"",
+			"source": "Fewer than 1 outstanding review"
+		},
+		{
+			"file": "packages/coding-agent/src/advisor/settings.ts",
+			"korean": "\"미처리 검토 3개 미만\"",
+			"source": "Fewer than 3 outstanding reviews"
+		},
+		{
+			"file": "packages/coding-agent/src/advisor/settings.ts",
+			"korean": "\"미처리 검토 5개 미만\"",
+			"source": "Fewer than 5 outstanding reviews"
+		},
+		{
+			"file": "packages/coding-agent/src/advisor/settings.ts",
+			"korean": "\"모든 검토 완료 대기\"",
+			"source": "Wait for all reviews"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/auth-broker-cli.ts",
+			"korean": "\"환경 변수\"",
+			"source": "env"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/auth-broker-cli.ts",
+			"korean": "\"로컬 SQLite\"",
+			"source": "sqlite"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/auth-broker-cli.ts",
+			"korean": "\"(API 키)\"",
+			"source": "(api key)"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/bench-cli.ts",
+			"korean": "\"회 실행\"",
+			"source": "runs"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/bench-cli.ts",
+			"korean": "\"쌍\"",
+			"source": "pairs"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/plugin-cli.ts",
+			"korean": "`${theme.status.error} ${name} ${enabled ? \"활성화\" : \"비활성화\"} 실패: ${err}`",
+			"source": "{0} Failed to {2} {1}: {3}",
+			"values": [
+				"theme.status.error",
+				"name",
+				"enabled ? __I18N__(\"enable\\u0004runtime-action\") : __I18N__(\"disable\\u0004runtime-action\")",
+				"err"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/cli/setup-cli.ts",
+			"korean": "`${theme.status.success} ${component.label} 준비 완료`",
+			"source": "{0} {2} ready",
+			"values": [
+				"theme.status.success",
+				"component.label",
+				"component.name"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/cli/setup-cli.ts",
+			"korean": "`${component.label} 준비 중...`",
+			"source": "Preparing {1}...",
+			"values": [
+				"component.label",
+				"component.name"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/cli/setup-cli.ts",
+			"korean": "`${component.label} 설정 실패`",
+			"source": "Failed to set up {1}",
+			"values": [
+				"component.label",
+				"component.name"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/cli/usage-cli.ts",
+			"korean": "\"전역\"",
+			"source": "global"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/usage-cli.ts",
+			"korean": "\"개별 설정\"",
+			"source": "override"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/usage-cli.ts",
+			"korean": "`정책: 우선순위 ${policy.priority} · 예비 할당량 ${policy.reservePct}% (${reserveSource})${reclaimLabel}`",
+			"source": "policy: priority {0} · reserve {1}% ({4}){3}",
+			"values": [
+				"policy.priority",
+				"policy.reservePct",
+				"reserveSource",
+				"reclaimLabel",
+				"policy.reserveSource"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/commands/toks.ts",
+			"korean": "`${chalk.dim(\"크기\")}  ${formatBytes(bytes)} · ${int(chars)}자 · ${int(lines)}줄`",
+			"source": "{0}   {1} · {2} char{4} · {3} line{5}",
+			"values": [
+				"chalk.dim(__I18N__(\"size\"))",
+				"formatBytes(bytes)",
+				"int(chars)",
+				"int(lines)",
+				"chars === 1 ? \"\" : \"s\"",
+				"lines === 1 ? \"\" : \"s\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/config/config-file.ts",
+			"korean": "\"추가 검증\"",
+			"source": "AuxValidate"
+		},
+		{
+			"file": "packages/coding-agent/src/config/config-file.ts",
+			"korean": "\"예기치 않은\"",
+			"source": "Unexpected"
+		},
+		{
+			"file": "packages/coding-agent/src/config/config-file.ts",
+			"korean": "`검증${other.stage.slice(\"Validate\".length)}`",
+			"source": "Validate{0}",
+			"values": [
+				"other.stage.slice(\"Validate\".length)"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/config/registry.ts",
+			"korean": "`알 수 없는 ${label}: ${unknown.join(\", \")}. 허용되는 ${label}: ${values.join(\", \")}`",
+			"source": "Unknown {4}: {1}. Valid {2}s: {3}",
+			"values": [
+				"label",
+				"unknown.join(\", \")",
+				"label",
+				"values.join(\", \")",
+				"unknown.length === 1 ? label : `${label}s`"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/eval/settings.ts",
+			"korean": "\"세션별\"",
+			"source": "session"
+		},
+		{
+			"file": "packages/coding-agent/src/eval/settings.ts",
+			"korean": "\"세션 동안 커널을 유지합니다\"",
+			"source": "Keep the kernel for the session"
+		},
+		{
+			"file": "packages/coding-agent/src/eval/settings.ts",
+			"korean": "\"호출별\"",
+			"source": "per-call"
+		},
+		{
+			"file": "packages/coding-agent/src/eval/settings.ts",
+			"korean": "\"호출할 때마다 커널을 새로 시작합니다\"",
+			"source": "Start a fresh kernel for each call"
+		},
+		{
+			"file": "packages/coding-agent/src/exec/settings.ts",
+			"korean": "\"적극적\"",
+			"source": "aggressive"
+		},
+		{
+			"file": "packages/coding-agent/src/export/ttsr-settings.ts",
+			"korean": "\"유지\"",
+			"source": "keep"
+		},
+		{
+			"file": "packages/coding-agent/src/export/ttsr-settings.ts",
+			"korean": "\"세션당 한 번\"",
+			"source": "once"
+		},
+		{
+			"file": "packages/coding-agent/src/export/ttsr-settings.ts",
+			"korean": "\"메시지 간격 후\"",
+			"source": "after-gap"
+		},
+		{
+			"file": "packages/coding-agent/src/mcp/startup-events.ts",
+			"korean": "`서버 ${count}개`",
+			"source": "{0} server{1}",
+			"values": [
+				"count",
+				"count === 1 ? \"\" : \"s\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/command-controller.ts",
+			"korean": "`${formatDuration(minReset)}–${formatDuration(maxReset)} 후 ${verb === \"resets\" ? \"초기화\" : verb}`",
+			"source": "{2} in {0}–{1}",
+			"values": [
+				"formatDuration(minReset)",
+				"formatDuration(maxReset)",
+				"verb === \"resets\" ? __I18N__(\"resets\\u0004runtime-action\") : verb"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/command-controller.ts",
+			"korean": "`${formatDuration(minReset)} 후 ${verb === \"resets\" ? \"초기화\" : verb}`",
+			"source": "{1} in {0}",
+			"values": [
+				"formatDuration(minReset)",
+				"verb === \"resets\" ? __I18N__(\"resets\\u0004runtime-action\") : verb"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/mcp-command-controller.ts",
+			"korean": "`${scope === \"project\" ? \"프로젝트\" : \"사용자\"} 설정에 \"${proposed}\" 서버가 이미 있습니다.`",
+			"source": "Server \"{1}\" already exists in {2} config.",
+			"values": [
+				"scope === \"project\" ? __I18N__(\"project\") : __I18N__(\"user\")",
+				"proposed",
+				"scope"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/ssh-command-controller.ts",
+			"korean": "`${scope === \"user\" ? \"사용자\" : \"프로젝트\"} 설정에서 호스트 \"${name}\"을(를) 찾을 수 없습니다.`",
+			"source": "Host \"{1}\" not found in {2} config.",
+			"values": [
+				"scope === \"user\" ? __I18N__(\"user\") : __I18N__(\"project\")",
+				"name",
+				"scope"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/ssh-command-controller.ts",
+			"korean": "`- ${scope === \"user\" ? \"사용자\" : \"프로젝트\"} 설정에서 SSH 호스트 \"${name}\"을(를) 제거했습니다`",
+			"source": "- Removed SSH host \"{1}\" from {2} config",
+			"values": [
+				"scope === \"user\" ? __I18N__(\"user\") : __I18N__(\"project\")",
+				"name",
+				"scope"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/todo-command-controller.ts",
+			"korean": "`모든 작업을 ${target === \"completed\" ? \"완료\" : \"포기\"}로 표시했습니다.`",
+			"source": "Marked all tasks {1}.",
+			"values": [
+				"target === \"completed\" ? __I18N__(\"completed\\u0004job.state.completed\") : __I18N__(\"abandoned\\u0004runtime-state\")",
+				"target"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/todo-command-controller.ts",
+			"korean": "`${target === \"completed\" ? \"완료\" : \"포기\"}로 표시했습니다: ${taskHit.task.content}`",
+			"source": "Marked {2}: {1}",
+			"values": [
+				"target === \"completed\" ? __I18N__(\"completed\\u0004job.state.completed\") : __I18N__(\"abandoned\\u0004runtime-state\")",
+				"taskHit.task.content",
+				"target"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/controllers/todo-command-controller.ts",
+			"korean": "`${phaseHit.name} 단계를 ${target === \"completed\" ? \"완료\" : \"포기\"}로 표시했습니다.`",
+			"source": "Marked phase {0} {2}.",
+			"values": [
+				"phaseHit.name",
+				"target === \"completed\" ? __I18N__(\"completed\\u0004job.state.completed\") : __I18N__(\"abandoned\\u0004runtime-state\")",
+				"target"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/interactive-mode.ts",
+			"korean": "`세션 ${action === \"close\" ? \"종료\" : \"재시작\"} 실패: ${detail}\\n세션 로그를 저장하지 않고 종료하려면 ${appKey(this.keybindings, \"app.clear\")} 키를 다시 누르세요.`",
+			"source": "Could not {3} session: {1}\nPress {2} again to exit without saving the session log.",
+			"values": [
+				"action === \"close\" ? __I18N__(\"close\\u0004runtime-action\") : __I18N__(\"restart\")",
+				"detail",
+				"appKey(this.keybindings, \"app.clear\")",
+				"action"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/interactive-mode.ts",
+			"korean": "`세션 ${action === \"close\" ? \"종료\" : \"재시작\"} 실패: ${detail}`",
+			"source": "Could not {2} session: {1}",
+			"values": [
+				"action === \"close\" ? __I18N__(\"close\\u0004runtime-action\") : __I18N__(\"restart\")",
+				"detail",
+				"action"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/utils/ui-helpers.ts",
+			"korean": "`세션 컨텍스트를 ${compactionCount}회 압축했습니다`",
+			"source": "Session compacted {0} time{1}",
+			"values": [
+				"compactionCount",
+				"compactionCount === 1 ? \"\" : \"s\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/modes/utils/ui-helpers.ts",
+			"korean": "`대기 중인 메시지 ${queuedMessages.length}개를 보내지 못했습니다: ${\n\t\t\t\t\terror instanceof Error ? error.message : String(error)\n\t\t\t\t}`",
+			"source": "Failed to send queued message{2}: {1}",
+			"values": [
+				"queuedMessages.length",
+				"error instanceof Error ? error.message : String(error)",
+				"queuedMessages.length > 1 ? \"s\" : \"\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/slash-commands/helpers/context-report.ts",
+			"korean": "`  ${padToWidth(category.label, 16)} ${renderAsciiBar(fraction)}  ${category.tokens}토큰`",
+			"source": "  {0} {1}  {2} tokens",
+			"values": [
+				"padToWidth(category.label, 16)",
+				"renderAsciiBar(fraction)",
+				"category.tokens"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/slash-commands/helpers/context-report.ts",
+			"korean": "`  ${padToWidth(\"자동 압축 버퍼\", 16)} ${renderAsciiBar(fraction)}  ${breakdown.autoCompactBufferTokens}토큰`",
+			"source": "  {0} {1}  {2} tokens",
+			"values": [
+				"padToWidth(__I18N__(\"Auto-compact buf\"), 16)",
+				"renderAsciiBar(fraction)",
+				"breakdown.autoCompactBufferTokens"
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/slash-commands/helpers/context-report.ts",
+			"korean": "`  ${padToWidth(\"여유\", 16)} ${renderAsciiBar(fraction)}  ${breakdown.freeTokens}토큰`",
+			"source": "  {0} {1}  {2} tokens",
+			"values": [
+				"padToWidth(__I18N__(\"Free\"), 16)",
+				"renderAsciiBar(fraction)",
+				"breakdown.freeTokens"
+			]
+		},
+		{
+			"file": "packages/utils/src/cli.ts",
+			"korean": "\"알 수 없는 옵션이 있습니다\"",
+			"source": "Unknown option"
+		},
+		{
+			"file": "packages/utils/src/cli.ts",
+			"korean": "\"옵션 값이 없거나 올바르지 않습니다\"",
+			"source": "Missing or invalid option value"
+		},
+		{
+			"file": "packages/utils/src/cli.ts",
+			"korean": "\"명령줄 인수가 올바르지 않습니다\"",
+			"source": "Invalid command-line arguments"
+		},
+		{
+			"file": "packages/stats/src/index.ts",
+			"korean": "\"알 수 없는 옵션이 있습니다\"",
+			"source": "Unknown option"
+		},
+		{
+			"file": "packages/stats/src/index.ts",
+			"korean": "\"옵션 값이 없거나 올바르지 않습니다\"",
+			"source": "Missing or invalid option value"
+		},
+		{
+			"file": "packages/stats/src/index.ts",
+			"korean": "\"명령줄 인수가 올바르지 않습니다\"",
+			"source": "Invalid command-line arguments"
+		},
+		{
+			"file": "packages/tui/src/apps/autoresearch-dashboard.ts",
+			"korean": "\", 낮을수록 좋음\"",
+			"source": ", lower is better"
+		},
+		{
+			"file": "packages/tui/src/apps/autoresearch-dashboard.ts",
+			"korean": "\", 높을수록 좋음\"",
+			"source": ", higher is better"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "\"실행 중\"",
+			"source": "running"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "\"재시작 중\"",
+			"source": "restarting"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "\"중지 중\"",
+			"source": "stopping"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "\"종료됨\"",
+			"source": "exited"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "\"실패\"",
+			"source": "failed"
+		},
+		{
+			"file": "packages/tui/src/overlays/model-hub.ts",
+			"korean": "\"프로젝트\"",
+			"source": "project"
+		},
+		{
+			"file": "packages/tui/src/overlays/model-hub.ts",
+			"korean": "\"전역\"",
+			"source": "global"
+		},
+		{
+			"file": "packages/tui/src/overlays/plugin-selector.ts",
+			"korean": "\"사용자\"",
+			"source": "user"
+		},
+		{
+			"file": "packages/tui/src/overlays/plugin-selector.ts",
+			"korean": "\"프로젝트\"",
+			"source": "project"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"정의\"",
+			"source": "definition"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"타입 정의\"",
+			"source": "type_definition"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"참조\"",
+			"source": "references"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"호버 정보\"",
+			"source": "hover"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"심볼\"",
+			"source": "symbols"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"이름 변경\"",
+			"source": "rename"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"파일 이름 변경\"",
+			"source": "rename_file"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"코드 작업\"",
+			"source": "code_actions"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"구현\"",
+			"source": "implementation"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"상태\"",
+			"source": "status"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"다시 로드\"",
+			"source": "reload"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "\"지원 기능\"",
+			"source": "capabilities"
+		},
+		{
+			"file": "packages/tui/src/tools/resolve.ts",
+			"korean": "\"적용\"",
+			"source": "apply"
+		},
+		{
+			"file": "packages/tui/src/tools/resolve.ts",
+			"korean": "\"폐기\"",
+			"source": "discard"
+		},
+		{
+			"file": "packages/tui/src/tools/vibe.ts",
+			"korean": "\"대기\"",
+			"source": "wait"
+		},
+		{
+			"file": "packages/tui/src/tools/vibe.ts",
+			"korean": "\"세션\"",
+			"source": "list"
+		},
+		{
+			"file": "packages/utils/src/format.ts",
+			"korean": "`${noun} ${safeCount}개`",
+			"source": "{1} {2}",
+			"values": [
+				"noun",
+				"safeCount",
+				"pluralize(label, safeCount)"
+			],
+			"translation": "{0} {1}개"
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`${minutes}분`",
+			"source": "{0} minutes",
+			"values": [
+				"minutes"
+			]
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`약 ${Math.round(minutes / 60)}시간`",
+			"source": "about {0} hours",
+			"values": [
+				"Math.round(minutes / 60)"
+			]
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`${Math.round(minutes / 1_440)}일`",
+			"source": "{0} days",
+			"values": [
+				"Math.round(minutes / 1_440)"
+			]
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`약 ${Math.round(minutes / 43_200)}개월`",
+			"source": "about {0} month{1}",
+			"values": [
+				"Math.round(minutes / 43_200)",
+				"Math.round(minutes / 43_200) === 1 ? \"\" : \"s\""
+			],
+			"translation": "약 {0}개월"
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`${Math.round(minutes / 43_200)}개월`",
+			"source": "{0} months",
+			"values": [
+				"Math.round(minutes / 43_200)"
+			]
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`약 ${years}년`",
+			"source": "about {0} year{1}",
+			"values": [
+				"years",
+				"years === 1 ? \"\" : \"s\""
+			],
+			"translation": "약 {0}년"
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`${years}년 이상`",
+			"source": "over {0} year{1}",
+			"values": [
+				"years",
+				"years === 1 ? \"\" : \"s\""
+			],
+			"translation": "{0}년 이상"
+		},
+		{
+			"file": "packages/utils/src/dates.ts",
+			"korean": "`거의 ${years + 1}년`",
+			"source": "almost {0} years",
+			"values": [
+				"years + 1"
+			]
+		},
+		{
+			"file": "packages/tui/src/render/render-utils.ts",
+			"korean": "`… ${formatCount(itemType, safeRemaining)} 더 있음`",
+			"source": "… {1} more {2}",
+			"values": [
+				"formatCount(itemType, safeRemaining)",
+				"safeRemaining",
+				"pluralize(itemType, safeRemaining)"
+			],
+			"translation": "… {0} 더 있음"
+		},
+		{
+			"file": "packages/tui/src/render/render-utils.ts",
+			"korean": "`… 앞선 ${hidden}줄${hint ? ` ${hint}` : \"\"}`",
+			"source": "… {0} earlier line{2}{1}",
+			"values": [
+				"hidden",
+				"hint ? ` ${hint}` : \"\"",
+				"hidden === 1 ? \"\" : \"s\""
+			],
+			"translation": "… 앞선 {0}줄{1}"
+		},
+		{
+			"file": "packages/tui/src/render/render-utils.ts",
+			"korean": "`… 경고 ${hidden}개 더 있음`",
+			"source": "… {0} more warning{1}",
+			"values": [
+				"hidden",
+				"hidden === 1 ? \"\" : \"s\""
+			],
+			"translation": "… 경고 {0}개 더 있음"
+		},
+		{
+			"file": "packages/tui/src/apps/if-bench-board.ts",
+			"korean": "`${head} 실패 ${FAILURE_TEXT[record.failure ?? \"format\"]}`",
+			"source": "{0} FAIL {2}",
+			"values": [
+				"head",
+				"FAILURE_TEXT[record.failure ?? \"format\"]",
+				"record.failure ?? \"format\""
+			],
+			"translation": "{0} 실패 {1}"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "`${name} ${verb === \"restart\" ? \"재시작\" : verb === \"kill\" ? \"강제 종료\" : \"중지\"} 중…`",
+			"source": "{1} {0}…",
+			"values": [
+				"name",
+				"verb === \"restart\" ? __I18N__(\"restart\") : verb === \"kill\" ? __I18N__(\"kill\\u0004job.action.kill\") : __I18N__(\"stop\")"
+			],
+			"translation": "{0} {1} 중…"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "`${name} ${verb === \"restart\" ? \"재시작\" : verb === \"kill\" ? \"강제 종료\" : \"중지\"} 실패: ${error instanceof Error ? error.message : String(error)}`",
+			"source": "{1} {0} failed: {2}",
+			"values": [
+				"name",
+				"verb === \"restart\" ? __I18N__(\"restart\") : verb === \"kill\" ? __I18N__(\"kill\\u0004job.action.kill\") : __I18N__(\"stop\")",
+				"error instanceof Error ? error.message : String(error)"
+			],
+			"translation": "{0} {1} 실패: {2}"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "` · 범위 ${this.#reports.length}개`",
+			"source": " · {0} scope{1}",
+			"values": [
+				"this.#reports.length",
+				"this.#reports.length === 1 ? \"\" : \"s\""
+			],
+			"translation": " · 범위 {0}개"
+		},
+		{
+			"file": "packages/tui/src/apps/ps-top.ts",
+			"korean": "`범위 ${this.#reports.length}개에 프로세스 ${this.#flat.length}개 ${chalk.dim(scopeKind)}`",
+			"source": "{1} process{3} in {0} scope{4} {2}",
+			"values": [
+				"this.#reports.length",
+				"this.#flat.length",
+				"chalk.dim(scopeKind)",
+				"this.#flat.length === 1 ? \"\" : \"es\"",
+				"this.#reports.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "범위 {0}개에 프로세스 {1}개 {2}"
+		},
+		{
+			"file": "packages/tui/src/chat/advisor-message.ts",
+			"korean": "`${RANK_LOOK[rank].label} ${count}개`",
+			"source": "{1} {2}{3}",
+			"values": [
+				"RANK_LOOK[rank].label",
+				"count",
+				"rank",
+				"count === 1 ? \"\" : \"s\""
+			],
+			"translation": "{0} {1}개"
+		},
+		{
+			"file": "packages/tui/src/overlays/annotation-overlay.ts",
+			"korean": "`파일 ${this.#files.length}개`",
+			"source": "{0} file{1}",
+			"values": [
+				"this.#files.length",
+				"this.#files.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "파일 {0}개"
+		},
+		{
+			"file": "packages/tui/src/overlays/annotation-overlay.ts",
+			"korean": "`메모 ${this.#annotations.length}개`",
+			"source": "{0} note{1}",
+			"values": [
+				"this.#annotations.length",
+				"this.#annotations.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "메모 {0}개"
+		},
+		{
+			"file": "packages/tui/src/overlays/annotation-overlay.ts",
+			"korean": "`${this.#textLines.length}줄`",
+			"source": "{0} line{1}",
+			"values": [
+				"this.#textLines.length",
+				"this.#textLines.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "{0}줄"
+		},
+		{
+			"file": "packages/tui/src/overlays/annotation-overlay.ts",
+			"korean": "`메모 ${notes}개`",
+			"source": "{0} note{1}",
+			"values": [
+				"notes",
+				"notes === 1 ? \"\" : \"s\""
+			],
+			"translation": "메모 {0}개"
+		},
+		{
+			"file": "packages/tui/src/overlays/annotation-overlay.ts",
+			"korean": "`메모 ${count}개`",
+			"source": "{0} note{1}",
+			"values": [
+				"count",
+				"count === 1 ? \"\" : \"s\""
+			],
+			"translation": "메모 {0}개"
+		},
+		{
+			"file": "packages/tui/src/tools/grep.ts",
+			"korean": "`파일 ${hiddenFiles}개 더`",
+			"source": "{0} more file{1}",
+			"values": [
+				"hiddenFiles",
+				"hiddenFiles === 1 ? \"\" : \"s\""
+			],
+			"translation": "파일 {0}개 더"
+		},
+		{
+			"file": "packages/tui/src/tools/lsp.ts",
+			"korean": "`서버 실패 ${parsed.failures.length}건`",
+			"source": "{0} server failure{1}",
+			"values": [
+				"parsed.failures.length",
+				"parsed.failures.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "서버 실패 {0}건"
+		},
+		{
+			"file": "packages/tui/src/tools/task.ts",
+			"korean": "`${continuePrefix} 패치: ${theme.fg(verdictColor, isCorrect ? \"올바름\" : \"문제 있음\")} ${verdictIcon} ${theme.fg(\n\t\t\t\"dim\",\n\t\t\t`(신뢰도 ${(summary.confidence * 100).toFixed(0)}%)`,\n\t\t)}`",
+			"source": "{0} Patch is {1} {2} {3}",
+			"values": [
+				"continuePrefix",
+				"theme.fg(verdictColor, isCorrect ? __I18N__(\"correct\") : __I18N__(\"incorrect\"))",
+				"verdictIcon",
+				"theme.fg(\n\t\t\t\"dim\",\n\t\t\t__I18N__(\"({0}% confidence)\", `${(summary.confidence * 100).toFixed(0)}`),\n\t\t)"
+			],
+			"translation": "{0} 패치: {1} {2} {3}"
+		},
+		{
+			"file": "packages/tui/src/tools/task.ts",
+			"korean": "`${progress.retryFailure.attempt}회 시도 후 자동 재시도 중단: ${plainText(progress.retryFailure.errorMessage)}`",
+			"source": "auto-retry gave up after {0} attempt{2}: {1}",
+			"values": [
+				"progress.retryFailure.attempt",
+				"plainText(progress.retryFailure.errorMessage)",
+				"progress.retryFailure.attempt === 1 ? \"\" : \"s\""
+			],
+			"translation": "{0}회 시도 후 자동 재시도 중단: {1}"
+		},
+		{
+			"file": "packages/tui/src/tools/task.ts",
+			"korean": "`에이전트 ${count}개`",
+			"source": "{0} agent{1}",
+			"values": [
+				"count",
+				"count === 1 ? \"\" : \"s\""
+			],
+			"translation": "에이전트 {0}개"
+		},
+		{
+			"file": "packages/tui/src/tools/todo.ts",
+			"korean": "`… 진행 중인 할 일 ${hiddenActive}개 더`",
+			"source": "… {0} more active todo{1}",
+			"values": [
+				"hiddenActive",
+				"hiddenActive === 1 ? \"\" : \"s\""
+			],
+			"translation": "… 진행 중인 할 일 {0}개 더"
+		},
+		{
+			"file": "packages/tui/src/tools/todo.ts",
+			"korean": "`항목 ${e.items.length}개`",
+			"source": "{0} item{1}",
+			"values": [
+				"e.items.length",
+				"e.items.length === 1 ? \"\" : \"s\""
+			],
+			"translation": "항목 {0}개"
+		},
+		{
+			"file": "packages/tui/src/tools/vibe.ts",
+			"korean": "`턴 ${settledStatus === \"completed\" ? \"완료\" : settledStatus === \"failed\" ? \"실패\" : \"취소\"} — 결과 전달됨`",
+			"source": "turn {0} — result delivered",
+			"values": [
+				"settledStatus === \"completed\" ? __I18N__(\"completed\\u0004job.state.completed\") : settledStatus === \"failed\" ? __I18N__(\"failed\") : __I18N__(\"cancelled\\u0004job.state.cancelled\")"
+			],
+			"translation": "턴 {0} — 결과 전달됨"
+		},
+		{
+			"file": "packages/tui/src/tools/vibe.ts",
+			"korean": "`턴 ${settled === \"completed\" ? \"완료\" : settled === \"failed\" ? \"실패\" : \"취소\"} — 결과 전달됨`",
+			"source": "turn {0} — result delivered",
+			"values": [
+				"settled === \"completed\" ? __I18N__(\"completed\\u0004job.state.completed\") : settled === \"failed\" ? __I18N__(\"failed\") : __I18N__(\"cancelled\\u0004job.state.cancelled\")"
+			],
+			"translation": "턴 {0} — 결과 전달됨"
+		},
+		{
+			"file": "packages/coding-agent/src/cli/args.ts",
+			"korean": "`오류: 알 수 없는 플래그: ${flags.join(\", \")}`",
+			"source": "Error: unknown flag{1}: {0}",
+			"values": [
+				"flags.join(\", \")",
+				"flags.length === 1 ? \"\" : \"s\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/slash-commands/builtin-collaboration.ts",
+			"korean": "`활성 로컬 Collab 호스트 ${hosts.length}개`",
+			"source": "{0} active local Collab host{1}",
+			"values": [
+				"hosts.length",
+				"hosts.length === 1 ? \"\" : \"s\""
+			]
+		},
+		{
+			"file": "packages/coding-agent/src/tools/ast-edit.ts",
+			"korean": "`AST 편집: 파일 ${result.filesTouched}개에서 ${result.totalReplacements}개 교체`",
+			"source": "AST Edit: {1} replacement{2} in {0} file{3}",
+			"values": [
+				"result.filesTouched",
+				"result.totalReplacements",
+				"result.totalReplacements !== 1 ? \"s\" : \"\"",
+				"result.filesTouched !== 1 ? \"s\" : \"\""
+			]
+		}
+	]
+}

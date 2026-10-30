@@ -10,6 +10,7 @@
  * and telling guests goodbye — before a replacement room for the new session
  * is started, so a card that names generation N can never reach session N+1.
  */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { randomBytes } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
@@ -221,7 +222,9 @@ export class CollabController {
 		const input = relay?.trim() || cfgCollabRelayUrl.get(this.#ctx.settings) || "";
 		if (!input) {
 			throw new Error(
-				"No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com",
+				__ompTranslate(
+					"No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com",
+				),
 			);
 		}
 		// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
@@ -298,9 +301,12 @@ export class CollabController {
 		if (this.#shutdown || err instanceof CollabHostStoppedError) return;
 		logger.warn("Collab auto-start failed", { error: String(err) });
 		const message = sanitizeDisplayLine(err instanceof Error ? err.message : String(err));
-		this.#ctx.showStatus(truncateToWidth(`Collab auto-start failed: ${message}`, TRUNCATE_LENGTHS.LINE), {
-			dim: true,
-		});
+		this.#ctx.showStatus(
+			truncateToWidth(__ompTranslate("Collab auto-start failed: {0}", `${message}`), TRUNCATE_LENGTHS.LINE),
+			{
+				dim: true,
+			},
+		);
 	}
 
 	/**

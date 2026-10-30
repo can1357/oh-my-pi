@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -55,7 +56,7 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			? "write"
 			: "read";
 	};
-	readonly label = "Learn";
+	readonly label = __ompTranslate("Learn");
 	get description(): string {
 		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
 	}

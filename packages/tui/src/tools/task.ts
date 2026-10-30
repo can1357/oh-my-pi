@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
@@ -84,7 +85,7 @@ function renderNestedCycleLine(theme: Theme): string {
 }
 
 function formatFindingSummary(findings: FindingDetails[], theme: Theme): string {
-	if (findings.length === 0) return theme.fg("dim", "Findings: none");
+	if (findings.length === 0) return theme.fg("dim", __ompTranslate("Findings: none"));
 
 	const counts: { [P in FindingPriority]?: number } = {};
 	for (const finding of findings) {
@@ -99,7 +100,7 @@ function formatFindingSummary(findings: FindingDetails[], theme: Theme): string 
 		parts.push(theme.styledSymbol(symbol, color) ? `${theme.styledSymbol(symbol, color)} ${text}` : text);
 	}
 
-	return `${theme.fg("dim", "Findings:")} ${parts.join(theme.sep.dot)}`;
+	return `${theme.fg("dim", __ompTranslate("Findings:"))} ${parts.join(theme.sep.dot)}`;
 }
 
 function normalizeFindings(value: unknown): FindingDetails[] {
@@ -471,7 +472,7 @@ function renderTaskSection(
 	const trimmed = sanitizeText(task).trim();
 	if (!expanded || !trimmed) return lines;
 
-	lines.push(`${continuePrefix}${theme.fg("dim", "Task")}`);
+	lines.push(`${continuePrefix}${theme.fg("dim", __ompTranslate("Task"))}`);
 	const taskLines = trimmed.split("\n");
 	for (const line of taskLines.slice(0, maxExpanded)) {
 		lines.push(`${continuePrefix}  ${theme.fg("dim", replaceTabs(line))}`);
@@ -531,7 +532,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 	const idLabel = rawName ? formatTaskId(rawName) : "";
 	const brief = taskFirstLine(taskPreviewText(args.task, args.taskFile));
 	if (idLabel || brief) {
-		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
+		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || __ompTranslate("agent")))}`;
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
@@ -644,7 +645,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	const header = renderStatusLine(
 		{
 			iconOverride: theme.styledSymbol("tool.task", "accent"),
-			title: "Task",
+			title: __ompTranslate("Task"),
 			description: formatAgentHeaderLabel(args),
 		},
 		theme,
@@ -732,9 +733,9 @@ function renderAgentProgress(
 	const fullDescription = progress.description ? replaceTabs(sanitizeText(progress.description)).trim() : undefined;
 	let statusBadge: string | undefined;
 	if (progress.retryState && progress.status === "running") {
-		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
+		statusBadge = ` ${formatBadge(__ompTranslate("retrying"), "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
-		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
+		statusBadge = ` ${formatBadge(__ompTranslate("rate-limited"), "error", theme)}`;
 	}
 	const row = renderAgentTreeRow(
 		{
@@ -813,10 +814,17 @@ function renderAgentProgress(
 	// keep spinning while a child sleeps on a 3-hour provider rate-limit.
 	if (progress.retryState && progress.status === "running") {
 		const remainingMs = Math.max(0, progress.retryState.startedAtMs + progress.retryState.delayMs - nowMs);
-		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
+		const waitLabel =
+			remainingMs > 0
+				? __ompTranslate("in {0}\u0004tool.task.wait-time", `${formatDuration(remainingMs)}`)
+				: __ompTranslate("now\u0004tool.task.wait-time");
 		const summary =
-			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
+			__ompTranslate(
+				"retrying {0}/{1} {2}: ",
+				`${progress.retryState.attempt}`,
+				`${progress.retryState.maxAttempts}`,
+				`${waitLabel}`,
+			) + previewLine(sanitizeText(progress.retryState.errorMessage), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
@@ -971,7 +979,7 @@ function renderReviewResult(
 	// Explanation preview (first ~80 chars when collapsed, full when expanded)
 	if (summary.explanation) {
 		if (expanded) {
-			lines.push(`${continuePrefix}${theme.fg("dim", "Summary")}`);
+			lines.push(`${continuePrefix}${theme.fg("dim", __ompTranslate("Summary"))}`);
 			const explanationLines = sanitizeText(summary.explanation).split("\n");
 			for (const line of explanationLines) {
 				lines.push(`${continuePrefix}  ${theme.fg("dim", replaceTabs(line))}`);
@@ -1014,7 +1022,7 @@ function renderFindings(findings: FindingDetails[], continuePrefix: string, expa
 		const findingContinue = isLastFinding ? "   " : `${theme.tree.vertical}  `;
 
 		const { color } = getPriorityInfo(finding.priority);
-		const rawTitle = sanitizeText(finding.title?.replace(/^\[P\d\]\s*/, "") ?? "Untitled");
+		const rawTitle = sanitizeText(finding.title?.replace(/^\[P\d\]\s*/, "") ?? __ompTranslate("Untitled"));
 		const titleText = replaceTabs(rawTitle).replace(/[\r\n]+/g, " ");
 		const loc = `${path.basename(sanitizeText(finding.file_path || "<unknown>"))}:${finding.line_start}`;
 
@@ -1068,14 +1076,14 @@ function renderAgentResult(
 				: theme.status.error;
 	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
-		? "aborted"
+		? __ompTranslate("aborted")
 		: needsWarning
-			? "warning"
+			? __ompTranslate("warning")
 			: success
-				? "done"
+				? __ompTranslate("done\u0004download.state.completed")
 				: mergeFailed
-					? "merge failed"
-					: "failed";
+					? __ompTranslate("merge failed")
+					: __ompTranslate("failed");
 
 	// Reserve the name and required badges before optional model metadata and details.
 	const fullDescription = result.description ? replaceTabs(sanitizeText(result.description)).trim() : undefined;
@@ -1208,7 +1216,7 @@ function renderAgentResult(
 				const target = lines;
 				if (!isTaskTool) {
 					hasCustomRendering = true;
-					target.push(`${continuePrefix}${theme.fg("dim", `Tool: ${toolName}`)}`);
+					target.push(`${continuePrefix}${theme.fg("dim", __ompTranslate("Tool: {0}", `${toolName}`))}`);
 				}
 				if (component instanceof Text) {
 					// Prefix each line with continuePrefix
@@ -1254,17 +1262,17 @@ function renderAgentResult(
 	// row when the runner reports no root changes — same as the model summary.
 	if (result.patchPath && result.hasRootChanges !== false && !aborted && result.exitCode === 0) {
 		lines.push(
-			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Patch: ${replaceTabs(shortenPath(result.patchPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(__ompTranslate("Patch: {0}", `${replaceTabs(shortenPath(result.patchPath))}`), TRUNCATE_LENGTHS.CONTENT))}`,
 		);
 	} else if (result.branchName && !aborted && result.exitCode === 0) {
 		lines.push(
-			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Branch: ${replaceTabs(sanitizeText(result.branchName))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(__ompTranslate("Branch: {0}", `${replaceTabs(sanitizeText(result.branchName))}`), TRUNCATE_LENGTHS.CONTENT))}`,
 		);
 	}
 	if (!aborted && result.exitCode === 0) {
 		for (const nestedPath of result.nestedPatchPaths ?? []) {
 			lines.push(
-				`${continuePrefix}${theme.fg("dim", truncateToWidth(`Nested patch: ${replaceTabs(shortenPath(nestedPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+				`${continuePrefix}${theme.fg("dim", truncateToWidth(__ompTranslate("Nested patch: {0}", `${replaceTabs(shortenPath(nestedPath))}`), TRUNCATE_LENGTHS.CONTENT))}`,
 			);
 		}
 	}
@@ -1319,11 +1327,12 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	};
 	for (const p of hidden) counts[p.status]++;
 	const parts: string[] = [];
-	if (counts.completed > 0) parts.push(theme.fg("dim", `${counts.completed} done`));
-	if (counts.running > 0) parts.push(theme.fg("dim", `${counts.running} running`));
-	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
-	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
-	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
+	if (counts.completed > 0) parts.push(theme.fg("dim", __ompTranslate("{0} done", `${counts.completed}`)));
+	if (counts.running > 0)
+		parts.push(theme.fg("dim", __ompTranslate("{0} running\u0004tool.task.running", `${counts.running}`)));
+	if (counts.pending > 0) parts.push(theme.fg("dim", __ompTranslate("{0} pending", `${counts.pending}`)));
+	if (counts.failed > 0) parts.push(theme.fg("error", __ompTranslate("{0} failed", `${counts.failed}`)));
+	if (counts.aborted > 0) parts.push(theme.fg("error", __ompTranslate("{0} aborted", `${counts.aborted}`)));
 	const breakdown =
 		parts.length > 0
 			? `${theme.fg("dim", " (")}${parts.join(theme.fg("dim", theme.sep.dot))}${theme.fg("dim", ")")}`
@@ -1544,12 +1553,15 @@ export function renderResult(
 			}
 
 			const summaryParts: string[] = [];
-			if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
-			if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
-			if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
-			if (failCount > 0) summaryParts.push(theme.fg("error", `${failCount} failed`));
+			if (abortedCount > 0) summaryParts.push(theme.fg("error", __ompTranslate("{0} aborted", `${abortedCount}`)));
+			if (successCount > 0)
+				summaryParts.push(theme.fg("success", __ompTranslate("{0} succeeded", `${successCount}`)));
+			if (mergeFailedCount > 0)
+				summaryParts.push(theme.fg("warning", __ompTranslate("{0} merge failed", `${mergeFailedCount}`)));
+			if (failCount > 0) summaryParts.push(theme.fg("error", __ompTranslate("{0} failed", `${failCount}`)));
 			const totalRequests = requestTotal;
-			if (totalRequests > 0) summaryParts.push(theme.fg("dim", `${formatNumber(totalRequests)} req`));
+			if (totalRequests > 0)
+				summaryParts.push(theme.fg("dim", __ompTranslate("{0} req", `${formatNumber(totalRequests)}`)));
 			summaryParts.push(theme.fg("dim", formatDuration(details.totalDurationMs)));
 			// Wrap the run summary in the theme's bracket glyphs (dim chrome, colored
 			// counts) to match the bash tool's `[Wall: … | Exit: …]` footer.
@@ -1564,7 +1576,7 @@ export function renderResult(
 		const borderColor = isError ? "error" : "borderMuted";
 
 		if (lines.length === 0) {
-			const text = fallbackText.trim() ? fallbackText : "No results";
+			const text = fallbackText.trim() ? fallbackText : __ompTranslate("No results");
 			return {
 				header,
 				sections: [
@@ -1829,8 +1841,8 @@ function contextStats(
 /** Agent badges: `background` for async jobs, `isolated` worktrees. */
 function agentBadges(background: boolean, isolated: boolean | undefined): TspAgentProps["badges"] {
 	const badges: { text: string; tone?: TspTone }[] = [];
-	if (background) badges.push({ text: "background" });
-	if (isolated) badges.push({ text: "isolated" });
+	if (background) badges.push({ text: __ompTranslate("background") });
+	if (isolated) badges.push({ text: __ompTranslate("isolated") });
 	return badges.length > 0 ? badges : undefined;
 }
 
@@ -1978,9 +1990,9 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 	const errorLine = (message: string, token = "error"): NativeNode =>
 		text([span(plainText(message), token)], { wrap: "word", role: "omp.tool.error" });
 	const badges: { text: string; tone?: TspTone }[] = [...(agentBadges(state.background, result.isolated) ?? [])];
-	if (mergeFailed) badges.push({ text: "merge failed", tone: "warning" });
-	else if (warning && success) badges.push({ text: "warning", tone: "warning" });
-	if (result.truncated) badges.push({ text: "truncated", tone: "warning" });
+	if (mergeFailed) badges.push({ text: __ompTranslate("merge failed"), tone: "warning" });
+	else if (warning && success) badges.push({ text: __ompTranslate("warning"), tone: "warning" });
+	if (result.truncated) badges.push({ text: __ompTranslate("truncated\u0004tool.glob.truncated"), tone: "warning" });
 	const cost = result.usage?.cost.total ?? 0;
 	const assignment = describeAssignment(result.assignment ?? result.task);
 	return agentNode(
@@ -2094,7 +2106,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 	}
 	const target = agents.length > 1 ? agentCountLabel(agents.length) : formatAgentHeaderLabel(args);
 	return {
-		tool: { title: "Task", target, targetKind: target ? "text" : undefined },
+		tool: { title: __ompTranslate("Task"), target, targetKind: target ? "text" : undefined },
 		body: compact([describeContext(args?.context), ...agents]),
 	};
 }
@@ -2113,7 +2125,7 @@ function describeTaskResult(
 			return {
 				tool: { title: "Task", target: agentLabel, targetKind: "text" },
 				tone: "error",
-				body: compact([context, errorText(fallback || "Task failed")]),
+				body: compact([context, errorText(fallback || __ompTranslate("Task failed"))]),
 			};
 		}
 		return {
@@ -2147,10 +2159,10 @@ function describeTaskResult(
 	}
 	const summary: string[] = [];
 	if ((details.results ?? []).length > 0) {
-		if (succeeded) summary.push(`${succeeded} succeeded`);
-		if (failed) summary.push(`${failed} failed`);
-		if (aborted) summary.push(`${aborted} aborted`);
-		if (requests) summary.push(`${formatNumber(requests)} req`);
+		if (succeeded) summary.push(__ompTranslate("{0} succeeded", `${succeeded}`));
+		if (failed) summary.push(__ompTranslate("{0} failed", `${failed}`));
+		if (aborted) summary.push(__ompTranslate("{0} aborted", `${aborted}`));
+		if (requests) summary.push(__ompTranslate("{0} req", `${formatNumber(requests)}`));
 		summary.push(formatDuration(details.totalDurationMs));
 	}
 	const fallback = resultText(result);
@@ -2175,14 +2187,14 @@ function describeTaskResult(
 			target,
 			targetKind: target ? "text" : undefined,
 			meta: summary.length > 0 ? [summary.join(" · ")] : undefined,
-			badges: background ? [{ text: "background" }] : undefined,
+			badges: background ? [{ text: __ompTranslate("background") }] : undefined,
 		},
 		tone: aborted + failed > 0 ? "error" : undefined,
 		preview: "none",
 		body: compact([
 			context,
 			...agents,
-			count === 0 ? noteText(fallback.trim() || "No results", "dim") : undefined,
+			count === 0 ? noteText(fallback.trim() || __ompTranslate("No results"), "dim") : undefined,
 			trailer ? text([span(plainText(trailer), "muted")], { wrap: "word", role: "omp.tool.stats" }) : undefined,
 		]),
 	};

@@ -107,4 +107,61 @@ describe("formatDistanceToNow", () => {
 		almost.setMonth(almost.getMonth() - 9);
 		expect(formatDistanceToNow(almost)).toBe("almost 2 years");
 	});
+
+	it("localizes complete relative phrases without mixing English units into Korean", () => {
+		const modulePath = new URL("../src/dates.ts", import.meta.url).href;
+		const i18nPath = new URL("../src/i18n.ts", import.meta.url).href;
+		const script = `import {initializeI18n} from ${JSON.stringify(i18nPath)};
+import {formatDistanceToNow} from ${JSON.stringify(modulePath)};
+await initializeI18n();
+const now = new Date(2024,6,1,12);
+Date.now = () => now.getTime();
+const seconds = [0,30,90,44*60+29,45*60,120*60,86400,2*86400,30*86400,60*86400];
+const past = seconds.map(value=>formatDistanceToNow(now.getTime()-value*1000,{addSuffix:true}));
+const future = formatDistanceToNow(now.getTime()+300000,{addSuffix:true});
+const years = [0,3,9].map(months=>{
+	const date=new Date(now);date.setFullYear(date.getFullYear()-1);date.setMonth(date.getMonth()-months);
+	return formatDistanceToNow(date,{addSuffix:true});
+});
+console.log(JSON.stringify({past,future,years}));`;
+		const outputs = ["en", "ko"].map(language => {
+			const child = Bun.spawnSync([process.execPath, "-e", script], {
+				env: { ...process.env, OMP_LANG: language, OMP_LOCALE_DIR: undefined, PI_COMPILED: undefined },
+			});
+			expect(child.exitCode, child.stderr.toString()).toBe(0);
+			return JSON.parse(child.stdout.toString());
+		});
+		expect(outputs[0]).toEqual({
+			past: [
+				"less than a minute ago",
+				"1 minute ago",
+				"2 minutes ago",
+				"44 minutes ago",
+				"about 1 hour ago",
+				"about 2 hours ago",
+				"1 day ago",
+				"2 days ago",
+				"about 1 month ago",
+				"2 months ago",
+			],
+			future: "in 5 minutes",
+			years: ["about 1 year ago", "over 1 year ago", "almost 2 years ago"],
+		});
+		expect(outputs[1]).toEqual({
+			past: [
+				"1분 미만 전",
+				"1분 전",
+				"2분 전",
+				"44분 전",
+				"1시간 정도 전",
+				"2시간 정도 전",
+				"1일 전",
+				"2일 전",
+				"1개월 정도 전",
+				"2개월 전",
+			],
+			future: "5분 후",
+			years: ["1년 정도 전", "1년 이상 전", "2년 가까이 전"],
+		});
+	});
 });

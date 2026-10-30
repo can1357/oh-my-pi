@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	Api,
@@ -327,7 +328,7 @@ function getErrorMessage(error: unknown): string {
 function normalizePositiveInteger(name: string, value: number | undefined, fallback: number): number {
 	if (value === undefined) return fallback;
 	if (!Number.isInteger(value) || value <= 0) {
-		throw new Error(`Expected --${name} to be a positive integer, got ${value}`);
+		throw new Error(__ompTranslate("Expected --{0} to be a positive integer, got {1}", `${name}`, `${value}`));
 	}
 	return value;
 }
@@ -492,7 +493,7 @@ function renderCacheBenchmarkPrefix(prefix: string, namespace: string): string {
 		namespace,
 	});
 	if (!rendered.includes(CACHE_PREFIX_PLACEHOLDER)) {
-		throw new Error("Cache benchmark prefix template is missing its raw prefix placeholder");
+		throw new Error(__ompTranslate("Cache benchmark prefix template is missing its raw prefix placeholder"));
 	}
 	// Render the static wrapper first, then inject caller bytes so prompt
 	// normalization cannot trim spaces or collapse blank lines in prefix files.
@@ -636,12 +637,16 @@ async function runWithConcurrency<T>(
 function formatCachePairLine(pair: BenchCachePairReport, index: number, total: number): string {
 	const formatPhase = (run: BenchCacheRunReport, alreadyWarm = false) => {
 		if (!run.result.ok) {
-			return `${run.phase} failed: ${truncateToWidth(replaceTabs(run.result.error), ERROR_WIDTH)}`;
+			return __ompTranslate(
+				"{0} failed: {1}",
+				`${run.phase}`,
+				`${truncateToWidth(replaceTabs(run.result.error), ERROR_WIDTH)}`,
+			);
 		}
 		const usage = run.usage;
-		return `${run.phase}${alreadyWarm ? " (already warm)" : ""} ${run.observations.join(", ")} ${chalk.dim("input")} ${usage?.inputTokens ?? 0} ${chalk.dim("cache-read")} ${usage?.cacheReadTokens ?? 0} ${chalk.dim("cache-write")} ${usage?.cacheWriteTokens ?? 0} ${chalk.dim("output")} ${usage?.outputTokens ?? run.result.outputTokens} ${chalk.dim("total")} ${usage?.totalTokens ?? 0} ${chalk.dim("cost")} ${formatCost(usage?.cost ?? 0)} ${chalk.dim("TTFT")} ${formatMs(run.result.ttftMs)} ${chalk.dim("duration")} ${formatMs(run.result.durationMs)} ${chalk.dim("throughput")} ${run.result.tokensPerSecond.toFixed(1)}/s`;
+		return `${run.phase}${alreadyWarm ? __ompTranslate(" (already warm)") : ""} ${run.observations.join(", ")} ${chalk.dim(__ompTranslate("input"))} ${usage?.inputTokens ?? 0} ${chalk.dim(__ompTranslate("cache-read"))} ${usage?.cacheReadTokens ?? 0} ${chalk.dim(__ompTranslate("cache-write"))} ${usage?.cacheWriteTokens ?? 0} ${chalk.dim(__ompTranslate("output"))} ${usage?.outputTokens ?? run.result.outputTokens} ${chalk.dim(__ompTranslate("total"))} ${usage?.totalTokens ?? 0} ${chalk.dim(__ompTranslate("cost"))} ${formatCost(usage?.cost ?? 0)} ${chalk.dim("TTFT")} ${formatMs(run.result.ttftMs)} ${chalk.dim(__ompTranslate("duration"))} ${formatMs(run.result.durationMs)} ${chalk.dim(__ompTranslate("throughput"))} ${run.result.tokensPerSecond.toFixed(1)}/s`;
 	};
-	return `  ${chalk.dim(`pair ${index + 1}/${total}`)} ${formatPhase(pair.cold, pair.coldAlreadyWarm)}; ${formatPhase(pair.warm)}`;
+	return `  ${chalk.dim(__ompTranslate("pair {0}/{1}", `${index + 1}`, `${total}`))} ${formatPhase(pair.cold, pair.coldAlreadyWarm)}; ${formatPhase(pair.warm)}`;
 }
 
 interface BenchRequestOptions {
@@ -718,7 +723,7 @@ async function runBenchRequest(
 				firstTokenAt = now();
 			}
 			if (event.type === "error") {
-				return { ok: false, error: event.error.errorMessage ?? "request failed" };
+				return { ok: false, error: event.error.errorMessage ?? __ompTranslate("request failed") };
 			}
 			if (event.type === "done") {
 				message = event.message;
@@ -726,7 +731,7 @@ async function runBenchRequest(
 		}
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
-			return { ok: false, error: message.errorMessage ?? "request failed" };
+			return { ok: false, error: message.errorMessage ?? __ompTranslate("request failed") };
 		}
 		const rawDuration = message.duration ?? now() - startedAt;
 		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
@@ -742,7 +747,10 @@ async function runBenchRequest(
 		if (firstTokenAt === undefined && outputTokens === 0 && !hasVisibleFinalContent(message)) {
 			return {
 				ok: false,
-				error: `provider returned no output (0 tokens, empty stream; stop reason: ${message.stopReason ?? "unknown"})`,
+				error: __ompTranslate(
+					"provider returned no output (0 tokens, empty stream; stop reason: {0})",
+					`${message.stopReason ?? __ompTranslate("unknown")}`,
+				),
 			};
 		}
 		if (options.cacheCapture) options.cacheCapture.usage = captureUsage(message);
@@ -824,7 +832,7 @@ function formatMs(ms: number): string {
 
 /** One run's result line; `tagKind` labels the challenge (only informative when kinds are mixed). */
 function formatRunLine(result: BenchRunResult, index: number, total: number, opts: { tagKind: boolean }): string {
-	const prefix = chalk.dim(`run ${index + 1}/${total}`);
+	const prefix = chalk.dim(__ompTranslate("run {0}/{1}", `${index + 1}`, `${total}`));
 	const kind = opts.tagKind && result.challenge ? `${chalk.cyan(result.challenge.padEnd(10))} ` : "";
 	if (result.ok) {
 		// A prefill run emits a handful of tokens: its output rates are noise, the input rate is the result.
@@ -833,12 +841,16 @@ function formatRunLine(result: BenchRunResult, index: number, total: number, opt
 			result.challenge === "prefill"
 				? `${chalk.dim("prefill")} ${result.prefillTps.toFixed(0)}/s`
 				: `${chalk.dim("tok/s")} ${result.tokensPerSecond.toFixed(1)} ${chalk.dim("gen")} ${gen}`;
-		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${rates} ${chalk.dim("in")} ${formatNumber(result.inputTokens)} ${chalk.dim("out")} ${formatNumber(result.outputTokens)} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
+		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${rates} ${chalk.dim(__ompTranslate("in\u0004benchmark.metrics"))} ${formatNumber(result.inputTokens)} ${chalk.dim(__ompTranslate("out"))} ${formatNumber(result.outputTokens)} ${chalk.dim(__ompTranslate("total\u0004benchmark.metrics"))} ${formatMs(result.durationMs)}`;
 	}
 	return `  ${chalk.red("✗")} ${prefix} ${kind}${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
 }
 
-const PHASE_LABELS: Record<BenchPhase, string> = { single: "single-user", parallel: "parallel", prefill: "prefill" };
+const PHASE_LABELS: Record<BenchPhase, string> = {
+	single: __ompTranslate("single-user"),
+	parallel: __ompTranslate("parallel"),
+	prefill: __ompTranslate("prefill"),
+};
 
 /** Placeholder cell for a value the live footer has not measured yet. */
 const PENDING_CELL = "…";
@@ -861,8 +873,9 @@ interface BenchTableRow {
 
 function formatProgress(progress: BenchProgress, unit: "runs" | "pairs"): string {
 	const parts = [`${progress.completed}/${progress.total} ${unit}`];
-	if (progress.inFlight > 0) parts.push(`${progress.inFlight} in flight`);
-	if (progress.failed > 0) parts.push(chalk.red(`${progress.failed} failed`));
+	if (progress.inFlight > 0)
+		parts.push(__ompTranslate("{0} in flight\u0004benchmark.progress.in-flight", `${progress.inFlight}`));
+	if (progress.failed > 0) parts.push(chalk.red(__ompTranslate("{0} failed", `${progress.failed}`)));
 	return parts.join(chalk.dim(" · "));
 }
 
@@ -874,7 +887,7 @@ function formatRowStatus(row: BenchTableRow, spinner: string): string {
 			return `${chalk.yellow(spinner)} ${formatProgress(row.progress, "runs")}`;
 		case "done": {
 			const failed = row.report.results.filter(result => !result.ok).length;
-			return failed > 0 ? chalk.red(`(${failed} failed)`) : "";
+			return failed > 0 ? chalk.red(__ompTranslate("({0} failed)\u0004benchmark.result.failed", `${failed}`)) : "";
 		}
 	}
 }
@@ -901,10 +914,10 @@ interface BenchTableSpec {
 	rank(report: BenchModelReport): number | undefined;
 }
 
-const MODEL_COLUMN: BenchTableColumn = { header: "model", value: formatBenchModelLabel };
+const MODEL_COLUMN: BenchTableColumn = { header: __ompTranslate("model"), value: formatBenchModelLabel };
 
 const COST_COLUMN: BenchTableColumn = {
-	header: "cost/run",
+	header: __ompTranslate("cost/run"),
 	value: r => {
 		if (!r.stats) return undefined;
 		// Zero cost means the model is unpriced, not free.
@@ -1019,7 +1032,9 @@ function formatBenchTable(rows: readonly BenchTableRow[], spec: BenchTableSpec, 
 function assertCacheModeSupported(targets: BenchTarget[]): void {
 	if (targets.some(({ model }) => model.api === "openai-codex-responses")) {
 		throw new Error(
-			"--cache is not supported for openai-codex-responses because Codex WebSocket chaining cannot produce independent prompt-cache pairs",
+			__ompTranslate(
+				"--cache is not supported for openai-codex-responses because Codex WebSocket chaining cannot produce independent prompt-cache pairs",
+			),
 		);
 	}
 }
@@ -1031,19 +1046,23 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		command.flags.cachePrefixBytes !== undefined ||
 		command.flags.cachePairs !== undefined ||
 		command.flags.cacheConcurrency !== undefined;
-	if (!cacheMode && cacheFlagsUsed) throw new Error("Cache flags require --cache");
+	if (!cacheMode && cacheFlagsUsed) throw new Error(__ompTranslate("Cache flags require --cache"));
 	if (cacheMode && command.flags.runs !== undefined)
-		throw new Error("Use --cache-pairs instead of --runs with --cache");
-	if (cacheMode && command.flags.prompt !== undefined) throw new Error("--cache builds its own stable-prefix prompts");
-	if (cacheMode && command.flags.profile !== undefined) throw new Error("--profile cannot be combined with --cache");
+		throw new Error(__ompTranslate("Use --cache-pairs instead of --runs with --cache"));
+	if (cacheMode && command.flags.prompt !== undefined)
+		throw new Error(__ompTranslate("--cache builds its own stable-prefix prompts"));
+	if (cacheMode && command.flags.profile !== undefined)
+		throw new Error(__ompTranslate("--profile cannot be combined with --cache"));
 	if (cacheMode && (command.flags.par ?? 1) > 1) {
-		throw new Error("--par cannot parallelize cold/warm pairs; use --cache-concurrency instead");
+		throw new Error(__ompTranslate("--par cannot parallelize cold/warm pairs; use --cache-concurrency instead"));
 	}
 	const detailed = command.flags.detailed === true;
-	if (detailed && cacheMode) throw new Error("--detailed cannot be combined with --cache");
+	if (detailed && cacheMode) throw new Error(__ompTranslate("--detailed cannot be combined with --cache"));
 	if (detailed && command.flags.profile !== undefined) {
 		throw new Error(
-			"--profile cannot be combined with --detailed, which runs single-user, parallel, and prefill phases",
+			__ompTranslate(
+				"--profile cannot be combined with --detailed, which runs single-user, parallel, and prefill phases",
+			),
 		);
 	}
 	const profileFlag = command.flags.profile;
@@ -1054,17 +1073,21 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		profileFlag !== "prefill" &&
 		profileFlag !== "generation"
 	) {
-		throw new Error(`Unknown --profile "${profileFlag}" (expected chat, prefill, generation, or mix)`);
+		throw new Error(
+			__ompTranslate('Unknown --profile "{0}" (expected chat, prefill, generation, or mix)', `${profileFlag}`),
+		);
 	}
 	const profile: BenchProfile = profileFlag ?? "chat";
 	if (!cacheMode && command.flags.prompt !== undefined && profile !== "chat" && profile !== "generation") {
-		throw new Error("--prompt requires --profile chat or generation");
+		throw new Error(__ompTranslate("--prompt requires --profile chat or generation"));
 	}
 	if (
 		command.flags.prefillBytes !== undefined &&
 		(cacheMode || (!detailed && profile !== "mix" && profile !== "prefill"))
 	) {
-		throw new Error("--prefill-bytes requires prefill challenges (--detailed, or --profile mix or prefill)");
+		throw new Error(
+			__ompTranslate("--prefill-bytes requires prefill challenges (--detailed, or --profile mix or prefill)"),
+		);
 	}
 
 	const cachePairs = cacheMode
@@ -1085,7 +1108,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const cacheMaxTokens = cacheMode ? (maxTokensOverride ?? DEFAULT_CACHE_MAX_TOKENS) : undefined;
 	const par =
 		command.flags.par !== undefined ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
-	if (detailed && par < 2) throw new Error("--detailed needs --par of at least 2 for its parallel phase");
+	if (detailed && par < 2)
+		throw new Error(__ompTranslate("--detailed needs --par of at least 2 for its parallel phase"));
 	const promptOverride = command.flags.prompt?.trim() || undefined;
 	const explicitPrefillBytes =
 		command.flags.prefillBytes !== undefined
@@ -1115,7 +1139,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const now = deps.now ?? (() => performance.now());
 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
 	if (command.models.length === 0) {
-		throw new Error("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`");
+		throw new Error(__ompTranslate("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`"));
 	}
 	// One row per model, filled as runs finish. Outside cache mode the comparison
 	// table doubles as the live footer; cache mode shows a one-line status.
@@ -1164,7 +1188,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					(runtime.settings ? cfgTierAnthropic.get(runtime.settings) : undefined) ?? "none",
 					(runtime.settings ? cfgTierGoogle.get(runtime.settings) : undefined) ?? "none",
 				);
-		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
+		if (!json && flagTier) print(chalk.dim(__ompTranslate("service tier: {0}", `${flagTier}`)));
 		const total = cacheMode ? cachePairs! : runs;
 		rows = targets.map(({ selector, model, thinking }): BenchTableRow => ({
 			report: buildModelReport(selector, model, thinking, []),
@@ -1190,7 +1214,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			if (!preflightKey) {
 				const failure: BenchRunFailure = {
 					ok: false,
-					error: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
+					error: __ompTranslate(
+						'No credentials for provider "{0}". Run `omp` and use /login, or set the provider API key.',
+						`${model.provider}`,
+					),
 				};
 				results.push(failure);
 				if (!json) print(formatRunLine(failure, 0, runs, { tagKind }));
@@ -1301,7 +1328,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 				const { phase } = step;
 				if (!json && phase) {
 					print(
-						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(`· ${step.concurrency} concurrent · ${step.runs} runs`)}`,
+						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(__ompTranslate("· {0} concurrent · {1} runs", `${step.concurrency}`, `${step.runs}`))}`,
 					);
 				}
 				const finished: BenchRunResult[] = [];
@@ -1357,7 +1384,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 				const phaseReport = phase && phase !== "prefill" ? phases[phase] : undefined;
 				if (!json && phaseReport) {
 					print(
-						`    ${chalk.dim("aggregate")} ${phaseReport.aggregateTps.toFixed(1)} tok/s ${chalk.dim(`over ${formatMs(phaseReport.wallMs)} wall`)}`,
+						`    ${chalk.dim(__ompTranslate("aggregate"))} ${phaseReport.aggregateTps.toFixed(1)} tok/s ${chalk.dim(__ompTranslate("over {0} wall", `${formatMs(phaseReport.wallMs)}`))}`,
 					);
 				}
 				offset += step.runs;

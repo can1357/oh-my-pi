@@ -9,6 +9,8 @@
  * details first and fall back to args. When neither is present yet (a running
  * card), the device name supplies the default action.
  */
+import { t as ___ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 import type { ReactNode } from "react";
 import type { Tone } from "../parts";
 import { Badge, Badges, Kv, KvGrid, Note, ResultText } from "../parts";
@@ -18,11 +20,27 @@ import { detailsRecord, isRecord, normalizeWs, str, truncate } from "../util";
 type ResolveKind = "apply" | "discard" | "propose";
 
 /** Short badge word (summary) and full transition badge (body) per card kind. */
-const KIND_WORD: Record<ResolveKind, string> = { apply: "apply", discard: "discard", propose: "propose" };
+const KIND_WORD: Record<ResolveKind, string> = {
+	get apply() {
+		return __ompTranslate("apply");
+	},
+	get discard() {
+		return __ompTranslate("discard");
+	},
+	get propose() {
+		return __ompTranslate("propose");
+	},
+};
 const KIND_TRANSITION: Record<ResolveKind, string> = {
-	apply: "proposed → resolved",
-	discard: "proposed → rejected",
-	propose: "plan proposed",
+	get apply() {
+		return __ompTranslate("proposed → resolved");
+	},
+	get discard() {
+		return __ompTranslate("proposed → rejected");
+	},
+	get propose() {
+		return __ompTranslate("plan proposed");
+	},
 };
 const KIND_TONE: Record<ResolveKind, Tone> = { apply: "ok", discard: "warn", propose: "accent" };
 
@@ -119,7 +137,7 @@ function Body(props: ToolRenderProps): ReactNode {
 			{card.kind !== "propose" && card.reason && <Note>{card.reason}</Note>}
 			{card.kind === "propose" && card.planFilePath && (
 				<KvGrid>
-					<Kv k="plan">{card.planFilePath}</Kv>
+					<Kv k={___ompTranslate("plan")}>{card.planFilePath}</Kv>
 				</KvGrid>
 			)}
 			{extraRows.length > 0 && <KvGrid>{extraRows}</KvGrid>}

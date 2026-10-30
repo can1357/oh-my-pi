@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n-browser";
 /** Small pure formatting helpers shared across collab-web components. */
 
 /** HTML-escape text destined for `dangerouslySetInnerHTML`. */
@@ -33,25 +34,25 @@ export function fmtDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms < 0) return "0ms";
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	const s = ms / 1000;
-	if (s < 60) return `${s.toFixed(1)}s`;
+	if (s < 60) return __ompTranslate("{0}s", `${s.toFixed(1)}`);
 	const min = Math.floor(s / 60);
-	if (min < 60) return `${min}m${String(Math.round(s % 60)).padStart(2, "0")}s`;
+	if (min < 60) return __ompTranslate("{0}m{1}s", `${min}`, `${String(Math.round(s % 60)).padStart(2, "0")}`);
 	const h = Math.floor(min / 60);
-	return `${h}h${String(min % 60).padStart(2, "0")}m`;
+	return __ompTranslate("{0}h{1}m", `${h}`, `${String(min % 60).padStart(2, "0")}`);
 }
 
 /** "now", "42s ago", "5m ago", "3h ago", "2d ago". Input: epoch ms. */
 export function relTime(tsMs: number): string {
 	if (!Number.isFinite(tsMs)) return "";
 	const delta = Date.now() - tsMs;
-	if (delta < 10_000) return "now";
+	if (delta < 10_000) return __ompTranslate("now");
 	const s = Math.floor(delta / 1000);
-	if (s < 60) return `${s}s ago`;
+	if (s < 60) return __ompTranslate("{0}s ago", `${s}`);
 	const min = Math.floor(s / 60);
-	if (min < 60) return `${min}m ago`;
+	if (min < 60) return __ompTranslate("{0}m ago", `${min}`);
 	const h = Math.floor(min / 60);
-	if (h < 24) return `${h}h ago`;
-	return `${Math.floor(h / 24)}d ago`;
+	if (h < 24) return __ompTranslate("{0}h ago", `${h}`);
+	return __ompTranslate("{0}d ago", `${Math.floor(h / 24)}`);
 }
 
 /** "73%" from a 0–100 percent; em dash for null/non-finite. */

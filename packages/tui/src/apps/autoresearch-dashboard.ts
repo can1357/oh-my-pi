@@ -1,3 +1,4 @@
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
@@ -123,8 +124,8 @@ export function createDashboardController(): DashboardController {
 						card({ role: "omp.widget.autoresearch", head: describeTitle(runtime) }, [
 							...describeDashboard(runtime, 8, cx.supports("chart")),
 							hintsRow([
-								{ keys: ["ctrl+x"], label: "collapse" },
-								{ keys: ["ctrl+shift+x"], label: "overlay" },
+								{ keys: ["ctrl+x"], label: __ompTranslate("collapse") },
+								{ keys: ["ctrl+shift+x"], label: __ompTranslate("overlay") },
 							]),
 						]),
 					);
@@ -176,7 +177,9 @@ export function createDashboardController(): DashboardController {
 								],
 								() => {
 									const children = describeSheet(runtime, chart);
-									children.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
+									children.push(
+										actionBar([null, actionButton(__ompTranslate("Close"), "close", { keys: "escape" })]),
+									);
 									return { ...col(children, { gap: "md", role: "omp.app.autoresearch" }), scroll };
 								},
 							);
@@ -257,7 +260,10 @@ function describeTitle(runtime: AutoresearchDashboardRuntime): TspSpan[] {
 /** Widget shown while the very first run is in flight. */
 function describeRunningOnly(runtime: AutoresearchDashboardRuntime, state: ExperimentState): NativeNode {
 	const children: NativeNode[] = [
-		node("spinner", { label: [span("autoresearch", "accent"), span(" running", "warning")], tone: "warning" }),
+		node("spinner", {
+			label: [span("autoresearch", "accent"), span(__ompTranslate(" running"), "warning")],
+			tone: "warning",
+		}),
 	];
 	if (runtime.runningExperiment) children.push(elapsed(Date.now() - runtime.runningExperiment.startedAt));
 	const details: TspSpan[] = [];
@@ -270,12 +276,12 @@ function describeRunningOnly(runtime: AutoresearchDashboardRuntime, state: Exper
 /** One-line collapsed widget: run counts, best/baseline, confidence and mode. */
 function describeCollapsed(runtime: AutoresearchDashboardRuntime, state: ExperimentState): NativeNode {
 	const role = "omp.widget.autoresearch";
-	const hint = hintsRow([{ keys: ["ctrl+x"], label: "expand" }]);
+	const hint = hintsRow([{ keys: ["ctrl+x"], label: __ompTranslate("expand") }]);
 	if (runtime.lastRunSummary) {
 		const spans = [
 			span("autoresearch", "accent"),
-			span(` pending run #${runtime.lastRunSummary.runNumber}`, "warning"),
-			span(runtime.lastRunSummary.passed ? " pass" : " fail", "dim"),
+			span(__ompTranslate(" pending run #{0}", `${runtime.lastRunSummary.runNumber}`), "warning"),
+			span(runtime.lastRunSummary.passed ? __ompTranslate(" pass") : __ompTranslate(" fail"), "dim"),
 		];
 		if (runtime.lastRunSummary.parsedPrimary !== null) {
 			spans.push(
@@ -285,17 +291,20 @@ function describeCollapsed(runtime: AutoresearchDashboardRuntime, state: Experim
 				),
 			);
 		}
-		spans.push(span(" | log_experiment required", "warning"));
-		if (!runtime.autoresearchMode) spans.push(span(" | mode off", "dim"));
+		spans.push(span(__ompTranslate(" | log_experiment required"), "warning"));
+		if (!runtime.autoresearchMode) spans.push(span(__ompTranslate(" | mode off"), "dim"));
 		return text(spans, { truncate: "end", role });
 	}
 	if (state.results.length === 0) {
 		const spans = [
 			span("autoresearch", "accent"),
-			span(` ${runtime.autoresearchMode ? "baseline pending" : "mode off"}`, "warning"),
+			span(
+				` ${runtime.autoresearchMode ? __ompTranslate("baseline pending") : __ompTranslate("mode off")}`,
+				"warning",
+			),
 		];
 		if (state.name) spans.push(span(` | ${replaceTabs(state.name)}`, "dim"));
-		if (runtime.autoresearchMode) spans.push(span(" | run the baseline", "dim"));
+		if (runtime.autoresearchMode) spans.push(span(__ompTranslate(" | run the baseline"), "dim"));
 		return text(spans, { truncate: "end", role });
 	}
 	const current = currentResults(state.results, state.currentSegment);
@@ -304,28 +313,34 @@ function describeCollapsed(runtime: AutoresearchDashboardRuntime, state: Experim
 	const archivedRuns = Math.max(0, state.results.length - current.length);
 	const spans = [
 		span("autoresearch", "accent"),
-		span(` ${current.length} runs`, "muted"),
-		span(` ${counts.keep} kept`, "success"),
+		span(__ompTranslate(" {0} runs", `${current.length}`), "muted"),
+		span(__ompTranslate(" {0} kept", `${counts.keep}`), "success"),
 	];
-	if (archivedRuns > 0) spans.push(span(` +${archivedRuns} archived`, "dim"));
-	if (counts.crash > 0) spans.push(span(` ${counts.crash} crash`, "error"));
-	if (counts.checks_failed > 0) spans.push(span(` ${counts.checks_failed} checks_failed`, "error"));
+	if (archivedRuns > 0) spans.push(span(__ompTranslate(" +{0} archived", `${archivedRuns}`), "dim"));
+	if (counts.crash > 0) spans.push(span(__ompTranslate(" {0} crash", `${counts.crash}`), "error"));
+	if (counts.checks_failed > 0)
+		spans.push(span(__ompTranslate(" {0} checks_failed", `${counts.checks_failed}`), "error"));
 	spans.push(span(" | ", "dim"));
 	if (best && state.bestMetric !== null && best.result.metric !== state.bestMetric) {
-		spans.push(span(`best ${formatNum(best.result.metric, state.metricUnit)}`, "warning"));
-		spans.push(span(` baseline ${formatNum(state.bestMetric, state.metricUnit)}`, "dim"));
+		spans.push(span(__ompTranslate("best {0}", `${formatNum(best.result.metric, state.metricUnit)}`), "warning"));
+		spans.push(span(__ompTranslate(" baseline {0}", `${formatNum(state.bestMetric, state.metricUnit)}`), "dim"));
 	} else if (state.bestMetric !== null) {
-		spans.push(span(`baseline ${formatNum(state.bestMetric, state.metricUnit)}`, "warning"));
+		spans.push(span(__ompTranslate("baseline {0}", `${formatNum(state.bestMetric, state.metricUnit)}`), "warning"));
 	} else {
-		spans.push(span("no kept runs yet", "warning"));
+		spans.push(span(__ompTranslate("no kept runs yet"), "warning"));
 	}
 	if (state.confidence !== null) {
 		spans.push(span(" | ", "dim"));
-		spans.push(span(`conf ${state.confidence.toFixed(1)}x`, confidenceToken(state.confidence)));
+		spans.push(
+			span(__ompTranslate("conf {0}x", `${state.confidence.toFixed(1)}`), confidenceToken(state.confidence)),
+		);
 	}
 	const children: NativeNode[] = [text(spans, { truncate: "end" })];
 	if (runtime.runningExperiment) {
-		children.push(text([span("| running", "dim")]), elapsed(Date.now() - runtime.runningExperiment.startedAt));
+		children.push(
+			text([span(__ompTranslate("| running"), "dim")]),
+			elapsed(Date.now() - runtime.runningExperiment.startedAt),
+		);
 	} else if (!runtime.autoresearchMode) {
 		children.push(text([span(`| ${renderModeStatus(runtime, state)}`, "dim")]));
 	}
@@ -343,14 +358,17 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 		const pending = runtime.lastRunSummary;
 		if (pending) {
 			const items: { k: string; v: TspText }[] = [
-				{ k: "Pending run", v: `#${pending.runNumber}` },
+				{ k: __ompTranslate("Pending run"), v: `#${pending.runNumber}` },
 				{
-					k: "Result",
-					v: `${pending.passed ? "passed" : "failed"}${pending.parsedPrimary !== null ? `  ${state.metricName} ${formatNum(pending.parsedPrimary, state.metricUnit)}` : ""}`,
+					k: __ompTranslate("Result"),
+					v: `${pending.passed ? __ompTranslate("passed") : __ompTranslate("failed")}${pending.parsedPrimary !== null ? `  ${state.metricName} ${formatNum(pending.parsedPrimary, state.metricUnit)}` : ""}`,
 				},
-				{ k: "Next action", v: "finish log_experiment before starting another run." },
+				{
+					k: __ompTranslate("Next action"),
+					v: __ompTranslate("finish log_experiment before starting another run."),
+				},
 			];
-			if (!runtime.autoresearchMode) items.push({ k: "Mode", v: "off" });
+			if (!runtime.autoresearchMode) items.push({ k: "Mode", v: __ompTranslate("off") });
 			return [node("kv", { items, layout: "grid" }, undefined, "summary")];
 		}
 		if (runtime.autoresearchMode) {
@@ -359,9 +377,9 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 					"kv",
 					{
 						items: [
-							{ k: "Current segment", v: "0 runs" },
-							{ k: "Baseline", v: "pending" },
-							{ k: "Next action", v: "run and log the baseline experiment." },
+							{ k: __ompTranslate("Current segment"), v: __ompTranslate("0 runs") },
+							{ k: __ompTranslate("Baseline"), v: __ompTranslate("pending") },
+							{ k: __ompTranslate("Next action"), v: __ompTranslate("run and log the baseline experiment.") },
 						],
 						layout: "grid",
 					},
@@ -370,7 +388,7 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 				),
 			];
 		}
-		return [keyed(text([span("No experiments logged yet.", "dim")]), "summary")];
+		return [keyed(text([span(__ompTranslate("No experiments logged yet."), "dim")]), "summary")];
 	}
 
 	const current = currentResults(state.results, state.currentSegment);
@@ -381,29 +399,37 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 	const best = findBestResult(state);
 	const items: { k: string; v: TspText }[] = [
 		{
-			k: "Current segment",
+			k: __ompTranslate("Current segment"),
 			v: [
-				span(`${current.length} runs  `),
-				span(`${counts.keep} kept`, "success"),
-				span(`  ${counts.discard} discarded`, "warning"),
-				span(`  ${counts.crash} crashed`, counts.crash > 0 ? "error" : undefined),
-				span(`  ${counts.checks_failed} checks_failed`, counts.checks_failed > 0 ? "error" : undefined),
+				span(__ompTranslate("{0} runs  ", `${current.length}`)),
+				span(__ompTranslate("{0} kept", `${counts.keep}`), "success"),
+				span(__ompTranslate("  {0} discarded", `${counts.discard}`), "warning"),
+				span(__ompTranslate("  {0} crashed", `${counts.crash}`), counts.crash > 0 ? "error" : undefined),
+				span(
+					__ompTranslate("  {0} checks_failed", `${counts.checks_failed}`),
+					counts.checks_failed > 0 ? "error" : undefined,
+				),
 			],
 		},
 		{
-			k: "Baseline",
+			k: __ompTranslate("Baseline"),
 			v: `${formatNum(baseline, state.metricUnit)}${baselineRunNumber ? ` (#${baselineRunNumber})` : ""}`,
 		},
 	];
 	if (state.results.length > current.length) {
-		items.push({ k: "Archived", v: `${state.results.length - current.length} runs from earlier segments` });
+		items.push({
+			k: __ompTranslate("Archived"),
+			v: __ompTranslate("{0} runs from earlier segments", `${state.results.length - current.length}`),
+		});
 	}
 	if (runtime.lastRunSummary) {
 		items.push({
-			k: "Pending run",
+			k: __ompTranslate("Pending run"),
 			v: [
-				span(`#${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"})`),
-				span(" — log_experiment required", "warning"),
+				span(
+					`#${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? __ompTranslate("passed") : __ompTranslate("failed")})`,
+				),
+				span(__ompTranslate(" — log_experiment required"), "warning"),
 			],
 		});
 	}
@@ -418,9 +444,11 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 			value.push(span(` ${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`, "num"));
 		}
 		if (state.confidence !== null) {
-			value.push(span(`  conf ${state.confidence.toFixed(1)}x`, confidenceToken(state.confidence)));
+			value.push(
+				span(__ompTranslate("  conf {0}x", `${state.confidence.toFixed(1)}`), confidenceToken(state.confidence)),
+			);
 		}
-		items.push({ k: "Best", v: value });
+		items.push({ k: __ompTranslate("Best"), v: value });
 		const details = state.secondaryMetrics
 			.map(metric =>
 				renderSecondarySummary(
@@ -431,12 +459,12 @@ function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: numbe
 				),
 			)
 			.filter((detail): detail is string => Boolean(detail));
-		if (details.length > 0) items.push({ k: "Secondary", v: details.join("  ") });
+		if (details.length > 0) items.push({ k: __ompTranslate("Secondary"), v: details.join("  ") });
 	}
 
 	const cols: TspTableColumn[] = [
 		{ id: "run", head: [span("#", "muted")], align: "end", priority: 3 },
-		{ id: "commit", head: [span("commit", "muted")], truncate: "end", priority: 2 },
+		{ id: "commit", head: [span(__ompTranslate("commit"), "muted")], truncate: "end", priority: 2 },
 		{ id: "metric", head: [span(state.metricName, "warning")], align: "end", priority: 5 },
 		...state.secondaryMetrics.map((metric, index): TspTableColumn => ({
 			id: `secondary${index}`,
@@ -514,10 +542,10 @@ function describeSheetHead(runtime: AutoresearchDashboardRuntime): TspSpan[] {
 }
 
 const STATUS_LABEL: Record<ExperimentResult["status"], string> = {
-	keep: "kept",
-	discard: "discarded",
-	crash: "crashed",
-	checks_failed: "checks failed",
+	keep: __ompTranslate("kept"),
+	discard: __ompTranslate("discarded"),
+	crash: __ompTranslate("crashed"),
+	checks_failed: __ompTranslate("checks failed"),
 };
 
 const STATUS_TOKEN: Record<ExperimentResult["status"], string> = {
@@ -555,13 +583,13 @@ function modeLabel(runtime: AutoresearchDashboardRuntime): [label: string, token
 	const status = renderModeStatus(runtime, runtime.state);
 	switch (status) {
 		case "mode on":
-			return ["Mode on", "success"];
+			return [__ompTranslate("Mode on"), "success"];
 		case "baseline pending":
-			return ["Baseline pending", "warning"];
+			return [__ompTranslate("Baseline pending"), "warning"];
 		case "segment complete":
-			return ["Segment complete", "muted"];
+			return [__ompTranslate("Segment complete"), "muted"];
 		default:
-			return ["Mode off", "muted"];
+			return [__ompTranslate("Mode off"), "muted"];
 	}
 }
 
@@ -614,8 +642,9 @@ function describeIntro(runtime: AutoresearchDashboardRuntime, segmented: boolean
 		span(state.metricName, "mono"),
 		span(`, ${state.bestDirection} is better`),
 	];
-	if (segmented) meta.push(span("  ·  "), span(`Segment ${state.currentSegment + 1}`));
-	if (state.maxExperiments !== null) meta.push(span("  ·  "), span(`${state.maxExperiments} runs per segment`));
+	if (segmented) meta.push(span("  ·  "), span(__ompTranslate("Segment {0}", `${state.currentSegment + 1}`)));
+	if (state.maxExperiments !== null)
+		meta.push(span("  ·  "), span(__ompTranslate("{0} runs per segment", `${state.maxExperiments}`)));
 	if (state.branch) meta.push(span("  ·  "), span(replaceTabs(state.branch), "mono"));
 	children.push(keyed(text(meta, { truncate: "end", role: "omp.autoresearch.meta" }), "meta"));
 	return keyed(col(children, { gap: "xs", role: "omp.autoresearch.intro" }), "intro");
@@ -629,7 +658,7 @@ function describeNow(runtime: AutoresearchDashboardRuntime): NativeNode | undefi
 		return keyed(
 			row(
 				[
-					node("spinner", { label: [span("Running")], tone: "pending" }),
+					node("spinner", { label: [span(__ompTranslate("Running"))], tone: "pending" }),
 					elapsed(Date.now() - running.startedAt),
 					text([span(replaceTabs(running.command), "mono")], {
 						truncate: "end",
@@ -643,7 +672,16 @@ function describeNow(runtime: AutoresearchDashboardRuntime): NativeNode | undefi
 	}
 	const pending = runtime.lastRunSummary;
 	if (!pending) return undefined;
-	const result: TspSpan[] = [span(`Run #${pending.runNumber} ${pending.passed ? "passed" : "failed"}`, "strong")];
+	const result: TspSpan[] = [
+		span(
+			__ompTranslate(
+				"Run #{0} {1}",
+				`${pending.runNumber}`,
+				`${pending.passed ? __ompTranslate("passed") : __ompTranslate("failed")}`,
+			),
+			"strong",
+		),
+	];
 	if (pending.parsedPrimary !== null) {
 		result.push(
 			span(`  ·  ${state.metricName} `),
@@ -654,10 +692,17 @@ function describeNow(runtime: AutoresearchDashboardRuntime): NativeNode | undefi
 		row(
 			[
 				text(result, { truncate: "end" }),
-				text([span("Log it with "), span("log_experiment", "mono"), span(" before the next run")], {
-					truncate: "end",
-					role: "omp.autoresearch.next",
-				}),
+				text(
+					[
+						span(__ompTranslate("Log it with ")),
+						span("log_experiment", "mono"),
+						span(__ompTranslate(" before the next run")),
+					],
+					{
+						truncate: "end",
+						role: "omp.autoresearch.next",
+					},
+				),
 			],
 			{ gap: "md", align: "center", role: "omp.autoresearch.pending", tone: "warning" },
 		),
@@ -668,15 +713,26 @@ function describeNow(runtime: AutoresearchDashboardRuntime): NativeNode | undefi
 /** No runs in this segment yet: what the dashboard is waiting for. */
 function describeEmpty(runtime: AutoresearchDashboardRuntime, archived: number): NativeNode {
 	const [title, detail] = runtime.lastRunSummary
-		? ["Waiting for the first log", "Log the finished run to set this segment's baseline."]
+		? [
+				__ompTranslate("Waiting for the first log"),
+				__ompTranslate("Log the finished run to set this segment's baseline."),
+			]
 		: runtime.runningExperiment
-			? ["Measuring the baseline", "Every later run is compared with this first one."]
+			? [
+					__ompTranslate("Measuring the baseline"),
+					__ompTranslate("Every later run is compared with this first one."),
+				]
 			: runtime.autoresearchMode
 				? [
-						"No baseline yet",
-						"Run the benchmark once and log it as the baseline. Every later run is compared with it.",
+						__ompTranslate("No baseline yet"),
+						__ompTranslate(
+							"Run the benchmark once and log it as the baseline. Every later run is compared with it.",
+						),
 					]
-				: ["No experiments logged yet", "Turn autoresearch mode on to start measuring."];
+				: [
+						__ompTranslate("No experiments logged yet"),
+						__ompTranslate("Turn autoresearch mode on to start measuring."),
+					];
 	const children: NativeNode[] = [
 		text([span(title)], { role: "omp.autoresearch.empty.title" }),
 		text([span(detail)], { wrap: "word", role: "omp.autoresearch.empty.detail" }),
@@ -729,32 +785,45 @@ function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly 
 		const change = percentChange(best.result.metric, baseline);
 		const better = baseline !== null && isBetter(best.result.metric, baseline, state.bestDirection);
 		tiles.push(
-			stat("best", "Best", metricSpans(best.result.metric, unit, digits), [
+			stat("best", __ompTranslate("Best"), metricSpans(best.result.metric, unit, digits), [
 				statDetail(
 					change
-						? [span(change, better ? "success" : "error"), span(` vs baseline · run #${run}`)]
-						: [span(`The baseline · run #${run}`)],
+						? [
+								span(change, better ? "success" : "error"),
+								span(__ompTranslate(" vs baseline · run #{0}", `${run}`)),
+							]
+						: [span(__ompTranslate("The baseline · run #{0}", `${run}`))],
 				),
 			]),
 		);
 	} else {
-		tiles.push(stat("best", "Best", [span("—", "muted")], [statDetail([span("No kept run yet")])]));
+		tiles.push(
+			stat(
+				"best",
+				__ompTranslate("Best"),
+				[span("—", "muted")],
+				[statDetail([span(__ompTranslate("No kept run yet"))])],
+			),
+		);
 	}
 
 	const baselineDetail: TspSpan[] = [];
-	if (baselineRun !== null) baselineDetail.push(span(`Run #${baselineRun}`));
+	if (baselineRun !== null) baselineDetail.push(span(__ompTranslate("Run #{0}", `${baselineRun}`)));
 	if (baselineResult?.commit) baselineDetail.push(span(" · "), span(baselineResult.commit.slice(0, 7), "mono"));
 	tiles.push(
-		stat("baseline", "Baseline", baseline === null ? [span("—", "muted")] : metricSpans(baseline, unit, digits), [
-			statDetail(baselineDetail.length > 0 ? baselineDetail : [span("Not logged yet")]),
-		]),
+		stat(
+			"baseline",
+			__ompTranslate("Baseline"),
+			baseline === null ? [span("—", "muted")] : metricSpans(baseline, unit, digits),
+			[statDetail(baselineDetail.length > 0 ? baselineDetail : [span(__ompTranslate("Not logged yet"))])],
+		),
 	);
 
 	const confidence = state.confidence;
 	tiles.push(
 		stat(
 			"confidence",
-			"Confidence",
+			__ompTranslate("Confidence"),
 			confidence === null
 				? [span("—", "muted")]
 				: [span(confidence.toFixed(1), confidenceToken(confidence)), span("×", "muted")],
@@ -762,12 +831,12 @@ function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly 
 				statDetail([
 					span(
 						confidence === null
-							? "Needs three runs and a gain"
+							? __ompTranslate("Needs three runs and a gain")
 							: confidence >= 2
-								? "Gain is clear of run noise"
+								? __ompTranslate("Gain is clear of run noise")
 								: confidence >= 1
-									? "Gain is near run noise"
-									: "Gain is within run noise",
+									? __ompTranslate("Gain is near run noise")
+									: __ompTranslate("Gain is within run noise"),
 					),
 				]),
 			],
@@ -776,12 +845,16 @@ function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly 
 
 	const total = Math.max(state.maxExperiments ?? 0, current.length);
 	const failed = counts.crash + counts.checks_failed;
-	const tally: TspSpan[] = [span(`${counts.keep} kept · ${counts.discard} discarded`)];
-	if (failed > 0) tally.push(span(" · "), span(`${failed} failed`, "error"));
+	const tally: TspSpan[] = [span(__ompTranslate("{0} kept · {1} discarded", `${counts.keep}`, `${counts.discard}`))];
+	if (failed > 0)
+		tally.push(
+			span(" · "),
+			span(__ompTranslate("{0} failed\u0004research.experiments.failed", `${failed}`), "error"),
+		);
 	tiles.push(
 		stat(
 			"runs",
-			"Runs",
+			__ompTranslate("Runs"),
 			state.maxExperiments !== null
 				? [span(String(current.length)), span(` / ${state.maxExperiments}`, "muted")]
 				: [span(String(current.length))],
@@ -789,12 +862,20 @@ function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly 
 				node("meter", {
 					value: current.length / total,
 					parts: [
-						{ value: counts.keep / total, token: "success", label: `${counts.keep} kept` },
-						{ value: counts.discard / total, token: "muted", label: `${counts.discard} discarded` },
+						{ value: counts.keep / total, token: "success", label: __ompTranslate("{0} kept", `${counts.keep}`) },
+						{
+							value: counts.discard / total,
+							token: "muted",
+							label: __ompTranslate("{0} discarded", `${counts.discard}`),
+						},
 						{
 							value: failed / total,
 							token: "error",
-							label: `${counts.crash} crashed · ${counts.checks_failed} checks failed`,
+							label: __ompTranslate(
+								"{0} crashed · {1} checks failed",
+								`${counts.crash}`,
+								`${counts.checks_failed}`,
+							),
 						},
 					],
 					size: "sm",
@@ -812,7 +893,7 @@ function describeStats(runtime: AutoresearchDashboardRuntime, current: readonly 
 		for (const metric of state.secondaryMetrics) {
 			const value = best.result.metrics[metric.name];
 			if (value === undefined) continue;
-			spans.push(span(spans.length === 0 ? "At best  " : "   ·   "));
+			spans.push(span(spans.length === 0 ? __ompTranslate("At best  ") : "   ·   "));
 			spans.push(
 				span(`${metric.name} `, "mono muted"),
 				...metricSpans(value, metric.unit, fractionDigits([value]), "mono"),
@@ -877,7 +958,7 @@ function describeRuns(
 	);
 	const cols: TspTableColumn[] = [
 		{ id: "run", head: "#", align: "end", priority: 3 },
-		{ id: "status", head: "Outcome", priority: 4 },
+		{ id: "status", head: __ompTranslate("Outcome"), priority: 4 },
 		{ id: "metric", head: head(state.metricName, state.metricUnit), align: "end", priority: 5 },
 		{ id: "change", head: "vs baseline", align: "end", priority: 4 },
 		...state.secondaryMetrics.map((metric, index): TspTableColumn => ({
@@ -886,8 +967,8 @@ function describeRuns(
 			align: "end",
 			priority: 1,
 		})),
-		{ id: "commit", head: "Commit", priority: 2 },
-		{ id: "description", head: "Change", truncate: "end", grow: 1, priority: 3 },
+		{ id: "commit", head: __ompTranslate("Commit"), priority: 2 },
+		{ id: "description", head: __ompTranslate("Change"), truncate: "end", grow: 1, priority: 3 },
 	];
 	const rows = indexed
 		.slice()
@@ -1069,7 +1150,7 @@ export function renderDashboardLines(
 				truncateToWidth("Next action: run and log the baseline experiment.", width),
 			];
 		}
-		return [theme.fg("dim", "No experiments logged yet.")];
+		return [theme.fg("dim", __ompTranslate("No experiments logged yet."))];
 	}
 
 	const current = currentResults(state.results, state.currentSegment);

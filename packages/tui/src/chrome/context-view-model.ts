@@ -1,4 +1,5 @@
 /** Context snapshot shapes shared by the session snapshot builder and the context viewer. */
+import { t as __ompTranslate } from "@oh-my-pi/pi-utils/i18n";
 import type { ContextBreakdown } from "../status-line/context-usage";
 
 interface ContextCategoryDescriptor {
@@ -13,16 +14,20 @@ interface ContextCategoryDescriptor {
 /** Context categories in display order. */
 export const CONTEXT_CATEGORIES = [
 	// The Overview weight excludes the Skills listing; content views keep complete system blocks.
-	{ id: "system-prompt", label: "System Prompt", overviewLabel: "System Prompt (excluding Skills)" },
+	{
+		id: "system-prompt",
+		label: __ompTranslate("System Prompt"),
+		overviewLabel: __ompTranslate("System Prompt (excluding Skills)"),
+	},
 	// An estimate of the prompt's skill listing, without entries of its own.
-	{ id: "skills", label: "Skills", openable: false },
-	{ id: "built-in-tools", label: "Built-in Tools" },
-	{ id: "custom-tools", label: "Custom Tools" },
-	{ id: "user-messages", label: "User / Developer Messages" },
-	{ id: "assistant-messages", label: "Assistant Messages" },
-	{ id: "assistant-thinking", label: "Assistant Thinking" },
-	{ id: "tool-calls", label: "Tool Calls" },
-	{ id: "tool-output", label: "Tool Output" },
+	{ id: "skills", label: __ompTranslate("Skills"), openable: false },
+	{ id: "built-in-tools", label: __ompTranslate("Built-in Tools") },
+	{ id: "custom-tools", label: __ompTranslate("Custom Tools") },
+	{ id: "user-messages", label: __ompTranslate("User / Developer Messages") },
+	{ id: "assistant-messages", label: __ompTranslate("Assistant Messages") },
+	{ id: "assistant-thinking", label: __ompTranslate("Assistant Thinking") },
+	{ id: "tool-calls", label: __ompTranslate("Tool Calls") },
+	{ id: "tool-output", label: __ompTranslate("Tool Output") },
 ] as const satisfies readonly ContextCategoryDescriptor[];
 
 export type ContextCategoryId = (typeof CONTEXT_CATEGORIES)[number]["id"];
