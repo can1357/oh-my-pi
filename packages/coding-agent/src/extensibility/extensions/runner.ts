@@ -597,8 +597,9 @@ export class ExtensionRunner {
 	 * whole session (issue #5664). Handles are `unref`'d and every outstanding
 	 * timer is cleared on session teardown via {@link clearManagedTimers}.
 	 */
-	#managedTimers = new ManagedTimers((event, error, stack) =>
-		this.emitError({ extensionPath: "<timer>", event, error, stack }),
+	#managedTimers = new ManagedTimers(
+		(event, error, stack) => this.emitError({ extensionPath: "<timer>", event, error, stack }),
+		result => this.runtime.trackCallback(result),
 	);
 	/**
 	 * Disposers for the trampolines installed via {@link addFileWriteFallback} and
@@ -1596,17 +1597,16 @@ export class ExtensionRunner {
 	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
 	 * session's manager rather than a same-cwd sibling's.
 	 *
-	 * This is also where a callback's LIFETIME is owned. Every path that invokes extension code —
-	 * event handlers, slash commands, keyboard shortcuts, link activations, tool execution, the
-	 * file write/delete fallbacks — routes through here, so an asynchronous callback is counted as
-	 * outstanding until it returns, whoever started it. Ownership belongs here rather than at the
-	 * emitters: a method-name convention over `emit*` covers the broadcast loops and misses every
-	 * callback a controller invokes directly.
+	 * Callbacks this runner invokes — event handlers, slash commands, keyboard shortcuts, link
+	 * activations, tool execution, the file write/delete fallbacks — are owned here for their whole
+	 * lifetime, through {@link ExtensionRuntime.trackCallback}. Callbacks the runner merely handed
+	 * to someone else (a timer, the event bus, the tool UI controller) never reach this method, so
+	 * they report to the same runtime from where they are invoked; see the comment on
+	 * `ExtensionRuntime`'s pending-callback set for why the runtime, and not this class, is the
+	 * common owner.
 	 */
 	runScoped<T>(fn: () => T): T {
-		const result = withActiveSettings(this.settings, fn);
-		if (result instanceof Promise) this.#trackHandlerWork(result);
-		return result;
+		return this.runtime.trackCallback(withActiveSettings(this.settings, fn));
 	}
 
 	/**
@@ -1818,16 +1818,21 @@ export class ExtensionRunner {
 		this.#track(this.#pendingDispatches, dispatch);
 	}
 
-	/** Whether extension work is outstanding: a callback executing, or a broadcast between two of
-	 *  its handlers. Cheap check for a caller that must not declare itself settled while extension
-	 *  work runs, but cannot afford to wait for it. */
+	/** Whether extension work is outstanding: a callback executing anywhere in this session
+	 *  (see {@link ExtensionRuntime}'s pending-callback set — timers and `pi.events` subscriptions
+	 *  report there too, not only this runner's own invocations), a raced-out handler, or a
+	 *  broadcast between two of its handlers. Cheap check for a caller that must not declare itself
+	 *  settled while extension work runs, but cannot afford to wait for it. */
 	hasPendingHandlerWork(): boolean {
-		return this.#pendingHandlerWork.size > 0 || this.#pendingDispatches.size > 0;
+		return (
+			this.#pendingHandlerWork.size > 0 || this.#pendingDispatches.size > 0 || this.runtime.hasPendingCallbacks()
+		);
 	}
 
-	/** Resolves once every handler callback that is executing has returned, including ones whose
-	 *  dispatch already gave up on them. Unbounded by design: a handler that never returns keeps
-	 *  whatever its caller is holding, which is safer than releasing under it.
+	/** Resolves once every extension callback that is executing has returned, including ones whose
+	 *  dispatch already gave up on them and ones a timer or the event bus invoked. Unbounded by
+	 *  design: a callback that never returns keeps whatever its caller is holding, which is safer
+	 *  than releasing under it.
 	 *
 	 *  A broadcast between two of its handlers is not awaited — a caller waiting from inside one
 	 *  handler would wait for its own siblings — but neither is it polled: this waits for the next
@@ -1835,12 +1840,12 @@ export class ExtensionRunner {
 	 *  broadcast ending. A caller looping on {@link hasPendingHandlerWork} therefore makes one wait
 	 *  per real event rather than one per turn of the event loop. */
 	async waitForPendingHandlerWork(): Promise<void> {
-		while (this.#pendingHandlerWork.size > 0) {
-			await Promise.all([...this.#pendingHandlerWork]);
+		while (this.#pendingHandlerWork.size > 0 || this.runtime.hasPendingCallbacks()) {
+			await Promise.all([...this.#pendingHandlerWork, this.runtime.waitForPendingCallbacks()]);
 		}
 		if (this.#pendingDispatches.size > 0) {
 			this.#workChanged ??= Promise.withResolvers<void>();
-			await this.#workChanged.promise;
+			await Promise.race([this.#workChanged.promise, this.runtime.whenCallbacksChange()]);
 		}
 	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
@@ -1867,7 +1872,7 @@ export class ExtensionRunner {
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await withActiveSettings(this.settings, () =>
+			handlerResult = await this.runScoped(() =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;

@@ -121,6 +121,66 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
 
+	/**
+	 * Extension-authored callbacks running right now, whoever invoked them.
+	 *
+	 * There is no single place the host *calls* extension code: handlers go through the runner,
+	 * commands and shortcuts through their controllers, timers through {@link ManagedTimers},
+	 * `pi.events` subscriptions through the shared `EventBus`, a tool's `onSession` through the UI
+	 * controller. Each of those facilities is the only thing that knows when its call starts and
+	 * ends, so each reports here; the runtime is what they have in common, because it is the one
+	 * object both the loader (which builds `pi`) and the runner hold. A new facility that invokes
+	 * extension code owns its invocations by calling {@link trackCallback} — nothing infers a
+	 * lifetime from a name or a shape.
+	 */
+	readonly #pendingCallbacks = new Set<Promise<unknown>>();
+	#callbacksChanged: PromiseWithResolvers<void> | undefined;
+
+	/** Counts `result` as a live extension callback when it is awaitable. Thenable duck-typing, not
+	 *  `instanceof`: a callback compiled in another realm (`node:vm`, an `--import` loader) returns
+	 *  a Promise that fails the brand check while being every bit as live. Returns `result`. */
+	trackCallback<T>(result: T): T {
+		if (result === null || (typeof result !== "object" && typeof result !== "function")) return result;
+		if (!("then" in result) || typeof result.then !== "function") return result;
+		// `then` is callable, so this is awaitable; the compiler cannot express that for `unknown`.
+		const awaitable = result as PromiseLike<unknown>;
+		const settled = Promise.resolve(awaitable).then(
+			() => undefined,
+			() => undefined,
+		);
+		this.#pendingCallbacks.add(settled);
+		this.#notifyCallbacksChanged();
+		void settled.finally(() => {
+			this.#pendingCallbacks.delete(settled);
+			this.#notifyCallbacksChanged();
+		});
+		return result;
+	}
+
+	/** Whether any extension callback is executing. */
+	hasPendingCallbacks(): boolean {
+		return this.#pendingCallbacks.size > 0;
+	}
+
+	/** Resolves once every extension callback executing now has returned. */
+	async waitForPendingCallbacks(): Promise<void> {
+		while (this.#pendingCallbacks.size > 0) {
+			await Promise.all([...this.#pendingCallbacks]);
+		}
+	}
+
+	/** Settles on the next add or remove, so a caller can wait for a change instead of sampling. */
+	whenCallbacksChange(): Promise<void> {
+		this.#callbacksChanged ??= Promise.withResolvers<void>();
+		return this.#callbacksChanged.promise;
+	}
+
+	#notifyCallbacksChanged(): void {
+		const changed = this.#callbacksChanged;
+		this.#callbacksChanged = undefined;
+		changed?.resolve();
+	}
+
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
 	}
@@ -212,12 +272,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return getCodingAgentApi();
 	}
 
+	readonly events: EventBus;
+
 	constructor(
 		private readonly extension: Extension,
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
-		public readonly events: EventBus,
+		events: EventBus,
 	) {
+		// `pi.events` subscriptions are invoked by the bus, not by the runner, so the bus is the
+		// only party that can see when one starts; point it at the runtime that owns
+		// extension-callback lifetimes for this session. The bus itself is handed on unchanged —
+		// an extension comparing `pi.events` across bindings must still see its own session's bus.
+		events.setCallbackOwner(result => runtime.trackCallback(result));
+		this.events = events;
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
 		// rather than listing methods: a new method is bound without touching this.
@@ -228,6 +296,24 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			if (typeof descriptor?.value !== "function") continue;
 			Object.defineProperty(this, name, { value: descriptor.value.bind(this), writable: true, configurable: true });
 		}
+	}
+
+	/** Callback ownership belongs to the one runtime behind every facade for this session; this
+	 *  object is an API surface, not a second owner. */
+	trackCallback<T>(result: T): T {
+		return this.runtime.trackCallback(result);
+	}
+
+	hasPendingCallbacks(): boolean {
+		return this.runtime.hasPendingCallbacks();
+	}
+
+	waitForPendingCallbacks(): Promise<void> {
+		return this.runtime.waitForPendingCallbacks();
+	}
+
+	whenCallbacksChange(): Promise<void> {
+		return this.runtime.whenCallbacksChange();
 	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {

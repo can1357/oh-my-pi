@@ -22,7 +22,14 @@ export type ManagedTimerErrorHandler = (event: string, error: string, stack?: st
 export class ManagedTimers {
 	readonly #timers = new Set<Timer>();
 
-	constructor(private readonly onError: ManagedTimerErrorHandler) {}
+	/** @param onError reports a throw or rejection from a managed callback.
+	 *  @param own reports the callback itself to whoever owns extension-callback lifetimes.
+	 *  Clearing a handle stops future firings; it says nothing about a callback already running,
+	 *  and `clearAll()` on teardown is exactly the moment one is most likely to be mid-flight. */
+	constructor(
+		private readonly onError: ManagedTimerErrorHandler,
+		private readonly own: <T>(result: T) => T = result => result,
+	) {}
 
 	/** Schedule a repeating callback whose throws are contained. */
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
@@ -65,7 +72,7 @@ export class ManagedTimers {
 
 	#run(kind: "interval" | "timeout", callback: (...args: unknown[]) => void, args: unknown[]): void {
 		try {
-			const result = callback(...args) as unknown;
+			const result = this.own(callback(...args) as unknown);
 			if (result instanceof Promise) {
 				result.catch((err: unknown) => this.#report(kind, err));
 			}

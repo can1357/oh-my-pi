@@ -6736,6 +6736,7 @@ export class AgentSession implements SettingsScope {
 		do {
 			await this.agent.waitForIdle();
 			await this.waitForAdmittedSubmissions();
+			await this.#bash.waitForIdle();
 			await this.#drainQueuedPreparations();
 			await this.#drainInFlightEventHandlers();
 			await this.#drainExtensionNotifications();
@@ -6745,13 +6746,16 @@ export class AgentSession implements SettingsScope {
 
 	/** Whether any work that could still touch this session, its transcript or its credentials is
 	 *  outstanding: a run, an admitted submission (an extension command suspended inside
-	 *  `runScoped` is one), a queued-message preparation, an event handler, a queued extension
-	 *  notification, or an extension dispatch — including a callback whose dispatch has already
-	 *  given up waiting for it, and the gap between two handlers of one dispatch. */
+	 *  `runScoped` is one), a bash execution still recording its result, a queued-message
+	 *  preparation, an event handler, a queued extension notification, or an extension callback —
+	 *  including one a timer or the event bus invoked, one whose dispatch has already given up
+	 *  waiting for it, and the gap between two handlers of one dispatch. */
 	#hasLiveSessionWork(): boolean {
 		return (
 			this.agent.state.isStreaming ||
 			this.hasAdmittedSubmission ||
+			this.isBashRunning ||
+			this.hasPendingBashMessages ||
 			this.#queuedPreparations.size > 0 ||
 			this.#inFlightEventHandlers.size > 0 ||
 			this.#drainingExtensionEvents ||
@@ -6763,6 +6767,10 @@ export class AgentSession implements SettingsScope {
 	#releaseRetainedSessionMemory(): void {
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		// `reset()` notifies queue-change observers synchronously, and an observer can append right
+		// back into the transcript it just cleared. Take that writeback out before returning:
+		// `replaceMessages` touches no queue, so unlike a second reset it starts nothing.
+		if (this.agent.state.messages.length > 0) this.agent.replaceMessages([]);
 		this.#tools.releaseRestoredTranscript();
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
@@ -7522,9 +7530,20 @@ export class AgentSession implements SettingsScope {
 	 * are live; never rejects. Resolves at once when none are pending, and inside
 	 * the load itself so a deferred extension's `session_start` handler that sends
 	 * a message cannot wait on its own load.
+	 *
+	 * A disposed session binds nothing. Loading RUNS each extension's factory — extension code
+	 * with this session's context and credentials — so a refusal further in (a command, a prompt)
+	 * comes after the damage. The check belongs here rather than at each caller: the input
+	 * controller, the submission admission, the context build and the host's own loader callback
+	 * all arrive through this method, and a host loader that checks disposal itself can only do so
+	 * after it has already loaded (sdk.ts did exactly that).
 	 */
 	loadDeferredExtensions(): Promise<void> {
 		if (deferredExtensionLoadScope.getStore()) return Promise.resolve();
+		if (this.#isDisposed) {
+			this.#deferredExtensionLoader = undefined;
+			return this.#deferredExtensionLoad ?? Promise.resolve();
+		}
 		const load = this.#deferredExtensionLoader;
 		if (load) {
 			this.#deferredExtensionLoader = undefined;

@@ -72,8 +72,33 @@ export class BashRunner {
 		};
 	}
 
+	/** Executions that have not finished recording their result. `isRunning` covers the child
+	 *  process only; the append that follows it is what a caller clearing the transcript has to
+	 *  outlast. */
+	readonly #inFlight = new Set<Promise<unknown>>();
+
 	/** Executes a bash command while retaining the session and branch that owned its start. */
-	async executeBash(
+	executeBash(
+		command: string,
+		onChunk?: (chunk: string) => void,
+		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+	): Promise<BashResult> {
+		const execution = this.#executeBash(command, onChunk, options);
+		const tracked = execution.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.#inFlight.add(tracked);
+		void tracked.finally(() => this.#inFlight.delete(tracked));
+		return execution;
+	}
+
+	/** Resolves once no execution is still running or recording its result. */
+	async waitForIdle(): Promise<void> {
+		while (this.#inFlight.size > 0) await Promise.all([...this.#inFlight]);
+	}
+
+	async #executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },

@@ -7,6 +7,20 @@ import { logger } from "@oh-my-pi/pi-utils";
  */
 export class EventBus {
 	readonly #listeners = new Map<string, Set<(data: unknown) => void>>();
+	/** Reports a running handler to whoever owns extension-callback lifetimes for this bus's
+	 *  session. A `pi.events` subscription is invoked by the bus, not by the extension runner, so
+	 *  this is the only party that can see when one starts. */
+	#own: <T>(result: T) => T = result => result;
+	#ownerInstalled = false;
+
+	/** Installs the callback owner once. A later call is ignored: the first binding on this bus is
+	 *  its session's, and a bus an embedder shares with a second session must not have its
+	 *  callbacks reattributed to the newcomer. */
+	setCallbackOwner(own: <T>(result: T) => T): void {
+		if (this.#ownerInstalled) return;
+		this.#ownerInstalled = true;
+		this.#own = own;
+	}
 
 	emit = (channel: string, data: unknown): void => {
 		const handlers = this.#listeners.get(channel);
@@ -23,7 +37,7 @@ export class EventBus {
 		}
 		const safeHandler = async (data: unknown) => {
 			try {
-				await handler(data);
+				await this.#own(handler(data) as unknown);
 			} catch (err) {
 				logger.error("Event handler error", { channel, error: String(err) });
 			}

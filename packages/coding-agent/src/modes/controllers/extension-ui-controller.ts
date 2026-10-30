@@ -634,12 +634,16 @@ export class ExtensionUiController {
 		for (const registeredTool of runner?.getAllRegisteredTools() ?? []) {
 			if (registeredTool.definition.onSession) {
 				try {
-					await registeredTool.definition.onSession(event, {
-						...runner!.createContext(),
-						ui: uiContext,
-						hasUI: true,
-						compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-					});
+					// Through runScoped like every other extension callback: this controller invokes
+					// it directly, so without that the runner never knows the tool is still running.
+					await runner!.runScoped(() =>
+						registeredTool.definition.onSession!(event, {
+							...runner!.createContext(),
+							ui: uiContext,
+							hasUI: true,
+							compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+						}),
+					);
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));
 				}

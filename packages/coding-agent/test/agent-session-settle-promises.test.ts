@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { createContext, runInContext } from "node:vm";
 import { Agent, type AgentEvent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -1541,6 +1542,137 @@ describe("AgentSession settles what it promised", () => {
 			release.resolve();
 			await Promise.all(broadcasts);
 			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns a callback a timer invokes, not only one the runner invokes", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let armed = false;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.on("agent_start", (_event, ctx) => {
+				if (!armed) return;
+				// ManagedTimers invokes this, not the runner: clearing the handle on teardown stops
+				// future firings and says nothing about a callback already running.
+				ctx.setTimeout(() => {
+					entered.resolve();
+					return release.promise;
+				}, 0);
+			});
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let broadcast: Promise<unknown> | undefined;
+		try {
+			armed = true;
+			broadcast = session?.extensionRunner?.emit({ type: "agent_start" });
+			await withTimeout(entered.promise, 5_000, "timer callback never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			await broadcast;
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns a callback the event bus invokes", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let emit: ((channel: string, data: unknown) => void) | undefined;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			// `pi.events` subscriptions never reach the runner: the bus calls them.
+			pi.events.on("r11-channel", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+			emit = (channel, data) => pi.events.emit(channel, data);
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		try {
+			emit?.("r11-channel", {});
+			await withTimeout(entered.promise, 5_000, "event bus handler never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("owns a promise from another realm, which fails the Promise brand check", async () => {
+		await startPooledRunWithStrandedAside();
+		const realm = createContext({});
+		// Foreign-realm source, so the executor form is the only form available here — and that is
+		// the point: a pending Promise whose constructor is not this realm's.
+		const foreign = runInContext(
+			"new Promise(resolve => { globalThis.__release = resolve; })",
+			realm,
+		) as PromiseLike<void>;
+		expect(foreign instanceof Promise).toBe(false);
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		try {
+			session?.extensionRunner?.runScoped(() => foreign);
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			runInContext("globalThis.__release()", realm);
+			await foreign;
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			runInContext("globalThis.__release?.()", realm);
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("binds no deferred extension once the session is disposed", async () => {
+		await startPooledRunWithStrandedAside();
+		let factoryRan = false;
+		session?.setDeferredExtensionLoader(async () => {
+			factoryRan = true;
+		});
+		await session?.dispose();
+
+		// Loading runs the factory, which is extension code with this session's context: a refusal
+		// at the command, or in a host loader that checks disposal after loading, is too late.
+		await session?.prompt("/r11-never-bound");
+		for (let i = 0; i < 20; i++) await setImmediate();
+		expect(factoryRan).toBe(false);
+	}, 20_000);
+
+	it("leaves no transcript behind a public bash command that outlived disposal", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			pi.on("user_bash", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		let command: Promise<unknown> | undefined;
+		try {
+			command = session?.executeBash("printf R11_PUBLIC_BASH");
+			await withTimeout(entered.promise, 5_000, "user_bash handler never entered");
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+
+			release.resolve();
+			await command;
+			for (let i = 0; i < 40; i++) await setImmediate();
+			// The child process finishing is not the end of the work: recording its result appends.
+			expect(session?.messages).toHaveLength(0);
+		} finally {
+			release.resolve();
+			await command;
 		}
 	}, 20_000);
 });
