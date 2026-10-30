@@ -86,7 +86,8 @@ import {
 } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import { resolveTernPane } from "../../tools/browser/tern/kind";
+import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
+import { moveTernBlockToNewTab } from "../../tools/browser/tern/move";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -145,7 +146,12 @@ interface ForkTerminalDependencies {
 	resolveCliEntryCmd: typeof resolveCliEntryCmd;
 	getActiveProfile: typeof getActiveProfile;
 	argv: () => string[];
+	/** Move a block Tern just opened into a tab of its own. */
+	moveTernBlockToTab: (block: number) => Promise<void>;
 }
+
+/** What asking Tern for a fork yielded: the block it opened, a reason to fork in place, or a report already made. */
+type TernForkAttempt = { block: number } | { retryInPlace: true } | { reported: true };
 
 /**
  * Startup flags the fork child re-supplies from the parent's live state
@@ -207,6 +213,7 @@ export class CommandController {
 			resolveCliEntryCmd,
 			getActiveProfile,
 			argv: () => process.argv.slice(2),
+			moveTernBlockToTab: moveTernBlockToNewTab,
 			...forkTerminalDependencies,
 		};
 	}
@@ -1427,8 +1434,8 @@ export class CommandController {
 			return;
 		}
 
-		// A Tern pane fork leaves this session untouched, so it may run mid-turn.
-		if (await this.#forkIntoTernPane()) return;
+		// A Tern tab fork leaves this session untouched, so it may run mid-turn.
+		if (await this.#forkIntoTernTab()) return;
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
@@ -1602,14 +1609,50 @@ export class CommandController {
 	}
 
 	/**
-	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
-	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
-	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
-	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session, then move the block
+	 * it opened into a tab of its own, which keeps the original session. False means fork in place
+	 * instead: outside Tern, an unsaved session, a Tern without `fork`, or Tern refusing it. Once
+	 * the request is out, an unconfirmed one is reported rather than retried in place, since Tern
+	 * may still open the pane.
 	 */
-	async #forkIntoTernPane(): Promise<boolean> {
+	async #forkIntoTernTab(): Promise<boolean> {
 		const tern = resolveTernPane();
 		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+		const attempt = await this.#askTernToFork(tern);
+		if ("retryInPlace" in attempt) return false;
+		if ("reported" in attempt) return true;
+		let moved = true;
+		try {
+			await this.#forkTerminalDependencies.moveTernBlockToTab(attempt.block);
+		} catch (error) {
+			moved = false;
+			logger.warn("Tern opened the /fork block but could not move it into a new tab", {
+				block: attempt.block,
+				error,
+			});
+		}
+		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
+		this.ctx.present([
+			new Spacer(1),
+			new Text(
+				moved
+					? theme.fg("accent", `${theme.status.success} Session forked into a new tab${note}`)
+					: theme.fg(
+							"warning",
+							`${theme.status.success} Session forked into a new pane · Tern could not move it into a tab${note}`,
+						),
+				1,
+				1,
+			),
+		]);
+		return true;
+	}
+
+	/**
+	 * Ask Tern to run `omp --fork` of this pane's session, which it opens as a pane beside this one.
+	 * The session is flushed first because the new pane's omp reads the file as it starts.
+	 */
+	async #askTernToFork(tern: TernPane): Promise<TernForkAttempt> {
 		const client = new TernSocketClient({ socketPath: tern.socketPath });
 		try {
 			try {
@@ -1618,34 +1661,27 @@ export class CommandController {
 				logger.debug("Tern unreachable for /fork; forking in place", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				return false;
+				return { retryInPlace: true };
 			}
-			if (!client.supports("fork")) return false;
-			// The new pane's omp reads the session file as it starts.
+			if (!client.supports("fork")) return { retryInPlace: true };
 			await this.ctx.session.flushToDisk();
 			try {
-				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+				return { block: await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS }) };
 			} catch (error) {
 				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
 					const details = { kind: error.kind, error: error.message };
 					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
 					else logger.debug("Tern refused the fork; forking in place", details);
-					return false;
+					return { retryInPlace: true };
 				}
 				this.ctx.showError(
 					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				return true;
+				return { reported: true };
 			}
 		} finally {
 			client.close();
 		}
-		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
-		this.ctx.present([
-			new Spacer(1),
-			new Text(theme.fg("accent", `${theme.status.success} Session forked into a new pane${note}`), 1, 1),
-		]);
-		return true;
 	}
 
 	/**

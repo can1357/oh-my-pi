@@ -49,6 +49,7 @@ function createContext(
 		argv?: string[];
 		promptCacheKey?: string;
 		launchWarning?: string;
+		ternMoveError?: Error;
 	} = {},
 ) {
 	const sessionFile = options.persisted === false ? undefined : (options.sessionFile ?? sourceSessionFile);
@@ -75,6 +76,9 @@ function createContext(
 		placement: request.placement,
 		...(options.launchWarning ? { warning: options.launchWarning } : {}),
 	}));
+	const moveTernBlockToTab = vi.fn(async (_block: number): Promise<void> => {
+		if (options.ternMoveError) throw options.ternMoveError;
+	});
 	const showError = vi.fn();
 	const showHookConfirm = vi.fn(async () => options.confirmed ?? false);
 	const ctx = {
@@ -102,8 +106,19 @@ function createContext(
 		getActiveProfile: () =>
 			options.activeProfile === null ? undefined : (options.activeProfile ?? "active-profile"),
 		argv: () => options.argv ?? ["--model", "provider/model", "prompt text"],
+		moveTernBlockToTab,
 	});
-	return { controller, ctx, session, sessionManager, flush, launchTerminal, showError, showHookConfirm };
+	return {
+		controller,
+		ctx,
+		session,
+		sessionManager,
+		flush,
+		launchTerminal,
+		moveTernBlockToTab,
+		showError,
+		showHookConfirm,
+	};
 }
 
 function findPosixShellPlacement(): { multiplexer: TerminalLaunchMultiplexer; placement: TerminalLaunchPlacement } {
@@ -447,23 +462,36 @@ describe("/fork inside Tern", () => {
 		return daemon;
 	}
 
-	it("forks into a new pane while a turn is running, leaving the running session in place", async () => {
+	it("forks into a new tab while a turn is running, leaving the running session in place", async () => {
 		const tern = await startTern(() => ({ ok: { block: 9 } }));
-		const { controller, ctx, session } = createContext({ streaming: true });
+		const { controller, ctx, session, moveTernBlockToTab } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
 		expect(session.flushToDisk).toHaveBeenCalledTimes(1);
 		expect(session.fork).not.toHaveBeenCalled();
+		expect(moveTernBlockToTab).toHaveBeenCalledWith(9);
 		expect(ctx.showWarning).not.toHaveBeenCalled();
+		expect(ctx.present).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the fork and says it stayed a pane when Tern cannot move it into a tab", async () => {
+		await startTern(() => ({ ok: { block: 9 } }));
+		const { controller, ctx, session, moveTernBlockToTab } = createContext({
+			ternMoveError: new Error("tern move BLOCK tab new-tab exited with code 1"),
+		});
+		await controller.handleForkCommand();
+		expect(moveTernBlockToTab).toHaveBeenCalledWith(9);
+		expect(session.fork).not.toHaveBeenCalled();
 		expect(ctx.present).toHaveBeenCalledTimes(1);
 	});
 
 	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {
 		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
-		const { controller, ctx, session } = createContext({ streaming: true });
+		const { controller, ctx, session, moveTernBlockToTab } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);
 		expect(session.fork).not.toHaveBeenCalled();
+		expect(moveTernBlockToTab).not.toHaveBeenCalled();
 		expect(ctx.showWarning).toHaveBeenCalledTimes(1);
 	});
 });
