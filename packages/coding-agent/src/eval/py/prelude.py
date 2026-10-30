@@ -30,6 +30,8 @@ if "__omp_prelude_loaded__" not in globals():
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
     _OMP_ARTIFACT_ID_RE = re.compile(r"^\d+$")
     _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
+    # `<id>` and whatever selector follows it (`:raw`, `:5-9`, `:raw:5-9`).
+    _OMP_ARTIFACT_SELECTOR_RE = re.compile(r"^(\d+)(:.*)$")
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme.
@@ -97,6 +99,26 @@ if "__omp_prelude_loaded__" not in globals():
         )
         return Path(resolved) if isinstance(resolved, str) and resolved else None
 
+    def _pinned_artifact_uri(path: str | Path) -> str:
+        """`artifact://<id><selector>` with the id already resolved to its file.
+
+        A selector form goes to the read tool, which resolves `artifact://<id>`
+        against whatever directory the session reads when the call lands. The
+        id is this cell's, so it is resolved here first, the same way a bare
+        one is, and the tool is handed the file with the selector still on it.
+        """
+        if not isinstance(path, str):
+            return str(path)
+        match = _OMP_INTERNAL_URL_RE.match(path)
+        if match is None or match.group(1).lower() != "artifact":
+            return path
+        rest = match.group(2)
+        selector = _OMP_ARTIFACT_SELECTOR_RE.match(rest)
+        if selector is None or not _omp_url_roots().get("artifact"):
+            return path
+        resolved = _artifact_file(f"artifact://{selector.group(1)}")
+        return path if resolved is None else f"{resolved}{selector.group(2)}"
+
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
             return ""
@@ -154,7 +176,7 @@ if "__omp_prelude_loaded__" not in globals():
                 # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
                 p = Path(file_path)
         elif _should_delegate_read(path):
-            return _read_through_tool(path, offset, limit)
+            return _read_through_tool(_pinned_artifact_uri(path), offset, limit)
         else:
             p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")

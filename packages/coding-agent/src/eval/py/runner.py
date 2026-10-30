@@ -2589,9 +2589,11 @@ def _request_url_roots(req: dict) -> str | None:
     """
     env = req.get("env")
     if isinstance(env, dict):
+        # A request that carries an environment has said what its roots are,
+        # including when it says there are none: an empty or absent value there
+        # means this cell has no roots, not that an older cell's are still good.
         roots = env.get("PI_EVAL_LOCAL_ROOTS")
-        if isinstance(roots, str):
-            return roots
+        return roots if isinstance(roots, str) else None
     return os.environ.get("PI_EVAL_LOCAL_ROOTS")
 
 

@@ -223,9 +223,39 @@ describe("eval artifact readiness", () => {
 		await expect(resolveSettledArtifact(sessionWithArtifacts(current), "1", suspended)).rejects.toThrow(
 			"artifacts directory this cell was started with",
 		);
-		// The same miss on the session's own directory still falls through to
-		// the ordinary lookup, which is how another session's artifact is read.
-		expect(await resolveSettledArtifact(sessionWithArtifacts(current), "9", current)).toBeNull();
+		// A miss on the session's own directory is searched for in the other
+		// directories this process knows — which is how another session's
+		// artifact is read — and answered here either way, never handed back
+		// for the reader to resolve again later.
+		await expect(resolveSettledArtifact(sessionWithArtifacts(current), "9", current)).rejects.toThrow(
+			"no artifacts directory this process knows",
+		);
+	});
+
+	it("hands the read tool a file for a selector form, not an id to resolve later", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const started = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_started");
+		fs.mkdirSync(started, { recursive: true });
+		fs.writeFileSync(path.join(started, "1.bash.log"), "THIS CELL'S\nSECOND LINE\n");
+		const session = sessionWithArtifacts(started);
+
+		const helpers = createHelpers({
+			cwd: () => tempDir.path(),
+			env: new Map(),
+			localRoots: () => ({ artifact: started }),
+			emitStatus: () => {},
+			resolveArtifact: async (id, root) => {
+				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root }, { session });
+				return typeof value === "string" && value.length > 0 ? value : null;
+			},
+		});
+
+		// The selector travels; the id does not, because by the time the read
+		// tool resolves it the session may read another directory entirely.
+		expect(await helpers.pinArtifact("artifact://1:raw:1-2")).toBe(`${path.join(started, "1.bash.log")}:raw:1-2`);
+		// A bare id is the helpers' own business, and anything else is left be.
+		expect(await helpers.pinArtifact("artifact://1")).toBe("artifact://1");
+		expect(await helpers.pinArtifact("local://notes.md")).toBe("local://notes.md");
 	});
 
 	it("does not hold a cell for a staging tree that no copy is using", async () => {

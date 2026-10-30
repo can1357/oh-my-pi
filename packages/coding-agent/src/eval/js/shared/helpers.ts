@@ -50,6 +50,13 @@ export interface HelperBundle {
 	env(key?: string, value?: string): string | Record<string, string> | undefined;
 	/** Whether `rawPath` is an internal URL whose scheme has an injected root (served by these helpers, not delegated to the read tool). */
 	hasRoot(rawPath: string): boolean;
+	/**
+	 * `artifact://<id><selector>` with the id already resolved to its file, so
+	 * the read tool is handed a path rather than an id it would resolve
+	 * against whatever directory the session reads by then. Anything else is
+	 * returned unchanged.
+	 */
+	pinArtifact(rawPath: string): Promise<string>;
 }
 
 const utf8Encoder = new TextEncoder();
@@ -100,6 +107,15 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			ctx.emitStatus({ op: "env", key, value: result, action: "get" });
 			return result;
 		},
+		pinArtifact: async rawPath => {
+			const match = INTERNAL_URL_RE.exec(rawPath);
+			if (match === null || match[1].toLowerCase() !== "artifact") return rawPath;
+			const selector = ARTIFACT_SELECTOR_RE.exec(match[2]);
+			const root = ctx.localRoots().artifact;
+			if (selector === null || !root) return rawPath;
+			const resolved = await resolveArtifactPath(ctx, root, selector[1]!);
+			return resolved === undefined ? rawPath : `${resolved}${selector[2]}`;
+		},
 		hasRoot: rawPath => {
 			const match = INTERNAL_URL_RE.exec(rawPath);
 			if (match === null) return false;
@@ -122,6 +138,8 @@ function getMergedEnv(ctx: HelperContext): Record<string, string> {
 
 const INTERNAL_URL_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i;
 const ARTIFACT_ID_RE = /^\d+$/;
+/** An artifact id and whatever selector follows it (`:raw`, `:5-9`, `:raw:5-9`). */
+const ARTIFACT_SELECTOR_RE = /^(\d+)(:.*)$/;
 
 function resolvePath(ctx: HelperContext, value: string): string {
 	if (path.isAbsolute(value)) return path.normalize(value);

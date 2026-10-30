@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
+import { artifactsDirsFromRegistry } from "../internal-urls/registry-helpers";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { artifactCopyActivity, whenArtifactCopiesSettle } from "../session/session-manager";
 import type { ToolSession } from "../tools";
@@ -49,18 +50,23 @@ export async function resolveSettledArtifact(
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
 		if (after.announced === before.announced && after.pending === 0) {
 			if (found) return found;
-			// A miss belongs to the directory that asked. Handing the id back
-			// for the ordinary lookup would answer it from whatever directory
-			// the session reads now, which for a cell suspended across a
-			// re-adoption is a different conversation's artifact wearing the
-			// same number.
+			// A miss belongs to the directory that asked, and is answered here
+			// rather than handed back. Anything the reader does with "not
+			// there" resolves the id again, under whatever directory the
+			// session reads by then — and between this answer and the reader
+			// receiving it the session can be re-adopted, which is a different
+			// conversation's artifact wearing the same number.
 			const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+			// A cell whose session has moved on reads its own directory and no
+			// other: every other one belongs to a conversation it is not in.
 			if (current && path.resolve(current) !== path.resolve(dir)) {
 				throw new ToolError(
 					`artifact://${id} is not in ${dir}, the artifacts directory this cell was started with`,
 				);
 			}
-			return null;
+			const elsewhere = await artifactElsewhere(dir, id, signal);
+			if (elsewhere) return elsewhere;
+			throw new ToolError(`artifact://${id} is in no artifacts directory this process knows, including ${dir}`);
 		}
 		// Copies arriving back to back with no gap between them would keep a
 		// reader here forever. Saying so is better than answering from a
@@ -75,6 +81,24 @@ export async function resolveSettledArtifact(
 
 /** How many times a reader re-lists a directory that keeps gaining copies before it gives up. */
 const ARTIFACT_RESOLVE_ATTEMPTS = 16;
+
+/**
+ * The file for `id` in any artifacts directory this process knows other than
+ * `dir`, once the copies into it have settled — which is how a session reads
+ * an artifact another session produced.
+ *
+ * Searched here, not by the reader: a reader told "not there" would look it up
+ * again later, and by then "there" can mean another directory entirely.
+ */
+async function artifactElsewhere(dir: string, id: string, signal?: AbortSignal): Promise<string | null> {
+	for (const other of artifactsDirsFromRegistry()) {
+		if (path.resolve(other) === path.resolve(dir)) continue;
+		await whenArtifactCopiesSettle(other, signal);
+		const found = await artifactInDirectory(other, id);
+		if (found) return found;
+	}
+	return null;
+}
 
 /** The `<id>.<tool>.log` file for `id` in `dir`, or `null`. */
 async function artifactInDirectory(dir: string, id: string): Promise<string | null> {
