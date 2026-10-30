@@ -3,6 +3,8 @@ import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as connectionPrewarm from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import * as requestDebug from "@oh-my-pi/pi-ai/utils/request-debug";
+import { resetDispatchOriginsForTesting, transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { codexPrewarmHold, prewarmUnlessPaused } from "@oh-my-pi/pi-coding-agent/session/connection-prewarm";
@@ -14,6 +16,8 @@ afterEach(() => {
 	agentPauseGate.resume();
 	globalThis.WebSocket = originalWebSocket;
 	vi.restoreAllMocks();
+	connectionPrewarm.resetConnectionPrewarmForTesting();
+	resetDispatchOriginsForTesting();
 });
 
 function tick(): Promise<void> {
@@ -79,6 +83,56 @@ describe("session prewarm under /pause", () => {
 		agentPauseGate.resume();
 		prewarmUnlessPaused(model);
 		expect(prewarm).toHaveBeenCalledTimes(1);
+	});
+
+	test("an HTTP prewarm paused while its request is prepared never reaches the wire", async () => {
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled openai/gpt-4o-mini");
+		// A warm-up goes only to an origin a real request has reached.
+		await transportFetch(model, async () => new Response("{}"))("https://api.openai.com/v1/responses", {
+			method: "POST",
+		});
+		const sent: Array<{ method: string | undefined; paused: boolean }> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (_input: string | URL | Request, init?: RequestInit) => {
+					sent.push({ method: init?.method, paused: agentPauseGate.paused });
+					return new Response(null, { status: 204 });
+				},
+				{ preconnect() {} },
+			),
+		);
+		const preparing = Promise.withResolvers<void>();
+		const prepared = Promise.withResolvers<void>();
+		vi.spyOn(requestDebug, "isRequestDebugEnabled").mockReturnValue(true);
+		vi.spyOn(requestDebug, "createFetchRequestDebugSession").mockImplementation(async () => {
+			preparing.resolve();
+			await prepared.promise;
+			return {
+				id: 1,
+				requestPath: "unused",
+				responsePath: "unused",
+				openResponseLog: async () => ({ write() {}, async close() {} }),
+				wrapResponse: async (response: Response) => response,
+			};
+		});
+		const prewarm = vi.spyOn(connectionPrewarm, "prewarmModelConnection");
+
+		prewarmUnlessPaused(model);
+		// The `PI_REQ_DEBUG` dump awaits the filesystem: `/pause` lands there,
+		// after the entry check has passed.
+		await preparing.promise;
+		agentPauseGate.pause();
+		prepared.resolve();
+		await prewarm.mock.results[0]?.value;
+		expect(sent).toEqual([]);
+
+		// The abandoned warm-up holds no throttle slot, so the first one after
+		// resume goes out.
+		agentPauseGate.resume();
+		prewarmUnlessPaused(model);
+		await prewarm.mock.results[1]?.value;
+		expect(sent).toEqual([{ method: "HEAD", paused: false }]);
 	});
 
 	test("a Codex prewarm paused after it began opens no socket", async () => {

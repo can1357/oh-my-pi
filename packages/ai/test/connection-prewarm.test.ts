@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { resolveAnthropicPrewarmTarget } from "@oh-my-pi/pi-ai/providers/anthropic-http-options";
 import { prewarmModelConnection, resetConnectionPrewarmForTesting } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import * as requestDebug from "@oh-my-pi/pi-ai/utils/request-debug";
 import { resetDispatchOriginsForTesting, transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api } from "@oh-my-pi/pi-catalog/types";
@@ -44,6 +45,7 @@ async function dispatch(target: Model<Api>, url: string): Promise<void> {
 
 withOfficialAnthropicEndpoint();
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetConnectionPrewarmForTesting();
 	resetDispatchOriginsForTesting();
 });
@@ -89,6 +91,42 @@ describe("prewarmModelConnection", () => {
 		expect(calls.map(call => call.url)).toEqual([
 			"https://api.anthropic.com",
 			"https://api.business.githubcopilot.com",
+		]);
+	});
+
+	it("abandons a warm-up whose skip check turns true while the transport prepares it", async () => {
+		const { calls, fetch } = captureFetch();
+		await dispatch(COPILOT, COPILOT_PLAN_URL);
+		const preparing = Promise.withResolvers<void>();
+		const prepared = Promise.withResolvers<void>();
+		vi.spyOn(requestDebug, "isRequestDebugEnabled").mockReturnValue(true);
+		vi.spyOn(requestDebug, "createFetchRequestDebugSession").mockImplementation(async () => {
+			preparing.resolve();
+			await prepared.promise;
+			return {
+				id: 1,
+				requestPath: "unused",
+				responsePath: "unused",
+				openResponseLog: async () => ({ write() {}, async close() {} }),
+				wrapResponse: async (response: Response) => response,
+			};
+		});
+		let skip = false;
+
+		const pending = prewarmModelConnection(COPILOT, { fetch, skipIf: () => skip });
+		// The condition turns after the warm-up started, while the
+		// `PI_REQ_DEBUG` dump awaits the filesystem.
+		await preparing.promise;
+		skip = true;
+		prepared.resolve();
+		await expect(pending).resolves.toBeUndefined();
+		expect(calls).toEqual([]);
+
+		// The abandoned warm-up holds no throttle slot.
+		skip = false;
+		await prewarmModelConnection(COPILOT, { fetch, skipIf: () => skip });
+		expect(calls.map(call => [call.url, call.init.method])).toEqual([
+			["https://api.business.githubcopilot.com", "HEAD"],
 		]);
 	});
 
