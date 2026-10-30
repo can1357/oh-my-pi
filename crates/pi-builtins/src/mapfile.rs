@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{fmt::NumBuffer, io::Write};
 
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
@@ -190,8 +190,8 @@ impl MapFileCommand {
 				continue;
 			}
 
-			if self.remove_delimiter && line.ends_with(&[delimiter]) {
-				line.pop();
+			if self.remove_delimiter {
+				line.pop_if(|byte| *byte == delimiter);
 			}
 
 			let line_str = decode_line(line);
@@ -238,8 +238,9 @@ async fn run_callback<SE: brush_core::ShellExtensions>(
 	line: &str,
 	context: &mut brush_core::ExecutionContext<'_, SE>,
 ) -> Result<ExecutionResult, brush_core::Error> {
-	let index_arg = array_index.to_string();
-	let index_arg = escape::quote_if_needed(&index_arg, escape::QuoteMode::SingleQuote);
+	let mut index_buf = NumBuffer::new();
+	let index_arg =
+		escape::quote_if_needed(array_index.format_into(&mut index_buf), escape::QuoteMode::SingleQuote);
 	let line_arg = escape::quote_if_needed(line, escape::QuoteMode::SingleQuote);
 
 	let mut command = String::with_capacity(callback.len() + index_arg.len() + line_arg.len() + 2);

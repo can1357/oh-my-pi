@@ -26,27 +26,27 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 
 ## JS API ↔ Rust export/module mapping
 
-| JS export                                | Rust N-API export              | Rust module      |
-| ---------------------------------------- | ------------------------------ | ---------------- |
-| `new AudioCapture(sampleRate, cb)`       | `AudioCapture`                 | `audio.rs`       |
-| `new AudioPlayback(sampleRate)`          | `AudioPlayback`                | `audio.rs`       |
-| `new LiveWebRtcPeer(...)`                | `LiveWebRtcPeer`               | `live.rs`        |
-| `encodeSixel(bytes, width, height, backgroundRgb)` | `encode_sixel`              | `sixel.rs`       |
-| `encodeSixelAsync(bytes, width, height, backgroundRgb)` | `encode_sixel_async`    | `sixel.rs`       |
-| `decodeSixelToPng(bytes)`                | `decode_sixel_to_png`          | `sixel.rs`       |
-| `rasterizeSvg(bytes, maxWidth, maxHeight)` | `rasterize_svg`               | `svg.rs`         |
-| `pdfToMarkdown(bytes)`                   | `pdf_to_markdown`              | `pdf.rs`         |
-| `renderSnapcompactPng(text, options)`    | `render_snapcompact_png`       | `snapcompact.rs` |
-| `snapcompactSupportedChars(font, chars)` | `snapcompact_supported_chars`  | `snapcompact.rs` |
-| `htmlToMarkdown(html, options?)`         | `html_to_markdown`             | `html.rs`        |
-| `copyToClipboard(text)`                  | `copy_to_clipboard`            | `clipboard.rs`   |
-| `readImageFromClipboard()`               | `read_image_from_clipboard`    | `clipboard.rs`   |
-| `countTokens(input, encoding?)`          | `count_tokens`                 | `tokens.rs`      |
-| `detectMacOSAppearance()`                | `detect_macos_appearance`      | `appearance.rs`  |
-| `MacAppearanceObserver.start(cb)`        | `MacAppearanceObserver::start` | `appearance.rs`  |
-| `PowerAssertion.start(options?)`         | `PowerAssertion::start`        | `power.rs`       |
-| `getWorkProfile(lastSeconds)`            | `get_work_profile`             | `prof.rs`        |
-| `deviceCheckGenerateToken()`             | `device_check_generate_token`  | `devicecheck.rs` |
+| JS export                                               | Rust N-API export              | Rust module      |
+| ------------------------------------------------------- | ------------------------------ | ---------------- |
+| `new AudioCapture(sampleRate, cb)`                      | `AudioCapture`                 | `audio.rs`       |
+| `new AudioPlayback(sampleRate)`                         | `AudioPlayback`                | `audio.rs`       |
+| `new LiveWebRtcPeer(...)`                               | `LiveWebRtcPeer`               | `live.rs`        |
+| `encodeSixel(bytes, width, height, backgroundRgb)`      | `encode_sixel`                 | `sixel.rs`       |
+| `encodeSixelAsync(bytes, width, height, backgroundRgb)` | `encode_sixel_async`           | `sixel.rs`       |
+| `decodeSixelToPng(bytes)`                               | `decode_sixel_to_png`          | `sixel.rs`       |
+| `rasterizeSvg(bytes, maxWidth, maxHeight)`              | `rasterize_svg`                | `svg.rs`         |
+| `pdfToMarkdown(bytes)`                                  | `pdf_to_markdown`              | `pdf.rs`         |
+| `renderSnapcompactPng(text, options)`                   | `render_snapcompact_png`       | `snapcompact.rs` |
+| `snapcompactSupportedChars(font, chars)`                | `snapcompact_supported_chars`  | `snapcompact.rs` |
+| `htmlToMarkdown(html, options?)`                        | `html_to_markdown`             | `html.rs`        |
+| `copyToClipboard(text)`                                 | `copy_to_clipboard`            | `clipboard.rs`   |
+| `readImageFromClipboard()`                              | `read_image_from_clipboard`    | `clipboard.rs`   |
+| `countTokens(input, encoding?)`                         | `count_tokens`                 | `tokens.rs`      |
+| `detectMacOSAppearance()`                               | `detect_macos_appearance`      | `appearance.rs`  |
+| `MacAppearanceObserver.start(cb)`                       | `MacAppearanceObserver::start` | `appearance.rs`  |
+| `PowerAssertion.start(options?)`                        | `PowerAssertion::start`        | `power.rs`       |
+| `getWorkProfile(lastSeconds)`                           | `get_work_profile`             | `prof.rs`        |
+| `deviceCheckGenerateToken()`                            | `device_check_generate_token`  | `devicecheck.rs` |
 
 ## Data format boundaries and conversions
 
@@ -130,10 +130,10 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 - **Collection boundary**: profiling samples are produced by `profile_region(tag)` guards, including those in `task::blocking`, `task::blocking_mapped`, and `task::future`.
 - **Storage format**: fixed-size circular buffer (`MAX_SAMPLES = 10_000`) storing stack path, duration, and timestamp.
 - **Output boundary**: `getWorkProfile(lastSeconds)` returns:
-  - `folded`: folded-stack text (flamegraph input)
-  - `summary`: markdown table summary
-  - `svg`: optional flamegraph SVG
-  - `totalMs`, `sampleCount`
+   - `folded`: folded-stack text (flamegraph input)
+   - `summary`: markdown table summary
+   - `svg`: optional flamegraph SVG
+   - `totalMs`, `sampleCount`
 
 ## Lifecycle and state transitions
 

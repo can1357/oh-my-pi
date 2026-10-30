@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-catalog",
-	"version": "18.13.3",
+	"version": "18.14.0",
 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
 	"keywords": [
 		"ai",
@@ -32,10 +32,6 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
-		},
-		"./models.json": {
-			"types": "./src/models.json.d.ts",
-			"import": "./src/models.json"
 		},
 		"./provider-models": {
 			"types": "./src/provider-models/index.ts",

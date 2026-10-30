@@ -111,12 +111,10 @@ export class SessionStatsTracker {
 	/** Tool-schema tokens the active model carries in its prompt. */
 	#currentToolSchemaTokens(): number {
 		const session = this.#host.session;
-		return estimateContextToolSchemaTokens(
-			session.agent?.state?.tools ?? [],
-			this.#tokenizer,
-			session.model,
-			session.settings?.revision,
-		);
+		return estimateContextToolSchemaTokens(session.agent?.state?.tools ?? [], this.#tokenizer, session.model, {
+			sourceRevision: session.settings?.revision,
+			pruneDescriptions: session.agent?.prunesToolDescriptions?.(session.model),
+		});
 	}
 
 	/**

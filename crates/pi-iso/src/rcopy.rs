@@ -316,50 +316,24 @@ fn copy_mtime(src: &Path, dst: &Path) {
 	let _ = set_mtime(dst, mtime);
 }
 
-/// One path-based `utimensat`: rcopy holds no handle to `dst`
+/// One path-based time update: rcopy holds no handle to `dst`
 /// (`std::fs::copy` closes it), so opening one for `futimens` would add an
-/// open and a close per copied entry. `dst` is never a symlink here, but
-/// `AT_SYMLINK_NOFOLLOW` keeps a swapped-in link from redirecting the write.
+/// open and a close per copied entry. `dst` is never a symlink here, but not
+/// following keeps a swapped-in link from redirecting the write. Pre-epoch
+/// times are not mirrored.
 #[cfg(unix)]
 fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
-	use std::os::unix::ffi::OsStrExt;
-
-	let dur = mtime
+	mtime
 		.duration_since(std::time::UNIX_EPOCH)
 		.map_err(std::io::Error::other)?;
-	let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec {
-		tv_sec:  dur.as_secs() as _,
-		tv_nsec: dur.subsec_nanos() as libc::c_long,
-	}];
-	let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-	// SAFETY: `c_path` and `times` outlive the syscall; the kernel does
-	// not retain the pointers.
-	let rc = unsafe {
-		libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
-	};
-	if rc == 0 {
-		Ok(())
-	} else {
-		Err(std::io::Error::last_os_error())
-	}
+	std::fs::set_times_nofollow(path, std::fs::FileTimes::new().set_modified(mtime))
 }
 
-/// Windows has no path-based time setter, so open `path` with just enough
-/// access: backup semantics to open a directory, and write-attributes access,
-/// which works on readonly files.
+/// `fs::set_times` opens `path` with just write-attributes access and backup
+/// semantics, so it works on readonly files and directories.
 #[cfg(windows)]
 fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
-	use std::os::windows::fs::OpenOptionsExt;
-
-	use windows_sys::Win32::Storage::FileSystem::{
-		FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
-	};
-
-	std::fs::OpenOptions::new()
-		.access_mode(FILE_WRITE_ATTRIBUTES)
-		.custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-		.open(path)?
-		.set_modified(mtime)
+	std::fs::set_times(path, std::fs::FileTimes::new().set_modified(mtime))
 }
 
 #[cfg(not(any(unix, windows)))]

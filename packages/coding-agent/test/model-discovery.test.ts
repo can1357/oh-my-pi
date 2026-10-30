@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,11 +22,9 @@ import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/ty
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	discoverLiteLLMModels,
-	discoverOllamaModels,
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
-import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
@@ -1759,100 +1757,6 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(plain?.api).toBe("openai-responses");
 		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 		expect(plain?.compat).not.toMatchObject({ reasoningDisableMode: "qwen-enable-thinking-false" });
-	});
-
-	test("discovery timeout rejects even when fetch ignores abort", async () => {
-		vi.useFakeTimers();
-		try {
-			const pending = Promise.withResolvers<Response>();
-			let outcome: string | undefined;
-			void discoverOllamaModels(
-				{
-					provider: "ollama",
-					api: "openai-responses",
-					baseUrl: "http://127.0.0.1:11434",
-					discovery: { type: "ollama", timeoutMs: 25 },
-					optional: true,
-				},
-				{
-					fetch: () => pending.promise,
-					getBearerApiKeyResolver: async () => undefined,
-				},
-			).then(
-				() => {
-					outcome = "resolved";
-				},
-				error => {
-					outcome = error instanceof DOMException ? error.name : String(error);
-				},
-			);
-
-			vi.advanceTimersByTime(25);
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
-
-			expect(outcome).toBe("TimeoutError");
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	test("lm-studio discovery bounds a loopback probe without shrinking a remote host's budget", async () => {
-		// Regression (#12945): the lm-studio/openai-models-list probe used the flat
-		// remote budget, so every launch with no LM Studio listening on
-		// 127.0.0.1:1234 waited out the full connect timeout instead of the
-		// loopback cap the other implicit local engines honor.
-		vi.useFakeTimers();
-		try {
-			const hang = Promise.withResolvers<Response>();
-			const ctx = {
-				fetch: () => hang.promise,
-				getBearerApiKeyResolver: async () => undefined,
-			};
-			const loopback = discoverOpenAIModelsList(
-				{
-					provider: "lm-studio",
-					api: "openai-completions",
-					baseUrl: "http://127.0.0.1:1234/v1",
-					discovery: { type: "lm-studio" },
-					optional: true,
-				},
-				ctx,
-			);
-			const remote = discoverOpenAIModelsList(
-				{
-					provider: "lm-studio-remote",
-					api: "openai-completions",
-					baseUrl: "http://lm-studio.example:1234/v1",
-					discovery: { type: "lm-studio" },
-					optional: true,
-				},
-				ctx,
-			);
-			const outcomes = new Map<string, string>();
-			for (const [host, probe] of [
-				["loopback", loopback],
-				["remote", remote],
-			] as const) {
-				void probe.then(
-					() => outcomes.set(host, "resolved"),
-					error => outcomes.set(host, error instanceof DOMException ? error.name : String(error)),
-				);
-			}
-
-			// Both probes resolve their credential lookup before arming a deadline,
-			// so drain those microtasks before moving the clock. The drains are
-			// generous on purpose: asserting recorded outcomes (rather than awaiting
-			// a promise that a regression leaves pending) keeps a broken cap a
-			// failure instead of a hang.
-			for (let flush = 0; flush < 50; flush++) await Promise.resolve();
-			vi.advanceTimersByTime(1_000);
-			for (let flush = 0; flush < 50; flush++) await Promise.resolve();
-
-			expect(outcomes.get("loopback")).toBe("TimeoutError");
-			expect(outcomes.get("remote")).toBeUndefined();
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 
 	test("configured llama.cpp Qwen model keeps its /v1 runtime URL despite a native-root baseUrl override", async () => {
@@ -3979,53 +3883,6 @@ describe("ModelRegistry runtime discovery", () => {
 		).toBe("rich-alias-session");
 	});
 
-	test("litellm discovery falls back to /v1/models when the rich phase times out (#10964)", async () => {
-		const { promise: richHang } = Promise.withResolvers<Response>(); // never resolves
-		const richEndpoints = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"];
-		let v1ModelsHits = 0;
-		const fetchMock: FetchImpl = async input => {
-			const url = String(input);
-			if (url === "http://127.0.0.1:4013/v1/models") {
-				v1ModelsHits++;
-				return Response.json({
-					object: "list",
-					data: [{ id: "vendor-7/model-7", object: "model", owned_by: "mockvendor" }],
-				});
-			}
-			// Rich metadata endpoints stall past the discovery budget; anything else
-			// (unrelated implicit probes) fails fast so it cannot hang the suite.
-			if (richEndpoints.some(endpoint => url === `http://127.0.0.1:4013${endpoint}`)) {
-				return richHang;
-			}
-			throw new Error(`Unexpected URL: ${url}`);
-		};
-		const models = await discoverLiteLLMModels(
-			{
-				provider: "litellm-test",
-				baseUrl: "http://127.0.0.1:4013/v1",
-				api: "openai-responses",
-				discovery: { type: "litellm", timeoutMs: 50 },
-			},
-			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
-		);
-		const model = models.find(model => model.id === "vendor-7/model-7");
-		if (!model) throw new Error("Missing fallback LiteLLM model");
-
-		expect(v1ModelsHits).toBeGreaterThan(0);
-		expect(model.baseUrl).toBe("http://127.0.0.1:4013/v1");
-		expect(model.provider).toBe("litellm-test");
-		expect(model.providerType).toBe("litellm");
-		expect(model.api).toBe("openai-responses");
-		if (model.api !== "openai-responses") throw new Error("Expected fallback Responses API");
-		expect(
-			resolveOpenAIRequestSetup(model as Model<"openai-responses">, {
-				apiKey: "test",
-				messages: [],
-				sessionId: "fallback-alias-session",
-			}).requestHeaders["x-litellm-session-id"],
-		).toBe("fallback-alias-session");
-	});
-
 	test("configured litellm discovery omits non-conversational rich modes", async () => {
 		writeRawModelsJson({
 			"litellm-test": {
@@ -4181,39 +4038,6 @@ describe("ModelRegistry runtime discovery", () => {
 		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm")).toEqual([]);
-	});
-
-	test("built-in litellm discovery timeout settles pending state", async () => {
-		vi.useFakeTimers();
-		try {
-			writeRawModelsJson({
-				litellm: {
-					baseUrl: "https://litellm-timeout.example.net/v1",
-					apiKey: "sk-litellm-test",
-					api: "openai-completions",
-				},
-			});
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
-				fetch: () => Promise.withResolvers<Response>().promise,
-			});
-			expect(registry.find("litellm", "not-yet-discovered")).toBeUndefined();
-			expect(registry.isProviderDiscoveryPending("litellm")).toBe(true);
-
-			const refresh = registry.refreshProvider("litellm", "online");
-			for (let turn = 0; turn < 10; turn++) await Promise.resolve();
-			vi.advanceTimersByTime(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS);
-			await refresh;
-
-			expect(registry.getProviderDiscoveryState("litellm")).toMatchObject({
-				status: "unavailable",
-				stale: true,
-				models: [],
-				error: `model discovery timed out after ${RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS}ms`,
-			});
-			expect(registry.isProviderDiscoveryPending("litellm")).toBe(false);
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {

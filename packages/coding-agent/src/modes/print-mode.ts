@@ -17,7 +17,6 @@ import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
 import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
 import type { SlashCommandRuntime } from "../slash-commands/types";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
@@ -328,6 +327,7 @@ async function runPrintModeCore(
 			// reported, consumed without executing, and the run exits 1.
 			return true;
 		}
+		const { executeAcpBuiltinSlashCommand } = await import("../slash-commands/acp-builtins");
 		const refusalBeforeCommand = session.costCapRefusal;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		// The allow-list only matches registered commands, so `false` (not a

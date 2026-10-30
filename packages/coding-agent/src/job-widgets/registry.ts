@@ -69,6 +69,8 @@ interface WidgetEntry {
 	 * is asked again once its subagent names something else to watch.
 	 */
 	skippedWatch?: string;
+	/** A spec dropped for no longer fitting the output, sent back as rejected with the next request. */
+	misfit?: { answer: string; errors: string[] };
 }
 
 /** {@link JobWidgetRegistry} for one root `AsyncJobManager`. */
@@ -169,7 +171,7 @@ export class JobWidgets implements JobWidgetRegistry {
 		if (!inputs) return false;
 		let brief: JobWidgetBrief;
 		try {
-			entry.runtime.ingest(inputs.sources(), settled);
+			if (entry.runtime.ingest(inputs.sources(), settled)) this.#dropMisfit(entry);
 			brief = inputs.brief();
 		} catch (error) {
 			logger.warn("Job widget refresh failed", { jobId: entry.job.id, error: String(error) });
@@ -247,12 +249,19 @@ export class JobWidgets implements JobWidgetRegistry {
 		this.#inFlight += 1;
 		if (this.#recompute(entry, brief)) this.#notify();
 		const samples = entry.runtime.samples();
-		const request: JobWidgetAuthorRequest = { jobId: entry.job.id, brief, sources: samples, previous };
+		const request: JobWidgetAuthorRequest = {
+			jobId: entry.job.id,
+			brief,
+			sources: samples,
+			previous,
+			...(entry.misfit ? { rejected: entry.misfit } : {}),
+		};
+		entry.misfit = undefined;
 		// Where a spec's constant totals and targets may come from, besides the samples.
 		const stated = [brief.command, brief.task, brief.intent, brief.watch, brief.stage].filter(Boolean).join("\n");
-		let spec: JobWidgetSpec | undefined;
+		let installable: JobWidgetRuntime | undefined;
 		try {
-			for (let round = 0; round < 2 && !spec; round++) {
+			for (let round = 0; round < 2 && !installable; round++) {
 				const answer = await author(request, controller.signal);
 				if (controller.signal.aborted || !this.#enabled()) return;
 				if (answer === undefined) {
@@ -266,10 +275,18 @@ export class JobWidgets implements JobWidgetRegistry {
 					break;
 				}
 				const checked = validateJobWidgetSpec(answer, sampleLines(samples), stated);
-				if (checked.ok) spec = checked.spec;
-				else {
-					logger.debug("Job widget spec rejected", { jobId: entry.job.id, errors: checked.errors });
-					request.rejected = { answer: JSON.stringify(answer), errors: checked.errors };
+				let errors: string[];
+				if (checked.ok) {
+					// The samples are a few lines; what else a loose rule matches shows only on the whole output.
+					const candidate = this.#build(entry.job, checked.spec);
+					errors = candidate.problems();
+					if (errors.length === 0) installable = candidate;
+				} else {
+					errors = checked.errors;
+				}
+				if (errors.length > 0) {
+					logger.debug("Job widget spec rejected", { jobId: entry.job.id, errors });
+					request.rejected = { answer: JSON.stringify(answer), errors };
 				}
 			}
 		} catch (error) {
@@ -281,23 +298,44 @@ export class JobWidgets implements JobWidgetRegistry {
 			if (entry.request === controller) entry.request = undefined;
 		}
 		if (controller.signal.aborted || !this.#enabled() || this.#entries.get(entry.job.id) !== entry) return;
-		if (spec) this.#install(entry, spec, brief);
+		if (installable) this.#install(entry, installable, brief);
 		if (this.#recompute(entry, brief)) this.#notify();
 		this.#syncTimer();
 	}
 
-	/** Drive the widget by `spec`, rereading every source from its oldest retained text. */
-	#install(entry: WidgetEntry, spec: JobWidgetSpec, brief: JobWidgetBrief): void {
-		const runtime = new JobWidgetRuntime(spec, entry.job.startTime, this.#now);
-		const inputs = entry.job.widgetInputs;
+	/** A runtime driven by `spec` (none: the fallback) that has read every source from its oldest retained text. */
+	#build(job: AsyncJob, spec: JobWidgetSpec | undefined): JobWidgetRuntime {
+		const runtime = new JobWidgetRuntime(spec, job.startTime, this.#now);
+		const inputs = job.widgetInputs;
 		try {
-			if (inputs) runtime.ingest(inputs.sources(), entry.job.status !== "running");
+			if (inputs) runtime.ingest(inputs.sources(), job.status !== "running");
 		} catch (error) {
-			logger.warn("Job widget refresh failed", { jobId: entry.job.id, error: String(error) });
+			logger.warn("Job widget refresh failed", { jobId: job.id, error: String(error) });
 		}
+		return runtime;
+	}
+
+	/** Drive the widget by a runtime `#build` made and `problems()` cleared. */
+	#install(entry: WidgetEntry, runtime: JobWidgetRuntime, brief: JobWidgetBrief): void {
+		logger.debug("Job widget spec installed", { jobId: entry.job.id, spec: runtime.spec });
 		entry.runtime = runtime;
 		entry.specHadWatch = brief.watch !== undefined && brief.watch.length > 0;
 		entry.lastIngestAt = this.#now();
+	}
+
+	/**
+	 * Fall back from a spec that new output shows draws something other than
+	 * progress (see `JobWidgetRuntime.problems`), so a misfit never reaches the
+	 * screen; the next request sends it back with why.
+	 */
+	#dropMisfit(entry: WidgetEntry): void {
+		const { spec } = entry.runtime;
+		if (!spec) return;
+		const errors = entry.runtime.problems();
+		if (errors.length === 0) return;
+		logger.debug("Job widget spec dropped", { jobId: entry.job.id, errors });
+		entry.misfit = { answer: JSON.stringify(spec), errors };
+		entry.runtime = this.#build(entry.job, undefined);
 	}
 
 	#notify(): void {

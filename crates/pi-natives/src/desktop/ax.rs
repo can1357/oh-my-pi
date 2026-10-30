@@ -304,17 +304,13 @@ impl AxRegistry {
 	/// Drops expired refs. An identity a newer ref took over keeps pointing at
 	/// that one.
 	fn evict(&mut self, mut expired: impl FnMut(&Registered) -> bool) {
-		let refs = &mut self.refs;
-		self.entries.retain(|id, entry| {
-			let expired = expired(entry);
-			if expired
-				&& let Some(target_refs) = refs.get_mut(&entry.target_key)
-				&& target_refs.get(&entry.handle) == Some(id)
+		for (id, entry) in self.entries.extract_if(|_, entry| expired(entry)) {
+			if let Some(target_refs) = self.refs.get_mut(&entry.target_key)
+				&& target_refs.get(&entry.handle) == Some(&id)
 			{
 				target_refs.remove(&entry.handle);
 			}
-			!expired
-		});
+		}
 	}
 
 	fn enforce_cap(&mut self) {

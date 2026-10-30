@@ -1,3 +1,4 @@
+import { scheduler } from "node:timers/promises";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
@@ -391,7 +392,7 @@ export class OAuthRefresher {
 	async #drainRefreshes(): Promise<void> {
 		this.#shuttingDown = true;
 		// Work tracked while draining (a lease hand-back a returning caller left behind) is waited for too.
-		while (this.#pendingRefreshes.size > 0) await Promise.allSettled([...this.#pendingRefreshes]);
+		while (this.#pendingRefreshes.size > 0) await Promise.allSettled(this.#pendingRefreshes);
 	}
 
 	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
@@ -620,18 +621,19 @@ export class OAuthRefresher {
 		let keepLease = false;
 		let saved = false;
 		try {
-			let stopLeaseRenewal = false;
+			const leaseRenewalStop = new AbortController();
 			let leaseRenewalError: unknown;
-			const leaseRenewalStopped = Promise.withResolvers<void>();
 			const leaseRenewal =
 				leasedCredentialId !== undefined && leaseStore
 					? (async () => {
 							// Renew every interval; after a busy store, retry almost at once,
 							// since another full interval would outlive the lease.
 							let delayMs = OAUTH_REFRESH_LEASE_RENEW_MS;
-							while (!stopLeaseRenewal) {
-								await Promise.race([Bun.sleep(delayMs), leaseRenewalStopped.promise]);
-								if (stopLeaseRenewal) return;
+							while (!leaseRenewalStop.signal.aborted) {
+								// Stopping cancels the wait, so a finished exchange leaves no renewal
+								// timer behind to hold the process open for up to an interval.
+								await scheduler.wait(delayMs, { signal: leaseRenewalStop.signal }).catch(() => undefined);
+								if (leaseRenewalStop.signal.aborted) return;
 								let renewed: boolean;
 								try {
 									renewed = leaseStore.renewCredentialRefreshLease(
@@ -694,8 +696,7 @@ export class OAuthRefresher {
 						until: takenOverFrom.expiresAtMs + OAUTH_REFRESH_STALLED_OWNER_MS,
 					});
 					// Stop renewing first: a renewal after the hand-back would take it back.
-					stopLeaseRenewal = true;
-					leaseRenewalStopped.resolve();
+					leaseRenewalStop.abort();
 					await leaseRenewal;
 					// Never release this lease afterwards: a hand-back that landed left
 					// nothing to release, and one that did not must leave a recent owner.
@@ -754,8 +755,7 @@ export class OAuthRefresher {
 					},
 				};
 			} finally {
-				stopLeaseRenewal = true;
-				leaseRenewalStopped.resolve();
+				leaseRenewalStop.abort();
 				await leaseRenewal;
 				clearTimeout(backstop);
 			}

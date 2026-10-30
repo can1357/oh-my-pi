@@ -499,7 +499,7 @@ mod proc_snapshot {
 /// macOS process primitives: libproc and `KERN_PROCARGS2`.
 #[cfg(target_os = "macos")]
 pub mod sys {
-	use std::{mem::size_of, ptr};
+	use std::ptr;
 
 	const KERN_PROCARGS2: libc::c_int = 49;
 	// proc_pidinfo flavors missing from libc. Short BSD info is readable for
@@ -648,7 +648,6 @@ mod proc_snapshot {
 	use std::{
 		collections::HashMap,
 		ffi::CStr,
-		mem::size_of,
 		path::Path,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
@@ -1033,7 +1032,6 @@ mod proc_snapshot {
 pub mod sys {
 	use std::{
 		ffi::c_void,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrInvalid, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 	};
@@ -1386,12 +1384,12 @@ pub mod sys {
 		// SAFETY: a successful query initializes a UnicodeString at the buffer head.
 		let command = unsafe { &*storage.as_ptr().cast::<UnicodeString>() };
 		let length = usize::from(command.length);
-		if length == 0 || length % size_of::<u16>() != 0 {
+		if length == 0 || !length.is_multiple_of(size_of::<u16>()) {
 			return None;
 		}
-		let base = storage.as_ptr() as usize;
+		let base = storage.as_ptr().addr();
 		let end = base.checked_add(storage.len().checked_mul(size_of::<usize>())?)?;
-		let command_start = command.buffer as usize;
+		let command_start = command.buffer.addr();
 		let command_end = command_start.checked_add(length)?;
 		if command_start < base || command_end > end {
 			return None;
@@ -1449,7 +1447,6 @@ pub mod sys {
 mod proc_snapshot {
 	use std::{
 		collections::HashMap,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 		time::Duration,
@@ -2077,8 +2074,7 @@ mod tests {
 		let self_pid = i32::try_from(std::process::id()).expect("pid fits in i32");
 
 		assert_eq!(host.pids.first(), Some(&self_pid), "the chain must start at us");
-		for pair in host.pids.windows(2) {
-			let [child, parent] = [pair[0], pair[1]];
+		for &[child, parent] in host.pids.array_windows() {
 			let entry = all
 				.iter()
 				.find(|process| process.pid() == child)

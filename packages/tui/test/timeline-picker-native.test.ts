@@ -126,6 +126,37 @@ describe("rewind page", () => {
 		expect(JSON.stringify((page.dock[0] as RewindSelectorComponent).describe(pickerCx))).toContain("4/4");
 	});
 
+	test("an interrupted turn that shows nothing is never picked: the page opens on the turn above it", () => {
+		// Interrupted before the first token: no text, no usage row.
+		const interrupted = {
+			...assistant([]),
+			stopReason: "aborted",
+			errorMessage: "Interrupted by user",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		} as unknown as AgentMessage;
+		const selector = new RewindSelectorComponent([...transcript(), entry("a3", "u2", interrupted)], {
+			ui,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onSelect: () => {},
+			onCancel: () => {},
+		});
+		const { main } = selector.describeScreen(pickerCx);
+		expect(marks(main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
+		expect(captionText(main)).toContain("1 turn below dropped");
+		expect(JSON.stringify(selector.describe(pickerCx))).toContain("4/5");
+		// Down has nothing that shows to step onto.
+		selector.handleInput("\x1b[B");
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
+	});
+
 	test("stepping up moves the pick and drops everything below it", () => {
 		const selector = rewind();
 		for (let i = 0; i < 3; i++) selector.handleInput(UP);

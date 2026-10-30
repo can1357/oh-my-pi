@@ -43,9 +43,9 @@ This is not context-overflow or payload-rejection handling and does not establis
 - message is **not** context overflow
 - not a usage-preflight block, the specially handled full-replay Responses body-read timeout, or an Anthropic HTTP 400 rejecting mutation of latest-assistant thinking
 - one of:
-  - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
-  - the error is an account-scoped policy denial eligible for credential rotation
-  - the normalized `AIError` classification is retryable (including stale Responses replay, transient transport/provider failures, and usage limits)
+   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
+   - the error is an account-scoped policy denial eligible for credential rotation
+   - the normalized `AIError` classification is retryable (including stale Responses replay, transient transport/provider failures, and usage limits)
 
 Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
 
@@ -89,7 +89,7 @@ Flow (`#handleRetryableError`):
 7. If the current model's retry budget is exhausted, stop unless a model switch or confirmed credential reset permits continuation. A fallback model receives a fresh retry budget; credential recovery keeps the cumulative count. Known thinking-only stream-close routes have a one-retry cap rather than the full configured budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping, except an authoritative usage-reset wait explicitly allowed by `retry.waitForUsageReset`.
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
-10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
+10.   Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
 ### What resets retry counters
 
