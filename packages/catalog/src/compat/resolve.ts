@@ -1156,12 +1156,12 @@ function compatReasoning<TApi extends Api>(spec: ModelSpec<TApi>, axes: Resolved
 }
 
 /** Identity-derived `requiresEffort` default (mandatory-reasoning lineages). */
-function impliesMandatoryReasoning(facts: IdentityFacts, modelId: string): boolean {
+function impliesMandatoryReasoning(facts: IdentityFacts, provider: string, modelId: string): boolean {
 	if (facts.identity.thinkingVariant) return true;
 	// Thinking-variant orphans: a bounded pair token anywhere in the id
 	// (`runtime-thinking-model`, `qwen3-…-thinking-2507`) names the
 	// reasoning-locked sibling even when it is not a collapse suffix.
-	if (stripThinkingVariantSuffix(modelId) !== undefined) return true;
+	if (stripThinkingVariantSuffix(modelId, provider) !== undefined) return true;
 	return false;
 }
 
@@ -1225,7 +1225,8 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (supportsDisplay) config.supportsDisplay = true;
 	if (rule.prefixBinding) config.prefixBinding = true;
 	const requiresEffort =
-		rule.requiresEffort ?? (impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
+		rule.requiresEffort ??
+		(impliesMandatoryReasoning(facts, spec.provider, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
 	if (requiresEffort) config.requiresEffort = true;
 	if (rule.suppressWhenOff) config.suppressWhenOff = true;
 	return config;
@@ -1279,7 +1280,7 @@ function fillExplicitThinking<TApi extends Api>(
 	const needsRequiresEffort =
 		thinking.requiresEffort === undefined &&
 		(rule.requiresEffort ??
-			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
+			(impliesMandatoryReasoning(facts, spec.provider, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
 	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
 	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
 	const needsEffortBudgets = thinking.effortBudgets === undefined && rule.effortBudgets !== undefined;

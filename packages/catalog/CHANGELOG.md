@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AI Stupid Level as a built-in provider with `/login aistupidlevel` or `AISTUPIDLEVEL_API_KEY`: its benchmark routing modes (default `auto-coding`) and the model ids it can pin come from live discovery as text-only models, and thinking levels are sent as `reasoning_effort` ([#16867](https://github.com/can1357/oh-my-pi/pull/16867) by [@StudioPlatforms](https://github.com/StudioPlatforms))
+
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))

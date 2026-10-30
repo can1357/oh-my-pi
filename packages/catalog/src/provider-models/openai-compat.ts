@@ -1934,6 +1934,33 @@ export function coralbricksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// AI Stupid Level
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the AI Stupid Level Smart Router discovery manager. `/v1/models`
+ * needs a router key and lists the routing modes (`auto-*`) beside the model
+ * ids a request can pin, with no capability data: routing modes resolve
+ * against their bundled seed rows, and the limits, text-only input, and
+ * `reasoning_effort` ladder every row shares live in
+ * `providers/aistupidlevel.kdl`. A successful fetch is the complete roster;
+ * without a key the seeded routing modes are served.
+ */
+export function aistupidlevelModelManagerOptions(
+	config?: ModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "aistupidlevel",
+		defaultBaseUrl: "https://aistupidlevel.info/v1",
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		mapModel: mapWithBundledReference,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 6. xAI
 // ---------------------------------------------------------------------------
 
