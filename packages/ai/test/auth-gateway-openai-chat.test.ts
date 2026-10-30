@@ -73,6 +73,7 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 							id: "call_1",
 							type: "function",
 							function: { name: "lookup", arguments: '{"q":"a"}' },
+							extra_content: { google: { thought_signature: "sig-123" } },
 						},
 						{
 							id: "call_2",
@@ -122,6 +123,7 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		if (call1.type !== "toolCall" || call2.type !== "toolCall") throw new Error("unreachable");
 		expect(call1.id).toBe("call_1");
 		expect(call1.name).toBe("lookup");
+		expect(call1.thoughtSignature).toBe("sig-123");
 		expect(call1.arguments).toEqual({ q: "a" });
 		// Un-parseable args fall back to __raw passthrough.
 		expect(call2.arguments).toEqual({ __raw: "not-json" });
@@ -337,6 +339,34 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 		});
 	});
 
+	it("emits Google thought signatures in tool-call metadata", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_google",
+					name: "check",
+					arguments: { value: "test" },
+					thoughtSignature: "sig-google",
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const out = encodeResponse(message, "gemini-test");
+		const choices = out.choices as Array<{
+			message: { tool_calls?: Array<Record<string, unknown>> };
+		}>;
+		expect(choices[0].message.tool_calls).toEqual([
+			{
+				id: "call_google",
+				type: "function",
+				function: { name: "check", arguments: '{"value":"test"}' },
+				extra_content: { google: { thought_signature: "sig-google" } },
+			},
+		]);
+	});
+
 	it("maps length stop reason and emits null content when text is empty", () => {
 		const message: AssistantMessage = { ...emptyAssistant(), stopReason: "length" };
 		const out = encodeResponse(message, "gpt-test");
@@ -352,7 +382,13 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		// Pre-populate partial.content so toolcall_start can look up id/name by contentIndex.
 		partial.content = [
 			{ type: "text", text: "" },
-			{ type: "toolCall", id: "call_A", name: "tool_a", arguments: {} },
+			{
+				type: "toolCall",
+				id: "call_A",
+				name: "tool_a",
+				arguments: {},
+				thoughtSignature: "sig-stream",
+			},
 			{ type: "toolCall", id: "call_B", name: "tool_b", arguments: {} },
 		];
 		const events: AssistantMessageEvent[] = [
@@ -400,7 +436,12 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(textDeltas.join("")).toBe("Hi there");
 
 		// Collect tool_call deltas; verify index sequence.
-		const toolDeltas: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> = [];
+		const toolDeltas: Array<{
+			index: number;
+			id?: string;
+			function?: { name?: string; arguments?: string };
+			extra_content?: unknown;
+		}> = [];
 		for (const c of chunks) {
 			const tc = c.choices[0].delta.tool_calls;
 			if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
@@ -410,6 +451,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(starts.map(s => s.index)).toEqual([0, 1]);
 		expect(starts[0].id).toBe("call_A");
 		expect(starts[0].function?.name).toBe("tool_a");
+		expect(starts[0].extra_content).toEqual({ google: { thought_signature: "sig-stream" } });
 		expect(starts[1].id).toBe("call_B");
 		expect(starts[1].function?.name).toBe("tool_b");
 

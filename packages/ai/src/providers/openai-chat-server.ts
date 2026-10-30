@@ -292,7 +292,16 @@ function buildAssistantMessage(
 					args = { __raw: argsStr };
 				}
 			}
-			const call: ToolCall = { type: "toolCall", id: raw.id, name: fn.name, arguments: args };
+			const rawExtraContent =
+				typeof raw === "object" && raw !== null && "extra_content" in raw ? raw.extra_content : undefined;
+			const thoughtSignature = extractGoogleThoughtSignature(rawExtraContent);
+			const call: ToolCall = {
+				type: "toolCall",
+				id: raw.id,
+				name: fn.name,
+				arguments: args,
+				...(thoughtSignature ? { thoughtSignature } : {}),
+			};
 			parts.push(call);
 		}
 	}
@@ -428,11 +437,15 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		responseMessage.reasoning_content = reasoning;
 	}
 	if (toolCalls.length > 0) {
-		responseMessage.tool_calls = toolCalls.map(tc => ({
-			id: tc.id,
-			type: "function",
-			function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
-		}));
+		responseMessage.tool_calls = toolCalls.map(tc => {
+			const extraContent = googleThoughtSignatureExtraContent(tc.thoughtSignature);
+			return {
+				id: tc.id,
+				type: "function",
+				function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
+				...(extraContent ? { extra_content: extraContent } : {}),
+			};
+		});
 	}
 
 	return {
@@ -496,6 +509,32 @@ function flattenAssistant(message: AssistantMessage): {
 		}
 	}
 	return { text, reasoning, toolCalls };
+}
+
+function extractGoogleThoughtSignature(value: unknown): string | undefined {
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return undefined;
+		try {
+			const parsed: unknown = JSON.parse(trimmed);
+			if (parsed !== trimmed) return extractGoogleThoughtSignature(parsed);
+		} catch {
+			// Raw provider signatures are opaque strings, usually base64.
+		}
+		return trimmed;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	if ("google" in value) return extractGoogleThoughtSignature(value.google);
+	if ("perCall" in value) return extractGoogleThoughtSignature(value.perCall);
+	if ("thought_signature" in value) return extractGoogleThoughtSignature(value.thought_signature);
+	return undefined;
+}
+
+function googleThoughtSignatureExtraContent(
+	value: string | undefined,
+): Record<string, unknown> | undefined {
+	const signature = extractGoogleThoughtSignature(value);
+	return signature ? { google: { thought_signature: signature } } : undefined;
 }
 
 function isOnlyRaw(args: Record<string, unknown>): boolean {
@@ -593,7 +632,10 @@ export function encodeStream(
 			const toolIndexByContentIndex = new Map<number, number>();
 			// wire index -> metadata emitted so far, to detect values that need a
 			// concatenation-safe corrective chunk before the finish.
-			const sentToolMeta = new Map<number, { id: string; name: string; hasArgumentBytes: boolean }>();
+			const sentToolMeta = new Map<
+				number,
+				{ id: string; name: string; hasArgumentBytes: boolean; thoughtSignature?: string }
+			>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
@@ -642,7 +684,13 @@ export function encodeStream(
 							toolIndexByContentIndex.set(event.contentIndex, idx);
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
-							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
+							sentToolMeta.set(idx, {
+								id: call?.id ?? "",
+								name: call?.name ?? "",
+								hasArgumentBytes: false,
+								...(call?.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+							});
+							const extraContent = googleThoughtSignatureExtraContent(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -653,6 +701,7 @@ export function encodeStream(
 												id: call?.id ?? "",
 												type: "function",
 												function: { name: call?.name ?? "", arguments: "" },
+												...(extraContent ? { extra_content: extraContent } : {}),
 											},
 										],
 									},
@@ -689,7 +738,15 @@ export function encodeStream(
 							const correctArguments = sent.hasArgumentBytes
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
-							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
+							const extraContent = sent.thoughtSignature
+								? undefined
+								: googleThoughtSignatureExtraContent(event.toolCall.thoughtSignature);
+							if (
+								correctId !== undefined ||
+								correctName !== undefined ||
+								correctArguments !== undefined ||
+								extraContent !== undefined
+							) {
 								writeSse(
 									controller,
 									baseChunk(
@@ -697,6 +754,7 @@ export function encodeStream(
 											tool_calls: [
 												{
 													index: idx,
+													...(extraContent ? { extra_content: extraContent } : {}),
 													...(correctId !== undefined ? { id: correctId } : {}),
 													...(correctName !== undefined || correctArguments !== undefined
 														? {
