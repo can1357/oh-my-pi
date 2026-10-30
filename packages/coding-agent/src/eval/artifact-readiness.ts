@@ -32,6 +32,34 @@ export { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "./artifact-readiness-name";
  * before an abort is not something to hand back afterwards as though the read
  * had succeeded.
  */
+/**
+ * What each artifacts directory was when a cell was last given it as a root,
+ * by resolved path.
+ *
+ * A root is a pathname, and a pathname can be made to mean another directory.
+ * A cell suspended while its own was moved aside and replaced would read the
+ * replacement as its own artifacts — the same mistake as every other one in
+ * this file, one level up: the identity was in hand when the cell started and
+ * looked up again by name when it read.
+ */
+const artifactRootIdentities = new Map<string, string>();
+
+/** The directory `dir` is now, as a device and inode pair, or `undefined`. */
+function directoryIdentity(dir: string): string | undefined {
+	try {
+		const stat = fs.statSync(dir, { bigint: true });
+		return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Record what the artifacts directory a cell is being started on is now. */
+export function rememberArtifactRoot(dir: string): void {
+	const identity = directoryIdentity(dir);
+	if (identity) artifactRootIdentities.set(path.resolve(dir), identity);
+}
+
 export async function resolveSettledArtifact(
 	session: ToolSession,
 	id: string,
@@ -42,6 +70,10 @@ export async function resolveSettledArtifact(
 	// re-adoption is not the session's current one.
 	const dir = root ?? contextLocalProtocolOptions(session)?.getArtifactsDir?.();
 	if (!dir) return null;
+	const was = artifactRootIdentities.get(path.resolve(dir));
+	if (was && directoryIdentity(dir) !== was) {
+		throw new ToolError(`${dir} is no longer the artifacts directory this cell was started on`);
+	}
 	for (let attempt = 1; ; attempt++) {
 		await whenArtifactCopiesSettle(dir, signal);
 		const before = artifactCopyActivity(dir);
@@ -56,17 +88,9 @@ export async function resolveSettledArtifact(
 			// session reads by then — and between this answer and the reader
 			// receiving it the session can be re-adopted, which is a different
 			// conversation's artifact wearing the same number.
-			const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
-			// A cell whose session has moved on reads its own directory and no
-			// other: every other one belongs to a conversation it is not in.
-			if (current && path.resolve(current) !== path.resolve(dir)) {
-				throw new ToolError(
-					`artifact://${id} is not in ${dir}, the artifacts directory this cell was started with`,
-				);
-			}
-			const elsewhere = await artifactElsewhere(dir, id, signal);
+			const elsewhere = await artifactElsewhere(session, dir, id, signal);
 			if (elsewhere) return elsewhere;
-			throw new ToolError(`artifact://${id} is in no artifacts directory this process knows, including ${dir}`);
+			throw new ToolError(`artifact://${id} is in none of the artifacts directories this cell may read: ${dir}`);
 		}
 		// Copies arriving back to back with no gap between them would keep a
 		// reader here forever. Saying so is better than answering from a
@@ -83,15 +107,34 @@ export async function resolveSettledArtifact(
 const ARTIFACT_RESOLVE_ATTEMPTS = 16;
 
 /**
- * The file for `id` in any artifacts directory this process knows other than
- * `dir`, once the copies into it have settled — which is how a session reads
- * an artifact another session produced.
+ * The file for `id` in the other directories this cell may read, once the
+ * copies into them have settled.
  *
  * Searched here, not by the reader: a reader told "not there" would look it up
  * again later, and by then "there" can mean another directory entirely.
+ *
+ * Which directories those are is the whole question. A cell reading the
+ * session's own current directory may also read the artifacts of any session
+ * this process knows — that is what reading `artifact://<n>` of another
+ * conversation has always meant. A cell whose session has moved on, or whose
+ * session has no directory at all, may not: for it, every other directory
+ * belongs to a conversation it is not in, and an absent current directory is
+ * not a licence to look anywhere. What it keeps is the source a seance was
+ * started to consult, which is its own to read by construction.
  */
-async function artifactElsewhere(dir: string, id: string, signal?: AbortSignal): Promise<string | null> {
-	for (const other of artifactsDirsFromRegistry()) {
+async function artifactElsewhere(
+	session: ToolSession,
+	dir: string,
+	id: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
+	const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+	// The source a seance was started to consult is this cell's to read
+	// whatever else has happened: that is what the seance is.
+	const consulted = session.seanceSourceArtifactsDir;
+	const ownRoot = Boolean(current && path.resolve(current) === path.resolve(dir));
+	const reachable = [...(consulted ? [consulted] : []), ...(ownRoot ? artifactsDirsFromRegistry() : [])];
+	for (const other of reachable) {
 		if (path.resolve(other) === path.resolve(dir)) continue;
 		await whenArtifactCopiesSettle(other, signal);
 		const found = await artifactInDirectory(other, id);

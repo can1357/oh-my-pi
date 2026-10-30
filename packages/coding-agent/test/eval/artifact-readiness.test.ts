@@ -221,14 +221,14 @@ describe("eval artifact readiness", () => {
 		// since. Answering its miss from the directory the session reads now
 		// would hand it that other artifact.
 		await expect(resolveSettledArtifact(sessionWithArtifacts(current), "1", suspended)).rejects.toThrow(
-			"artifacts directory this cell was started with",
+			"is in none of the artifacts directories this cell may read",
 		);
 		// A miss on the session's own directory is searched for in the other
 		// directories this process knows — which is how another session's
 		// artifact is read — and answered here either way, never handed back
 		// for the reader to resolve again later.
 		await expect(resolveSettledArtifact(sessionWithArtifacts(current), "9", current)).rejects.toThrow(
-			"no artifacts directory this process knows",
+			"is in none of the artifacts directories this cell may read",
 		);
 	});
 

@@ -1,5 +1,6 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
+import { rememberArtifactRoot } from "./artifact-readiness";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -90,6 +91,12 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
 	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: protocolOptions });
 	const roots = options ? buildEvalUrlRoots(options) : {};
 	const artifactsDir = protocolOptions?.getArtifactsDir?.();
-	if (artifactsDir) roots.artifact = artifactsDir;
+	if (artifactsDir) {
+		roots.artifact = artifactsDir;
+		// What that directory is now, so a cell reading through this root later
+		// is reading the directory it was given rather than whatever has taken
+		// its name since.
+		rememberArtifactRoot(artifactsDir);
+	}
 	return roots;
 }

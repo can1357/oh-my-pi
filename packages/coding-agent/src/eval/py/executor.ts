@@ -440,6 +440,9 @@ async function executePerCall(code: string, cwd: string, options: PythonExecutor
 	try {
 		return await executeWithKernel(kernel, code, { ...options, cwd });
 	} finally {
+		// The kernel is this call's and goes with it, and so does the standing
+		// authority its cells registered: nothing is left running to ask.
+		if (options.bridgeSessionId) unregisterPyToolBridgeSession(options.bridgeSessionId);
 		await kernel.shutdown().catch(() => undefined);
 	}
 }
@@ -519,6 +522,17 @@ async function invokePythonToolRequest(
 		signal: options.signal,
 	};
 	await ensureToolBridge(bridgeOptions);
+	// The identity the kernel itself was started with, derived the same way
+	// rather than guessed: a registration under anything else is a call the
+	// kernel's own prelude cannot be answered through, because the id it sends
+	// is the one in its environment.
+	const present = sessionRegistry.getPresentSession(cwd, {
+		cwd,
+		sessionId: options.sessionId,
+		interpreter: options.interpreter,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	const bridgeSessionId = present ? bridgeSessionIdFor(present.sessionKey) : options.sessionId;
 
 	// The roots the caller has *now*, carried with the request: a tool defined
 	// in an earlier cell is invoked long after the environment its kernel was
@@ -528,9 +542,7 @@ async function invokePythonToolRequest(
 		? { ...request, env: { PI_EVAL_LOCAL_ROOTS: JSON.stringify(resolveEvalUrlRoots(options.toolSession)) } }
 		: request;
 	const runId = Snowflake.next();
-	// The same identity the kernel's own cells register under: the bridge
-	// belongs to the kernel, and the prelude sends that id with every call.
-	const unregister = registerPyToolBridge(bridgeOptions.bridgeSessionId ?? options.sessionId, runId, {
+	const unregister = registerPyToolBridge(bridgeSessionId, runId, {
 		toolSession: options.toolSession,
 		signal: options.signal,
 		emitStatus: undefined,
