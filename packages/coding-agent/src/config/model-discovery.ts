@@ -29,9 +29,10 @@ import {
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
+	type ThinkingConfig,
 	runnerApiKind,
 } from "@oh-my-pi/pi-catalog/types";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -956,15 +957,24 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
-	/** The row advertises an effort ladder, and whether it also accepts `none`. */
-	| { kind: "ladder"; efforts: Effort[]; acceptsNone: boolean; defaultLevel?: Effort };
+	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
+	| {
+			kind: "ladder";
+			efforts: Effort[];
+			acceptsNone: boolean;
+			defaultLevel?: Effort;
+			effortMap?: Partial<Record<Effort, Effort>>;
+			requiresEffort?: boolean;
+	  };
 
 /**
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
- * other gateways may advertise the same fields top-level. Returns undefined
- * when the row says nothing usable about reasoning.
+ * other gateways may advertise the same fields top-level, along with
+ * `reasoning_effort_map` (where an unserved request lands) and
+ * `reasoning_required`. Returns undefined when the row says nothing usable
+ * about reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -977,6 +987,8 @@ function extractAdvertisedReasoning(item: {
 	supported_reasoning_levels?: unknown;
 	default_reasoning_level?: unknown;
 	reasoning?: unknown;
+	reasoning_effort_map?: unknown;
+	reasoning_required?: unknown;
 }): AdvertisedReasoning | undefined {
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
 	// codex-lb nests every reasoning field under `metadata`; read the denial from
@@ -988,6 +1000,8 @@ function extractAdvertisedReasoning(item: {
 	if (efforts === undefined) return undefined;
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
+	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
+	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;
 	return {
 		kind: "ladder",
 		efforts,
@@ -997,6 +1011,9 @@ function extractAdvertisedReasoning(item: {
 		// clamped to the lowest tier.
 		acceptsNone: advisoryEffortEntries(raw).includes("none"),
 		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+		...(effortMap !== undefined ? { effortMap } : {}),
+		// An explicit `false` is kept so it outranks an identity default that locks reasoning on.
+		...(typeof requiresEffort === "boolean" ? { requiresEffort } : {}),
 	};
 }
 
@@ -1007,6 +1024,21 @@ function advisoryEffortEntries(value: unknown): string[] {
 		const raw = isRecord(entry) ? entry.effort : entry;
 		return typeof raw === "string" ? [raw.toLowerCase()] : [];
 	});
+}
+
+/**
+ * A row's requested → served aliases (`{"medium": "high"}` for a low/high/max
+ * route). Any omp effort may be requested; served values must be ladder tiers.
+ */
+function extractReasoningEffortMap(value: unknown): Partial<Record<Effort, Effort>> | undefined {
+	if (!isRecord(value)) return undefined;
+	let effortMap: Partial<Record<Effort, Effort>> | undefined;
+	for (const [rawRequested, rawServed] of Object.entries(value)) {
+		const requested = rawRequested.toLowerCase() as Effort;
+		const served = advertisedReasoningEffort(rawServed);
+		if (served !== undefined && THINKING_EFFORTS.includes(requested)) (effortMap ??= {})[requested] = served;
+	}
+	return effortMap;
 }
 
 /**
@@ -1048,7 +1080,14 @@ function withAdvertisedEfforts(
 		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
 			? preferredDefault
 			: advertised.efforts[0];
-	const thinking = { mode: "effort" as const, efforts: advertised.efforts, defaultLevel };
+	// The alias map and the thinking-off lock are wire facts of this row too.
+	const thinking: ThinkingConfig = {
+		mode: "effort",
+		efforts: advertised.efforts,
+		defaultLevel,
+		...(advertised.effortMap !== undefined ? { effortMap: advertised.effortMap } : {}),
+		...(advertised.requiresEffort !== undefined ? { requiresEffort: advertised.requiresEffort } : {}),
+	};
 	if (isAnthropic) {
 		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode ?? "budget";
 		return { ...spec, reasoning: true, thinking: { ...thinking, mode } };
@@ -1157,6 +1196,8 @@ export async function discoverOpenAIModelsList(
 						supported_reasoning_levels?: unknown;
 						default_reasoning_level?: unknown;
 						reasoning?: unknown;
+						reasoning_effort_map?: unknown;
+						reasoning_required?: unknown;
 					}>;
 				};
 			}),
@@ -1407,6 +1448,8 @@ export async function discoverProxyModels(
 					supported_reasoning_levels?: unknown;
 					default_reasoning_level?: unknown;
 					reasoning?: unknown;
+					reasoning_effort_map?: unknown;
+					reasoning_required?: unknown;
 				}>;
 			};
 		});
