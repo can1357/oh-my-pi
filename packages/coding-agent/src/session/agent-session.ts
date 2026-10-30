@@ -84,7 +84,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -448,6 +447,7 @@ import {
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus, PromptCacheEntry } from "./cache-warmer";
+import { prewarmUnlessPaused } from "./connection-prewarm";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
 import {
@@ -2240,7 +2240,22 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Compaction summaries, handoff documents, branch summaries and side
+		// turns all reach a provider through this one function, outside any
+		// agent loop, so `/pause` holds each of their requests here. The wait
+		// ends on the request's own signal or on this session's disposal — a
+		// human releases `/pause`, and a disposed session must not pay for its
+		// held requests on resume — and then the request's own hold runs, so a
+		// caller's check of what changed under the pause sees the state after it.
+		this.#sideStreamFn = (model, context, options) => {
+			const disposed = this.#disposeAbortController.signal;
+			const lifetime = options?.signal ? AbortSignal.any([options.signal, disposed]) : disposed;
+			return sideStreamFn(model, context, {
+				...options,
+				beforeDispatch: agentPauseGate.dispatchHold(lifetime, options?.beforeDispatch),
+			});
+		};
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -6832,12 +6847,13 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Warms the active model's API connection while idle, so the next turn
 	 * skips connection setup. Throttled and best effort; no-op mid-turn, where
-	 * the pooled socket is busy and a warm-up would open a redundant one.
+	 * the pooled socket is busy and a warm-up would open a redundant one, and
+	 * while `/pause` holds (see `./connection-prewarm`).
 	 */
 	prewarmModelConnection(): void {
 		const model = this.model;
 		if (!model || this.#isDisposed || this.isStreaming) return;
-		void prewarmModelConnection(model);
+		prewarmUnlessPaused(model);
 	}
 
 	get isAborting(): boolean {
@@ -12786,12 +12802,10 @@ export class AgentSession implements SettingsScope {
 				// The check below is this turn's last synchronous one, but the
 				// stream still resolves the credential, any command-backed
 				// headers and an in-flight slot before the transport, and it
-				// re-dispatches on its own after a rotation. Hold at the gate
-				// there too, where nothing of this layer's own can follow.
-				beforeDispatch: async () => {
-					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
-					assertEphemeralTurnReady();
-				},
+				// re-dispatches on its own after a rotation. The side stream
+				// parks each of those dispatches at the gate first, so what
+				// changed under the pause is checked here, after the wait.
+				beforeDispatch: assertEphemeralTurnReady,
 				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},
 			model.provider,

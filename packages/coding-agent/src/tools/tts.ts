@@ -18,6 +18,7 @@ import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 
+import { pauseHeldFetch } from "./pause-held-fetch";
 import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
 
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
@@ -114,7 +115,8 @@ async function synthesizeCloud(
 		},
 		{
 			apiKey: ctx.modelRegistry.resolver(model, sessionId),
-			fetch: ctx.fetch,
+			// The synthesis request waits out `/pause`, like every other request.
+			fetch: pauseHeldFetch(ctx.fetch ?? fetch),
 			signal,
 		},
 	);

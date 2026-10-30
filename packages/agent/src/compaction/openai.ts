@@ -35,6 +35,7 @@ import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages"
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	DispatchHold,
 	FetchImpl,
 	Message,
 	Model,
@@ -48,6 +49,7 @@ import {
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
+import { holdBeforeDispatch } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -873,6 +875,8 @@ export async function requestOpenAiRemoteCompaction(
 		codexCompaction?: CodexCompactionContext;
 		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
 		rewriteOutputs?: boolean;
+		/** Awaited immediately before the request goes out; see `SummaryOptions.beforeDispatch`. */
+		beforeDispatch?: DispatchHold;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
@@ -992,6 +996,11 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
+	// The hold is the last step before the wire — the attestation, metadata and
+	// Bedrock signing above all await — and it ends on the caller's signal, not
+	// the timeout below: the timeout bounds the provider, and arming it before
+	// a `/pause` would fail a held compaction instead of sending it on resume.
+	await holdBeforeDispatch(opts?.beforeDispatch, signal);
 	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers,
@@ -1064,7 +1073,7 @@ export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string; beforeDispatch?: DispatchHold },
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -1091,6 +1100,8 @@ export async function requestRemoteCompaction(
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 
+	// Held before the timeout is armed, like the Responses request above.
+	await holdBeforeDispatch(opts?.beforeDispatch, signal);
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,

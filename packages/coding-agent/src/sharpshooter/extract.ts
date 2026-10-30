@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getSegmenter } from "@oh-my-pi/pi-tui";
@@ -251,6 +251,12 @@ async function runSharpshooterExtraction(
 					maxTokens: 2048,
 					reasoning: clampThinkingLevelForModel(model, Effort.Low),
 					toolChoice: "required",
+					// Extraction runs beside the agent loop, so `/pause` holds it
+					// here. It has no signal to end the wait, so a session disposed
+					// while it was held fails the request instead of paying for it.
+					beforeDispatch: agentPauseGate.dispatchHold(undefined, () => {
+						if (session.isDisposed) throw new Error("Session disposed before sharpshooter extraction was sent.");
+					}),
 				},
 			),
 		{ provider: model.provider },

@@ -16,7 +16,14 @@
  *
  * Hosts drive the singleton {@link agentPauseGate} (e.g. the TUI `/pause`
  * command); library code only ever reads it.
+ *
+ * A request issued outside an agent loop — a compaction summary, a memory
+ * extraction, an edit repair, a judge question — never reaches those two
+ * boundaries, so it carries {@link AgentPauseGate.dispatchHold} as its
+ * `beforeDispatch` instead, and the provider layer parks it there.
  */
+
+import type { DispatchHold } from "@oh-my-pi/pi-ai";
 
 /** Listener invoked with the new state on every pause/resume transition. */
 export type AgentPauseListener = (paused: boolean) => void;
@@ -90,6 +97,30 @@ export class AgentPauseGate {
 				signal.removeEventListener("abort", onAbort);
 			}
 		}
+	}
+
+	/**
+	 * The `beforeDispatch` hold for a request issued outside an agent loop. It
+	 * parks the request until the gate is released, then runs `next` — the
+	 * caller's own hold — so a caller's check of what changed under the pause
+	 * runs after the wait, not before it.
+	 *
+	 * `signal` ends the wait, and the hold then rejects with its reason. Pass
+	 * the request's own signal, so a cancelled request unparks, or a wider
+	 * lifetime that includes it (a session's), so a request whose owner went
+	 * away while it was held fails instead of dispatching on resume. The gate
+	 * is tested before anything is awaited, so an open gate costs a request no
+	 * microtask, and a caller that can also run outside a paused process (a
+	 * one-shot CLI) needs no branch of its own.
+	 */
+	dispatchHold(signal?: AbortSignal, next?: DispatchHold): DispatchHold {
+		return () => {
+			if (!this.#gate) return next?.();
+			return this.waitUntilResumed(signal).then(() => {
+				signal?.throwIfAborted();
+				return next?.();
+			});
+		};
 	}
 
 	#notify(paused: boolean): void {

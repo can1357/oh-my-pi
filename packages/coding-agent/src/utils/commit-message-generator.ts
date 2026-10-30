@@ -2,7 +2,7 @@
  * Generate commit messages from diffs using a smol, fast model.
  * Follows the same pattern as title-generator.ts.
  */
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { agentPauseGate, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -119,6 +119,9 @@ export async function generateCommitMessage(
 							sessionId,
 							maxTokens,
 							reasoning: toReasoningEffort(candidate.thinkingLevel),
+							// An isolated task commits from beside the agent loop, so
+							// `/pause` holds the request here.
+							beforeDispatch: agentPauseGate.dispatchHold(),
 						},
 					),
 				{ provider: candidate.model.provider },

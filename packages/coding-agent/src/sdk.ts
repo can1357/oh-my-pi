@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import {
 	Agent,
+	agentPauseGate,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentOptions,
@@ -27,7 +28,6 @@ import type {
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
-import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
@@ -404,6 +404,7 @@ import {
 	cfgSnapcompactToolResults,
 	cfgWorkspaceAdditionalDirectories,
 } from "./session/context-settings";
+import { codexPrewarmHold, prewarmUnlessPaused } from "./session/connection-prewarm";
 import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, cfgTaskMaxConcurrency } from "./task/settings";
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
@@ -2186,7 +2187,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// build). Effective for endpoints known before any request (official
 		// Anthropic); others warm once a request has revealed their real origin.
 		// Every mode benefits (interactive, print, rpc, acp).
-		void prewarmModelConnection(model);
+		prewarmUnlessPaused(model);
 		// Usage-aware credential selection may need a cold remote usage report.
 		// Start only that metadata read while tools/extensions/context are loading;
 		// the selector owns eligibility and still chooses/pins the account at request
@@ -2960,7 +2961,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
 						adoptThinkingForModel(restoredModel);
-						void prewarmModelConnection(restoredModel);
+						prewarmUnlessPaused(restoredModel);
 						return true;
 					}
 				}
@@ -3295,7 +3296,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					);
 					modelFallbackMessage = `Fallback: ${usageFallbackReason.from} -> ${target}\n${usageFallbackReason.reason}`;
 				}
-				void prewarmModelConnection(selectedModel);
+				prewarmUnlessPaused(selectedModel);
 				break;
 			}
 			if (!model) {
@@ -3344,7 +3345,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
 				// so the role's explicit selector (e.g. `:max`) now applies.
 				adoptThinkingForModel(resolvedDefaultModel);
-				void prewarmModelConnection(resolvedDefaultModel);
+				prewarmUnlessPaused(resolvedDefaultModel);
 				return true;
 			};
 
@@ -3418,7 +3419,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
 					}
 					adoptThinkingForModel(resolved.model);
-					void prewarmModelConnection(resolved.model);
+					prewarmUnlessPaused(resolved.model);
 					return true;
 				}
 				return false;
@@ -5379,7 +5380,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (prewarmModel?.api === "openai-codex-responses") {
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 			const codexModel = prewarmModel as Model<"openai-codex-responses">;
-			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })) {
+			if (
+				!agentPauseGate.paused &&
+				isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })
+			) {
 				void (async () => {
 					try {
 						const codexPrewarmApiKey = options.getApiKey
@@ -5397,6 +5401,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							preferWebsockets: session.preferWebsockets,
 							providerSessionState: session.providerSessionState,
 							serviceTier: session.effectiveServiceTier(codexModel),
+							beforeDispatch: codexPrewarmHold,
 						});
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);

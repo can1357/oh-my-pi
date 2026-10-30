@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -594,14 +595,16 @@ async function resolveMnemopiProviderOptions(
 			// journalJudgmentUsage snapshots the session id. /new, fork, and session
 			// switch keep this function, so bind inside each call. An in-flight call
 			// keeps the callback it already created and still journals to its start.
-			const { onUsage, request, signal } = {
-				onUsage: journalJudgmentUsage(usageLedger),
-				request: resolveMemoryCompletionInput(prompt, opts),
-				signal:
-					typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
-						? AbortSignal.timeout(opts.timeout)
-						: undefined,
-			};
+			const onUsage = journalJudgmentUsage(usageLedger);
+			const request = resolveMemoryCompletionInput(prompt, opts);
+			// The caller's timeout bounds the model, not a human's `/pause`: wait a
+			// pause out before arming it. A pause engaged once it runs can still
+			// expire it, and the call then returns no completion, as a slow one does.
+			await agentPauseGate.dispatchHold()();
+			const signal =
+				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
+					? AbortSignal.timeout(opts.timeout)
+					: undefined;
 
 			for (const { model, thinkingLevel } of candidates) {
 				if (signal?.aborted) return null;
@@ -648,6 +651,8 @@ async function resolveMnemopiProviderOptions(
 										reasoning: clampThinkingLevelForModel(model, toReasoningEffort(level)),
 										disableReasoning: shouldDisableReasoning(level) ? true : undefined,
 										signal,
+										// Each attempt holds at the provider boundary too.
+										beforeDispatch: agentPauseGate.dispatchHold(signal),
 										onAttempt: message =>
 											onUsage?.({
 												purpose: "memory",

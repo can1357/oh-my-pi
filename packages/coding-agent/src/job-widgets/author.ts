@@ -3,7 +3,12 @@
  * role (aliasing `smol`) with a forced `respond` call carrying the spec
  * schema, fed the job's brief and redacted output samples.
  */
-import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentTelemetryConfig,
+	agentPauseGate,
+	instrumentedCompleteSimple,
+	resolveTelemetry,
+} from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -236,6 +241,9 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 				disableReasoning: true,
 				maxTokens: MAX_SPEC_TOKENS,
 				toolChoice: { type: "tool", name: RESPOND_TOOL },
+				// Widget specs are written beside the agent loop, for a running
+				// job: `/pause` holds the request here.
+				beforeDispatch: agentPauseGate.dispatchHold(signal),
 			},
 			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: "job_widget" },
 		);

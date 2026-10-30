@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
@@ -436,6 +436,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
+				signal: options.signal,
 			});
 			if (!isMemoryStartupActive(options)) return;
 
@@ -597,6 +598,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				sessionId: session.sessionId,
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
+				signal: options.signal,
 			});
 			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
@@ -871,6 +873,8 @@ async function runStage1Job(options: {
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
 	metadata?: Record<string, unknown>;
+	/** This startup's lifetime: ends a `/pause` hold when the session goes away. */
+	signal: AbortSignal;
 }): Promise<
 	| {
 			kind: "output";
@@ -909,6 +913,9 @@ async function runStage1Job(options: {
 						// OpenAI chat-completions owns its transient retries in the HTTP
 						// transport; never restart that budget at the provider/oneshot layers.
 						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+						// Memory work runs beside the agent loop, so `/pause` holds
+						// each request here, at the provider boundary.
+						beforeDispatch: agentPauseGate.dispatchHold(options.signal),
 					},
 				),
 			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
@@ -1019,6 +1026,8 @@ async function runConsolidationModel(options: {
 	apiKey: ApiKey;
 	sessionId: string;
 	metadata?: Record<string, unknown>;
+	/** This startup's lifetime: ends a `/pause` hold when the session goes away. */
+	signal: AbortSignal;
 }): Promise<{
 	memoryMd: string;
 	memorySummary: string;
@@ -1053,6 +1062,7 @@ async function runConsolidationModel(options: {
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+					beforeDispatch: agentPauseGate.dispatchHold(options.signal),
 				},
 			),
 		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },

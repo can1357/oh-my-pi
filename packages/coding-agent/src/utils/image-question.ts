@@ -1,4 +1,4 @@
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { agentPauseGate, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -111,6 +111,13 @@ export async function askImageQuestion(
 	}
 
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
+	// A read that started before `/pause` runs to completion, but its question is
+	// a new request: wait the pause out before arming the question budget, which
+	// bounds the vision model, not the human who paused it.
+	if (agentPauseGate.paused) {
+		await agentPauseGate.waitUntilResumed(signal);
+		signal?.throwIfAborted();
+	}
 	const timeoutMs = cfgImagesQuestionTimeoutMs.get(session.settings);
 	const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
 	const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
@@ -156,6 +163,9 @@ export async function askImageQuestion(
 				apiKey: modelRegistry.resolver(model, session.getSessionId?.() ?? undefined),
 				signal: effectiveSignal,
 				reasoning,
+				// Each attempt holds at the provider boundary too, so a pause
+				// engaged once the budget runs still sends nothing.
+				beforeDispatch: agentPauseGate.dispatchHold(effectiveSignal),
 			},
 			{ telemetry, oneshotKind: "image_question", completeImpl },
 		);

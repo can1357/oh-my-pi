@@ -431,9 +431,7 @@ async function generateTitleOnlineWithModels(
 							// this one, a thinking-loop re-sample, an attempt with a
 							// rotated credential — holds here, immediately before the
 							// transport, where no credential or header await follows.
-							beforeDispatch: async () => {
-								if (agentPauseGate.paused) await holdUntilResumed(signal, sessionId);
-							},
+							beforeDispatch: agentPauseGate.dispatchHold(signal),
 							signal,
 						},
 					);

@@ -188,9 +188,7 @@ async function describeImage(
 				// Every request the completion layer puts on the wire holds here,
 				// immediately before the transport: this one, a thinking-loop
 				// re-sample, and each attempt with a rotated credential.
-				beforeDispatch: async () => {
-					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
-				},
+				beforeDispatch: agentPauseGate.dispatchHold(signal),
 			},
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);

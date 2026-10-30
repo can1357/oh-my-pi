@@ -13,7 +13,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { agentPauseGate, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
@@ -384,6 +384,9 @@ async function executeCompletion(
 					reasoning: candidate.reasoning,
 					disableReasoning: candidate.disableReasoning,
 					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+					// An eval cell already running when `/pause` lands still runs,
+					// but its `completion()` call is a new request: hold it here.
+					beforeDispatch: agentPauseGate.dispatchHold(signal),
 				},
 				{ telemetry, oneshotKind: "eval_completion" },
 			);

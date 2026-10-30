@@ -12,7 +12,7 @@
  * bridge ({@link TextJudge}) renders the same questions into keyword prompts
  * for an ordinary chat model.
  */
-import type { ImageContent, Usage } from "../types";
+import type { DispatchHold, ImageContent, Usage } from "../types";
 
 /** JSON-compatible value; readonly containers are accepted so `as const` state passes through. */
 export type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -131,6 +131,13 @@ export interface JudgmentResult<Q extends Questions = Questions> {
 
 export interface JudgeOptions {
 	signal?: AbortSignal;
+	/**
+	 * Awaited immediately before each request the judgment puts on the wire,
+	 * retries and split chunks included, and ended by {@link signal}; see
+	 * `StreamOptions.beforeDispatch`. A cached answer sends nothing and waits
+	 * on nothing.
+	 */
+	beforeDispatch?: DispatchHold;
 }
 
 /** Answers typed questions about a state. Implementations are stateless and safe to share. */

@@ -231,6 +231,7 @@ export interface AnthropicNativeCompactionOptions
 			| "promptCacheKey"
 			| "providerSessionState"
 			| "maxInFlightRequests"
+			| "beforeDispatch"
 		>,
 		Pick<InstrumentedChatSpanOptions, "completeImpl" | "telemetry" | "retry"> {}
 
@@ -273,6 +274,7 @@ export async function requestAnthropicNativeCompaction(
 			promptCacheKey: options.promptCacheKey,
 			providerSessionState: options.providerSessionState,
 			maxInFlightRequests: options.maxInFlightRequests,
+			beforeDispatch: options.beforeDispatch,
 			anthropicCompaction: { instructions: request.instructions, filesDueBefore: request.filesDueBefore },
 		},
 		{
