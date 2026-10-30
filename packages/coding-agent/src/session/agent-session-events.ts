@@ -2,7 +2,7 @@ import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
-import type { RetryErrorUpdate } from "../extensibility/shared-events";
+import type { RetryErrorUpdate, RetryFallbackAppliedEvent } from "../extensibility/shared-events";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -61,7 +61,7 @@ export type AgentSessionEvent =
 	  }
 	| ({ type: "cache_warming_start" } & CacheWarmingRefreshStart)
 	| ({ type: "cache_warming_end" } & CacheWarmingRefreshEnd)
-	| { type: "retry_fallback_applied"; from: string; to: string; role: string; reason?: string }
+	| Omit<RetryFallbackAppliedEvent, "target">
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }
 	| { type: "config_warnings_changed" }

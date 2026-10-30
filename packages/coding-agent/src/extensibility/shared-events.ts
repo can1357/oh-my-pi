@@ -291,6 +291,8 @@ export interface RetryFallbackAppliedEvent {
 	from: string;
 	to: string;
 	role: string;
+	/** Advisor-only transitions do not change the session's active model. Absent means session. */
+	target?: "advisor";
 	/** Decision-time cause, including whether the source request was skipped. */
 	reason?: string;
 }

@@ -353,6 +353,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
+- `shake({ protectTurns?, signal? }?)`: awaits artifact-backed elision and returns `ShakeResult`; see below
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
@@ -366,6 +367,45 @@ Handlers and tool `execute` receive `ctx` with:
 - `annotations`: `/annotate` as an API, for boards and remote clients. `submit({ source, notes, deliver?, review?, focus? })` builds the feedback `/annotate` would and delivers it without any UI; `open({ source, deliver?, focus? })` mounts the annotation overlay on the source and resolves with the operator's notes (`undefined` when dismissed; `mode === "tui"` only). Text sources are `{ kind: "text", text, label? }`, `{ kind: "file", path }` (resolved against the live session cwd), or `{ kind: "last" }`; diff sources are `{ kind: "diff", diff, label? }`, `{ kind: "uncommitted" }`, or `{ kind: "pr", ref }` (`ref` is a GitHub PR or GitLab MR URL, `pr://owner/repo/N`, or `mr://<host>/<group>/<project>/N/diff`). `review`/`focus` apply to diff sources only (a type error on text sources). Text notes are `{ note, line?, quote? }` (1-based; whole-source when omitted, and the quoted line is filled in); diff notes are `{ path, note, line?, side?, occurrence?, rawLine? }` (`side` defaults to `"new"`; `rawLine` is the diff row including its `+`/`-`/space prefix). Notes that do not match their source reject rather than being dropped. `text` and `diff` sources are frozen snapshots of what you pass; `file`, `last`, `uncommitted`, and `pr` are re-read at call time and line numbers are matched against the current content, so pass `quote`/`rawLine` to reject a note (naming it) when that content drifted. `deliver` defaults to `"auto"`: pasteable notes go into the composer when the interactive TUI editor is available and are sent otherwise; an LLM review request (`review: true` on a diff) is always sent. Sending uses `pi.sendUserMessage` and queues as a follow-up while the agent is streaming. `"paste"`/`"send"` force a channel and `"none"` only returns `text`. The result is discriminated by `kind`: `"text"` carries `TextReviewAnnotation[]` and, after `open`, `editedText` when the operator replaced the source in the external editor (the feedback then refers to that text); `"diff"` carries `CodeReviewAnnotation[]` and `review` (whether `text` is an LLM review request). Both carry the rendered `text` and the `delivered` channel.
   Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
+
+### Mechanical reduction (`ctx.shake`)
+
+`await ctx.shake({ protectTurns: 6 })` runs the existing elision strategy without
+an LLM summary. It preserves the newest six user-started exchanges, including
+their assistant messages, tool calls, tool results, custom entries, and metadata.
+The current unfinished exchange counts. User-invoked skill and collab prompts
+also start exchanges; agent-attributed messages, synthetic continuations, and
+agent reminders do not. Fewer than six exchanges protects the entire branch.
+This hard suffix also protects results marked useless.
+
+The operation offloads eligible older tool output and fenced/XML blocks to a
+recovery artifact, persists the branch, rebuilds context, and invalidates cached
+provider sessions. Failure to save an artifact rejects without eliding history.
+Entries hidden by the latest compaction are not rewritten. A usage anchor inside
+the protected suffix is not edited, so usage estimates remain conservative until
+the next successful provider response.
+
+Omitting `protectTurns` uses the ordinary manual `/shake` token-tail preset.
+Handler cancellation is composed with `signal`; uncommitted work is cancelled,
+and event dispatch waits for any started history rewrite or rollback to settle
+before continuation, including after a handler timeout.
+
+The opt-in [`fallback-shake` example](../packages/coding-agent/examples/extensions/fallback-shake/)
+awaits this operation on an automatic main-session model/provider change. It
+ignores manual switches, unchanged identities, advisor transitions, and subagent
+histories. It does not enable fallback or change retry policy.
+
+To use it personally, copy that directory to `~/.config/omp/fallback-shake` and add
+the directory to `extensions` in `~/.omp/agent/config.yml`. A new process using a
+core build with `ctx.shake` is required; copying an extension does not upgrade an
+already installed binary. From a source checkout, `mise run install:omp` builds
+and installs the binary into `${PI_INSTALL_DIR:-$HOME/.local/bin}`.
+
+Verification surfaces:
+
+- `mise run test:fallback-shake`: session fallback, exact suffix, recovery, and cancellation contracts
+- `mise run test:shake-regression`: existing manual shake and retry-fallback contracts
+- `mise run smoke:fallback-shake`: installed binary and personal extension against a loopback HTTP provider, including request-body and persisted-entry comparisons; `OMP_FALLBACK_SHAKE_BINARY` and `OMP_FALLBACK_SHAKE_EXTENSION` override the installed paths
 
 ### Ephemeral side turns (`ctx.runEphemeralTurn`)
 
@@ -389,7 +429,7 @@ const { replyText } = await ctx.runEphemeralTurn({
 
 For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
 
-Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached *within* a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
+Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached _within_ a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
 
 Tool calls are always discarded rather than executed. Pass `tools: false` to remove tool definitions after context transforms and set `toolChoice: "none"` at the provider boundary. Omitting it preserves `/btw`'s tool catalog for prompt-cache reuse; disabling it may reduce cache hits. Bedrock Converse rejects tool opt-out if the transformed history still contains tool calls or results. Existing context/provider hooks still run. It is not a sandbox or a guarantee that arbitrary extension hooks have no side effects. Model inference consumes the configured provider's resources. `dedupeReply` defaults to `true`, collapses runs of more than three identical lines, and caps the returned reply at 4 KiB. Set it to `false` to disable those transformations; `replyText` is still trimmed. Callers should use `replyText` for the final result.
 
@@ -502,9 +542,9 @@ Cancelable pre-events:
 
 ```ts
 pi.on("assistant_message", event => ({
-	content: event.message.content.map(block =>
-		block.type === "text" ? { ...block, text: block.text.replaceAll("teh", "the") } : block,
-	),
+ content: event.message.content.map(block =>
+  block.type === "text" ? { ...block, text: block.text.replaceAll("teh", "the") } : block,
+ ),
 }));
 ```
 
@@ -521,15 +561,16 @@ Handlers must tolerate re-entry: a source-base retry can call the entire `before
 If a later queue drain fails, earlier originals that have not reached the
 transcript are restored ahead of newer enqueues. Generated preparation context
 is not requeued, and explicitly cleared or replaced queues are not resurrected.
+
 #### External input interception
 
 `input` runs once at submission ingress, before command interpretation, skill or
 prompt-template expansion, and queue insertion:
 
-| Submission | `source` |
-|---|---|
-| Main-session Enter or Ctrl+Enter | `"interactive"` |
-| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+| Submission                                                                  | `source`        |
+| --------------------------------------------------------------------------- | --------------- |
+| Main-session Enter or Ctrl+Enter                                            | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"`         |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -577,7 +618,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 - `auto_compaction_start` / `auto_compaction_end`
 - `auto_retry_start` / `auto_retry_end`
-- `retry_fallback_applied` — `{ from, to, role, reason? }` when auto-retry switches model/provider
+- `retry_fallback_applied` — `{ from, to, role, target?: "advisor", reason? }` when auto-retry switches model/provider. Absent `target` means the active session; advisor transitions carry `"advisor"`. Main-session handlers are awaited before the next replacement-model request.
 - `retry_fallback_succeeded` — `{ model, role }` when a request succeeds on that fallback
 - `ttsr_triggered`
 - `todo_reminder`
@@ -629,11 +670,11 @@ Current `execute` signature:
 
 ```ts
 execute(
-	toolCallId,
-	params,
-	signal,
-	onUpdate,
-	ctx,
+ toolCallId,
+ params,
+ signal,
+ onUpdate,
+ ctx,
 ): Promise<AgentToolResult>
 ```
 
@@ -813,7 +854,7 @@ permission error from these surfaces as it does today, with no handler consulted
 - The ACP bridge's `writeTextFile`, which hands the write to a remote client.
 - The `lsp` tool's own writes: applying a workspace edit or code action, and the
   Biome formatter, which writes the buffer and then shells out to `biome format
---write` — a subprocess write no in-process seam can reach.
+  --write` — a subprocess write no in-process seam can reach.
 
 ### File delete fallback (`registerFileDeleteFallback`)
 

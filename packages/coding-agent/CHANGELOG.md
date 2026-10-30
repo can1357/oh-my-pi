@@ -4,6 +4,7 @@
 
 ### Added
 
+- Extensions can now await artifact-backed `ctx.shake({ protectTurns: 6 })`; the opt-in `fallback-shake` example reduces older context on automatic model fallback while preserving six actual user-started exchanges unchanged, excluding agent-attributed and synthetic injections.
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 - The local `capability` CLI's MCP server is registered by default (lowest priority, so a same-named entry in your MCP config wins; `disabledServers` turns it off) with its request timeout disabled, since its blocking `wait` runs up to 30 minutes. The server is stamped with the session's identity through `CAPABILITY_SESSION_ID`

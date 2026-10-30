@@ -8,6 +8,14 @@
 /** Mode selector for `AgentSession.shake`. */
 export type ShakeMode = "elide" | "images" | "thinking";
 
+/** Options for artifact-backed elision through the extension context. */
+export interface ShakeOptions {
+	/** Keep this many newest user-started exchanges intact, including their tool results. */
+	protectTurns?: number;
+	/** Handler cancellation is composed with this signal before any history mutation. */
+	signal?: AbortSignal;
+}
+
 /** Outcome of an `AgentSession.shake` run. */
 export interface ShakeResult {
 	mode: ShakeMode;

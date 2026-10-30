@@ -67,6 +67,7 @@ function initializeRunnerForTest(runner: ExtensionRunner | undefined): void {
 		shutdown: () => {},
 		getContextUsage: () => undefined,
 		compact: async () => {},
+		shake: () => Promise.reject(new Error("Unexpected shake")),
 		getSystemPrompt: () => [],
 	};
 	runner.initialize(actions, contextActions);

@@ -16,12 +16,13 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### Lifecycle & Safety
 
-| Extension                | Description                                                                  |
-| ------------------------ | ---------------------------------------------------------------------------- |
-| `permission-gate.ts`     | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
-| `protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                |
-| `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
-| `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                        |
+| Extension                | Description                                                                                  |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `permission-gate.ts`     | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.)                 |
+| `protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                                |
+| `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)                          |
+| `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                                        |
+| `fallback-shake/`        | Shakes older context on automatic fallback, preserving the newest six user-started exchanges |
 
 ### Custom Tools
 
@@ -74,39 +75,39 @@ See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-	const z = pi.zod;
+ const z = pi.zod;
 
-	// Subscribe to lifecycle events
-	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
-			const ok = await ctx.ui.confirm("Dangerous!", "Allow rm -rf?");
-			if (!ok) return { block: true, reason: "Blocked by user" };
-		}
-	});
+ // Subscribe to lifecycle events
+ pi.on("tool_call", async (event, ctx) => {
+  if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
+   const ok = await ctx.ui.confirm("Dangerous!", "Allow rm -rf?");
+   if (!ok) return { block: true, reason: "Blocked by user" };
+  }
+ });
 
-	// Register custom tools
-	pi.registerTool({
-		name: "greet",
-		label: "Greeting",
-		description: "Generate a greeting",
-		parameters: z.object({
-			name: z.string().describe("Name to greet"),
-		}),
-		async execute(toolCallId, params, onUpdate, ctx, signal) {
-			return {
-				content: [{ type: "text", text: `Hello, ${params.name}!` }],
-				details: {},
-			};
-		},
-	});
+ // Register custom tools
+ pi.registerTool({
+  name: "greet",
+  label: "Greeting",
+  description: "Generate a greeting",
+  parameters: z.object({
+   name: z.string().describe("Name to greet"),
+  }),
+  async execute(toolCallId, params, onUpdate, ctx, signal) {
+   return {
+    content: [{ type: "text", text: `Hello, ${params.name}!` }],
+    details: {},
+   };
+  },
+ });
 
-	// Register commands
-	pi.registerCommand("hello", {
-		description: "Say hello",
-		handler: async (args, ctx) => {
-			ctx.ui.notify("Hello!", "info");
-		},
-	});
+ // Register commands
+ pi.registerCommand("hello", {
+  description: "Say hello",
+  handler: async (args, ctx) => {
+   ctx.ui.notify("Hello!", "info");
+  },
+ });
 }
 ```
 
@@ -118,7 +119,7 @@ export default function (pi: ExtensionAPI) {
 const z = pi.zod;
 
 parameters: z.object({
-	action: z.enum(["list", "add"]),
+ action: z.enum(["list", "add"]),
 });
 ```
 
@@ -127,17 +128,17 @@ parameters: z.object({
 ```typescript
 // Store state in tool result details for proper branching support
 return {
-	content: [{ type: "text", text: "Done" }],
-	details: { todos: [...todos], nextId }, // Persisted in session
+ content: [{ type: "text", text: "Done" }],
+ details: { todos: [...todos], nextId }, // Persisted in session
 };
 
 // Reconstruct on session events
 pi.on("session_start", async (_event, ctx) => {
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "message" && entry.message.toolName === "my_tool") {
-			const details = entry.message.details;
-			// Reconstruct state from details
-		}
-	}
+ for (const entry of ctx.sessionManager.getBranch()) {
+  if (entry.type === "message" && entry.message.toolName === "my_tool") {
+   const details = entry.message.details;
+   // Reconstruct state from details
+  }
+ }
 });
 ```

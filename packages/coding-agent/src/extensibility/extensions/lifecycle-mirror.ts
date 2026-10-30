@@ -115,6 +115,7 @@ export type MappedExtensionEvent =
 export function extensionEventFromSessionEvent(
 	event: AgentSessionEvent,
 	turnIndex: number,
+	target?: "advisor",
 ): MappedExtensionEvent | null {
 	switch (event.type) {
 		case "agent_start":
@@ -216,6 +217,7 @@ export function extensionEventFromSessionEvent(
 				from: event.from,
 				to: event.to,
 				role: event.role,
+				target,
 				reason: event.reason,
 			};
 		case "retry_fallback_succeeded":

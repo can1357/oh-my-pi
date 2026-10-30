@@ -1,0 +1,33 @@
+[tasks."test:fallback-shake"]
+description = "Prove automatic fallback elides only older exchanges before the replacement request"
+run = "bun test packages/coding-agent/test/fallback-shake.test.ts packages/coding-agent/examples/extensions/fallback-shake/rule.test.ts"
+
+[tasks."test:shake-regression"]
+description = "Check existing shake, tool protection, and retry fallback contracts"
+run = "bun test packages/agent/test/shake.test.ts packages/agent/test/tool-protection.test.ts packages/coding-agent/test/shake.test.ts packages/coding-agent/test/agent-session-retry-fallback.test.ts"
+
+[tasks."gen:rpc"]
+description = "Regenerate RPC wire types and schemas"
+run = "bun --cwd=packages/coding-agent run gen:rpc"
+
+[tasks."build:omp"]
+description = "Build the local compiled omp binary using the package builder"
+depends = ["build:native"]
+run = "bun --cwd=packages/coding-agent run build"
+
+[tasks."build:native"]
+description = "Build and probe the host native addon using the repository builder"
+run = "bun run build:native"
+
+[tasks."deps:omp"]
+description = "Install the locked workspace dependencies"
+run = "bun install --frozen-lockfile"
+
+[tasks."install:omp"]
+description = "Install the locally built binary to the standard standalone installer directory"
+depends = ["build:omp"]
+run = 'install -d "${PI_INSTALL_DIR:-$HOME/.local/bin}" && install -m 755 packages/coding-agent/dist/omp "${PI_INSTALL_DIR:-$HOME/.local/bin}/omp"'
+
+[tasks."smoke:fallback-shake"]
+description = "Exercise the installed binary and personal extension against a local HTTP provider"
+run = 'bun scripts/fallback-shake-smoke.ts "${OMP_FALLBACK_SHAKE_BINARY:-$HOME/.local/bin/omp}" "${OMP_FALLBACK_SHAKE_EXTENSION:-$HOME/.config/omp/fallback-shake/index.ts}"'

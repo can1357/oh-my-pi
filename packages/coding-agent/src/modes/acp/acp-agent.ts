@@ -3018,6 +3018,7 @@ export class AcpAgent implements Agent {
 				getSystemPrompt: () => record.session.systemPrompt,
 				runEphemeralTurn: args => record.session.runEphemeralTurn(args),
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
+				shake: options => record.session.shake("elide", { ...options, requireArtifact: true }),
 			},
 			{
 				getContextUsage: () => record.session.getContextUsage(),

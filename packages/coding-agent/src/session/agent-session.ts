@@ -2429,7 +2429,7 @@ export class AgentSession implements SettingsScope {
       allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
       planModeState: () => this.#planModeState,
       clientBridge: () => this.#clientBridge,
-      emitSessionEvent: event => this.#emitSessionEvent(event),
+			emitSessionEvent: event => this.#emitSessionEvent(event, { extensionTarget: "advisor" }),
       emitNotice: (level, message, source) => this.emitNotice(level, message, source),
       sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
       extractQueuedAdvisorCards: () => this.#extractQueuedAdvisorCards(),
@@ -3560,7 +3560,10 @@ export class AgentSession implements SettingsScope {
     }
   }
 
-  async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+	async #emitSessionEvent(
+		event: AgentSessionEvent,
+		options: { detachExtensions?: boolean; extensionTarget?: "advisor" } = {},
+	): Promise<void> {
     if (event.type === "tool_execution_update") {
       // Returned background calls have no later tool result to persist their
       // terminal frame. Keep the latest update for future focus rebuilds;
@@ -3586,7 +3589,7 @@ export class AgentSession implements SettingsScope {
     } else {
       this.#emit(event);
     }
-    const extensionEmit = this.#emitExtensionEvent(event);
+		const extensionEmit = this.#emitExtensionEvent(event, options.extensionTarget);
     if (options.detachExtensions) {
       void extensionEmit.catch(error => {
         logger.warn("Detached session event extension emit failed", {
@@ -5503,7 +5506,7 @@ export class AgentSession implements SettingsScope {
   }
 
   /** Emit extension events based on session events */
-  async #emitExtensionEvent(event: AgentSessionEvent): Promise<void> {
+	async #emitExtensionEvent(event: AgentSessionEvent, target?: "advisor"): Promise<void> {
     if (!this.#extensionRunner) return;
     if (event.type === "agent_start") {
       this.#turnIndex = 0;
@@ -5518,7 +5521,7 @@ export class AgentSession implements SettingsScope {
       // blocked by unrelated notification-only work.
       return;
     }
-    const mapped = extensionEventFromSessionEvent(event, this.#turnIndex);
+		const mapped = extensionEventFromSessionEvent(event, this.#turnIndex, target);
     if (!mapped) return;
     if (event.type === "turn_end") this.#turnIndex++;
     await this.#extensionRunner.emit(mapped);
@@ -6956,8 +6959,17 @@ export class AgentSession implements SettingsScope {
   }
 
   /** Reduce stored context with the selected shake strategy. */
-  shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-    return this.#maintenance.shake(mode, opts);
+	shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; protectTurns?: number; requireArtifact?: boolean } = {},
+	): Promise<ShakeResult> {
+		if (opts.protectTurns === undefined) return this.#maintenance.shake(mode, opts);
+		const leaf = this.sessionManager.getLeafId();
+		const model = this.model;
+		return this.#maintenance.shake(mode, {
+			...opts,
+			isCurrent: () => this.sessionManager.getLeafId() === leaf && this.model === model,
+		});
   }
 
   /** Compact the active session history. */
@@ -8727,6 +8739,7 @@ export class AgentSession implements SettingsScope {
           : undefined;
         await this.compact(instructions, options);
       },
+			shake: options => this.shake("elide", { ...options, requireArtifact: true }),
       switchSession: async sessionPath => {
         const success = await this.switchSession(sessionPath);
         return { cancelled: !success };

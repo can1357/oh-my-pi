@@ -253,6 +253,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			shake: options => this.ctx.session.shake("elide", { ...options, requireArtifact: true }),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};
@@ -484,6 +485,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			shake: options => this.ctx.session.shake("elide", { ...options, requireArtifact: true }),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};

@@ -176,6 +176,7 @@ describe("extension provider registration rollback", () => {
 					shutdown: () => {},
 					getContextUsage: () => undefined,
 					compact: async () => {},
+					shake: () => Promise.reject(new Error("Unexpected shake")),
 					getSystemPrompt: () => [],
 				},
 			);
