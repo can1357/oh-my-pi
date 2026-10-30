@@ -5274,6 +5274,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const originalDispose = session.dispose.bind(session);
 			let tinyClientReleased = false;
 			session.dispose = async () => {
+				let lifecycle: AgentLifecycleManager | undefined;
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -5295,9 +5296,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						lifecycle = AgentLifecycleManager.global();
+						await lifecycle.dispose();
 					}
 					await originalDispose();
+					// A subagent that finishes during this session's own teardown (a
+					// foreground task it aborted, a background job that completed
+					// first) does so after the lifecycle was disposed, and is released
+					// rather than adopted. Wait for those releases too, so none
+					// outlives this session.
+					await lifecycle?.dispose();
 				} finally {
 					// The tiny-model client is a process singleton shared by every session.
 					// Only the session that owns process state drops its connections, once:
@@ -5332,6 +5340,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 			const codexModel = prewarmModel as Model<"openai-codex-responses">;
 			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })) {
+				// Detached, and parked first on the key: a session disposed meanwhile would
+				// otherwise still open a WebSocket into the provider-session map its dispose
+				// already closed, and nothing would close that one. Disposers run in
+				// `beginDispose()`, the entry every disposal path shares.
+				const prewarmAbort = new AbortController();
+				session.addDisposer(() => prewarmAbort.abort());
 				void (async () => {
 					try {
 						const codexPrewarmApiKey = options.getApiKey
@@ -5339,13 +5353,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								// then resolve the result if it is itself an ApiKeyResolver.
 								await resolveApiKeyOnce(await options.getApiKey(codexModel))
 							: await modelRegistry.getApiKey(codexModel, providerSessionId);
-						if (!codexPrewarmApiKey) return;
+						if (!codexPrewarmApiKey || prewarmAbort.signal.aborted) return;
 						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {
 							apiKey: codexPrewarmApiKey,
 							sessionId: providerSessionId,
 							preferWebsockets: session.preferWebsockets,
 							providerSessionState: session.providerSessionState,
 							serviceTier: session.effectiveServiceTier(codexModel),
+							signal: prewarmAbort.signal,
 						});
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);

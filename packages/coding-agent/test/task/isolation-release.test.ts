@@ -127,4 +127,177 @@ describe("isolated agent release", () => {
 		await commitsAcrossRelease("ReleaseAfterCapture", patch, patch);
 		expect(events).toEqual(["commit", "irc wakes released"]);
 	});
+
+	it("removes the workspace of an agent released mid-capture only after its run-end branch is committed", async () => {
+		const id = "ReleaseDuringCapture";
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-release-"));
+		tempRoots.push(artifactsDir);
+		const baseline = {
+			root: { repoRoot: "/repo", headCommit: "base", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+			nested: [],
+		};
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: "/repo/isolated",
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
+		vi.spyOn(worktreeModule, "cleanupIsolation").mockImplementation(async () => {
+			events.push("cleanup");
+		});
+		vi.spyOn(worktreeModule, "captureDeltaPatch").mockImplementation(async () => {
+			events.push("release capture");
+			return { rootPatch: patch, nestedPatches: [] };
+		});
+		const runEndCommitStarted = Promise.withResolvers<void>();
+		const runEndCommit = Promise.withResolvers<void>();
+		const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
+			events.push("commit");
+			if (commitSpy.mock.calls.length === 1) {
+				runEndCommitStarted.resolve();
+				await runEndCommit.promise;
+			}
+			events.push("committed");
+			return { branchName: `omp/task/${id}`, baseSha: "base", rootPatch: patch, nestedPatches: [] };
+		});
+		let disposeCalls = 0;
+		const session = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {
+				disposeCalls++;
+			},
+		} as unknown as AgentSession;
+		// The agent's owner tore down while it ran, so the agent is released the moment
+		// it is adopted, while the run's own branch commit still reads the workspace.
+		const owner = AgentLifecycleManager.global();
+		await owner.dispose();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session,
+				aborted: false,
+				keepAlive: true,
+				isolated: true,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => session,
+				onRelease: options.onRelease,
+				lifecycle: owner,
+			});
+			return result(options.id);
+		});
+
+		const run = runIsolatedSubprocess({
+			baseOptions: {
+				cwd: "/repo",
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Do work",
+				index: 0,
+				id,
+			},
+			context: { repoRoot: "/repo" },
+			preferredBackend: undefined,
+			agentId: id,
+			mergeMode: "branch",
+			artifactsDir,
+			buildFailureResult: error => ({ ...result(id), exitCode: 1, error: String(error) }),
+		});
+		await runEndCommitStarted.promise;
+		// The release began at adoption; everything it does before touching the disk is
+		// microtasks, so a release that does not wait for the run has reached the workspace.
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		runEndCommit.resolve();
+		const settled = await run;
+		await owner.dispose();
+
+		expect(settled.branchName).toBe(`omp/task/${id}`);
+		expect(events).toEqual(["commit", "committed", "release capture", "cleanup"]);
+		expect(disposeCalls).toBe(1);
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+	});
+
+	it("captures and releases the workspace of an agent shut down while it runs", async () => {
+		const id = "ReleasedByOwnRun";
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-release-"));
+		tempRoots.push(artifactsDir);
+		const baseline = {
+			root: { repoRoot: "/repo", headCommit: "base", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+			nested: [],
+		};
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: "/repo/isolated",
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
+		vi.spyOn(worktreeModule, "cleanupIsolation").mockImplementation(async () => {
+			events.push("cleanup");
+		});
+		vi.spyOn(worktreeModule, "captureDeltaPatch").mockImplementation(async () => {
+			events.push("release capture");
+			return { rootPatch: patch, nestedPatches: [] };
+		});
+		vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
+			events.push("commit");
+			return { branchName: `omp/task/${id}`, baseSha: "base", rootPatch: patch, nestedPatches: [] };
+		});
+		const session = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			// Its manager shut it down mid-run: the run itself releases the agent, and waits for that.
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session,
+				aborted: true,
+				abortKind: "shutdown",
+				keepAlive: true,
+				isolated: true,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => session,
+				onRelease: options.onRelease,
+			});
+			return { ...result(options.id), exitCode: 1, aborted: true };
+		});
+
+		await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: "/repo",
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Do work",
+				index: 0,
+				id,
+			},
+			context: { repoRoot: "/repo" },
+			preferredBackend: undefined,
+			agentId: id,
+			mergeMode: "branch",
+			artifactsDir,
+			buildFailureResult: error => ({ ...result(id), exitCode: 1, error: String(error) }),
+		});
+
+		// The work done before the shutdown is kept on the task branch, then the workspace goes.
+		expect(events).toEqual(["release capture", "commit", "cleanup"]);
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+	});
 });

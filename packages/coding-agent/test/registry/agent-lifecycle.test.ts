@@ -1049,4 +1049,55 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Next-Owner")).toMatchObject({ status: "idle", session: revived.session });
 		expect(revived.disposeCalls()).toBe(0);
 	});
+
+	it("an agent that finishes while teardown releases its siblings is released before teardown settles", async () => {
+		const siblingReleasing = deferred();
+		const holdSiblingRelease = deferred();
+		const sibling = makeSessionStub();
+		registerIdleSub("Sibling-Sub", sibling.session);
+		lifecycle.adopt("Sibling-Sub", {
+			idleTtlMs: 0,
+			onRelease: async () => {
+				siblingReleasing.resolve();
+				await holdSiblingRelease.promise;
+			},
+		});
+		const late = makeSessionStub();
+		const lateRelease = vi.fn(async () => {});
+		const lateRef = registry.register({
+			id: "Late-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: late.session,
+			sessionFile: "/tmp/Late-Sub.jsonl",
+			status: "running",
+		});
+
+		const teardown = lifecycle.dispose();
+		await siblingReleasing.promise;
+		// The run finishes now, after teardown took its list of agents to release.
+		registry.setStatus("Late-Sub", "idle", lateRef);
+		lifecycle.adopt("Late-Sub", { idleTtlMs: TTL, onRelease: lateRelease }, lateRef);
+		holdSiblingRelease.resolve();
+		await teardown;
+
+		expect(late.disposeCalls()).toBe(1);
+		expect(lateRelease).toHaveBeenCalledTimes(1);
+		expect(registry.get("Late-Sub")).toBeUndefined();
+	});
+
+	it("an agent that finishes after teardown settled is released at once, not kept alive", async () => {
+		await lifecycle.dispose(Date.now());
+		const late = makeSessionStub();
+		const lateRelease = vi.fn(async () => {});
+		const lateRef = registerIdleSub("After-Sub", late.session);
+
+		lifecycle.adopt("After-Sub", { idleTtlMs: TTL, onRelease: lateRelease }, lateRef);
+		await flushAsync();
+		await flushAsync();
+
+		expect(late.disposeCalls()).toBe(1);
+		expect(lateRelease).toHaveBeenCalledTimes(1);
+		expect(registry.get("After-Sub")).toBeUndefined();
+	});
 });

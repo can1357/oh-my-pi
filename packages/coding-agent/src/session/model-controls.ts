@@ -67,6 +67,8 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
+	/** Aborted once the session begins disposing. */
+	disposeSignal(): AbortSignal;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
@@ -658,7 +660,7 @@ export class ModelControls {
 						registry: this.#host.modelRegistry,
 						model,
 						sessionId: this.#host.sessionId(),
-						signal: controller.signal,
+						signal: AbortSignal.any([controller.signal, this.#host.disposeSignal()]),
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
 							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
@@ -676,8 +678,10 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		// Drop the result if the turn was aborted/superseded, or the session began disposing,
+		// while classifying: a disposing session records no new thinking level.
+		if (this.#host.promptGeneration() !== generation || !this.#autoThinking || this.#host.disposeSignal().aborted)
+			return;
 
 		const effort = clampThinkingLevelToCeiling(
 			model,

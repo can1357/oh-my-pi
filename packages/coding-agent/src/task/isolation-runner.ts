@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -375,10 +375,13 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
  * Kept-alive runs retain the isolation handle through idle/parked lifecycle
- * transitions, then capture final changes and clean up on release. One-shot
- * and failed startup paths clean up in `finally`. If captured changes cannot
- * be written to disk, the workspace is retained under a unique `.retained-*`
- * sibling and its path is named in the resulting error.
+ * transitions, then capture final changes and clean up on release. A release
+ * that arrives before the run has captured its own result, and a kept-alive
+ * agent no lifecycle owns (its owner tore down as it finished), are carried
+ * out by the run itself after that capture. One-shot and failed startup paths
+ * clean up in `finally`. If captured changes cannot be written to disk, the
+ * workspace is retained under a unique `.retained-*` sibling and its path is
+ * named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let taskBaseline: WorktreeBaseline | undefined;
@@ -392,6 +395,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let releasePromise: Promise<void> | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
+	/**
+	 * Set in `finally` below, once the run has captured its own result. Until then the workspace
+	 * is the run's: a release that arrives earlier (one the run itself awaits as it aborts, or
+	 * one that starts as the agent is adopted while that capture still reads the workspace) is
+	 * only recorded, and the run carries it out on its way out.
+	 */
+	let runEnded = false;
+	let releaseRequested = false;
 	const releaseBase = (): Promise<void> => {
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
@@ -404,6 +415,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return cleanupPromise;
 	};
 	const releaseIsolation = (): Promise<void> => {
+		if (!runEnded) {
+			// The run's caller waits for the release the run carries out; waiting here instead
+			// would deadlock a release the run itself awaits.
+			releaseRequested = true;
+			return Promise.resolve();
+		}
 		releasePromise ??= (async () => {
 			if (!handle || !taskBaseline || retainWorkspace) {
 				await cleanupHandle();
@@ -588,12 +605,25 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
-			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
-		) {
+		runEnded = true;
+		const keptAlive = opts.baseOptions.keepAlive !== false;
+		if (handle && keptAlive && (releaseRequested || !AgentLifecycleManager.global().has(opts.agentId))) {
+			// Released while the run was under way, or kept alive with no lifecycle to own it
+			// (its owner tore down as it finished): release it now that the run's own capture is
+			// done, keeping any later work on the task branch before the workspace goes.
+			if (deferredCleanup) {
+				trackLateCleanup(deferredCleanup.then(releaseIsolation), {
+					agentId: opts.agentId,
+					resource: "isolation",
+				});
+			} else {
+				try {
+					await releaseIsolation();
+				} catch (error) {
+					logger.warn("Isolated agent release failed", { agentId: opts.agentId, error: String(error) });
+				}
+			}
+		} else if (handle && !retainWorkspace && !keptAlive) {
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,

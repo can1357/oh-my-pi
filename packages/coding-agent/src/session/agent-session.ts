@@ -1188,6 +1188,8 @@ export class AgentSession implements SettingsScope {
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
+	/** Aborted by {@link beginDispose}: work that started before it (the auto-thinking classifier) stops there. */
+	readonly #disposeAbortController = new AbortController();
 	/**
 	 * Cancels the current turn's pre-dispatch setup (memory-backend auto-recall and
 	 * other awaited preparation in {@link #prepareAgentStart}) when {@link abort} runs.
@@ -2079,6 +2081,7 @@ export class AgentSession implements SettingsScope {
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
+			disposeSignal: () => this.#disposeAbortController.signal,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
@@ -3530,6 +3533,20 @@ export class AgentSession implements SettingsScope {
 		if (this.#admittedSubmissionCount === 0) return Promise.resolve();
 		this.#admittedSubmissionsSettled ??= Promise.withResolvers<void>();
 		return this.#admittedSubmissionsSettled.promise;
+	}
+
+	/**
+	 * A disposing session starts no new turn: a prompt sent after {@link beginDispose} is
+	 * refused here, while one sent before it still runs to a settled turn (the contract
+	 * {@link #prepareAgentStart} states). Otherwise anything that fires during teardown (an
+	 * extension timer or event handler, an SDK caller) starts a turn and a provider request
+	 * from a session that is being closed.
+	 */
+	#refusePromptWhileDisposing(): void {
+		if (!this.#isDisposed) return;
+		throw new Error(
+			"This session has begun disposing, so this prompt was refused: a disposing session starts no new turn. A prompt sent before disposal began still runs to the end of its turn.",
+		);
 	}
 
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
@@ -6151,8 +6168,9 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: eval starts throw, queued asides are dropped, the aside
-	 * provider is detached, and settings listeners bound to the session stop
+	 * immediately: eval starts throw, queued asides and background deliveries
+	 * are dropped and later ones refused, the aside provider is detached, cache
+	 * warming stops for good, and settings listeners bound to the session stop
 	 * (a config reload mid-teardown must not reconnect or re-steer anything).
 	 * Idempotent; `dispose()` runs it first.
 	 *
@@ -6177,13 +6195,31 @@ export class AgentSession implements SettingsScope {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
-		this.yieldQueue.clear();
+		// Closed, not just cleared: a delivery that arrives later (an MCP notification its
+		// debounce timer sends during the teardown) would otherwise start a model turn.
+		this.yieldQueue.close();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
 		this.agent.hasQueuedAsides = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		// Work that would otherwise run on into the teardown below, and through every
+		// wrapper's awaits before `dispose()`, each of which reached the provider or the
+		// transcript from a disposing session: extension timers (their callbacks can prompt),
+		// a speculative or retrying compaction, the unexpected-stop judge and other post-prompt
+		// work, and the auto-thinking classifier. `dispose()` repeats the first three for
+		// anything its own teardown starts.
+		this.#disposeAbortController.abort();
+		this.#extensionRunner?.clearManagedTimers();
+		this.#fallbackExtensionTimers?.clearAll();
+		this.#maintenance.cancelSpeculation();
+		this.abortCompaction();
+		this.#postPromptTasksAbortController.abort();
+		// Stopped here rather than in the teardown that follows: a wrapper that awaits
+		// other work first (the draft write, the SDK's lifecycle teardown) would leave an
+		// armed refresh free to send a paid request from a session already disposed.
+		this.#cacheWarmer?.dispose();
 	}
 
 	/**
@@ -6329,15 +6365,6 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		// Stop cache warming before the drain windows below: an armed tick firing
-		// mid-dispose would issue a paid warm request and persist usage into the
-		// closing session writer.
-		if (this.#cacheWarmer) {
-			this.#cacheWarmer.onWarmed = undefined;
-			this.#cacheWarmer.onRefreshStart = undefined;
-			this.#cacheWarmer.onRefreshEnd = undefined;
-			this.#cacheWarmer.cancel();
-		}
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -8081,6 +8108,7 @@ export class AgentSession implements SettingsScope {
 	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		this.#refusePromptWhileDisposing();
 		return this.#admitSubmission(() => this.#prompt(text, options));
 	}
 
@@ -8402,6 +8430,7 @@ export class AgentSession implements SettingsScope {
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
+		this.#refusePromptWhileDisposing();
 		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
 	}
 
@@ -10013,6 +10042,7 @@ export class AgentSession implements SettingsScope {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
+		if (options?.triggerTurn) this.#refusePromptWhileDisposing();
 		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
 	}
 
