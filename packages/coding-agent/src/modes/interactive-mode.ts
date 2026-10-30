@@ -2211,6 +2211,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "status.cost":
 					void this.handleUsageCommand();
 					return;
+				case "status.cache":
+					void this.handleSessionCommand();
+					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
 					return;
