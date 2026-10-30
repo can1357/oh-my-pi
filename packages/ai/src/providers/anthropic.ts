@@ -2682,7 +2682,18 @@ const streamAnthropicOnce = (
 						onFirstItemTimeout: () => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 						abortSignal: options?.signal,
 						isProgressItem: item => {
-							if ((item as AnthropicStreamEvent).type === "ping") {
+							const event = item as AnthropicStreamEvent;
+							if (event.type === "content_block_delta") {
+								const delta = event.delta;
+								if (
+									(delta.type === "text_delta" && delta.text === "") ||
+									(delta.type === "thinking_delta" && delta.thinking === "") ||
+									(delta.type === "input_json_delta" && delta.partial_json === "")
+								) {
+									return false;
+								}
+							}
+							if (event.type === "ping") {
 								if (!sawNonPingEvent) return false;
 								if (pingProgressCapMs === undefined) return true;
 								return Date.now() - lastNonPingProgressAtMs < pingProgressCapMs;

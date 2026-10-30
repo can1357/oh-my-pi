@@ -174,6 +174,64 @@ describe("anthropic ping keepalive idle cap", () => {
 		expect(providerRetryWait).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		["text", { type: "text", text: "" }, { type: "text_delta", text: "" }],
+		["thinking", { type: "thinking", thinking: "", signature: "" }, { type: "thinking_delta", thinking: "" }],
+		[
+			"tool input",
+			{ type: "tool_use", id: "toolu_empty_delta", name: "write", input: {} },
+			{ type: "input_json_delta", partial_json: "" },
+		],
+	] as const)("times out empty %s deltas without renewing ping keepalives", async (_name, block, delta) => {
+		vi.useFakeTimers();
+		const counters = { pings: 0 };
+		const controller = new AbortController();
+		let iteratorStarted = false;
+		const script: ScriptStep[] = [
+			{ waitMs: 0, event: writeToolCallOpening[0]! },
+			{ waitMs: 0, event: { type: "content_block_start", index: 0, content_block: block } },
+			...Array.from({ length: 24 }, () => [
+				{ waitMs: 250, event: { type: "content_block_delta", index: 0, delta } },
+				{ waitMs: 250, event: { type: "ping" } },
+			]).flat(),
+			{ waitMs: 500, event: "hang-with-pings" },
+		];
+		const client = createScriptedClient(script, counters, () => {
+			iteratorStarted = true;
+		});
+		const providerRetryWait = vi.fn(async () => {});
+		let settled = false;
+		const resultPromise = streamAnthropic(model, context, {
+			client,
+			signal: controller.signal,
+			streamFirstEventTimeoutMs: 1_000,
+			streamIdleTimeoutMs: 1_000,
+			providerRetryWait,
+		})
+			.result()
+			.then(message => {
+				settled = true;
+				return message;
+			});
+
+		try {
+			await drainMicrotasksUntil(() => iteratorStarted, "Anthropic mock stream never started");
+			await drainMicrotasks(30);
+			for (let step = 0; step < 9 && !settled; step++) {
+				vi.advanceTimersByTime(500);
+				await drainMicrotasks(30);
+			}
+			expect(settled).toBe(true);
+			const result = await resultPromise;
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Anthropic stream stalled while waiting for the next event");
+			expect(providerRetryWait).not.toHaveBeenCalled();
+		} finally {
+			controller.abort();
+			await resultPromise;
+		}
+	});
+
 	it("keeps a slow-but-alive stream open across ping-bridged gaps within the cap", async () => {
 		vi.useFakeTimers();
 		const counters = { pings: 0 };
