@@ -1746,12 +1746,27 @@ export class ProcessTerminal implements Terminal {
 				}
 				switch (owner.kind) {
 					case "osc11": {
+						// Clearing the deadline without checking whose it is holds only
+						// because the query gate keeps at most one `osc11` owner in the
+						// FIFO at a time (see #queryBackgroundColor), so the owner
+						// drained here is always the one that armed it. Let two coexist
+						// and this cancels a live cycle's deadline on an older cycle's
+						// sentinel, and that cycle never surrenders.
 						this.#clearOsc11SentinelDeadline();
 						if (this.#osc11LiveCycle === owner.cycle) {
 							// DA1 arrived before OSC 11 response: terminal doesn't support
 							// OSC 11. It said so itself, so unlike a cycle that merely ran
 							// out of patience this one is owed nothing more and leaves no
 							// marker behind.
+							//
+							// This ends a live cycle without touching
+							// `#osc11CacheRefreshTimer`, which is safe only because a
+							// cycle cannot be in multiplexer settlement here: the owner
+							// matched above is pushed by #startDirectOsc11Query, which
+							// runs after the settle timer fires. Push that owner earlier
+							// and this path has to cancel the settle timer too, or the
+							// request parked behind the cycle is stranded — the defect
+							// the reply path at #consumeOsc11Reply exists to prevent.
 							const index = this.#osc11Cycles.indexOf(owner.cycle);
 							if (index >= 0) this.#osc11Cycles.splice(index, 1);
 							this.#osc11LiveCycle = undefined;
@@ -2060,6 +2075,11 @@ export class ProcessTerminal implements Terminal {
 		// prematurely clear the new query's pending state. Preserve a requested
 		// cache refresh when coalescing direct and explicit queries, and retain
 		// the latest explicit request identity across automatic queries.
+		//
+		// This is also what keeps at most one `osc11` owner in the sentinel
+		// FIFO, which the DA1 branch relies on when it clears the sentinel
+		// deadline without checking whose it is. Relax the gate and that clear
+		// has to match the owner it drained against `#osc11LiveCycle` first.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
 			const queued = this.#osc11QueuedQuery;
 			this.#osc11QueuedQuery = { cache: queued?.cache ?? cache, token: token ?? queued?.token };
@@ -2093,6 +2113,21 @@ export class ProcessTerminal implements Terminal {
 		this.#startDirectOsc11Query(cycle);
 	}
 
+	/**
+	 * Two things downstream depend on where this owner is pushed, and both are
+	 * silent if it moves.
+	 *
+	 * It is pushed here, after any multiplexer settlement has ended, so the DA1
+	 * branch that drains it can end a live cycle without cancelling
+	 * `#osc11CacheRefreshTimer` — a cycle it matches is never still in
+	 * settlement. Push it when the settlement query goes out instead and that
+	 * branch strands the request parked behind the cycle.
+	 *
+	 * And it is the only `osc11` owner in the FIFO, because
+	 * {@link ProcessTerminal.#queryBackgroundColor} queues rather than starting
+	 * a second cycle while one is outstanding. That is what lets the same
+	 * branch clear the sentinel deadline without checking whose it is.
+	 */
 	#startDirectOsc11Query(cycle: Osc11Cycle): void {
 		const owner: Da1SentinelOwner = { kind: "osc11", cycle };
 		this.#da1SentinelOwners.push(owner);
