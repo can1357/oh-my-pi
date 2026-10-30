@@ -9,7 +9,7 @@
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 - Gateway rows discovered from `/v1/models` now keep the `reasoning_effort_map` and `reasoning_required` facts they advertise: a route that serves only low/high/max routes `medium` to `high` instead of the nearest lower tier, and a thinking-off request still sends a tier the route accepts ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
 - Computer-use scripts can wait for a window opened by an action and read it in the same call with a window filter's optional `wait` ([#17391](https://github.com/can1357/oh-my-pi/pull/17391) by [@will-bogusz](https://github.com/will-bogusz))
-- `/restart` during a running turn now goes on with that turn after the relaunch, as `omp --restore` does after a crash: a reply it cut off is generated again, and a tool batch it cut off entirely runs again
+- `/restart` during a running turn now goes on with that turn after the relaunch, as `omp --restore` does after a crash: a reply it cut off is generated again, and a tool batch it cut off entirely runs again ([#17471](https://github.com/can1357/oh-my-pi/pull/17471) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
 
