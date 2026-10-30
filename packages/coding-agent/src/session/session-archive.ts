@@ -1171,21 +1171,31 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
 }
 
 /**
- * Whether the live session already holds everything its retained archive
- * does, so opening it needs no restore.
+ * Whether the live session already has a copy of everything its retained
+ * archive holds, so opening it needs no restore.
  *
- * A restore keeps its archive, so most sessions with an archive beside them
- * are complete; only one interrupted between the transcript and its tree is
- * not. Asking before taking any lease is what keeps an ordinary open of a
- * complete session — a fork, a render — from needing ownership it has no
- * reason to want.
+ * Presence, not sameness. A restore keeps its archive, and a session that
+ * carries on afterwards diverges from it by design — a child renames itself,
+ * a tool rewrites its output — so comparing content here reads ordinary
+ * living as an interrupted restore and refuses to open a complete session.
+ * The only thing a restore would have left undone is an archived path with
+ * no live counterpart at all, which is what this looks for.
+ *
+ * Asking before taking any lease is what keeps an ordinary open — a resume,
+ * a fork, a render — from needing ownership it has no reason to want. Reading
+ * only directory entries is also what keeps it from reading the whole tree
+ * on every open of a session with a large retained archive.
  */
 async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
 	if (!(await statIfPresent(archiveArtifacts))) return true;
 	try {
-		await assertLiveTreeHoldsArchive(archiveArtifacts, liveArtifacts, await fs.realpath(archiveArtifacts));
+		for (const file of await treeFiles(archiveArtifacts)) {
+			if (SESSION_STAGING_RE.test(path.basename(file))) continue;
+			const live = path.join(liveArtifacts, path.relative(archiveArtifacts, file));
+			if (!(await statIfPresent(live))) return false;
+		}
 		return true;
 	} catch {
 		return false;

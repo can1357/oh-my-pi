@@ -1223,14 +1223,28 @@ async function publishArtifactIntoArchive(
 	//
 	// The window the exclusive create cannot cover — a replacement between it
 	// and the open — is closed by reading the descriptor rather than trusting
-	// it: a file that is not this source's bytes is refused, whatever its
-	// inode says.
-	await fs.rm(tempPath, { force: true });
-	await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
-	const stagedHandle = await fs.open(tempPath, "r");
+	// it. The read is of the whole file, not a prefix of it: containment
+	// alone accepts a stage truncated before it was opened, and publishing
+	// that writes an empty artifact into the archive and calls it archived.
+	//
+	// Everything from the staging write on is inside the cleanup, so a copy
+	// that fails part-way or a descriptor that cannot be opened leaves no
+	// temp behind.
+	let stagedHandle: fs.FileHandle | undefined;
 	try {
+		await fs.rm(tempPath, { force: true });
+		await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
+		stagedHandle = await fs.open(tempPath, "r");
 		const staged = await stagedHandle.stat();
 		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
+		// Equal to the source, not merely contained in it: containment alone
+		// accepts a stage truncated before it was opened, and publishing that
+		// writes an empty artifact into the archive and calls it archived.
+		// Measured against the source as it stands, because a live file that
+		// changed since this run stat'd it is the live file changing, not the
+		// stage being replaced.
+		const sourceNow = await fs.stat(source).catch(() => undefined);
+		if (staged.size !== sourceNow?.size) throw new Error(stagedChanged);
 		if (!(await archivedHandleIsHeldBy(stagedHandle, staged, source))) throw new Error(stagedChanged);
 		const stagedIsOurs = async (): Promise<boolean> => {
 			const standing = await fs.lstat(tempPath).catch(() => undefined);
@@ -1294,7 +1308,7 @@ async function publishArtifactIntoArchive(
 		}
 		return;
 	} finally {
-		await stagedHandle.close();
+		await stagedHandle?.close();
 		await fs.rm(tempPath, { force: true });
 	}
 }

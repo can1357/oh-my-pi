@@ -2389,3 +2389,77 @@ test("the resume route finishes a half restore rather than opening a session wit
 	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
+test("a complete session that carried on since it was archived still opens", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const child = path.join(liveArtifacts, "child.jsonl");
+	await Bun.write(child, sessionBody(childId, "FIRST TURN", root));
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	// Ordinary living after a restore: a child takes another turn, a tool
+	// rewrites its output. The archive is retained and now differs, which is
+	// what retention means — it is not an interrupted restore.
+	await Bun.write(child, `${await Bun.file(child).text()}${JSON.stringify({ type: "later" })}\n`);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "REPLACED");
+
+	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	await manager.close();
+
+	expect(await Bun.file(child).text()).toContain("later");
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("REPLACED");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a truncated stage is not published as an archived artifact", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+
+	// Emptied after it is staged and before it is read. Proving the stage is
+	// contained in the source accepts that; proving it is the source does not.
+	const realCopyFile = fs.copyFile;
+	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
+		const result = await realCopyFile(source, destination, mode);
+		if (String(destination).includes("tool.log")) await fs.truncate(String(destination), 0);
+		return result;
+	});
+	let result: GcResult;
+	try {
+		result = await archiveEverything();
+	} finally {
+		copyFile.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).exists()).toBe(false);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+});
+
+test("a staging failure leaves no temp behind", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+
+	const realOpen = fs.open;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target).endsWith(".tmp") && String(target).includes("tool.log")) {
+			throw Object.assign(new Error("EMFILE: injected"), { code: "EMFILE" });
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+	}) as typeof fs.open);
+	try {
+		await archiveEverything();
+	} finally {
+		open.mockRestore();
+	}
+
+	// The copy is inside the cleanup now, so a descriptor this run could not
+	// open does not strand the file it had already staged.
+	for (const name of await fs.readdir(archivedArtifacts).catch(() => [])) {
+		expect(name.endsWith(".tmp")).toBe(false);
+	}
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+});
