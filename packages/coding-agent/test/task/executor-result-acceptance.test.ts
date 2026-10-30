@@ -174,6 +174,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		trackIrcReply: () => {},
 		hasIrcInterrupts: () => false,
 		holdIrcWakes: () => () => {},
+		waitForStopPasses: async () => {},
 		subscribeRunState: () => () => {},
 		isParentIrcSteer: () => false,
 		asyncJobManager: options?.asyncJobManager,

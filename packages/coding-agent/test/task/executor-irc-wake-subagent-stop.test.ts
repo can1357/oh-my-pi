@@ -74,24 +74,6 @@ function toLifecycleFrame(data: unknown): LifecycleFrame {
 	return { status: isRecord(data) && typeof data.status === "string" ? data.status : undefined };
 }
 
-/** Rendezvous points of a stop pass held open while a wake turn overlaps it. */
-interface OverlapGates {
-	/** The first stop pass's handler is consulting. */
-	stopEntered: PromiseWithResolvers<void>;
-	/** The overlapping wake turn's model reply was served. */
-	wakeYielded: PromiseWithResolvers<void>;
-	/** Lets the first pass's handler answer. */
-	releaseStop: PromiseWithResolvers<void>;
-}
-
-function createOverlapGates(): OverlapGates {
-	return {
-		stopEntered: Promise.withResolvers<void>(),
-		wakeYielded: Promise.withResolvers<void>(),
-		releaseStop: Promise.withResolvers<void>(),
-	};
-}
-
 describe("IRC wake turn subagent_stop (real session)", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -464,308 +446,115 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		});
 	});
 
-	it("fails closed when a newer wake took the session while handlers were consulting", async () => {
+	it("holds a newer wake until the refused wake's continuation is judged and published", async () => {
 		const stopEntered = Promise.withResolvers<void>();
 		const releaseStop = Promise.withResolvers<void>();
-		const secondWakeRunning = Promise.withResolvers<void>();
-		const releaseSecondWake = Promise.withResolvers<void>();
 		const run = await setup({
 			responses: [
 				yieldCall("REFUSED-PAYLOAD"),
-				async () => {
-					secondWakeRunning.resolve();
-					await releaseSecondWake.promise;
-					return { content: ["second wake reply"] };
-				},
-			],
-			onStop: async () => {
-				stopEntered.resolve();
-				await releaseStop.promise;
-				return { decision: "block", reason: "keep going" };
-			},
-		});
-
-		await deliverWake(run.session, "m1");
-		await stopEntered.promise;
-		// The first wake's turn is settled and its monitor detached: the session is
-		// idle, so a second wake starts its own turn while the first pass consults.
-		await deliverWake(run.session, "m2");
-		await secondWakeRunning.promise;
-		releaseStop.resolve();
-		releaseSecondWake.resolve();
-		await run.session.waitForIrcReplies();
-		await run.session.waitForIdle();
-
-		// The continuation could not start on the busy session and never reached the
-		// model; the refused payload was not published by either observation.
-		expect(run.mock.calls).toHaveLength(2);
-		expect(JSON.stringify(run.mock.calls[1]?.context.messages)).not.toContain("keep going");
-		expect(run.stopEvents).toHaveLength(1);
-		expect(await Bun.file(run.artifact).exists()).toBe(false);
-		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
-	});
-
-	it("leaves a newer wake's yield-tool state alone when an older wake's refusal can no longer be answered", async () => {
-		const outputSchema = {
-			type: "object",
-			properties: { findings: { type: "array", items: { type: "string" } } },
-			required: ["findings"],
-		};
-		const stopEntered = Promise.withResolvers<void>();
-		const releaseStop = Promise.withResolvers<void>();
-		const newerSectionRecorded = Promise.withResolvers<void>();
-		const olderFinished = Promise.withResolvers<void>();
-		const run = await setup({
-			outputSchema,
-			responses: [
-				{ content: [{ type: "toolCall", name: "yield", arguments: { data: { findings: ["OLDER"] } } }] },
-				{ content: [{ type: "toolCall", name: "yield", arguments: { type: ["findings"], data: "NEWER" } }] },
-				// The section's tool result is in; the newer turn closes its sections only after the older pass refused.
-				async () => {
-					newerSectionRecorded.resolve();
-					await olderFinished.promise;
-					return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result" } }] };
-				},
-				{ content: ["done"] },
+				yieldCall("CONTINUATION-PAYLOAD"),
+				{ content: ["second wake reply"] },
 			],
 			onStop: async (_event, callIndex) => {
-				if (callIndex !== 1) return undefined;
-				stopEntered.resolve();
-				await releaseStop.promise;
-				return { decision: "block", reason: "redo" };
-			},
-		});
-		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
-			const status = toLifecycleFrame(data).status;
-			if (status === "failed" || status === "aborted") olderFinished.resolve();
-		});
-
-		await deliverWake(run.session, "m1");
-		await stopEntered.promise;
-		await deliverWake(run.session, "m2");
-		await newerSectionRecorded.promise;
-		releaseStop.resolve();
-		await run.session.waitForIrcReplies();
-		await run.session.waitForIdle();
-
-		// The newer turn's sections were never refused, so its data-less finalize closes them.
-		expect(JSON.stringify(run.session.messages)).not.toContain("cannot satisfy");
-		expect(run.mock.calls).toHaveLength(3);
-		expect(JSON.parse(await Bun.file(run.artifact).text())).toEqual({ findings: ["NEWER"] });
-	});
-
-	it("never lets a newer wake that is still settling publish a refused wake's continuation", async () => {
-		const manager = new AsyncJobManager({});
-		AsyncJobManager.setInstance(manager);
-		const gate = Promise.withResolvers<string>();
-		const stopEntered = Promise.withResolvers<void>();
-		const releaseStop = Promise.withResolvers<void>();
-		const secondWakeRan = Promise.withResolvers<void>();
-		const refusalOutcome = Promise.withResolvers<void>();
-		const run = await setup({
-			manager,
-			responses: [
-				yieldCall("REFUSED-PAYLOAD"),
-				() => {
-					secondWakeRan.resolve();
-					return { content: ["second wake reply"] };
-				},
-				// Whichever turn runs third: a refusal's continuation yields, anything else is prose.
-				context => {
-					if (!JSON.stringify(context.messages).includes("keep going"))
-						return { content: ["noted the job result"] };
-					refusalOutcome.resolve();
-					return yieldCall("CONTINUATION-PAYLOAD");
-				},
-				{ content: ["noted the job result"] },
-			],
-			onStop: async (event, callIndex) => {
-				if (callIndex > 1) return event.stop_hook_active ? { decision: "block", reason: "keep going" } : undefined;
-				// The newer wake's turn ends while this job runs, so its observation stays open, settling.
-				manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
-					id: "bg-job",
-					ownerId: AGENT_ID,
-				});
-				stopEntered.resolve();
-				await releaseStop.promise;
-				return { decision: "block", reason: "keep going" };
-			},
-		});
-		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
-			if (toLifecycleFrame(data).status === "failed") refusalOutcome.resolve();
-		});
-
-		await deliverWake(run.session, "m1");
-		await stopEntered.promise;
-		await deliverWake(run.session, "m2");
-		await secondWakeRan.promise;
-		await run.session.waitForIdle();
-		// The newer wake's turn has ended and its observation is still open. The
-		// refusal now either starts a continuation or fails the refused wake.
-		releaseStop.resolve();
-		await refusalOutcome.promise;
-		gate.resolve("BUILD GREEN");
-		await run.session.waitForIrcReplies();
-		await run.session.waitForIdle();
-		await manager.waitForAll();
-
-		// The newer wake owns the session: the refusal could not be answered, so no
-		// continuation ran and no other observation judged or published its yield.
-		const artifact = (await Bun.file(run.artifact).exists()) ? await Bun.file(run.artifact).text() : "";
-		expect(artifact).not.toContain("REFUSED-PAYLOAD");
-		expect(artifact).not.toContain("CONTINUATION-PAYLOAD");
-		expect(run.stopEvents).toHaveLength(1);
-		expect(run.mock.calls.map(call => JSON.stringify(call.context.messages)).join("\n")).not.toContain("keep going");
-		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
-	});
-
-	it("drops an older wake's yield its handler allows only after a newer wake published", async () => {
-		const stopEntered = Promise.withResolvers<void>();
-		const releaseStop = Promise.withResolvers<void>();
-		const newerPublished = Promise.withResolvers<void>();
-		const run = await setup({
-			responses: [yieldCall("OLDER-PAYLOAD"), yieldCall("NEWER-PAYLOAD")],
-			onStop: async (_event, callIndex) => {
-				// The newer wake's own pass allows at once.
 				if (callIndex > 1) return undefined;
 				stopEntered.resolve();
 				await releaseStop.promise;
-				return undefined;
+				return { decision: "block", reason: "keep going" };
 			},
-		});
-		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
-			if (toLifecycleFrame(data).status === "completed") newerPublished.resolve();
 		});
 
 		await deliverWake(run.session, "m1");
 		await stopEntered.promise;
-		// The older pass is still consulting when the newer wake runs, yields and publishes.
+		// The pass holds the idle child: the newer wake parks instead of taking the session.
+		// Delivery routes the wake before it resolves, so the park is already decided here.
 		await deliverWake(run.session, "m2");
-		await newerPublished.promise;
-		expect(await Bun.file(run.artifact).text()).toContain("NEWER-PAYLOAD");
+		expect(run.mock.calls).toHaveLength(1);
 		releaseStop.resolve();
 		await run.session.waitForIrcReplies();
 		await run.session.waitForIdle();
 
-		// The older handler allowed a candidate its observation no longer owns:
-		// publishing it would overwrite the newer wake's result with a stale one.
+		// The continuation ran next and its yield was judged and published; only then did the newer wake run.
+		expect(run.mock.calls).toHaveLength(3);
+		expect(JSON.stringify(run.mock.calls[1]?.context.messages)).toContain("keep going");
+		expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
 		const artifact = await Bun.file(run.artifact).text();
-		expect(artifact).toContain("NEWER-PAYLOAD");
-		expect(artifact).not.toContain("OLDER-PAYLOAD");
-		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+		expect(artifact).toContain("CONTINUATION-PAYLOAD");
+		expect(artifact).not.toContain("REFUSED-PAYLOAD");
 	});
 
-	it("publishes an older wake's yield its handler allows while the newer wake that closed it is still running", async () => {
+	it("lets a user prompt to the idle child cancel the pass, then runs the prompt", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		let handlerSawCancel = false;
+		const run = await setup({
+			responses: [yieldCall("UNJUDGED-PAYLOAD"), { content: ["hello, user"] }],
+			onStop: async event => {
+				stopEntered.resolve();
+				const cancelled = Promise.withResolvers<void>();
+				if (event.signal.aborted) cancelled.resolve();
+				else event.signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+				await cancelled.promise;
+				handlerSawCancel = true;
+				return { decision: "block", reason: "not done" };
+			},
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		await run.session.prompt("user says hi");
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The candidate was never judged: nothing is published, the wake turn is
+		// cancelled rather than failed on a refusal, and the user's prompt ran after.
+		expect(handlerSawCancel).toBe(true);
+		expect(run.stopEvents).toHaveLength(1);
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+		expect(run.lifecycle.map(frame => frame.status)).not.toContain("failed");
+		expect(run.mock.calls).toHaveLength(2);
+		expect(JSON.stringify(run.mock.calls[1]?.context.messages)).toContain("user says hi");
+	});
+
+	it("cancels, unjudged, a wake that a newer wake superseded while its owner work settled", async () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const gate = Promise.withResolvers<string>();
-		const stopEntered = Promise.withResolvers<void>();
-		const releaseStop = Promise.withResolvers<void>();
-		const newerTurnRunning = Promise.withResolvers<void>();
-		const releaseNewerTurn = Promise.withResolvers<void>();
-		// The older wake's lifecycle end: the newer turn cannot end before it is released.
-		const olderEnded = Promise.withResolvers<string | undefined>();
 		const run = await setup({
 			manager,
 			responses: [
 				yieldCall("OLDER-PAYLOAD"),
-				async () => {
-					newerTurnRunning.resolve();
-					await releaseNewerTurn.promise;
-					return { content: ["newer turn answered in prose"] };
-				},
+				{ content: ["newer wake reply"] },
 				// The owner job's delivered result.
 				{ content: ["noted the job result"] },
 			],
-			onStop: async (_event, callIndex) => {
-				if (callIndex !== 1) return undefined;
-				stopEntered.resolve();
-				await releaseStop.promise;
-				return undefined;
-			},
-		});
-		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
-			const status = toLifecycleFrame(data).status;
-			if (status !== undefined && status !== "started") olderEnded.resolve(status);
+			onStop: () => undefined,
 		});
 		// Owner background work keeps the first wake's observation open after its turn yielded.
 		manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
 			id: "bg-job",
 			ownerId: AGENT_ID,
 		});
+		const olderEnded = Promise.withResolvers<string | undefined>();
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			const status = toLifecycleFrame(data).status;
+			if (status !== undefined && status !== "started") olderEnded.resolve(status);
+		});
 
 		try {
 			await deliverWake(run.session, "m1");
 			await run.session.waitForIdle();
-			// The newer wake closes the open observation: its pass starts, then the newer turn runs.
+			// The newer wake closes the still-settling observation before its pass could run.
 			await deliverWake(run.session, "m2");
-			await stopEntered.promise;
-			await newerTurnRunning.promise;
-			// Allowed while the newer turn has published nothing: the older yield is the result.
-			releaseStop.resolve();
-			expect(await olderEnded.promise).toBe("completed");
-			expect(await Bun.file(run.artifact).text()).toContain("OLDER-PAYLOAD");
+
+			expect(await olderEnded.promise).toBe("aborted");
+			expect(run.stopEvents).toHaveLength(0);
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
 		} finally {
-			releaseStop.resolve();
-			releaseNewerTurn.resolve();
 			gate.resolve("ok");
 			await run.session.waitForIrcReplies();
 			await run.session.waitForIdle();
 			await manager.waitForAll();
 		}
-	});
-
-	it("stops a settling continuation from observing a newer wake's turn", async () => {
-		const manager = new AsyncJobManager({});
-		AsyncJobManager.setInstance(manager);
-		const gate = Promise.withResolvers<string>();
-		const continuationRan = Promise.withResolvers<void>();
-		const newerWakeRan = Promise.withResolvers<void>();
-		const run = await setup({
-			manager,
-			responses: [
-				yieldCall("REFUSED-PAYLOAD"),
-				() => {
-					continuationRan.resolve();
-					return yieldCall("CONTINUATION-PAYLOAD");
-				},
-				() => {
-					newerWakeRan.resolve();
-					return yieldCall("NEWER-PAYLOAD");
-				},
-				// The delivered job result's turn.
-				{ content: ["noted the job result"] },
-			],
-			onStop: (_event, callIndex) => {
-				if (callIndex > 1) return undefined;
-				// Still running when the continuation's turn ends, so the continuation keeps settling.
-				manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
-					id: "bg-job",
-					ownerId: AGENT_ID,
-				});
-				return { decision: "block", reason: "keep going" };
-			},
-		});
-
-		await deliverWake(run.session, "m1");
-		await continuationRan.promise;
-		await run.session.waitForIdle();
-		await deliverWake(run.session, "m2");
-		await newerWakeRan.promise;
-		await run.session.waitForIdle();
-		gate.resolve("BUILD GREEN");
-		await run.session.waitForIrcReplies();
-		await run.session.waitForIdle();
-		await manager.waitForAll();
-
-		// The continuation's pass judged its own yield, not the newer wake's (which
-		// never reached its monitor). The newer wake took the session meanwhile, so
-		// the allowed continuation is dropped rather than published over that turn.
-		expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
-		const artifact = await Bun.file(run.artifact).text();
-		expect(artifact).not.toContain("CONTINUATION-PAYLOAD");
-		expect(artifact).not.toContain("REFUSED-PAYLOAD");
-		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
 	});
 
 	it("judges a continuation's yield only after its owner async work quiesced", async () => {
@@ -867,105 +656,96 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.at(-1)?.status).toBe("failed");
 	});
 
-	// The stop pass of a driven run (initial or resumed) shares the kept-alive session with IRC
-	// wakes: while its handlers consult, the child is idle and a peer message starts a turn that
-	// the run's monitor, still attached, records. These pin that such a turn is never published
-	// on a verdict that was about the candidate it replaced.
-	describe("a driven run overlapped by a wake turn", () => {
-		async function driveThroughWake(target: AgentSession, eventBus: EventBus, gates: OverlapGates) {
-			const turn = runSubagentFollowUpTurn({
-				id: AGENT_ID,
-				agent: wakeAgent,
-				message: "do the work",
-				artifactsDir: tempDir.path(),
-				eventBus,
-			});
-			await gates.stopEntered.promise;
-			// The old candidate's handlers are still consulting; a wake turn yields a newer one.
-			await deliverWake(target, "m1");
-			await gates.wakeYielded.promise;
-			await target.waitForIdle();
-			gates.releaseStop.resolve();
-			return await turn;
-		}
-
-		const wakeYield =
-			(gates: OverlapGates): MockHandler =>
-			() => {
-				gates.wakeYielded.resolve();
-				return yieldCall("WAKE-PAYLOAD");
-			};
-
-		it("judges the candidate a wake turn recorded while handlers were consulting the old one", async () => {
-			const gates = createOverlapGates();
-			const run = await setup({
-				driven: true,
-				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates)],
-				onStop: async (_event, callIndex) => {
-					if (callIndex !== 1) return undefined;
-					gates.stopEntered.resolve();
-					await gates.releaseStop.promise;
-					return undefined;
-				},
-			});
-
-			const result = await driveThroughWake(run.session, run.eventBus, gates);
-
-			// The first verdict was about OLD-PAYLOAD. WAKE-PAYLOAD may only be published after a
-			// second pass saw the wake turn's transcript.
-			expect(result.output).toContain("WAKE-PAYLOAD");
-			expect(run.stopEvents).toHaveLength(2);
-			expect(JSON.stringify(run.stopEvents[1]?.messages)).toContain("WAKE-PAYLOAD");
-			expect(await Bun.file(run.artifact).text()).toContain("WAKE-PAYLOAD");
+	it("runs a driven run's refusal continuation through its own hold", async () => {
+		const run = await setup({
+			driven: true,
+			responses: [yieldCall("REFUSED-PAYLOAD"), yieldCall("REPLACEMENT")],
+			onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
 		});
 
-		it("honors a refusal of the candidate the wake turn recorded", async () => {
-			const gates = createOverlapGates();
-			const run = await setup({
-				driven: true,
-				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates), yieldCall("REPLACEMENT")],
-				onStop: async (_event, callIndex) => {
-					if (callIndex === 1) {
-						gates.stopEntered.resolve();
-						await gates.releaseStop.promise;
-						return undefined;
-					}
-					return callIndex === 2 ? { decision: "block", reason: "redo the wake answer" } : undefined;
-				},
-			});
-
-			const result = await driveThroughWake(run.session, run.eventBus, gates);
-
-			expect(result.output).toContain("REPLACEMENT");
-			expect(result.output).not.toContain("WAKE-PAYLOAD");
-			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, false, true]);
-			const artifact = await Bun.file(run.artifact).text();
-			expect(artifact).toContain("REPLACEMENT");
-			expect(artifact).not.toContain("WAKE-PAYLOAD");
+		const result = await runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do the work",
+			artifactsDir: tempDir.path(),
+			eventBus: run.eventBus,
 		});
 
-		it("voids a refusal of the replaced candidate without spending the run's continuation state", async () => {
-			const gates = createOverlapGates();
-			const run = await setup({
-				driven: true,
-				responses: [yieldCall("OLD-PAYLOAD"), wakeYield(gates), yieldCall("CONTINUATION")],
-				onStop: async (_event, callIndex) => {
-					if (callIndex !== 1) return undefined;
-					gates.stopEntered.resolve();
-					await gates.releaseStop.promise;
-					return { decision: "block", reason: "stale refusal" };
+		expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+		expect(result.output).toContain("REPLACEMENT");
+		expect(result.output).not.toContain("REFUSED-PAYLOAD");
+	});
+
+	it("holds an extension's turn-starting message until the wake's result is published", async () => {
+		const releaseStop = Promise.withResolvers<void>();
+		const stopEntered = Promise.withResolvers<void>();
+		let published: boolean | undefined;
+		const run = await setup({
+			responses: [
+				yieldCall("WAKE-PAYLOAD"),
+				async () => {
+					published = await Bun.file(run.artifact).exists();
+					return { content: ["handled the extension message"] };
 				},
-			});
-
-			const result = await driveThroughWake(run.session, run.eventBus, gates);
-
-			// No continuation ran for a verdict on a candidate nobody would publish, and the pass that
-			// judged the wake turn's candidate was not told this run had already been refused once.
-			expect(run.mock.calls.map(call => JSON.stringify(call.context.messages)).join("\n")).not.toContain(
-				"stale refusal",
-			);
-			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, false]);
-			expect(result.output).toContain("WAKE-PAYLOAD");
+			],
+			onStop: async () => {
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
 		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		const sent = run.session.sendCustomMessage(
+			{ customType: "ext-note", content: "extension says hi", display: false },
+			{ triggerTurn: true },
+		);
+		releaseStop.resolve();
+		await sent;
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The extension's turn ran only after the judged yield was published.
+		expect(run.mock.calls).toHaveLength(2);
+		expect(published).toBe(true);
+		expect(await Bun.file(run.artifact).text()).toContain("WAKE-PAYLOAD");
+	});
+
+	it("holds a parent wake that arrives while a driven run's handlers consult until the run publishes", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const run = await setup({
+			driven: true,
+			parentId: "Parent",
+			responses: [yieldCall("RUN-PAYLOAD"), { content: ["parent wake reply"] }],
+			onStop: async () => {
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
+		});
+
+		const turn = runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do the work",
+			artifactsDir: tempDir.path(),
+			eventBus: run.eventBus,
+		});
+		await stopEntered.promise;
+		await deliverWake(run.session, "m1", "Parent");
+		// The parent's message did not start a turn the run's monitor could take as its result.
+		expect(run.mock.calls).toHaveLength(1);
+		releaseStop.resolve();
+		const result = await turn;
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		expect(result.output).toContain("RUN-PAYLOAD");
+		expect(await Bun.file(run.artifact).text()).toContain("RUN-PAYLOAD");
+		expect(run.stopEvents).toHaveLength(1);
+		// Released after publishing, the parked wake got its own turn.
+		expect(run.mock.calls).toHaveLength(2);
 	});
 });
