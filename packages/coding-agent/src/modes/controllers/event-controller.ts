@@ -1097,12 +1097,49 @@ export class EventController {
 	}
 
 	/**
+	 * What a session being left behind knows about calls waiting on a person, kept so returning to
+	 * it reports what it reported before. A host that drives its own approval UI raises no session
+	 * dialog, so these records are the only evidence those calls are owed an answer — and unlike a
+	 * dialog, nothing republishes them on attach.
+	 */
+	#parkedApprovalRecords = new WeakMap<
+		object,
+		{ prompts: Map<string, RunStatus>; waiting: Set<string>; answered: Set<string> }
+	>();
+
+	/**
+	 * Take back what {@link resetTranscriptAnchors} parked for `session`, if anything, and report
+	 * from it. Called by the focus controller once the transcript is pointed at that session.
+	 */
+	adoptApprovalRecords(session: object): void {
+		const parked = this.#parkedApprovalRecords.get(session);
+		if (!parked) return;
+		this.#parkedApprovalRecords.delete(session);
+		this.#blockingPrompts = parked.prompts;
+		this.#waitingToolCalls = parked.waiting;
+		this.#answeredBeforeStart = parked.answered;
+		setRunStatus(this.#reportedStatus());
+	}
+
+	/**
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
 	 * components, timers, and stream-reveal state all reference the previous
-	 * session's transcript and must not bleed into the new one.
+	 * session's transcript and must not bleed into the new one. `parkFor` is
+	 * the session being left: its approval records are kept aside for a return
+	 * rather than dropped, since nothing else can rebuild them.
 	 */
-	resetTranscriptAnchors(): void {
+	resetTranscriptAnchors(parkFor?: object): void {
+		if (parkFor && (this.#blockingPrompts.size > 0 || this.#answeredBeforeStart.size > 0)) {
+			this.#parkedApprovalRecords.set(parkFor, {
+				prompts: this.#blockingPrompts,
+				waiting: this.#waitingToolCalls,
+				answered: this.#answeredBeforeStart,
+			});
+			this.#blockingPrompts = new Map();
+			this.#waitingToolCalls = new Set();
+			this.#answeredBeforeStart = new Set();
+		}
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;

@@ -504,6 +504,37 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
+	it("keeps a session's own approval record across a focus change, and lends it to no one", async () => {
+		// A host that drives its own approval UI raises no session dialog, so
+		// this record is the only evidence the call is owed an answer — and
+		// nothing republishes it on the way back. It is kept for the session it
+		// belongs to, and the session focused in its place never sees it.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const mine = {} as object;
+		const other = {} as object;
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+
+		// Focus away: the record is parked, and the session arriving inherits none.
+		controller.resetTranscriptAnchors(mine);
+		controller.adoptApprovalRecords(other);
+		await controller.handleEvent(AGENT_START);
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+
+		// Focus back: the call is still owed an answer, and says so again.
+		controller.resetTranscriptAnchors(other);
+		controller.adoptApprovalRecords(mine);
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
 	it("keeps the permission kind and names the approval still waiting when an overlapping one ends", async () => {
 		// Two approvals overlap. The session publishes the oldest open dialog as
 		// its wait, with that dialog's own words and kind, and republishes the

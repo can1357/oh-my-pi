@@ -224,15 +224,15 @@ describe("ExtensionRunner", () => {
 			await ui.select("Proceed?", ["yes"]);
 			await ui.select("Declared by the call", ["yes"], { toolCallId: "call-2" });
 		});
-		// The holder keeps the `ui`; the run it was handed to is over, and no run of
-		// that call is on this chain, so the dialog names none.
+		// The holder keeps the `ui`, and the `ui` keeps the run it was handed to.
+		// That run is over, so the session reads it and claims no call.
 		await keptPastTheCall!.select("After the call", ["yes"]);
 		await runner.createContext().ui.select("Unrelated?", ["yes"]);
 
 		expect(frames).toEqual([
 			{ prompt: "Proceed?", declared: undefined, call: "call-1", finished: false },
 			{ prompt: "Declared by the call", declared: "call-2", call: undefined, finished: undefined },
-			{ prompt: "After the call", declared: undefined, call: undefined, finished: undefined },
+			{ prompt: "After the call", declared: undefined, call: "call-1", finished: true },
 			{ prompt: "Unrelated?", declared: undefined, call: undefined, finished: undefined },
 		]);
 	});

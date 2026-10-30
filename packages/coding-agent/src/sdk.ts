@@ -3583,6 +3583,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						kind: frame.kind,
 						toolCallId: frame.toolCallId,
 						toolCallExecution: frame.toolCallExecution,
+						toolCallOwned: frame.toolCallOwned,
 					})
 				: dialog();
 		extensionRunner.setUserWaitTracker(trackUserWait);

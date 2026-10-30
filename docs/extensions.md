@@ -947,12 +947,18 @@ own end.
 Attribution names a run of a call, never the id on its own. Two agents in one process can hold the
 same tool-call id at once and are never confused for each other; an executor bound to no agent
 claims none of theirs; and a call that `retry` runs again is a new run — the earlier one being over
-says nothing about this one, and a dialog left open over a finished run stops naming its call so
-the next run of that id answers for itself. Within a live run, timers and detached promises keep
-the identity, and a `ui` a call was handed resolves to the run of that call the dialog is raised
-inside — so a holder that keeps the `ui` past the call names nothing with it. Some boundaries lose
-the ambient identity: a `worker` callback, and work resumed on an `AsyncResource` created before
-the run. Pass `toolCallId` explicitly from such a callback when the dialog is still that call's.
+says nothing about this one, and a dialog left open stops naming its call the moment the run that
+raised it ends, so the next run of that id answers for itself. Within a live run, timers and
+detached promises keep the identity, and a `ui` handed to a call keeps the run it was handed to —
+so a holder that keeps that `ui` past the call names nothing with it, not even while a later run
+of the same call is executing. Some boundaries lose the ambient identity: a `worker` callback, and
+work resumed on an `AsyncResource` created before the run. Pass `toolCallId` explicitly from such a
+callback when the dialog is still that call's.
+
+A host that wraps `trackUserWaits` must forward the whole frame to `session.waitForUser`. An
+adapter that copies only some fields drops the dialog's ownership, and the wait then falls back to
+whatever run is executing around it — which, inside a nested `invokeTool`, is the child rather than
+the parent that raised the dialog.
 
 None of this survives a restart: waits are not persisted, so reopening a session restores no open
 dialog and approves nothing — an unfinished call that was waiting comes back with no wait and no

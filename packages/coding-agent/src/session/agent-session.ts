@@ -39,6 +39,7 @@ import {
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	currentToolExecution,
+	onToolExecutionEnd,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -1420,22 +1421,29 @@ export class AgentSession implements SettingsScope {
 	async waitForUser<T>(
 		dialog: () => Promise<T>,
 		prompt?: string,
-		options?: { kind?: BlockedKind; toolCallId?: string; toolCallExecution?: ToolExecution },
+		options?: { kind?: BlockedKind; toolCallId?: string; toolCallExecution?: ToolExecution; toolCallOwned?: boolean },
 	): Promise<T> {
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
 		}
+		const claim = this.#owningToolCall(options);
 		this.#openUserWaits.set(waitId, {
 			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
 			...(options?.kind ? { kind: options.kind } : {}),
-			...(this.#owningToolCall(options) ?? {}),
+			...(claim ?? {}),
 		});
+		// The claim expires with the run that made it, not with whatever publishes next: a surface
+		// replaying the last frame must never read a call this dialog no longer speaks for.
+		const dropClaimWatch = claim?.execution
+			? onToolExecutionEnd(claim.execution, () => this.#publishOpenUserWait())
+			: undefined;
 		this.#publishOpenUserWait();
 		try {
 			return await dialog();
 		} finally {
+			dropClaimWatch?.();
 			this.#openUserWaits.delete(waitId);
 			if (this.#openUserWaits.size === 0) {
 				this.#openUserWait = undefined;
@@ -1455,12 +1463,13 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * What a dialog is recorded against. A caller that names the call it is asking about asserts
-	 * that about this moment and is taken at its word. A `ui` handed to a call carries the run it
-	 * was handed to, not an id a later call could reuse, and that run identifies the dialog's call
-	 * only while it lasts. With neither, the execution that raised the dialog is read from the
-	 * async context the loop binds around `tool.execute`: a host that opens its own approval
-	 * through the plain `waitForUser` therefore still says which call owes the answer, without
-	 * naming it and without anyone reading its words.
+	 * that about this moment and is taken at its word. A dialog from a `ui` handed to one call
+	 * carries the run that `ui` belongs to, and belongs to that run alone: when the run is over, or
+	 * when no run of its call was ever found, the dialog names no call rather than borrowing the
+	 * one executing around it. With neither, the run that raised the dialog is read from the async
+	 * context the loop binds around `tool.execute`: a host that opens its own approval through the
+	 * plain `waitForUser` therefore still says which call owes the answer, without naming it and
+	 * without anyone reading its words.
 	 *
 	 * Everything here is scoped to this session's agent and to one run. Two agents in a process can
 	 * hold the same call id at once; an interrupted call that `retry` runs again is a new run of
@@ -1470,7 +1479,7 @@ export class AgentSession implements SettingsScope {
 	 * approval opens before its call is announced.
 	 */
 	#owningToolCall(
-		options: { toolCallId?: string; toolCallExecution?: ToolExecution } | undefined,
+		options: { toolCallId?: string; toolCallExecution?: ToolExecution; toolCallOwned?: boolean } | undefined,
 	): { toolCallId: string; execution?: ToolExecution } | undefined {
 		const owner = this.agent;
 		const named = options?.toolCallId;
@@ -1480,11 +1489,12 @@ export class AgentSession implements SettingsScope {
 			const executing = currentToolExecution(owner);
 			return executing?.toolCallId === named ? { toolCallId: named, execution: executing } : { toolCallId: named };
 		}
-		const captured = options?.toolCallExecution;
-		if (captured) {
+		if (options?.toolCallOwned || options?.toolCallExecution) {
 			// Only this agent's own run: another agent's call of the same id, and an executor bound
-			// to no agent, are not this session's to answer for.
-			const mine = captured.owner === owner && typeof captured.toolCallId === "string";
+			// to no agent, are not this session's to answer for. A `ui` whose run is over, or which
+			// never found one, claims nothing — the run executing around it is not its.
+			const captured = options.toolCallExecution;
+			const mine = captured?.owner === owner && typeof captured?.toolCallId === "string";
 			return mine && !captured.finished ? { toolCallId: captured.toolCallId, execution: captured } : undefined;
 		}
 		const executing = currentToolExecution(owner);

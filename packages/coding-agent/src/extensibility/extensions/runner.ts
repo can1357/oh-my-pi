@@ -8,9 +8,10 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
+	currentToolExecution,
+	type ToolExecution,
 	isNonBlankContext,
 	joinAdditionalContext,
-	type ToolExecution,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -43,7 +44,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
-import { trackUserWaits, type UserWaitTracker } from "./user-wait";
+import { trackUserWaits, type UserWaitOwner, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import type {
@@ -521,7 +522,7 @@ export class ExtensionRunner {
 	/** The host's own `ui`, before tracking: a per-call wrapper is built from this. */
 	#rawUiContext: ExtensionUIContext | undefined;
 	/** The last per-call wrapper handed out, so repeated contexts for one call share it. */
-	#callUiContext: { toolCallId: string; ui: ExtensionUIContext } | undefined;
+	#callUiContext: { owner: UserWaitOwner; ui: ExtensionUIContext } | undefined;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -1047,19 +1048,22 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * The `ui` a tool call's own context gets: dialogs it raises name the run of that call they are
-	 * raised inside, so the wait each one opens says whose it is and a surface tracking the call
-	 * sees its own dialog settle — while a holder that keeps the `ui` past the call, where no such
-	 * run is on the chain, names nothing with it. A context built for no call keeps the
-	 * session-wide wrapper, which names none.
+	 * The `ui` a tool call's own context gets: dialogs it raises name the run that context was
+	 * built for, so the wait each one opens says whose it is and a surface tracking the call sees
+	 * its own dialog settle — while a holder that keeps the `ui` past that run names nothing with
+	 * it, not even when a later run of the same call is executing. A context built for no call
+	 * keeps the session-wide wrapper, which names none.
 	 */
-	#uiForCall(toolCallId: string | undefined): ExtensionUIContext {
+	#uiForCall(toolCallId: string | undefined, execution: ToolExecution | undefined): ExtensionUIContext {
 		const raw = this.#rawUiContext;
 		if (!raw || !this.#trackUserWait || toolCallId === undefined) return this.#uiContext;
-		if (this.#callUiContext?.toolCallId !== toolCallId) {
-			this.#callUiContext = { toolCallId, ui: trackUserWaits(raw, this.#trackUserWait, toolCallId) };
-		}
-		return this.#callUiContext.ui;
+		const run = execution ?? currentToolExecution();
+		const cached = this.#callUiContext;
+		if (cached && cached.owner.toolCallId === toolCallId && cached.owner.execution === run) return cached.ui;
+		const owner: UserWaitOwner = { toolCallId, execution: run, settled: run !== undefined };
+		const ui = trackUserWaits(raw, this.#trackUserWait, owner);
+		this.#callUiContext = { owner, ui };
+		return ui;
 	}
 
 	hasUI(): boolean {
@@ -1623,7 +1627,7 @@ export class ExtensionRunner {
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
 		return {
-			ui: this.#uiForCall(delegation?.toolCallId),
+			ui: this.#uiForCall(delegation?.toolCallId, delegation?.context?.toolCall?.execution),
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),

@@ -80,7 +80,8 @@ import {
 	createAdditionalContextMessage,
 	isNonBlankContext,
 	joinAdditionalContext,
-	runInToolCall,
+	createToolExecution,
+	runToolExecution,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 } from "./tool-context";
@@ -3639,7 +3640,12 @@ async function executeToolCalls(
 					// Wrapper-dispatched nested calls (for example `write xd://…`)
 					// inherit the context, so their passive hook context joins this
 					// root call at the batch boundary.
+					// The run this call is about to make, prepared first so the context the
+					// host builds for it is bound to this run and not to a later one that
+					// reuses the id.
+					const execution = createToolExecution(config.owner, toolCall.id);
 					const toolContext = getToolContext?.({
+						execution,
 						batchId,
 						index,
 						total: toolCalls.length,
@@ -3666,7 +3672,7 @@ async function executeToolCalls(
 						// it raises) is attributable to this call, under this agent, while
 						// this run of it lasts. A loop with no owner binds nothing: there is
 						// no one to attribute the work to.
-						rawResult = await runInToolCall(config.owner, toolCall.id, () =>
+						rawResult = await runToolExecution(execution, () =>
 							tool.execute(
 								toolCall.id,
 								executionArgs,

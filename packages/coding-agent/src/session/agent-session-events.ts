@@ -144,6 +144,12 @@ export interface UserWaitFrame {
 	 * Never serialized — it is an in-process handle, not part of any wire frame.
 	 */
 	toolCallExecution?: ToolExecution;
+	/**
+	 * True when this dialog came from a `ui` handed to one tool call. Such a dialog belongs to that
+	 * call's run and to nothing else: when {@link toolCallExecution} is absent or over, the dialog
+	 * names no call, rather than falling back to whatever happens to be executing around it.
+	 */
+	toolCallOwned?: boolean;
 }
 
 /**

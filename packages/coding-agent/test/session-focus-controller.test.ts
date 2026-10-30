@@ -120,6 +120,7 @@ function makeHarness(
 			resetTranscriptAnchors: () => {
 				resetTranscriptAnchors++;
 			},
+			adoptApprovalRecords() {},
 			restorePendingToolResults() {},
 			markViewIdle() {},
 		},

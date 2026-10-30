@@ -88,10 +88,11 @@ export class SessionFocusController {
 			if (!attachment) return;
 		} else {
 			++this.#attachGeneration;
+			const leaving = this.#attachedSession ?? this.ctx.session;
 			this.#focusedAgentId = id;
 			this.#attachedSession = session;
 			this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
-			attachment = this.#attach(session);
+			attachment = this.#attach(session, leaving);
 			this.#focusAttachment = attachment;
 		}
 		let attached = false;
@@ -137,9 +138,10 @@ export class SessionFocusController {
 	 */
 	async #detachToMain(): Promise<void> {
 		if (!this.#focusedAgentId) return;
+		const leaving = this.#attachedSession;
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
-		const attached = await this.#attach(this.ctx.session);
+		const attached = await this.#attach(this.ctx.session, leaving);
 		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
 	}
 
@@ -171,14 +173,19 @@ export class SessionFocusController {
 		});
 	}
 
-	/** Retarget core, both directions: swap subscription, transcript, and status line onto `target`. */
-	async #attach(target: AgentSession): Promise<boolean> {
+	/**
+	 * Retarget core, both directions: swap subscription, transcript, and status line onto `target`.
+	 * `leaving` is the session being replaced, whose record of calls still owed an answer is kept
+	 * for its own return rather than dropped — a host that drives its own approval UI raises no
+	 * dialog to replay on the way back.
+	 */
+	async #attach(target: AgentSession, leaving?: AgentSession): Promise<boolean> {
 		const generation = ++this.#attachGeneration;
 		this.ctx.syncIdleMaintenanceView(target);
 		try {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi();
-			this.ctx.eventController.resetTranscriptAnchors();
+			this.ctx.eventController.resetTranscriptAnchors(leaving);
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;
@@ -238,6 +245,7 @@ export class SessionFocusController {
 			// `user_wait_start` was published when the dialog opened, which may be
 			// before this attach subscribed: replay it so a session still owing a
 			// person an answer reports blocked rather than working or idle.
+			this.ctx.eventController.adoptApprovalRecords(target);
 			const openWait = target.activeUserWait();
 			if (openWait) {
 				await this.ctx.eventController.handleEvent(openWait);

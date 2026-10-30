@@ -424,10 +424,11 @@ describe("AgentSession computer display hold per turn", () => {
 		});
 	});
 
-	it("stops naming a call once the run that claimed it ends, leaving the dialog open", async () => {
+	it("stops naming a call the moment the run that claimed it ends, leaving the dialog open", async () => {
 		// A dialog can outlive the run that raised it. The id is then free for
-		// another run, so the open dialog stops naming it: answering the old
-		// dialog must not answer for whatever is running under that id now.
+		// another run, so the open dialog stops naming it at that moment — not
+		// when something else next publishes, which may be never: a surface
+		// replaying the snapshot in between would answer for the wrong run.
 		const target = createSession([{ content: ["done"] }]);
 		const stale = Promise.withResolvers<void>();
 		const fresh = Promise.withResolvers<void>();
@@ -437,6 +438,9 @@ describe("AgentSession computer display hold per turn", () => {
 			staleWait = target.waitForUser(() => stale.promise, "the dialog left open");
 			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
 		});
+		// Nothing else has published, and the dialog is still on screen.
+		expect(target.activeUserWait()?.prompt).toBe("the dialog left open");
+		expect(target.activeUserWait()?.toolCalls).toBeUndefined();
 		await runInToolCall(owner, "question-1", async () => {
 			const wait = target.waitForUser(() => fresh.promise, "the new run's dialog");
 			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
