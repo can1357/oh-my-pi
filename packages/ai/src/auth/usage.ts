@@ -232,6 +232,7 @@ export class UsageService implements UsageApi {
 						refreshableCredential,
 						refreshableCredentialId,
 						timeoutSignal,
+						"usage-poll",
 					);
 					const refreshedCredential = mergeRefreshedUsageCredential(request.credential, refreshed);
 					this.persistRefreshedCredential(
