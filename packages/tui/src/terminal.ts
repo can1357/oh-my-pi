@@ -1735,9 +1735,12 @@ export class ProcessTerminal implements Terminal {
 						}
 					}
 				}
-				// An orphaned cycle's colour report has just been swallowed, so the
-				// sentinel that follows it is this one. It belongs to that cycle
-				// and resolves nothing in the queue.
+				// A cycle that is owed a sentinel without holding a slot claims this
+				// one: an orphan whose colour was swallowed, or a cycle retired
+				// after its colour had arrived. The sentinel answers nobody in the
+				// FIFO, but it is not inert — the cycle waiting behind it has just
+				// lost its own, so the helper finishes that cycle where its colour
+				// already arrived and releases whatever was parked behind it.
 				if (this.#osc11SentinelClaims > 0) {
 					this.#osc11SentinelClaims -= 1;
 					this.#settleCycleWhoseSentinelWasSpent();
