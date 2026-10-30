@@ -919,6 +919,115 @@ pub fn normalize_role_atspi(native: &str, multiline: bool) -> String {
 	}
 }
 
+/// Refuses input to an iPhone Mirroring window that shows a connection screen
+/// ("Connection Paused", "iPhone in Use") instead of the phone: a picture of
+/// the phone with static text beside it. Reads at most three levels and 64
+/// nodes of the window, never the phone's content; a window it cannot read
+/// takes the input as before.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn require_phone_screen(
+	backend: &mut dyn AxBackend,
+	window: &DesktopWindow,
+) -> CoreResult<()> {
+	match connection_screen(backend, window) {
+		Ok(None) => Ok(()),
+		Ok(Some((text, buttons))) => {
+			let mut message = format!(
+				"window {} of {} is not showing the phone; no input was sent; connection state: \
+				 {text:?}",
+				window.id, window.app,
+			);
+			if !buttons.is_empty() {
+				let _ = write!(
+					message,
+					"; buttons: {}, pressed with press() on their element. Connecting needs the phone \
+					 locked and plays the phone's audio on this Mac, so do not press one while the \
+					 user is using the phone",
+					buttons.join(", "),
+				);
+			}
+			Err(DesktopError::input_failed(message))
+		},
+		Err(error) if error.code == ErrorCode::Cancelled => Err(error),
+		Err(_) => Ok(()),
+	}
+}
+
+/// The connection screen's text and titled buttons: the children of one
+/// element that holds an image and non-empty static text.
+#[cfg(any(target_os = "macos", test))]
+fn connection_screen(
+	backend: &mut dyn AxBackend,
+	window: &DesktopWindow,
+) -> CoreResult<Option<(String, Vec<String>)>> {
+	let root = backend.window_root(window)?;
+	// (role, label, parent) per node read; parent indexes this list, the root
+	// is `None`.
+	let mut nodes: Vec<(String, String, Option<usize>)> = Vec::new();
+	let mut pending: Vec<_> = backend
+		.children(&root)?
+		.into_iter()
+		.rev()
+		.map(|h| (h, 1, None))
+		.collect();
+	while nodes.len() < 64 {
+		let Some((handle, depth, parent)) = pending.pop() else {
+			break;
+		};
+		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip)?;
+		let label = props
+			.value
+			.or(props.title)
+			.or(props.description)
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect::<Vec<_>>()
+			.join(" ");
+		let index = nodes.len();
+		nodes.push((props.role, label, parent));
+		if depth < 3 {
+			pending.extend(
+				children
+					.into_iter()
+					.rev()
+					.map(|h| (h, depth + 1, Some(index))),
+			);
+		}
+	}
+	let labels = |parent: Option<usize>, role: &str| -> Vec<String> {
+		nodes
+			.iter()
+			.filter(|(r, label, p)| *p == parent && r == role && !label.is_empty())
+			.map(|(_, label, _)| label.clone())
+			.collect()
+	};
+	let mut parents: Vec<Option<usize>> = Vec::new();
+	for (_, _, parent) in &nodes {
+		if !parents.contains(parent) {
+			parents.push(*parent);
+		}
+	}
+	for parent in parents {
+		let text = labels(parent, "statictext");
+		let pictured = nodes
+			.iter()
+			.any(|(role, _, p)| *p == parent && role == "image");
+		if pictured && !text.is_empty() {
+			let text = text.join(" ");
+			let mut shown: String = text.chars().take(512).collect();
+			if text.chars().count() > 512 {
+				shown.push('…');
+			}
+			let buttons = labels(parent, "button")
+				.into_iter()
+				.map(|title| format!("{title:?}"))
+				.collect();
+			return Ok(Some((shown, buttons)));
+		}
+	}
+	Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
 	use std::collections::{HashMap, HashSet};
@@ -1073,6 +1182,80 @@ mod tests {
 			focused: true,
 		}
 	}
+	fn text(value: &str) -> AxProps {
+		AxProps { value: Some(value.into()), ..p("statictext", None) }
+	}
+
+	#[test]
+	fn phone_screen_refuses_a_connection_screen_quoting_it_and_its_buttons() {
+		// The localized "Connecting" shape: the picture after the text.
+		let mut m = Mock {
+			props: [
+				(2, p("group", None)),
+				(3, text("  Connexion\n suspendue ")),
+				(4, text(" Verrouillez   votre iPhone. ")),
+				(5, p("button", Some("Reprendre"))),
+				(6, p("image", Some("Background"))),
+			]
+			.into(),
+			children: [(1, vec![2]), (2, vec![3, 4, 5, 6])].into(),
+			..Default::default()
+		};
+		let error = require_phone_screen(&mut m, &window()).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(
+			error
+				.message
+				.contains("\"Connexion suspendue Verrouillez votre iPhone.\""),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("buttons: \"Reprendre\""), "{}", error.message);
+		assert_eq!(m.root_reads, 1);
+		assert_eq!(m.bounds_reads, 0);
+	}
+
+	#[test]
+	fn phone_screen_allows_bare_window() {
+		assert!(require_phone_screen(&mut Mock::default(), &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_allows_the_settings_window_and_blank_text() {
+		// iPhone Mirroring Settings: text and buttons, no picture.
+		let mut settings = Mock {
+			props: [
+				(2, p("scrollarea", None)),
+				(3, p("group", None)),
+				(4, text("Require Mac login to access iPhone:")),
+				(5, p("group", None)),
+				(6, p("button", Some("Revoke Access…"))),
+				(7, text("iPhone Mirroring Settings")),
+			]
+			.into(),
+			children: [(1, vec![2, 7]), (2, vec![3, 5]), (3, vec![4]), (5, vec![6])].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut settings, &window()).is_ok());
+		let mut blank = Mock {
+			props: [(2, p("group", None)), (3, p("image", None)), (4, text("  "))].into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut blank, &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_lets_input_through_when_the_window_cannot_be_read() {
+		let mut m = Mock {
+			props: [(2, p("group", None)), (3, p("image", None)), (4, text("Timed Out"))].into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			destroyed: [2].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut m, &window()).is_ok());
+	}
+
 	#[test]
 	fn generations_keep_current_and_previous() {
 		let mut m = Mock::default();

@@ -85,6 +85,7 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
+				require_phone_screen(&window, process::remote_screen(pid))?;
 				match mode {
 					DeliveryMode::Background => {
 						let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
@@ -239,6 +240,7 @@ impl MacInput {
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
 		let remote = process::remote_screen(pid);
+		require_phone_screen(window, remote)?;
 		// A takeover write goes to the window brought to the front for it.
 		let behind_user = || match mode {
 			DeliveryMode::Background => entry_front.require_behind(skylight::front_pid(), pid, wid),
@@ -327,6 +329,7 @@ impl MacInput {
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
 		let remote = process::remote_screen(pid);
+		require_phone_screen(window, remote)?;
 		let gap = key_gap(remote);
 		let chord = chord_keys(window, keys, remote, layout_strokes)?;
 		match mode {
@@ -405,6 +408,7 @@ impl MacInput {
 				// Read before anything about the target ([`EntryFront::before`]).
 				let entry_front = EntryFront::now();
 				let remote = process::remote_screen(pid);
+				require_phone_screen(&window, remote)?;
 				let gap = key_gap(remote);
 				let held = chord_keys(&window, keys, remote, layout_strokes)?;
 				match mode {
@@ -464,6 +468,13 @@ impl MacInput {
 			},
 		}
 	}
+}
+
+fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) -> CoreResult<()> {
+	if remote == Some(RemoteScreen::HidReports) {
+		super::super::ax::require_phone_screen(&mut ax::MacAx::new(), window)?;
+	}
+	Ok(())
 }
 
 /// The current keyboard layout's lookup from character to key; `None` when
