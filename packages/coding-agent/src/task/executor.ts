@@ -98,6 +98,7 @@ import { ToolAbortError } from "../tools/tool-errors";
 import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { asReleaseHold } from "../utils/release-hold";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
@@ -3561,7 +3562,12 @@ export async function finalizeSubagentLifecycle(args: {
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
-	const disposeSession = async (): Promise<void> => {
+	/**
+	 * Dispose the child, bounded by the cleanup deadline. Returns the disposal
+	 * still running when that deadline passed, so a caller whose next step
+	 * destroys what the child is being disposed on can wait for it.
+	 */
+	const disposeSession = async (): Promise<{ deferred?: Promise<void> }> => {
 		// On a graceful finish (e.g. a `yield`) the advisor's review of the final
 		// turn was enqueued at turn end but may still be draining. Give it a
 		// chance to land in the transcript before the runtime is torn down —
@@ -3578,13 +3584,14 @@ export async function finalizeSubagentLifecycle(args: {
 		} catch (error) {
 			if (Date.now() >= cleanupDeadlineAt) {
 				args.onCleanupDeferred?.(disposal);
-				return;
+				return { deferred: disposal };
 			}
 			logger.warn("Subagent session cleanup failed", {
 				id: args.id,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		return {};
 	};
 	const releaseOwnedResources = async (): Promise<void> => {
 		try {
@@ -3666,9 +3673,24 @@ export async function finalizeSubagentLifecycle(args: {
 	// caller held while leaving the child registered and revivable hands
 	// `ensureLive` a session whose workspace and kernel have just gone.
 	// `runSubprocess`'s own boundary is the backstop if this throws.
-	await disposeSession();
+	const { deferred } = await disposeSession();
 	if (registry.get(args.id) === ref) registry.unregister(args.id, ref);
-	await releaseOwnedResources();
+	if (!deferred) {
+		await releaseOwnedResources();
+		return;
+	}
+	// The disposal outran the cleanup deadline. What the caller held is what the
+	// child is still being disposed on — its isolation workspace, its kernel —
+	// so the release waits for the disposal to finish rather than pulling the
+	// ground out from under it, and the wait is tracked rather than awaited
+	// here, which is what the deadline was for. Claiming says so: this
+	// discharge is owned now, and the boundary that created the hold must not
+	// run it the moment this returns.
+	asReleaseHold(args.onRelease)?.claim();
+	trackLateCleanup(deferred.catch(() => undefined).then(releaseOwnedResources), {
+		id: args.id,
+		resource: "refused-adoption-release",
+	});
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */

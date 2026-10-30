@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -19,7 +20,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
+import { ISOLATION_OWNER_FILE, writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -1038,6 +1040,133 @@ describe("detachGitDir", () => {
 			// The run that holds the current claim still tears it down.
 			await cleanupIsolation({ ...stale, generation });
 			expect(await Bun.file(path.join(stale.mergedDir, "successor.txt")).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	for (const damage of ["missing", "truncated", "malformed", "no-generation", "unreadable"] as const) {
+		it(`leaves a successor's workspace alone when the marker is ${damage}`, async () => {
+			// A teardown proves ownership from the marker. A marker it cannot
+			// read proves nothing, so it cannot authorise deleting whatever is
+			// in the directory now — that is a reclamation problem for
+			// `omp worktree clear`, which judges liveness, not a licence.
+			const { wt } = await makeLinkedWorktree();
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-marker-damage-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			try {
+				const stale = await ensureIsolation(wt, "marker-damage");
+				const successor = await ensureIsolation(wt, "marker-damage");
+				expect(successor.generation).not.toBe(stale.generation);
+				const live = path.join(successor.mergedDir, "live.txt");
+				await fs.writeFile(live, "owned by the successor\n");
+				const marker = path.join(path.dirname(successor.mergedDir), ISOLATION_OWNER_FILE);
+				if (damage === "missing") await fs.unlink(marker);
+				if (damage === "truncated") await fs.truncate(marker, 0);
+				if (damage === "malformed") await fs.writeFile(marker, '{"generation":');
+				if (damage === "no-generation") {
+					await fs.writeFile(marker, JSON.stringify({ pid: process.pid, id: "marker-damage" }));
+				}
+				if (damage === "unreadable") await fs.chmod(marker, 0);
+
+				await cleanupIsolation(stale);
+
+				expect(await Bun.file(live).exists()).toBe(true);
+			} finally {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			}
+		});
+	}
+
+	it("does not destroy a predecessor's workspace when its own claim fails to land", async () => {
+		// Materialisation has to empty the directory it is taking over. Doing
+		// that before the claim is written leaves a window where a crash — or a
+		// full disk — destroys a live predecessor and materialises nothing.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claim-first-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const live = await ensureIsolation(wt, "claim-first");
+			const kept = path.join(live.mergedDir, "live.txt");
+			await fs.writeFile(kept, "owned by the live run\n");
+			let starts = 0;
+			const isoStart = natives.isoStart;
+			vi.spyOn(natives, "isoStart").mockImplementation(async (...args) => {
+				starts += 1;
+				return await isoStart(...args);
+			});
+			const write = Bun.write.bind(Bun);
+			vi.spyOn(Bun, "write").mockImplementation((destination, input, options) =>
+				String(destination).endsWith(ISOLATION_OWNER_FILE)
+					? Promise.reject(new Error("claim write failed"))
+					: write(destination as Parameters<typeof write>[0], input as Parameters<typeof write>[1], options),
+			);
+
+			await expect(ensureIsolation(wt, "claim-first")).rejects.toThrow("claim write failed");
+
+			expect(starts).toBe(0);
+			expect(await Bun.file(kept).exists()).toBe(true);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("keeps a workspace a descendant is still working in until that descendant ends", async () => {
+		// A nested child spawned from an isolated parent inherits its cwd
+		// without materialising anything, so the owner's teardown has to
+		// account for it rather than delete the ground it is standing on.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "leased-workspace");
+			const nested = path.join(handle.mergedDir, "nested");
+			await fs.mkdir(nested, { recursive: true });
+			const data = path.join(nested, "descendant.txt");
+			await fs.writeFile(data, "written by a descendant\n");
+			const descendant = leaseIsolationWorkspace(nested);
+
+			await cleanupIsolation(handle);
+			expect(await Bun.file(data).exists()).toBe(true);
+
+			// The owner's teardown is not cancelled, only deferred: it runs when
+			// the last descendant ends.
+			descendant();
+			await scheduler.wait(50);
+			expect(await Bun.file(data).exists()).toBe(false);
 		} finally {
 			setWorktreesDir(undefined);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;

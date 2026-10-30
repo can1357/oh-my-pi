@@ -6,11 +6,12 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { readIsolationGeneration, writeIsolationOwner } from "./isolation-ownership";
+import { deferTeardownWhileLeased, forgetIsolationWorkspace, registerIsolationWorkspace } from "./isolation-lease";
+import { clearClaimedWorkspace, readIsolationClaim, writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -665,15 +666,24 @@ export async function ensureIsolation(
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
-		await fs.rm(baseDir, { recursive: true, force: true });
-		// Claim ownership before the backend materialises `m`. Backends only
-		// create/replace `mergedDir` (and overlay upper/work), never the base
-		// dir, so the marker survives `isoStart` — and a concurrent
-		// `omp worktree clear` never sees this sandbox without a live owner,
-		// even while a large clone is still in progress.
-		await fs.mkdir(baseDir, { recursive: true });
-		const generation = await writeIsolationOwner(baseDir, id);
+		// The whole attempt runs under the sandbox lock, so a teardown cannot
+		// retire the directory out from under a materialisation that has already
+		// claimed it, and two materialisations of one id cannot interleave.
+		const lock = await acquireFileLock(baseDir);
+		let claimed = false;
 		try {
+			// Claim ownership before anything is destroyed or materialised. The
+			// previous contents go only once this generation's marker is on disk,
+			// so live data never sits under no marker, and the previous owner's
+			// teardown finds a generation that is not its own. Backends only
+			// create/replace `mergedDir` (and overlay upper/work), never the base
+			// dir, so the marker survives `isoStart` — and a concurrent
+			// `omp worktree clear` never sees this sandbox without a live owner,
+			// even while a large clone is still in progress.
+			await fs.mkdir(baseDir, { recursive: true });
+			const generation = await writeIsolationOwner(baseDir, id);
+			claimed = true;
+			await clearClaimedWorkspace(baseDir);
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
 			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
@@ -684,6 +694,9 @@ export async function ensureIsolation(
 			// frozen repo that still borrows the source object DB via alternates.
 			await detachSubmodules(repoRoot, mergedDir);
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
+			// Descendants that inherit this cwd without materialising anything of
+			// their own are accounted for against this sandbox from here.
+			registerIsolationWorkspace(mergedDir);
 			return {
 				mergedDir,
 				generation,
@@ -692,12 +705,16 @@ export async function ensureIsolation(
 				fallbackReason,
 			};
 		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
+			// Only a claimed sandbox may be emptied: a failure before the claim
+			// landed leaves whatever was there for its own owner.
+			if (claimed) await clearClaimedWorkspace(baseDir).catch(() => undefined);
 			const message = errorMessage(err);
 			if (!natives.isoIsUnavailableError(message)) {
 				throw err;
 			}
 			fallbackReason ??= message;
+		} finally {
+			lock.release();
 		}
 	}
 
@@ -709,38 +726,81 @@ export async function ensureIsolation(
  *
  * The workspace path is derived from the task id, so the same path is handed
  * out again to a replacement spawn, to a session the SDK opens on it, or to
- * another omp process entirely. A teardown can arrive long after its own run —
- * a release that outlived its lifecycle manager's teardown deadline — and the
- * directory it captured may by then be a live successor's. So the marker is
- * re-read here and the removal happens only while the generation on disk is
- * still the one this handle materialised. Nothing else can make that
- * judgement: the registry is process-local, and the two colliding runs need
- * not share a process.
+ * another omp process entirely, and a teardown can arrive long after its own
+ * run — a release that outlived its lifecycle manager's deadline. So ownership
+ * is proved at the moment of deletion rather than before it, in three steps,
+ * under the sandbox lock:
+ *
+ * - the marker must still name *this* generation. Anything else — a later
+ *   run's generation, a damaged, truncated, unreadable or absent marker —
+ *   leaves the directory alone. A handle cannot establish ownership from a
+ *   marker nobody can read, and an unreadable marker is `omp worktree clear`'s
+ *   problem, not a licence.
+ * - the directory is then renamed out of the way, which takes it out of
+ *   circulation in one atomic step: a materialisation that starts the instant
+ *   the lock is released builds a fresh sandbox at the original path and
+ *   cannot be touched by the teardown below, which now names only the retired
+ *   copy. A mount the backend still holds refuses the rename (`EBUSY`); that
+ *   teardown keeps the lock instead, which blocks the materialisation rather
+ *   than racing it.
+ * - only then are the backend stop and the removal run.
+ *
+ * A handle with no generation predates claims (a fixture's hand-built handle)
+ * and keeps the old unconditional behaviour.
  */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	// A descendant session is still working in here — a nested child spawned
+	// from an isolated parent inherits this cwd without materialising anything
+	// of its own. The owner keeps the teardown; the last descendant to end runs
+	// it. See `isolation-lease`.
+	if (deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle))) return;
 	// baseDir is the parent of the merged directory
 	const baseDir = path.dirname(handle.mergedDir);
-	const generation = await readIsolationGeneration(baseDir);
-	if (generation !== undefined && generation !== handle.generation) {
-		logger.warn("isolation cleanup skipped: the workspace now belongs to a later run", {
-			mergedDir: handle.mergedDir,
-			expected: handle.generation,
-			found: generation,
-		});
-		return;
+	const lock = await acquireFileLock(baseDir);
+	let retiredDir: string | undefined;
+	let proceed = false;
+	try {
+		if (handle.generation !== undefined) {
+			const claim = await readIsolationClaim(baseDir);
+			if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
+				logger.warn("isolation cleanup skipped: the workspace is no longer provably this run's", {
+					mergedDir: handle.mergedDir,
+					expected: handle.generation,
+					found: claim.kind === "claimed" ? claim.generation : `unknown (${claim.reason})`,
+				});
+				return;
+			}
+		}
+		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
+		try {
+			await fs.rename(baseDir, candidate);
+			retiredDir = candidate;
+		} catch {
+			// A live mount pins the directory in place; hold the lock across the
+			// teardown instead, so no materialisation can start beside it.
+			retiredDir = undefined;
+		}
+		proceed = true;
+	} finally {
+		// Held past here only when the directory could not be retired.
+		if (!proceed || retiredDir !== undefined) lock.release();
 	}
+	const teardownBase = retiredDir ?? baseDir;
+	const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
 	try {
 		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
+			await natives.isoStop(handle.backend, teardownMerged);
 		} catch (err) {
 			logger.warn("isolation backend stop failed during cleanup", {
 				backend: handle.backend,
-				mergedDir: handle.mergedDir,
+				mergedDir: teardownMerged,
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
 	} finally {
-		await fs.rm(baseDir, { recursive: true, force: true });
+		await fs.rm(teardownBase, { recursive: true, force: true });
+		forgetIsolationWorkspace(handle.mergedDir);
+		if (retiredDir === undefined) lock.release();
 	}
 }
 

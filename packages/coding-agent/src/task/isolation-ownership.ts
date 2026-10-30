@@ -6,6 +6,7 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Snowflake } from "@oh-my-pi/pi-utils";
@@ -85,19 +86,52 @@ export async function writeIsolationOwner(baseDir: string, id: string): Promise<
 }
 
 /**
- * The generation currently recorded for the sandbox at `baseDir`, or undefined
- * when there is no readable marker — a sandbox from before markers carried
- * one, or a directory nobody has claimed.
+ * What the marker at `baseDir` says, told apart from not being able to read it.
+ *
+ * A teardown may only delete a sandbox it can still prove is its own, so
+ * "the marker is damaged, truncated, unreadable or gone" has to be a distinct
+ * answer from "the marker names someone": an old handle cannot establish
+ * ownership from a marker nobody can read, and an unreadable marker is a
+ * reclamation problem for `omp worktree clear` rather than a licence to
+ * delete whatever is there now.
  */
-export async function readIsolationGeneration(baseDir: string): Promise<string | undefined> {
+export type IsolationClaim =
+	/** The marker names the generation that currently owns the sandbox. */
+	| { kind: "claimed"; generation: string }
+	/** The marker cannot be read, or carries no generation. */
+	| { kind: "unknown"; reason: string };
+
+/** Read the claim recorded for the sandbox at `baseDir`. */
+export async function readIsolationClaim(baseDir: string): Promise<IsolationClaim> {
 	let decoded: unknown;
 	try {
 		decoded = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).json();
-	} catch {
-		return undefined;
+	} catch (error) {
+		return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
 	}
-	if (typeof decoded !== "object" || decoded === null || !("generation" in decoded)) return undefined;
-	return typeof decoded.generation === "string" && decoded.generation.length > 0 ? decoded.generation : undefined;
+	if (typeof decoded !== "object" || decoded === null || !("generation" in decoded)) {
+		return { kind: "unknown", reason: "marker carries no generation" };
+	}
+	const generation = decoded.generation;
+	if (typeof generation !== "string" || generation.length === 0) {
+		return { kind: "unknown", reason: "marker generation is not a non-empty string" };
+	}
+	return { kind: "claimed", generation };
+}
+
+/**
+ * Remove everything in a sandbox the caller has just claimed, keeping the
+ * marker that records the claim. Materialising over an existing sandbox has to
+ * destroy its contents; doing that only after the claim is written means there
+ * is never a moment where live data sits under no marker, and the previous
+ * owner's teardown finds a generation that is not its own.
+ */
+export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
+	const entries = await fs.readdir(baseDir).catch(() => [] as string[]);
+	for (const entry of entries) {
+		if (entry === ISOLATION_OWNER_FILE) continue;
+		await fs.rm(path.join(baseDir, entry), { recursive: true, force: true });
+	}
 }
 
 /**

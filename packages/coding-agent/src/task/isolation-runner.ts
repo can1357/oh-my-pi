@@ -390,6 +390,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
+	/** Artifacts {@link releaseIsolation} captured, when it ran before this function's own post-run capture. */
+	let releasedCapture: IsolationPatchCapture["artifacts"] | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
@@ -426,6 +428,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					);
 				}
 				const patchResult = capture.artifacts;
+				// Kept for the post-run path: a release that ran inside the child's
+				// own teardown — a refused adoption ends the child there — has
+				// already captured and removed the workspace, so the result the
+				// parent reads must carry that capture rather than a second,
+				// impossible one.
+				releasedCapture = patchResult;
 				AgentRegistry.global().setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
@@ -501,6 +509,16 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		// so their cleanup remains asynchronous.
 		if (deferredCleanup && result.exitCode === 0) {
 			await deferredCleanup;
+		}
+		if (releasePromise) {
+			// The child's own teardown already ran the release — a refused
+			// adoption ends the child inside `runSubprocess` — so the capture and
+			// the workspace removal have happened. Re-capturing from a directory
+			// that is gone would report a capture failure, and a retained
+			// workspace, for work that was in fact captured: hand back what the
+			// release wrote.
+			await releasePromise;
+			return rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) });
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;

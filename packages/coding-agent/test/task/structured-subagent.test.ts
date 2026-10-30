@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1489,6 +1490,79 @@ describe("structured subagent primitive", () => {
 		expect(released).toBe(1);
 		expect(childDisposals).toBe(1);
 		expect(AgentRegistry.global().get(settled.result.id)).toBeUndefined();
+		finishTeardown.resolve();
+		await tearingDown;
+	});
+
+	it("waits for a deferred child disposal before releasing what the child is being disposed on", async () => {
+		// `disposeSession` returns at its cleanup deadline with the disposal
+		// still running. Releasing then takes away the workspace and kernel the
+		// child is being disposed on, which is the failure the refusal path was
+		// meant to avoid in the first place.
+		mockDiscovery();
+		const finishDispose = Promise.withResolvers<void>();
+		let disposalFinished = false;
+		const childSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {
+				await finishDispose.promise;
+				disposalFinished = true;
+			},
+		} as unknown as AgentSession;
+		const blockerDisposing = Promise.withResolvers<void>();
+		const finishTeardown = Promise.withResolvers<void>();
+		const blocker = AgentRegistry.global().register({
+			id: "Deferred-Blocker",
+			displayName: "blocker",
+			kind: "sub",
+			session: {
+				dispose: async () => {
+					blockerDisposing.resolve();
+					await finishTeardown.promise;
+				},
+			} as unknown as AgentSession,
+			sessionFile: null,
+			status: "idle",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.adopt("Deferred-Blocker", { idleTtlMs: 0 }, blocker);
+		const tearingDown = lifecycle.dispose(Date.now() + 5000);
+		await blockerDisposing.promise;
+		let released = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: childSession,
+				sessionFile: `/tmp/${options.id}.jsonl`,
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: childSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: false,
+				agentIdleTtlMs: 0,
+				// Already past: the disposal below is deferred on its first check.
+				cleanupDeadlineAt: Date.now(),
+				reviveSession: async () => childSession,
+				onRelease: options.onRelease,
+			});
+			return { ...result(), id: options.id };
+		});
+
+		await runStructuredSubagent(request({ keepAlive: true, onRelease: () => void (released += 1) }));
+
+		expect(disposalFinished).toBe(false);
+		expect(released).toBe(0);
+
+		finishDispose.resolve();
+		await scheduler.wait(50);
+		expect(disposalFinished).toBe(true);
+		expect(released).toBe(1);
 		finishTeardown.resolve();
 		await tearingDown;
 	});
