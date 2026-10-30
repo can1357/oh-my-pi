@@ -12,7 +12,7 @@
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import { createAuthGatewayRouter, gatewayRouteAccepts, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliModel } from "../config/model-resolver";
@@ -52,8 +52,9 @@ function viewCandidates(selector: string, settings: Settings, registry: Registry
  * that model's `retry.fallbackChains` (its role's chain when the entry named a
  * role). Each entry tries chat models first so a chat selector never lands on a
  * same-named runner; runner kinds (stt, tts, image, …) only resolve in the full
- * catalog, and their fallbacks keep only models of the same kind. Empty when no
- * entry resolves.
+ * catalog. Fallbacks keep only models of the same kind on an API that kind's
+ * route accepts, so an unroutable fallback (an on-device runner, say) never
+ * masks the failure that triggered it. Empty when no entry resolves.
  */
 export function selectorCandidates(selector: string, settings: Settings, registry: RegistryView): Model<Api>[] {
 	for (const pattern of normalizeModelPatternList(selector)) {
@@ -62,9 +63,16 @@ export function selectorCandidates(selector: string, settings: Settings, registr
 				getAll: () => registry.getAll(kind),
 				getAvailable: () => registry.getAvailable(kind),
 			});
-			// A runner's fallback chain may name chat models (`retry.fallbackChains.default`); its route cannot serve them.
+			// A runner's fallback chain may name chat models (`retry.fallbackChains.default`) or on-device runners; its route cannot serve them.
 			const [first] = candidates;
-			if (first) return candidates.filter(candidate => modelKind(candidate) === modelKind(first));
+			if (first) {
+				const firstKind = modelKind(first);
+				return candidates.filter(
+					candidate =>
+						candidate === first ||
+						(modelKind(candidate) === firstKind && gatewayRouteAccepts(firstKind, candidate.api)),
+				);
+			}
 		}
 	}
 	return [];

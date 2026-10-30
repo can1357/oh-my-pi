@@ -35,6 +35,7 @@ import {
 import {
 	type AuthGatewayClient,
 	DEFAULT_AUTH_GATEWAY_BIND,
+	gatewayRouteAccepts,
 	type ModelResolveOptions,
 	parseAuthGatewayClients,
 	startAuthGateway,
@@ -228,8 +229,9 @@ const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
 ];
 
 /**
- * Every registry model of a kind the gateway can route (on-device `local-inference` runners excluded), bundled catalog order within each kind. `availableOnly`
- * restricts to models with usable auth (`getAvailable`) instead of the whole catalog (`getAll`).
+ * Every registry model a gateway route can serve ({@link gatewayRouteAccepts}: a routable kind on an API its route
+ * accepts, never an on-device runner), bundled catalog order within each kind. `availableOnly` restricts to models
+ * with usable auth (`getAvailable`) instead of the whole catalog (`getAll`).
  */
 export function gatewayRoutableModels(
 	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
@@ -238,8 +240,7 @@ export function gatewayRoutableModels(
 	const models: Model<Api>[] = [];
 	for (const kind of GATEWAY_MODEL_KINDS) {
 		for (const model of availableOnly ? registry.getAvailable(kind) : registry.getAll(kind)) {
-			// On-device runners have no gateway route: every request for one answers 400.
-			if (model.api !== "local-inference") models.push(model);
+			if (gatewayRouteAccepts(kind, model.api)) models.push(model);
 		}
 	}
 	return models;
