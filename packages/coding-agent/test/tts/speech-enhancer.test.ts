@@ -54,6 +54,57 @@ describe("SpeechEnhancer rewriting", () => {
 		expect(rewritten).toBe("Spoken text");
 		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1536 });
 	});
+	it("summarizes completed replies with a short output budget", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled Claude Haiku 4.5 model");
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		const registry = await createRegistry(settings, [model]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "Fixed the parser and all tests pass." }],
+		} as never);
+
+		const summary = await new SpeechEnhancer({ settings, registry, sessionId: "session-digest" }).summarize(
+			"Long detailed response",
+		);
+		const options = completeSimpleMock.mock.calls[0]?.[2] as
+			| { disableReasoning?: boolean; maxTokens?: number }
+			| undefined;
+
+		expect(summary).toBe("Fixed the parser and all tests pass.");
+		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 128 });
+	});
+
+	it("preserves an empty digest as the no-speech result", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled Claude Haiku 4.5 model");
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		const registry = await createRegistry(settings, [model]);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "   " }],
+		} as never);
+
+		const summary = await new SpeechEnhancer({ settings, registry, sessionId: "session-empty-digest" }).summarize(
+			"Original reply",
+		);
+
+		expect(summary).toBe("");
+	});
+
+	it("returns null when digest generation fails so the caller can speak the original reply", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled Claude Haiku 4.5 model");
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		const registry = await createRegistry(settings, [model]);
+		vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("unavailable"));
+
+		const summary = await new SpeechEnhancer({ settings, registry, sessionId: "session-failed-digest" }).summarize(
+			"Original reply",
+		);
+
+		expect(summary).toBeNull();
+	});
 
 	it("selects an available local-inference tiny model", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");

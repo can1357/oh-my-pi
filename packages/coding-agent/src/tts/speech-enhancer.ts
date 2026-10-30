@@ -1,19 +1,11 @@
 /**
- * Enhanced speech rewriting (`speech.enhanced`): turn assistant markdown into
- * natural spoken prose with the tiny/smol model before synthesis.
+ * Enhanced speech rewriting and end-of-turn digests use a tiny/smol model.
  *
- * Two pieces:
- * - {@link BlockAccumulator} — fence-aware paragraph splitter over the raw
- *   streaming deltas. Blocks are blank-line-delimited; a fenced code block
- *   never splits, and an idle-time {@link BlockAccumulator.flushPartial} while
- *   inside a fence stays silent so half a code block is never sent to the
- *   rewriter.
- * - {@link SpeechEnhancer} — the per-session rewrite service the event
- *   controller hands to the vocalizer. Resolves the tiny/smol role (same chain
- *   as the auto-thinking classifier), sends one bounded completion per block,
- *   and returns null on any failure or timeout so the caller falls back to the
- *   mechanical {@link SpeakableStream} cleanup — speech never blocks on the
- *   model.
+ * - {@link BlockAccumulator} groups streaming deltas into markdown paragraphs
+ *   for natural read-aloud.
+ * - {@link SpeechEnhancer} rewrites those blocks or summarizes a completed
+ *   reply. Both paths use bounded completions and return null on failure so
+ *   callers can fall back to mechanical cleanup or the original reply.
  */
 import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -21,19 +13,19 @@ import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import speechDigestPrompt from "../prompts/system/speech-digest.md" with { type: "text" };
 import speechRewritePrompt from "../prompts/system/speech-rewrite.md" with { type: "text" };
 
 const SYSTEM_PROMPT = prompt.render(speechRewritePrompt);
-// Rewrite budget: a paragraph in, a spoken paragraph (usually shorter) out.
-// Always reserve enough room to survive backends that ignore `disableReasoning`
-// (e.g. Qwen3 via llama.cpp catalogued `reasoning: false` but still emitting
-// thinking). `maxTokens` is a hard cap — non-thinking completions still return
-// in a normal spoken-paragraph budget (issue #4355).
+const DIGEST_SYSTEM_PROMPT = prompt.render(speechDigestPrompt);
 const ANSWER_MAX_TOKENS = 1536;
-/** Per-block completion deadline before falling back to mechanical cleanup. */
+const DIGEST_MAX_TOKENS = 128;
+/** Per-completion deadline before falling back to the unmodified response. */
 const REWRITE_TIMEOUT_MS = 6000;
-/** Bound block characters sent to the model (huge diffs/code dumps get elided). */
+const DIGEST_TIMEOUT_MS = 6000;
+/** Bound prompt sizes; long texts retain both their opening and conclusion. */
 const MAX_BLOCK_CHARS = 4000;
+const MAX_DIGEST_CHARS = 12000;
 
 /** Session-scoped dependencies; mirrors the auto-thinking classifier's deps. */
 export interface SpeechEnhancerDeps {
@@ -62,18 +54,44 @@ export class SpeechEnhancer {
 		this.#deps = deps;
 	}
 
-	/**
-	 * Rewrite `block` for speech. Returns the spoken text (empty string when
-	 * the model judged the block unspeakable — pure code/markup), or null when
-	 * the rewrite failed, timed out, or no model/key resolved; the caller then
-	 * falls back to mechanical normalization.
-	 */
-	async rewrite(block: string, signal?: AbortSignal): Promise<string | null> {
+	/** Rewrite one markdown block into spoken prose. Null means mechanical TTS cleanup. */
+	rewrite(block: string, signal?: AbortSignal): Promise<string | null> {
+		return this.#complete(
+			block,
+			SYSTEM_PROMPT,
+			ANSWER_MAX_TOKENS,
+			REWRITE_TIMEOUT_MS,
+			MAX_BLOCK_CHARS,
+			"rewrite",
+			signal,
+		);
+	}
+
+	/** Condense a completed assistant reply for read-aloud. Null means speak the original reply. */
+	async summarize(text: string, signal?: AbortSignal): Promise<string | null> {
+		const summary = await this.#complete(
+			text,
+			DIGEST_SYSTEM_PROMPT,
+			DIGEST_MAX_TOKENS,
+			DIGEST_TIMEOUT_MS,
+			MAX_DIGEST_CHARS,
+			"digest",
+			signal,
+		);
+		return summary?.trim() ?? null;
+	}
+
+	async #complete(
+		text: string,
+		systemPrompt: string,
+		maxTokens: number,
+		timeoutMs: number,
+		maxInputChars: number,
+		operation: "rewrite" | "digest",
+		signal?: AbortSignal,
+	): Promise<string | null> {
 		try {
 			const { settings, registry, sessionId } = this.#deps;
-			// `@tiny` expands a configured `modelRoles.tiny` and otherwise falls
-			// through tiny's alias to the smol priority chain — unlike bare role
-			// lookup, this resolves even with no roles configured.
 			const model = resolveModelRoleValue("@tiny", roleCandidatePool("tiny", settings, registry), {
 				settings,
 				matchPreferences: getModelMatchPreferences(settings),
@@ -83,35 +101,35 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
+			const timeout = AbortSignal.timeout(timeoutMs);
+			const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 			const response = await retryTransientCompletion(
-				() => {
-					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
-					return completeSimple(
+				() =>
+					completeSimple(
 						model,
 						{
-							systemPrompt: [SYSTEM_PROMPT],
-							messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
+							systemPrompt: [systemPrompt],
+							messages: [{ role: "user", content: boundText(text, maxInputChars), timestamp: Date.now() }],
 						},
 						{
 							apiKey: registry.resolver(model, sessionId),
 							sessionId,
-							maxTokens: ANSWER_MAX_TOKENS,
+							maxTokens,
 							disableReasoning: true,
 							metadata,
-							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+							signal: requestSignal,
 						},
-					);
-				},
-				{ signal, provider: model.provider },
+					),
+				{ signal: requestSignal, provider: model.provider },
 			);
 			if (response.stopReason === "error") {
-				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });
+				logger.debug(`speech-enhancer: ${operation} errored`, { error: response.errorMessage });
 				return null;
 			}
 			return extractText(response.content);
 		} catch (error) {
 			if (!signal?.aborted) {
-				logger.debug("speech-enhancer: rewrite failed", {
+				logger.debug(`speech-enhancer: ${operation} failed`, {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			}
@@ -120,11 +138,11 @@ export class SpeechEnhancer {
 	}
 }
 
-/** Elide the middle of an oversized block so the prompt stays bounded. */
-function boundBlock(block: string): string {
-	if (block.length <= MAX_BLOCK_CHARS) return block;
-	const half = MAX_BLOCK_CHARS / 2;
-	return `${block.slice(0, half)}\n… (elided) …\n${block.slice(-half)}`;
+/** Elide the middle of oversized input while preserving its opening and conclusion. */
+function boundText(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const half = Math.floor((maxChars - 20) / 2);
+	return `${text.slice(0, half)}\n… (middle elided) …\n${text.slice(-half)}`;
 }
 
 /**
