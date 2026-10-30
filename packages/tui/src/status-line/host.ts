@@ -30,9 +30,7 @@ export type PromptCacheColdReason =
 	| { kind: "tools" }
 	| { kind: "system-prompt" }
 	| { kind: "retention" }
-	| { kind: "compaction" }
-	/** The conversation was rewound, branched or rewritten. */
-	| { kind: "history" };
+	| { kind: "compaction" };
 
 /** omp's cache warmer as it concerns the entry. */
 export interface PromptCacheWarming {
