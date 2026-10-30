@@ -142,6 +142,23 @@ export function getCustomApi(api: string): RegisteredCustomApi | undefined {
 }
 
 /**
+ * Withdraw one registration of a custom API: `gate`'s, or the host's own when no gate is given.
+ * Another session's registration of the same id stays to be selected, whether or not that
+ * session is still live — retirement only stops an entry being selected; the registrar alone
+ * withdraws it.
+ */
+export function unregisterCustomApi(api: string, gate?: ProviderCallGate): void {
+	const registrations = customApiRegistry.get(api);
+	if (!registrations) return;
+	const kept = registrations.filter(entry => entry.gate !== gate);
+	if (kept.length === 0) {
+		customApiRegistry.delete(api);
+	} else if (kept.length !== registrations.length) {
+		customApiRegistry.set(api, kept);
+	}
+}
+
+/**
  * Remove the custom APIs registered by a specific source (e.g., extension path): only `gate`'s
  * registrations when a gate is given, every session's otherwise.
  */

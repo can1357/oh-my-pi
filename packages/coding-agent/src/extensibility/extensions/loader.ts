@@ -33,7 +33,12 @@ import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus, extensionCallbackScope, OwnedEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { rememberProviderConfigOwner } from "./callback-ownership";
+import {
+	forgetQueuedProviderRegistrations,
+	type QueuedProviderRegistration,
+	rememberQueuedProviderRegistration,
+	restoreQueuedProviderRegistrations,
+} from "./callback-ownership";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -167,7 +172,10 @@ class ExtensionCallbackLease {
  */
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	/** Each record carries the session that queued it, so a drain can pass `owner` straight to
+	 *  `ModelRegistry.registerProvider`. One that passes only the other three fields still gets
+	 *  it: see `QueuedProviderRegistration`. */
+	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[] = [];
 
 	/**
 	 * Extension-authored callbacks, owned from the moment this session ACCEPTS them.
@@ -250,18 +258,61 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		};
 	}
 
-	/** Counts `result` as a live extension callback when it is awaitable, and returns something
-	 *  awaitable exactly once more. Thenable duck-typing, not `instanceof`: a callback compiled in
-	 *  another realm (`node:vm`, an `--import` loader) returns a Promise that fails the brand check
-	 *  while being every bit as live. A COLD thenable runs its body on each `then`, so observing
-	 *  one by calling `then` and handing the original back would run it twice; the adopted promise
-	 *  is returned in its place. */
+	/**
+	 * Counts what an admitted call produced as this session's live work, until that work is
+	 * finished.
+	 *
+	 * Completion is per KIND, not per thenable. A thenable says when it is done by settling, and
+	 * a cold one runs its body on each `then`, so observing it by calling `then` and handing the
+	 * original back would run it twice — the adopted promise is returned in its place. Thenable
+	 * duck-typing, not `instanceof`: a callback compiled in another realm (`node:vm`, an
+	 * `--import` loader) returns a Promise that fails the brand check while being every bit as
+	 * live.
+	 *
+	 * An `AssistantMessageEventStream` is the kind that cost us a round: it is returned at once
+	 * and keeps producing, and it says when it is done through `result()`, not by being
+	 * awaitable. A real parent prompt served by a child's registered stream therefore read the
+	 * restricted credential before disposal and the unrestricted one after, while the producer
+	 * was still running.
+	 *
+	 * Structural rather than by class, but narrow on purpose: a producer that both ITERATES and
+	 * reports a terminal `result()` is a stream, and `result` on its own is too common a method
+	 * name to treat as a completion signal — watching every object that has one made a
+	 * deferred-load exit guard wait for work that was never going to settle. The value is handed
+	 * back untouched, because the caller consumes the stream, not a copy.
+	 *
+	 * Anything else is already complete when it is returned: a value carries no outstanding work.
+	 */
 	trackCallback<T>(result: T): T {
 		if (result === null || (typeof result !== "object" && typeof result !== "function")) return result;
-		if (!("then" in result) || typeof result.then !== "function") return result;
-		// `then` is callable, so this is awaitable; the compiler cannot express that for `unknown`.
-		const adopted = Promise.resolve(result as PromiseLike<unknown>);
-		const settled = adopted.then(
+		if ("then" in result && typeof result.then === "function") {
+			// `then` is callable, so this is awaitable; the compiler cannot express that for `unknown`.
+			const adopted = Promise.resolve(result as PromiseLike<unknown>);
+			this.#watch(adopted);
+			return adopted as T;
+		}
+		const streaming =
+			"result" in result &&
+			typeof result.result === "function" &&
+			Symbol.asyncIterator in result &&
+			typeof (result as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
+		if (streaming) {
+			const completion: unknown = (result as { result: () => unknown }).result();
+			if (
+				completion !== null &&
+				typeof completion === "object" &&
+				"then" in completion &&
+				typeof completion.then === "function"
+			) {
+				this.#watch(completion as PromiseLike<unknown>);
+			}
+		}
+		return result;
+	}
+
+	/** Holds this session open until `work` settles, however it settles. */
+	#watch(work: PromiseLike<unknown>): void {
+		const settled = Promise.resolve(work).then(
 			() => undefined,
 			() => undefined,
 		);
@@ -271,7 +322,6 @@ export class ExtensionRuntime implements IExtensionRuntime {
 			this.#pendingCallbacks.delete(settled);
 			this.#notifyCallbacksChanged();
 		});
-		return adopted as T;
 	}
 
 	runOwned<R>(call: () => R): R {
@@ -304,18 +354,24 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
-		// The configuration is queued exactly as the extension wrote it. Ownership travels beside
-		// it: main.ts, sdk.ts and models-cli.ts each drain this queue into ModelRegistry, and a
-		// host that drains it itself must not lose the owner by not knowing to pass one, so the
-		// registry looks it up. Nothing of the author's object is wrapped, copied or extended —
-		// the places that CALL a provider ask the owner first instead.
-		rememberProviderConfigOwner(config, this);
-		this.pendingProviderRegistrations.push({ name, config, sourceId });
+		// The configuration is queued exactly as the extension wrote it, and the owner travels
+		// with THIS registration rather than with the object: an author may hand one object to
+		// every session that loads the extension, and each session's registration of it is its
+		// own. main.ts, sdk.ts and models-cli.ts drain this queue into ModelRegistry with the
+		// owner; a host that drains it itself and passes only name, config and source still has
+		// its owner found, from the record indexed here.
+		const registration: QueuedProviderRegistration<ProviderConfig> = { name, config, sourceId, owner: this };
+		rememberQueuedProviderRegistration(registration);
+		this.pendingProviderRegistrations.push(registration);
 	}
 
 	unregisterProvider(name: string): void {
+		const removed = this.pendingProviderRegistrations.filter(registration => registration.name === name);
 		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
 		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+		// Withdrawn before any drain: such a record must not lend its owner to a later
+		// registration of the same object by another session.
+		forgetQueuedProviderRegistrations(removed);
 	}
 
 	sendMessage(): void {
@@ -390,11 +446,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly arktype = type;
 	readonly zod = zod;
 	readonly flagValues = new Map<string, boolean | string>();
-	readonly pendingProviderRegistrations: Array<{
-		name: string;
-		config: ProviderConfig;
-		sourceId: string;
-	}> = [];
+	readonly pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[] = [];
 
 	get pi() {
 		return getCodingAgentApi();
@@ -691,11 +743,18 @@ async function runExtensionFactory(
 		// bus shared between sessions cannot work out for itself.
 		await extensionCallbackScope.run(runtime, () => factory(api));
 	} catch (error) {
+		const discarded = runtime.pendingProviderRegistrations.filter(
+			registration => !providerRegistrationCheckpoint.includes(registration),
+		);
 		runtime.pendingProviderRegistrations.splice(
 			0,
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// The queue's owner index follows the queue: what the failed extension queued is gone, and
+		// what it unregistered is queued again.
+		forgetQueuedProviderRegistrations(discarded);
+		restoreQueuedProviderRegistrations(providerRegistrationCheckpoint);
 		throw error;
 	}
 }

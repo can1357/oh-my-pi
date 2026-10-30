@@ -104,6 +104,7 @@ import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
+import type { QueuedProviderRegistration } from "./callback-ownership";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -2324,8 +2325,13 @@ export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTie
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
-	/** Provider registrations queued during extension loading, processed during session initialization */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	/** Provider registrations queued during extension loading, processed during session
+	 *  initialization. Each record carries the session that queued it: the same configuration
+	 *  object may be registered by two sessions, so ownership belongs to the occurrence rather
+	 *  than to the author's object. A host that drains this queue and passes only the first
+	 *  three fields still registers under the right owner — the registry recovers it from the
+	 *  record — but passing `owner` on is cheaper and exact. */
+	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[];
 	/** Queue a provider registration until initialization, then apply it immediately. */
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */

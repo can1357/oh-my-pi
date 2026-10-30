@@ -2,30 +2,99 @@ import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import type { ExtensionCallbackOwner } from "./types";
 
 /**
- * Which session registered a provider configuration.
+ * One `pi.registerProvider` call waiting in a runtime's queue, and the session that made it.
  *
- * The configuration an extension passes to `pi.registerProvider` travels from the runtime's queue
- * to `ModelRegistry` through whichever drain the host happens to use, and ownership has to arrive
- * with it. It cannot be carried ON the object: a provider is whatever its author wrote — frozen,
- * callable, built from getters, a class instance with private fields — and four rounds of review
- * each broke a different one of those shapes by wrapping, copying or extending it. A getter
- * evaluated merely to find a callback had already run the author's code before any wrapper
- * existed.
+ * Ownership belongs to the registration OCCURRENCE, not to the configuration object. An author may
+ * hand the same object to every session that loads the extension — a module-level constant, a
+ * subagent rebinding its parent's extensions — so the object alone cannot say which session a
+ * given registration came from. Each queued record carries its own owner, and a drain that
+ * passes the record's owner to `ModelRegistry.registerProvider` needs nothing else.
  *
- * So the object is left exactly as it was handed over and the association is kept beside it. The
- * registry looks the owner up here when its caller did not pass one, builds a {@link ProviderCallGate}
- * from it, and the places that actually CALL a provider ask that gate first.
+ * A host that drains the queue itself passes only the documented three fields. For it, the
+ * queued records are also indexed here by configuration object, oldest first, and the registry
+ * claims the oldest one still queued that matches name and source. Records that left the queue
+ * without being registered are withdrawn from the index, so they can lend their owner to nobody.
+ * Nothing of the author's object is wrapped, copied, extended or read: the index holds it only as
+ * a key.
  */
-const providerConfigOwners = new WeakMap<object, ExtensionCallbackOwner>();
-
-/** Records the session a provider configuration was registered by. */
-export function rememberProviderConfigOwner(config: object, owner: ExtensionCallbackOwner): void {
-	providerConfigOwners.set(config, owner);
+export interface QueuedProviderRegistration<C extends object = object> {
+	readonly name: string;
+	readonly config: C;
+	readonly sourceId: string;
+	readonly owner: ExtensionCallbackOwner;
 }
 
-/** The session a provider configuration was registered by, if an extension registered it. */
-export function providerConfigOwner(config: object): ExtensionCallbackOwner | undefined {
-	return providerConfigOwners.get(config);
+const queuedByConfig = new WeakMap<object, QueuedProviderRegistration[]>();
+const queuedRecords = new WeakSet<object>();
+
+/** Indexes a record a runtime has just queued. */
+export function rememberQueuedProviderRegistration(registration: QueuedProviderRegistration): void {
+	queuedRecords.add(registration);
+	const queued = queuedByConfig.get(registration.config);
+	if (queued) {
+		if (!queued.includes(registration)) queued.push(registration);
+	} else {
+		queuedByConfig.set(registration.config, [registration]);
+	}
+}
+
+/** Drops records that left a queue without being registered: an `unregisterProvider` before the
+ *  drain, or a failed extension's rollback. */
+export function forgetQueuedProviderRegistrations(registrations: Iterable<object>): void {
+	for (const registration of registrations) {
+		if (!isQueuedRecord(registration)) continue;
+		const queued = queuedByConfig.get(registration.config);
+		if (!queued) continue;
+		const index = queued.indexOf(registration);
+		if (index >= 0) queued.splice(index, 1);
+		if (queued.length === 0) queuedByConfig.delete(registration.config);
+	}
+}
+
+/** Re-indexes records a rollback put back into a queue, in queue order. */
+export function restoreQueuedProviderRegistrations(registrations: Iterable<object>): void {
+	for (const registration of registrations) {
+		if (isQueuedRecord(registration)) rememberQueuedProviderRegistration(registration);
+	}
+}
+
+/** Only records a runtime queued through {@link rememberQueuedProviderRegistration} are indexed;
+ *  anything else a host puts in a queue is not ours to forget or restore. */
+function isQueuedRecord(value: object): value is QueuedProviderRegistration {
+	return queuedRecords.has(value);
+}
+
+/**
+ * The session a registration being applied belongs to, consuming its queued record.
+ *
+ * With `owner` given, the caller knows; the matching record of that owner is consumed so it
+ * cannot be claimed again by a later ownerless registration of the same object. Without it,
+ * the oldest record still queued for this object, name and source is the one being drained.
+ * Records that match equally are interchangeable for the registry: same object, same name, same
+ * source — only their owners differ, and each drain gets a different one.
+ */
+export function claimProviderRegistrationOwner(
+	name: string,
+	config: object,
+	sourceId: string | undefined,
+	owner: ExtensionCallbackOwner | undefined,
+): ExtensionCallbackOwner | undefined {
+	const queued = queuedByConfig.get(config);
+	if (!queued) return owner;
+	const index = queued.findIndex(
+		registration =>
+			registration.name === name &&
+			(sourceId === undefined || registration.sourceId === sourceId) &&
+			(owner === undefined || registration.owner === owner),
+	);
+	if (index < 0) return owner;
+	const [claimed] = queued.splice(index, 1);
+	if (queued.length === 0) queuedByConfig.delete(config);
+	if (!claimed) return owner;
+	// Registered now: a later rollback that puts the same record back must not make it claimable
+	// a second time.
+	queuedRecords.delete(claimed);
+	return owner ?? claimed.owner;
 }
 
 const gatesByOwner = new WeakMap<ExtensionCallbackOwner, ProviderCallGate>();

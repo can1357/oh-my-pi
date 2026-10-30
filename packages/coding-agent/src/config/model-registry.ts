@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { registerCustomApi, unregisterCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -52,8 +52,13 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
-import { callThroughGate, type ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
-import { providerCallGate, providerConfigOwner } from "../extensibility/extensions/callback-ownership";
+import {
+	callThroughGate,
+	type GatedRegistration,
+	type ProviderCallGate,
+	selectLiveRegistration,
+} from "@oh-my-pi/pi-ai/auth/provider-gate";
+import { claimProviderRegistrationOwner, providerCallGate } from "../extensibility/extensions/callback-ownership";
 import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -210,11 +215,75 @@ interface ConfiguredModelDiscoveryResult {
 	replaceRuntimeModels: boolean;
 }
 
+/** What `registerProvider` consumes of an extension's configuration, read ONCE.
+ *
+ *  Every field of the author's object may be a getter, and a getter is the registering session's
+ *  code: evaluating one is a call into the extension. So the fields are read a single time,
+ *  inside that session's admission, into this plain record, and everything the registry does
+ *  afterwards — validation, overlays, transport overrides, keys, the discovery rows' defaults —
+ *  works from the record. The methods are not here: `streamSimple`, `fetchDynamicModels` and
+ *  `oauth.modifyModels` are read off the author's object each time they are used, inside the
+ *  admission of that use, and run on it, so a method replaced later is the one that runs and its
+ *  receiver is the object it was written on. Only their presence is recorded. */
+interface AdmittedProviderConfig {
+	readonly baseUrl: string | undefined;
+	readonly apiKey: string | undefined;
+	readonly api: Api | undefined;
+	readonly headers: Record<string, string> | undefined;
+	readonly compat: ProviderConfigInput["compat"];
+	readonly remoteCompaction: ProviderConfigInput["remoteCompaction"];
+	readonly authHeader: boolean | undefined;
+	readonly transport: ProviderConfigInput["transport"];
+	readonly usage: UsageProvider | undefined;
+	readonly oauth: ProviderOAuthBlock | undefined;
+	readonly streams: boolean;
+	readonly discovers: boolean;
+	readonly modifies: boolean;
+	/** Overlays built from `models`; empty when it declared none. */
+	readonly overlays: readonly CustomModelOverlay[];
+	/** `!command` values in its key and headers, so a 401 can re-run them. */
+	readonly commandConfigs: ReadonlySet<string>;
+}
+
+type ProviderOAuthBlock = NonNullable<ProviderConfigInput["oauth"]>;
+type HeaderResolver = NonNullable<Model<Api>["resolveHeaders"]>;
+
 /**
- * Credential-aware model projection supplied by an extension provider. Receives
- * the fully composed catalog and returns the list the host should serve.
+ * One session's — or the host's — registration of a provider name.
+ *
+ * Several sessions register one name: a subagent rebinding its parent's extensions does. The
+ * registries this one installs into keep an entry per registration and select the newest live
+ * one; this record is the same for what THIS registry owns, so a withdrawal takes away exactly the
+ * caller's entries and the callbacks it stores are chosen among live registrations when they run.
  */
-type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
+interface RuntimeProviderRegistration extends GatedRegistration {
+	sourceId: string | undefined;
+	/** Custom API ids this registration installed a stream for. */
+	readonly apis: Set<string>;
+	/** Set once this registration declared models: the OAuth block whose `modifyModels` projects
+	 *  the catalog while it is in force, or none. Unset, it leaves the projection to an earlier
+	 *  registration, as a registration without models always has. */
+	projection: { readonly oauth: ProviderOAuthBlock | undefined } | undefined;
+	/** The configuration whose `fetchDynamicModels` discovers while this registration is in force,
+	 *  and the fields its rows default to. */
+	discovery: { readonly config: ProviderConfigInput; readonly fields: AdmittedProviderConfig } | undefined;
+}
+
+/**
+ * A header resolver an extension's model projection put on a row. From then on the HOST holds it
+ * and calls it itself — the streaming path does, knowing nothing of who wrote it — so it is owned
+ * the way an accepted handler is: each call runs through the producing registration's gate and is
+ * refused once that session has gone. It runs on the row it came with; the row's data is not
+ * wrapped.
+ */
+function ownProjectedResolver(
+	gate: ProviderCallGate | undefined,
+	row: Model<Api>,
+	resolver: HeaderResolver,
+): HeaderResolver {
+	if (!gate) return resolver;
+	return async signal => callThroughGate(gate, () => resolver.call(row, signal));
+}
 
 function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
@@ -401,16 +470,19 @@ export class ModelRegistry {
 	// headers). Separate from #commandConfigsByProvider because static reload
 	// rebuilds that map from models.yml only; runtime entries must survive.
 	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
-	// Credential-aware model projections registered via
-	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
-	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
-	// definitions, so without re-applying the projection every static reload
-	// would silently revert the provider to its unprojected catalog.
-	// Each entry carries the lifetime of the session that registered it; a retired session's
-	// projection is skipped rather than applied or refused.
-	#runtimeModelModifiers: Map<string, { modify: ModifyModelsHook; gate?: ProviderCallGate }> = new Map();
+	// Providers with a credential-aware model projection registered via
+	// `registerProvider({ oauth: { modifyModels } })`, in the order the hooks
+	// run. Persisted for the same reason as #runtimeModelOverlays: the overlays
+	// hold the *pre-projection* definitions, so without re-applying the
+	// projection every static reload would silently revert the provider to its
+	// unprojected catalog. Which registration's hook runs is chosen when it runs
+	// (see #applyRuntimeModelModifiers).
+	#runtimeModelModifiers: Set<string> = new Set();
 	#lastModelModifierWarnings: Map<string, string> = new Map();
-	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
+	// Every registration of each runtime provider name, oldest first.
+	#runtimeRegistrations: Map<string, RuntimeProviderRegistration[]> = new Map();
+	// The source of the registration applied last for each provider name: a
+	// registration from another source takes the name over.
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
 	// Keyed by provider name; use the same SQLite cache path as builtins.
@@ -492,12 +564,9 @@ export class ModelRegistry {
 		for (const config of runtimeConfigs) invalidateCommandConfig(config);
 	}
 
-	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
+	#recordRuntimeCommandConfigs(providerName: string, values: ReadonlySet<string>): void {
 		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
-		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
-		for (const modelDef of config.models ?? []) {
-			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
-		}
+		for (const value of values) target.add(value);
 		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
 		else this.#runtimeCommandConfigsByProvider.delete(providerName);
 	}
@@ -1121,26 +1190,44 @@ export class ModelRegistry {
 	 * mutation of both the array and its model records before returning, and the
 	 * rows it returns for its own provider are re-materialized through
 	 * `buildModel` so the registry keeps its "every model is built" invariant.
+	 *
+	 * The hook in force for a provider is the one declared by its newest live
+	 * registration that declared models. A retired session's projection is not
+	 * applied and no code of its runs; an earlier live registration's applies
+	 * again. The hook is read off the author's OAuth block when it runs, inside
+	 * that registration's admission, and called on the block. So is everything
+	 * read from what it returns, and a header resolver it put on a row is owned
+	 * by that registration from then on (see {@link ownProjectedResolver}).
 	 */
 	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
-		for (const [providerName, modifier] of this.#runtimeModelModifiers) {
-			// A modifier belongs to the session that registered it. Once that session is gone the
-			// projection is simply not applied — the catalog keeps the rows it already has, and
-			// no extension code runs for a session that cannot own what it would do.
-			if (modifier.gate?.retired === true) continue;
+		for (const providerName of this.#runtimeModelModifiers) {
+			const registration = selectLiveRegistration(
+				this.#runtimeRegistrations.get(providerName)?.filter(entry => entry.projection !== undefined) ?? [],
+			);
+			const oauth = registration?.projection?.oauth;
+			if (!registration || !oauth) continue;
 			const credential = this.authStorage.credentials.getOAuth(providerName);
 			if (!credential) continue;
+			const { gate } = registration;
+			const before = projected;
 			try {
 				// Clone mutable catalog data, retaining resolver functions as opaque
 				// capabilities. Hooks can then rename models without losing their
 				// request-time credentials or resolving them during catalog reads.
 				const snapshot: Model<Api>[] = structuredClone(
-					projected.map(({ resolveHeaders: _resolveHeaders, ...model }) => model),
+					before.map(({ resolveHeaders: _resolveHeaders, ...model }) => model),
 				);
+				// Resolvers already on the catalog are the host's, or held for an earlier
+				// hook's owner; a resolver the hook hands back that is not one of these is
+				// its own output.
+				const handed = new Set<HeaderResolver>();
 				for (let index = 0; index < snapshot.length; index++) {
-					if (projected[index].resolveHeaders) snapshot[index].resolveHeaders = projected[index].resolveHeaders;
+					const resolver = before[index].resolveHeaders;
+					if (!resolver) continue;
+					snapshot[index].resolveHeaders = resolver;
+					handed.add(resolver);
 				}
 				// A hook owns its provider's rows and may synthesize them outright
 				// (a credential-scoped catalog replacing the registered bootstrap)
@@ -1152,26 +1239,33 @@ export class ModelRegistry {
 				// reader crashes, or an identity left over from a different id.
 				// Rows of other providers pass through untouched; rebuilding a
 				// full catalog on every projection costs more than it can fix.
-				projected = callThroughGate(modifier.gate, () => modifier.modify(snapshot, credential)).map(model => {
-					const withHeaders =
-						model.resolveHeaders && model.headers
-							? {
-									...model,
-									headers: undefined,
-									resolveHeaders: createConfigHeaderResolver([model.resolveHeaders, model.headers]),
-								}
-							: model;
-					if (withHeaders.provider !== providerName) return withHeaders as Model<Api>;
-					// `identity` exists only on built rows. Without it the hook
-					// authored a spec, where `compat` already is the sparse
-					// override `toModelSpec` would drop while reading the absent
-					// `compatConfig`; built rows keep resolving from that field
-					// instead of feeding the resolved view back in as an override.
-					return buildModel(
-						withHeaders.identity === undefined
-							? (withHeaders as ModelSpec<Api>)
-							: toModelSpec(withHeaders as Model<Api>),
-					);
+				projected = callThroughGate(gate, () => {
+					const rows = oauth.modifyModels?.(snapshot, credential);
+					// A block whose hook was removed since registration projects nothing.
+					if (rows === undefined) return before;
+					return rows.map(model => {
+						const resolver = model.resolveHeaders;
+						const headers = model.headers;
+						const owned =
+							resolver && !handed.has(resolver) ? ownProjectedResolver(gate, model, resolver) : resolver;
+						const withHeaders =
+							owned && headers
+								? { ...model, headers: undefined, resolveHeaders: createConfigHeaderResolver([owned, headers]) }
+								: owned === resolver
+									? model
+									: { ...model, resolveHeaders: owned };
+						if (withHeaders.provider !== providerName) return withHeaders as Model<Api>;
+						// `identity` exists only on built rows. Without it the hook
+						// authored a spec, where `compat` already is the sparse
+						// override `toModelSpec` would drop while reading the absent
+						// `compatConfig`; built rows keep resolving from that field
+						// instead of feeding the resolved view back in as an override.
+						return buildModel(
+							withHeaders.identity === undefined
+								? (withHeaders as ModelSpec<Api>)
+								: toModelSpec(withHeaders as Model<Api>),
+						);
+					});
 				});
 			} catch (error) {
 				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
@@ -3469,7 +3563,10 @@ export class ModelRegistry {
 		return this.authStorage.credentials.hasOAuth(model.provider);
 	}
 
-	#clearRuntimeProviderState(providerName: string, gate?: ProviderCallGate): void {
+	/** Drops what THIS registry holds for a provider: catalog, keys, overrides, projection and
+	 *  discovery. The registries other code selects from — usage, OAuth, custom APIs — keep one
+	 *  entry per registration and are withdrawn from per registration, by the callers. */
+	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
@@ -3493,7 +3590,90 @@ export class ModelRegistry {
 		}
 		this.#invalidateProviderModelCache(providerName);
 		this.authStorage.keys.removeConfig(providerName);
-		this.authStorage.usage.removeProvider(providerName, gate);
+	}
+
+	/** Withdraws the custom APIs one registration installed. An id another provider's registration
+	 *  of the same session installed too stays: that registration replaced this one's stream in the
+	 *  custom-API registry and still serves through it. */
+	#withdrawCustomApis(providerName: string, registration: RuntimeProviderRegistration): void {
+		for (const api of registration.apis) {
+			let claimedElsewhere = false;
+			for (const [otherProvider, entries] of this.#runtimeRegistrations) {
+				if (otherProvider === providerName) continue;
+				if (entries.some(entry => entry.gate === registration.gate && entry.apis.has(api))) {
+					claimedElsewhere = true;
+					break;
+				}
+			}
+			if (!claimedElsewhere) unregisterCustomApi(api, registration.gate);
+		}
+	}
+
+	/**
+	 * Takes one registration out of the registries other code selects from, under its own gate, so
+	 * another session's entry for the same name stays to be selected. A host registration has no
+	 * gate to scope by: its usage removal takes every runtime usage entry for the name, and its
+	 * OAuth entry is left for the next host registration to replace, as before registrations were
+	 * tracked.
+	 */
+	#withdrawRegistrationEntries(providerName: string, registration: RuntimeProviderRegistration): void {
+		this.#withdrawCustomApis(providerName, registration);
+		if (registration.gate) unregisterOAuthProvider(providerName, registration.gate);
+		this.authStorage.usage.removeProvider(providerName, registration.gate);
+	}
+
+	/**
+	 * Records which registrations of a provider are left after some went, and settles what this
+	 * registry holds for it. While a live registration still backs the provider its catalog, keys
+	 * and overrides stay — a departing session must not take a live one's provider with it — and
+	 * the projection and discovery follow the registrations that remain. With none live,
+	 * everything goes.
+	 */
+	#settleRegistrations(providerName: string, remaining: RuntimeProviderRegistration[]): void {
+		if (remaining.length === 0) this.#runtimeRegistrations.delete(providerName);
+		else this.#runtimeRegistrations.set(providerName, remaining);
+		const newestSource = remaining.at(-1)?.sourceId;
+		if (newestSource) this.#runtimeProviderSourceByName.set(providerName, newestSource);
+		else this.#runtimeProviderSourceByName.delete(providerName);
+		if (!remaining.some(entry => entry.gate?.retired !== true)) {
+			this.#clearRuntimeProviderState(providerName);
+			return;
+		}
+		this.#syncRegistrationCallbacks(providerName);
+	}
+
+	/**
+	 * Keeps the projection order and the discovery manager in step with the registrations that
+	 * declare them. Which registration's hook or fetcher runs is chosen when it runs; this only
+	 * decides whether there is anything to choose from.
+	 */
+	#syncRegistrationCallbacks(providerName: string): void {
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		if (entries.some(entry => entry.projection?.oauth !== undefined)) {
+			this.#runtimeModelModifiers.add(providerName);
+		} else {
+			this.#runtimeModelModifiers.delete(providerName);
+			this.#lastModelModifierWarnings.delete(providerName);
+		}
+		const discovering = entries.findLast(entry => entry.discovery !== undefined);
+		if (!discovering) this.#runtimeModelManagers.delete(providerName);
+		else if (!this.#runtimeModelManagers.has(providerName)) {
+			this.#installRuntimeModelManager(providerName, discovering.sourceId);
+		}
+	}
+
+	/** The discovery manager for a runtime provider. It holds no registration: each run selects
+	 *  the one that discovers (see {@link #discoverRuntimeModels}). */
+	#installRuntimeModelManager(providerName: string, sourceId: string | undefined): void {
+		const options: ModelManagerOptions<Api> = {
+			providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+			staticModels: [],
+			cacheDbPath: this.#cacheDbPath,
+			cacheTtlMs: 24 * 60 * 60 * 1000,
+			dynamicModelsAuthoritative: true,
+			fetchDynamicModels: () => this.#discoverRuntimeModels(providerName),
+		};
+		this.#runtimeModelManagers.set(providerName, { options, sourceId: sourceId ?? "" });
 	}
 
 	/**
@@ -3505,20 +3685,21 @@ export class ModelRegistry {
 		for (const sourceId of typeof sourceIds === "string" ? [sourceIds] : sourceIds) {
 			unregisterCustomApis(sourceId);
 			unregisterOAuthProviders(sourceId);
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-			if (!sourceProviders || sourceProviders.size === 0) {
-				continue;
-			}
-			this.#ensureFullSnapshot();
-			this.#runtimeProvidersBySource.delete(sourceId);
-			for (const providerName of sourceProviders) {
-				if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
-					continue;
+			// Settling replaces or deletes only the entry being visited, which a Map iteration
+			// tolerates.
+			for (const [providerName, entries] of this.#runtimeRegistrations) {
+				const departing = entries.filter(entry => entry.sourceId === sourceId);
+				if (departing.length === 0) continue;
+				this.#ensureFullSnapshot();
+				for (const registration of departing) {
+					this.authStorage.usage.removeProvider(providerName, registration.gate);
 				}
-				this.#runtimeProviderSourceByName.delete(providerName);
-				this.#clearRuntimeProviderState(providerName);
+				this.#settleRegistrations(
+					providerName,
+					entries.filter(entry => entry.sourceId !== sourceId),
+				);
+				cleared = true;
 			}
-			cleared = true;
 		}
 		if (cleared) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
@@ -3530,23 +3711,30 @@ export class ModelRegistry {
 	 *
 	 * `callbackOwner` is the session withdrawing it. Several sessions can hold a registration for
 	 * one provider name — a subagent that rebound its parent's extensions does — so a withdrawal
-	 * takes away only the caller's own entry and leaves a sibling's to be selected again. Without
-	 * it, every entry for the name goes, which is what a host teardown means.
+	 * takes away only the caller's own registration, from every registry it was installed into
+	 * (custom API, OAuth, usage), and leaves what this registry holds for the provider while
+	 * another live registration still backs it. Without an owner, every registration for the name
+	 * goes, which is what a host teardown means.
 	 */
 	unregisterProvider(providerName: string, callbackOwner?: ExtensionCallbackOwner): void {
-		const gate = callbackOwner ? providerCallGate(callbackOwner) : undefined;
-		const sourceId = this.#runtimeProviderSourceByName.get(providerName);
-		if (sourceId) {
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-			sourceProviders?.delete(providerName);
-			if (sourceProviders?.size === 0) {
-				this.#runtimeProvidersBySource.delete(sourceId);
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		let remaining: RuntimeProviderRegistration[];
+		if (callbackOwner) {
+			const gate = providerCallGate(callbackOwner);
+			for (const registration of entries) {
+				if (registration.gate === gate) this.#withdrawCustomApis(providerName, registration);
 			}
-			this.#runtimeProviderSourceByName.delete(providerName);
+			unregisterOAuthProvider(providerName, gate);
+			this.authStorage.usage.removeProvider(providerName, gate);
+			remaining = entries.filter(registration => registration.gate !== gate);
+		} else {
+			for (const registration of entries) this.#withdrawCustomApis(providerName, registration);
+			unregisterOAuthProvider(providerName);
+			this.authStorage.usage.removeProvider(providerName);
+			remaining = [];
 		}
-		unregisterOAuthProvider(providerName, gate);
 		this.#ensureFullSnapshot();
-		this.#clearRuntimeProviderState(providerName, gate);
+		this.#settleRegistrations(providerName, remaining);
 		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
@@ -3575,122 +3763,205 @@ export class ModelRegistry {
 		config: ProviderConfigInput,
 		sourceId?: string,
 		/** The session that registered this configuration, when an extension did. Optional here
-		 *  because a host that drains the runtime's queue itself cannot be expected to know: the
-		 *  owner is recorded beside the configuration object and looked up below. */
+		 *  because a host that drains the runtime's queue itself passes only the queued name,
+		 *  configuration and source: the queued record it came from is found by those. */
 		callbackOwner?: ExtensionCallbackOwner,
 	): void {
-		// The configuration object is used exactly as its author wrote it. What this registry
-		// keeps is the LIFETIME beside each registration: every registry it installs into selects
-		// the most recent entry whose session is still live, and asks that session before it
-		// calls. See `ProviderCallGate`.
-		const owner = callbackOwner ?? providerConfigOwner(config);
+		// Whose registration this is comes first, and costs no author code: the queued record is
+		// found by the object's identity and our own strings. A session that has already gone
+		// registers nothing, and nothing of its configuration is evaluated — a getter on it is
+		// that session's code.
+		const owner = claimProviderRegistrationOwner(providerName, config, sourceId, callbackOwner);
 		const gate = owner ? providerCallGate(owner) : undefined;
-		// The one hook this registry stores for later rather than handing to a registry of its
-		// own. Reading it is already the author's code — a provider may expose it through a
-		// getter — so the read is admitted too, once, while the session that registered it is by
-		// definition still live.
-		const modifyModels =
-			config.oauth && gate?.retired !== true ? callThroughGate(gate, () => config.oauth?.modifyModels) : undefined;
-		if (config.streamSimple && !config.api) {
+		if (gate?.retired === true) {
+			logger.debug("Discarding a provider registration whose session has ended", {
+				provider: providerName,
+				sourceId,
+			});
+			return;
+		}
+		// One admitted read of everything registration consumes; below, only the record is used.
+		const fields = callThroughGate(gate, () => this.#admitProviderConfig(providerName, config));
+		this.#applyProviderRegistration(providerName, config, fields, sourceId, gate);
+	}
+
+	/**
+	 * Reads what registration consumes of an extension's configuration — each field once — and
+	 * derives from those reads everything that needs them: validation, model overlays and the
+	 * `!command` values. Runs inside the registering session's admission. Changes no registry
+	 * state, so an invalid configuration throws before anything is installed.
+	 */
+	#admitProviderConfig(providerName: string, config: ProviderConfigInput): AdmittedProviderConfig {
+		const {
+			baseUrl,
+			apiKey,
+			api,
+			headers,
+			compat,
+			remoteCompaction,
+			authHeader,
+			transport,
+			usage,
+			oauth,
+			models,
+			streamSimple,
+			fetchDynamicModels,
+		} = config;
+		const modifies = Boolean(oauth?.modifyModels);
+		if (streamSimple && !api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
-
 		validateProviderConfiguration(
 			providerName,
 			{
-				baseUrl: config.baseUrl,
-				headers: config.headers,
-				apiKey: config.apiKey,
-				api: config.api,
-				oauthConfigured: Boolean(config.oauth),
-				models: (config.models ?? []) as ProviderValidationModel[],
+				baseUrl,
+				headers,
+				apiKey,
+				api,
+				oauthConfigured: Boolean(oauth),
+				models: (models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
 		);
-
-		if (config.streamSimple && config.api) {
-			const streamSimple = config.streamSimple;
-			registerCustomApi(
-				config.api,
-				streamSimple,
-				sourceId,
-				(model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
-				gate,
+		const overlays: CustomModelOverlay[] = [];
+		const commandConfigs = new Set<string>();
+		this.#collectCommandConfigValues(commandConfigs, apiKey, headers);
+		for (const modelDef of models ?? []) {
+			const overlay = buildCustomModelOverlay(
+				providerName,
+				baseUrl!,
+				api,
+				headers,
+				apiKey,
+				authHeader,
+				compat,
+				undefined,
+				remoteCompaction,
+				modelDef as CustomModelDefinitionLike,
 			);
+			if (!overlay) {
+				throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
+			}
+			overlays.push(overlay);
+			this.#collectCommandConfigValues(commandConfigs, undefined, modelDef.headers);
 		}
+		return {
+			baseUrl,
+			apiKey,
+			api,
+			headers,
+			compat,
+			remoteCompaction,
+			authHeader,
+			transport,
+			usage,
+			oauth,
+			streams: Boolean(streamSimple),
+			discovers: Boolean(fetchDynamicModels),
+			modifies,
+			overlays,
+			commandConfigs,
+		};
+	}
 
-		if (config.oauth) {
-			// The author's object, registered as it stands. `id` and `sourceId` are this
-			// registry's own and live on the registration entry, not on the extension's block:
-			// a spread lost inherited methods and a delegating copy could not override a
-			// getter-only `id`.
-			registerOAuthProvider(config.oauth, { id: providerName, sourceId, gate });
+	/** This registration's entry for a provider name: the session's earlier one updated in place,
+	 *  or a new one. The same session registering the name from another source replaces its
+	 *  earlier registration outright — every entry it installed goes first. */
+	#registrationEntry(
+		providerName: string,
+		sourceId: string | undefined,
+		gate: ProviderCallGate | undefined,
+	): RuntimeProviderRegistration {
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		const existing = entries.find(entry => entry.gate === gate);
+		if (existing && (existing.sourceId === undefined || sourceId === undefined || existing.sourceId === sourceId)) {
+			existing.sourceId = sourceId ?? existing.sourceId;
+			return existing;
 		}
+		if (existing) this.#withdrawRegistrationEntries(providerName, existing);
+		const registration: RuntimeProviderRegistration = {
+			gate,
+			sourceId,
+			apis: new Set(),
+			projection: undefined,
+			discovery: undefined,
+		};
+		this.#runtimeRegistrations.set(providerName, [...entries.filter(entry => entry !== existing), registration]);
+		return registration;
+	}
 
+	#applyProviderRegistration(
+		providerName: string,
+		config: ProviderConfigInput,
+		fields: AdmittedProviderConfig,
+		sourceId: string | undefined,
+		gate: ProviderCallGate | undefined,
+	): void {
 		let sourceHandoff = false;
 		if (sourceId) {
 			this.#registeredProviderSources.add(sourceId);
 			const previousSourceId = this.#runtimeProviderSourceByName.get(providerName);
 			if (previousSourceId && previousSourceId !== sourceId) {
-				const previousProviders = this.#runtimeProvidersBySource.get(previousSourceId);
-				previousProviders?.delete(providerName);
-				if (previousProviders && previousProviders.size === 0) {
-					this.#runtimeProvidersBySource.delete(previousSourceId);
-				}
+				// Another extension takes this name over: what THIS registry folds from a
+				// provider's registrations starts again from it. Another session's registration
+				// is not this one's to remove — it stays in every registry, to be selected again
+				// once this one has gone.
 				this.#clearRuntimeProviderState(providerName);
 				sourceHandoff = true;
 			}
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId) ?? new Set<string>();
-			sourceProviders.add(providerName);
-			this.#runtimeProvidersBySource.set(sourceId, sourceProviders);
 			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
+		const registration = this.#registrationEntry(providerName, sourceId, gate);
+		// Another session's projection or discovery is still there to be chosen once this one goes.
+		if (sourceHandoff) this.#syncRegistrationCallbacks(providerName);
+
+		if (fields.streams && fields.api) {
+			// The author's function is read off the configuration at each call, inside the
+			// gate the custom-API registry runs it through, and called on the configuration.
+			registerCustomApi(
+				fields.api,
+				(model, context, options) => config.streamSimple!(model, context, options),
+				sourceId,
+				(model, context, options) => config.streamSimple!(model, context, options as SimpleStreamOptions),
+				gate,
+			);
+			registration.apis.add(fields.api);
+		}
+
+		if (fields.oauth) {
+			// The author's object, registered as it stands. `id` and `sourceId` are this
+			// registry's own and live on the registration entry, not on the extension's block:
+			// a spread lost inherited methods and a delegating copy could not override a
+			// getter-only `id`.
+			registerOAuthProvider(fields.oauth, { id: providerName, sourceId, gate });
+		}
+
 		if (sourceHandoff) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
-		// Extension usage providers override built-ins/configured resolvers for the
-		// provider lifetime. #clearRuntimeProviderState removes this override when
-		// the owning extension is unregistered or replaced.
-		if (config.usage) {
+		// Extension usage providers override built-ins/configured resolvers for as
+		// long as the registration lasts; withdrawing it removes this entry.
+		if (fields.usage) {
 			// The author's object and its lifetime, side by side: the usage service selects the
 			// newest live registration for a provider name and asks this gate before it calls.
-			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey, gate);
+			this.authStorage.usage.setProvider(providerName, fields.usage, fields.apiKey, gate);
 		}
-		if (config.apiKey) {
+		if (fields.apiKey) {
 			// A provider that owns a /login flow must not let its default key
 			// reference shadow the credential that login stores. Its apiKey is
 			// typically an env-var name; unset, it resolves to its literal text
 			// and would otherwise be sent (and passed to fetchDynamicModels)
 			// instead of the saved key.
-			const fallback = config.oauth !== undefined;
-			this.#installProviderApiKey(providerName, config.apiKey, { fallback });
+			const fallback = fields.oauth !== undefined;
+			this.#installProviderApiKey(providerName, fields.apiKey, { fallback });
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
-			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
+			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: fields.apiKey, fallback });
 		}
-		this.#recordRuntimeCommandConfigs(providerName, config);
+		this.#recordRuntimeCommandConfigs(providerName, fields.commandConfigs);
 
-		if (config.models && config.models.length > 0) {
-			// Build model overlays that persist across refresh() cycles
-			const newOverlays: CustomModelOverlay[] = [];
-			for (const modelDef of config.models) {
-				const overlay = buildCustomModelOverlay(
-					providerName,
-					config.baseUrl!,
-					config.api,
-					config.headers,
-					config.apiKey,
-					config.authHeader,
-					config.compat,
-					undefined,
-					config.remoteCompaction,
-					modelDef as CustomModelDefinitionLike,
-				);
-				if (!overlay) {
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
-				}
-				newOverlays.push(overlay);
-			}
+		if (fields.overlays.length > 0) {
+			const newOverlays = fields.overlays;
 			// Store as runtime overlays so they survive #reloadStaticModels()
 			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(m => m.provider !== providerName);
 			this.#runtimeModelOverlays.push(...newOverlays);
@@ -3698,25 +3969,22 @@ export class ModelRegistry {
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
 			// execution/error reporting by materializing only for this case.
-			if (modifyModels && !this.#hasFullSnapshot) {
+			if (fields.modifies && !this.#hasFullSnapshot) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
-			if (modifyModels) {
-				this.#runtimeModelModifiers.set(providerName, { modify: modifyModels, gate });
-			} else {
-				this.#runtimeModelModifiers.delete(providerName);
-			}
+			registration.projection = { oauth: fields.modifies ? fields.oauth : undefined };
+			this.#syncRegistrationCallbacks(providerName);
 			if (!this.#hasFullSnapshot) {
 				// Lazy compositions read runtime overlays directly. A whole-catalog
 				// modifier can affect providers beyond its owner, so discard every
 				// provider slice; an ordinary overlay only invalidates its provider.
-				if (modifyModels) {
+				if (fields.modifies) {
 					this.#providerLookupSnapshots.clear();
 					this.#internedStaticModels.clear();
 				} else {
 					this.#invalidateProviderModelCache(providerName);
 				}
-				if (!config.fetchDynamicModels) return;
+				if (!fields.discovers) return;
 			}
 
 			// Update the unprojected snapshot, then rerun every whole-catalog
@@ -3739,85 +4007,31 @@ export class ModelRegistry {
 
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#invalidateProviderModelCache(providerName);
-			if (!config.fetchDynamicModels) return;
+			if (!fields.discovers) return;
 		}
 
-		if (config.fetchDynamicModels) {
-			const providerBaseUrl = config.baseUrl ?? "";
-			const providerApi = config.api;
-			const providerHeaders = config.headers;
-			const fetcher = config.fetchDynamicModels;
-			const providerApiKey = config.apiKey;
-			const providerAuthHeader = config.authHeader;
-			const providerCompat = config.compat;
-			const managerOptions: ModelManagerOptions<Api> = {
-				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
-				staticModels: [],
-				cacheDbPath: this.#cacheDbPath,
-				cacheTtlMs: 24 * 60 * 60 * 1000,
-				dynamicModelsAuthoritative: true,
-				fetchDynamicModels: async () => {
-					const apiKey = await this.#peekApiKeyForProvider(providerName);
-					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
-					// Discovery is the registering session's work, and a retired session's
-					// discovery is simply not run: there is no catalog of its to refresh.
-					if (gate?.retired === true) return [];
-					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-						callThroughGate(gate, () => fetcher(resolvedKey)),
-					);
-					// Dynamic rows can carry `!command` headers that are not on the
-					// registerProvider() config; track them so F5 / 401 can evict the cache.
-					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
-					const results: Model<Api>[] = [];
-					for (const modelDef of modelDefs) {
-						const overlay = buildCustomModelOverlay(
-							providerName,
-							modelDef.baseUrl ?? providerBaseUrl,
-							modelDef.api ?? providerApi,
-							providerHeaders,
-							providerApiKey,
-							providerAuthHeader,
-							providerCompat,
-							undefined,
-							config.remoteCompaction,
-							modelDef as CustomModelDefinitionLike,
-						);
-						if (!overlay) continue;
-						// Static registrations fail validation on this mismatch; a live row is dropped instead.
-						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
-							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
-								provider: providerName,
-								model: overlay.id,
-								kind: overlay.kind,
-								api: overlay.api,
-							});
-							continue;
-						}
-						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
-					}
-					return results.map(toModelSpec);
-				},
-			};
-			this.#runtimeModelManagers.set(providerName, { options: managerOptions, sourceId: sourceId ?? "" });
+		if (fields.discovers) {
+			registration.discovery = { config, fields };
+			this.#installRuntimeModelManager(providerName, sourceId);
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
 			// here, so registration has no network side effect and callers can await.
 		}
 
 		if (
-			config.baseUrl ||
-			config.headers ||
-			config.apiKey ||
-			config.authHeader !== undefined ||
-			config.remoteCompaction !== undefined ||
-			config.transport !== undefined
+			fields.baseUrl ||
+			fields.headers ||
+			fields.apiKey ||
+			fields.authHeader !== undefined ||
+			fields.remoteCompaction !== undefined ||
+			fields.transport !== undefined
 		) {
 			const transportOverride = {
-				baseUrl: config.baseUrl,
-				headers: config.headers,
-				apiKey: config.apiKey,
-				authHeader: config.authHeader,
-				remoteCompaction: config.remoteCompaction,
-				transport: config.transport,
+				baseUrl: fields.baseUrl,
+				headers: fields.headers,
+				apiKey: fields.apiKey,
+				authHeader: fields.authHeader,
+				remoteCompaction: fields.remoteCompaction,
+				transport: fields.transport,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
 				this.#runtimeProviderOverrides.get(providerName),
@@ -3835,6 +4049,65 @@ export class ModelRegistry {
 			}
 			this.#invalidateProviderModelCache(providerName);
 		}
+	}
+
+	/**
+	 * One discovery run for a runtime provider. The registration that discovers is chosen after
+	 * the key is read — the one in force before that await may have gone — as the newest live one
+	 * that declared discovery. Its `fetchDynamicModels` is read off its configuration and called
+	 * on it inside its admission, and the rows it returns are that session's data, read inside its
+	 * admission too. If no live registration discovers, or the one that ran has gone by the time
+	 * its rows arrive, the answer is `null` — "could not fetch" — which leaves the cache as it is.
+	 * An empty list would instead prune the catalog and overwrite the cache a live registration
+	 * may still serve.
+	 */
+	async #discoverRuntimeModels(providerName: string): Promise<ModelSpec<Api>[] | null> {
+		const apiKey = await this.#peekApiKeyForProvider(providerName);
+		const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
+		const registration = selectLiveRegistration(
+			this.#runtimeRegistrations.get(providerName)?.filter(entry => entry.discovery !== undefined) ?? [],
+		);
+		const discovery = registration?.discovery;
+		if (!registration || !discovery) return null;
+		const { gate } = registration;
+		const { config, fields } = discovery;
+		const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
+			callThroughGate(gate, () => config.fetchDynamicModels!(resolvedKey)),
+		);
+		if (gate?.retired === true) return null;
+		return callThroughGate(gate, () => {
+			// Dynamic rows can carry `!command` headers that are not on the
+			// registerProvider() config; track them so F5 / 401 can evict the cache.
+			this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
+			const results: Model<Api>[] = [];
+			for (const modelDef of modelDefs) {
+				const overlay = buildCustomModelOverlay(
+					providerName,
+					modelDef.baseUrl ?? fields.baseUrl ?? "",
+					modelDef.api ?? fields.api,
+					fields.headers,
+					fields.apiKey,
+					fields.authHeader,
+					fields.compat,
+					undefined,
+					fields.remoteCompaction,
+					modelDef as CustomModelDefinitionLike,
+				);
+				if (!overlay) continue;
+				// Static registrations fail validation on this mismatch; a live row is dropped instead.
+				if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+					logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+						provider: providerName,
+						model: overlay.id,
+						kind: overlay.kind,
+						api: overlay.api,
+					});
+					continue;
+				}
+				results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+			}
+			return results.map(toModelSpec);
+		});
 	}
 
 	/**

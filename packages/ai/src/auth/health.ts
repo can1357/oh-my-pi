@@ -41,10 +41,11 @@ type DeclinedUsageProbe = "unsupported" | "unvalidated";
 /**
  * Runs one credential's usage probe through the registration's gate: the `supports` and
  * `validatesCredentials` reads, then `fetchUsage`. Every read of the provider is its author's
- * code — any of them may be a getter — so all of it runs as the owner's work, and each method is
- * called with the provider as its receiver, so a host provider reading its own private state
- * works. A throw, including the gate's refusal once the owner has retired, fails this probe only:
- * the caller records it as one credential's `ok: false`.
+ * code — any of them may be a getter — so all of it runs as the owner's work, each property is
+ * read once and the value read is the one used, and each method is called with the provider as
+ * its receiver, so a host provider reading its own private state works. A throw, including the
+ * gate's refusal once the owner has retired, fails this probe only: the caller records it as one
+ * credential's `ok: false`.
  */
 function probeUsage(
 	registration: UsageProviderRegistration,
@@ -54,7 +55,8 @@ function probeUsage(
 ): DeclinedUsageProbe | Promise<UsageReport | null> {
 	return callThroughGate<DeclinedUsageProbe | Promise<UsageReport | null>>(registration.gate, () => {
 		const provider = registration.provider;
-		if (provider.supports && !provider.supports(request)) return "unsupported";
+		const supports = provider.supports;
+		if (supports && !Reflect.apply(supports, provider, [request])) return "unsupported";
 		if (provider.validatesCredentials === false) return "unvalidated";
 		return provider.fetchUsage(params, ctx);
 	});

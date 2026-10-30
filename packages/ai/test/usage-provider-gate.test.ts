@@ -15,12 +15,14 @@ import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	type AuthStorageOptions,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 // `report` and `cacheVersionFor` serve credential selection and the usage cache, not the public `UsageApi`.
 import type { UsageService } from "@oh-my-pi/pi-ai/auth/usage";
-import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import type { UsageFetchContext, UsageFetchParams, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 
 function oauthRow(id: number, provider: string): StoredAuthCredential {
 	const credential: AuthCredential = {
@@ -105,11 +107,28 @@ function usageReport(provider: string, accountId: string, source: string): Usage
 }
 
 const storages: AuthStorage[] = [];
-async function makeStorage(rows: StoredAuthCredential[]): Promise<AuthStorage> {
-	const storage = new AuthStorage(makeStore(rows), { usageProviderResolver: () => undefined });
+async function makeStorage(rows: StoredAuthCredential[], options: AuthStorageOptions = {}): Promise<AuthStorage> {
+	const storage = new AuthStorage(makeStore(rows), { usageProviderResolver: () => undefined, ...options });
 	storages.push(storage);
 	await storage.credentials.reload();
 	return storage;
+}
+
+/** A key resolver that holds one reference until released, so a test can act while collection waits on it. */
+function heldResolver(held: string, resolved: Record<string, string>) {
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	return {
+		entered: entered.promise,
+		release: () => release.resolve(),
+		async resolve(config: string): Promise<string | undefined> {
+			if (config === held) {
+				entered.resolve();
+				await release.promise;
+			}
+			return resolved[config];
+		},
+	};
 }
 
 afterEach(() => {
@@ -318,5 +337,307 @@ describe("one failing usage provider", () => {
 
 		expect((storage.usage as UsageService).cacheVersionFor("ext-good")).toBeUndefined();
 		expect((await storage.usage.reports())?.map(report => report.provider)).toEqual(["ext-good"]);
+	});
+});
+
+describe("usage request collection selects after its awaits", () => {
+	it("asks the live parent when the newest owner retires while a stored key resolves", async () => {
+		const resolver = heldResolver("stored-ref", { "stored-ref": "stored-secret" });
+		const row: StoredAuthCredential = {
+			id: 1,
+			provider: "ext-wait",
+			credential: { type: "api_key", key: "stored-ref" },
+			disabledCause: null,
+		};
+		const storage = await makeStorage([row], { configValueResolver: config => resolver.resolve(config) });
+		const parent = makeGate();
+		const child = makeGate();
+		const calls: string[] = [];
+		for (const [label, gate] of [
+			["parent", parent.gate],
+			["child", child.gate],
+		] as const) {
+			storage.usage.setProvider(
+				"ext-wait",
+				{
+					id: "ext-wait",
+					supports() {
+						calls.push(`${label}.supports`);
+						return true;
+					},
+					fetchUsage: async params => {
+						calls.push(`${label}.fetch:${params.credential.apiKey}`);
+						return usageReport("ext-wait", "account-1", label);
+					},
+				},
+				undefined,
+				gate,
+			);
+		}
+
+		const pending = storage.usage.reports({ provider: "ext-wait" });
+		await resolver.entered;
+		child.retire();
+		resolver.release();
+
+		expect((await pending)?.map(report => report.metadata?.source)).toEqual(["parent"]);
+		expect(calls.some(call => call.startsWith("child."))).toBe(false);
+		expect(calls).toContain("parent.fetch:stored-secret");
+	});
+
+	it("uses the key configuration of the registration in force after the key resolves", async () => {
+		const resolver = heldResolver("child-ref", { "child-ref": "child-secret", "parent-ref": "parent-secret" });
+		const storage = await makeStorage([], { configValueResolver: config => resolver.resolve(config) });
+		const parent = makeGate();
+		const child = makeGate();
+		const keys: string[] = [];
+		for (const [label, apiKey, gate] of [
+			["parent", "parent-ref", parent.gate],
+			["child", "child-ref", child.gate],
+		] as const) {
+			storage.usage.setProvider(
+				"ext-keyed",
+				{
+					id: "ext-keyed",
+					fetchUsage: async params => {
+						keys.push(`${label}:${params.credential.apiKey}`);
+						return usageReport("ext-keyed", "account-1", label);
+					},
+				},
+				apiKey,
+				gate,
+			);
+		}
+
+		const pending = storage.usage.reports({ provider: "ext-keyed" });
+		await resolver.entered;
+		child.retire();
+		resolver.release();
+
+		expect((await pending)?.map(report => report.metadata?.source)).toEqual(["parent"]);
+		expect(keys).toEqual(["parent:parent-secret"]);
+	});
+});
+
+describe("a departing usage registration's failure", () => {
+	/** Parent and child registered under one provider; the child's fetch waits for `finish`, then
+	 *  ends as `outcome` decides. The parent reports, or fails once `failParent` is called. */
+	async function departing(outcome: () => Promise<UsageReport | null>) {
+		const storage = await makeStorage([oauthRow(1, "ext-depart")]);
+		const parent = makeGate();
+		const child = makeGate();
+		const calls: string[] = [];
+		const previous: unknown[] = [];
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		let parentFails = false;
+		storage.usage.setProvider(
+			"ext-depart",
+			{
+				id: "ext-depart",
+				fetchUsage: async (_params: UsageFetchParams, context: UsageFetchContext) => {
+					calls.push("parent");
+					previous.push(context.previousReport?.metadata?.source);
+					return parentFails ? null : usageReport("ext-depart", "account-1", "parent");
+				},
+				parseRateLimitHeaders: () => usageReport("ext-depart", "account-1", "parent-headers"),
+			},
+			undefined,
+			parent.gate,
+		);
+		storage.usage.setProvider(
+			"ext-depart",
+			{
+				id: "ext-depart",
+				fetchUsage: async () => {
+					calls.push("child");
+					entered.resolve();
+					await finish.promise;
+					return outcome();
+				},
+			},
+			undefined,
+			child.gate,
+		);
+		return {
+			storage,
+			child,
+			calls,
+			previous,
+			entered: entered.promise,
+			finish: () => finish.resolve(),
+			failParent: () => {
+				parentFails = true;
+			},
+		};
+	}
+
+	for (const action of ["retire", "withdraw"] as const) {
+		it(`does not cool down the live successor (${action})`, async () => {
+			const { storage, child, calls, entered, finish } = await departing(async () => null);
+			const pending = storage.usage.reports({ provider: "ext-depart" });
+			await entered;
+			if (action === "withdraw") storage.usage.removeProvider("ext-depart", child.gate);
+			child.retire();
+			finish();
+
+			expect((await pending)?.map(report => report.metadata?.source)).toEqual(["parent"]);
+			const next = await storage.usage.reports({ provider: "ext-depart" });
+			expect(next?.map(report => report.metadata?.source)).toEqual(["parent"]);
+			expect(calls).toEqual(["child", "parent"]);
+		});
+	}
+
+	it("still cools down a provider that fails while it is the one in force", async () => {
+		const { storage, calls, entered, finish } = await departing(async () => null);
+		const pending = storage.usage.reports({ provider: "ext-depart" });
+		await entered;
+		finish();
+
+		expect(await pending).toEqual([]);
+		expect(await storage.usage.reports({ provider: "ext-depart" })).toEqual([]);
+		expect(calls).toEqual(["child"]);
+	});
+
+	it("does not purge the successor's report when it ends in an auth failure", async () => {
+		const { storage, child, calls, previous, entered, finish, failParent } = await departing(async () => {
+			throw new ProviderHttpError("revoked", 401);
+		});
+		const pending = storage.usage.reports({ provider: "ext-depart" });
+		await entered;
+		child.retire();
+		// The parent answers again and records header state under the shared report key.
+		expect(storage.usage.ingestHeaders("ext-depart", { "x-limit": "1" })).toBe(true);
+		failParent();
+		finish();
+		await pending;
+
+		expect(calls).toEqual(["child", "parent"]);
+		expect(previous).toEqual(["parent-headers"]);
+	});
+
+	it("cools down the successor that failed under its own cache version, not its predecessor's", async () => {
+		const refreshing = Promise.withResolvers<void>();
+		const refreshed = Promise.withResolvers<void>();
+		const row = oauthRow(1, "ext-version");
+		// Inside the refresh skew, so the probe awaits a token refresh before it selects.
+		if (row.credential.type === "oauth") row.credential.expires = Date.now() + 10_000;
+		const storage = await makeStorage([row], {
+			refreshOAuthCredential: async () => {
+				refreshing.resolve();
+				await refreshed.promise;
+				return { access: "oat-refreshed", refresh: "refresh-1", expires: Date.now() + 3_600_000 };
+			},
+		});
+		const parent = makeGate();
+		const child = makeGate();
+		const calls: string[] = [];
+		for (const [label, cacheVersion, gate] of [
+			["parent", 2, parent.gate],
+			["child", 1, child.gate],
+		] as const) {
+			storage.usage.setProvider(
+				"ext-version",
+				{
+					id: "ext-version",
+					cacheVersion,
+					fetchUsage: async () => {
+						calls.push(label);
+						return null;
+					},
+				},
+				undefined,
+				gate,
+			);
+		}
+
+		const pending = storage.usage.reports({ provider: "ext-version" });
+		await refreshing.promise;
+		child.retire();
+		refreshed.resolve();
+
+		expect(await pending).toEqual([]);
+		// The parent's failure cooled down the parent's own key, so its successor probe waits it out.
+		expect(calls).toEqual(["parent"]);
+	});
+});
+
+describe("an authored property is read once per use", () => {
+	it("health invokes a stateful supports getter's first answer on the provider", async () => {
+		const storage = await makeStorage([oauthRow(1, "ext-stateful")]);
+		let reads = 0;
+		let fetches = 0;
+		const receivers: unknown[] = [];
+		const provider = {
+			id: "ext-stateful",
+			get supports() {
+				reads++;
+				return reads === 1
+					? function (this: unknown) {
+							receivers.push(this);
+							return true;
+						}
+					: undefined;
+			},
+			fetchUsage: async () => {
+				fetches++;
+				return usageReport("ext-stateful", "account-1", "health");
+			},
+		} as UsageProvider;
+		storage.usage.setProvider("ext-stateful", provider, undefined, makeGate().gate);
+
+		const [result] = await storage.health.check();
+		expect(result).toMatchObject({ provider: "ext-stateful", ok: true });
+		expect({ reads, fetches }).toEqual({ reads: 1, fetches: 1 });
+		expect(receivers).toEqual([provider]);
+	});
+
+	it("usage collection invokes the supports value it read, on the provider", async () => {
+		const storage = await makeStorage([oauthRow(1, "ext-stateful")]);
+		let reads = 0;
+		const receivers: unknown[] = [];
+		// Callable on odd reads only: a second read inside one support check finds nothing to call.
+		const provider = {
+			id: "ext-stateful",
+			get supports() {
+				reads++;
+				return reads % 2 === 1
+					? function (this: unknown) {
+							receivers.push(this);
+							return true;
+						}
+					: undefined;
+			},
+			fetchUsage: async () => usageReport("ext-stateful", "account-1", "collected"),
+		} as UsageProvider;
+		storage.usage.setProvider("ext-stateful", provider, undefined, makeGate().gate);
+
+		expect((await storage.usage.reports())?.map(report => report.metadata?.source)).toEqual(["collected"]);
+		expect(receivers.length).toBeGreaterThan(0);
+		expect(receivers.every(receiver => receiver === provider)).toBe(true);
+	});
+
+	it("header ingest invokes the parser it read, once, on the provider", async () => {
+		const storage = await makeStorage([oauthRow(1, "ext-stateful")]);
+		let reads = 0;
+		const receivers: unknown[] = [];
+		const provider = {
+			id: "ext-stateful",
+			fetchUsage: async () => null,
+			get parseRateLimitHeaders() {
+				reads++;
+				return reads === 1
+					? function (this: unknown) {
+							receivers.push(this);
+							return usageReport("ext-stateful", "account-1", "headers");
+						}
+					: undefined;
+			},
+		} as UsageProvider;
+		storage.usage.setProvider("ext-stateful", provider, undefined, makeGate().gate);
+
+		expect(storage.usage.ingestHeaders("ext-stateful", { "x-limit": "1" })).toBe(true);
+		expect(reads).toBe(1);
+		expect(receivers).toEqual([provider]);
 	});
 });

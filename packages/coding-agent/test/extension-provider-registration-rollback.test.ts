@@ -51,6 +51,7 @@ describe("extension provider registration rollback", () => {
 				name: "cliproxyapi",
 				config: { baseUrl: "https://replacement.example.invalid/v1" },
 				sourceId: "pi-cliproxyapi-provider@1.4.13",
+				owner: runtime,
 			},
 		]);
 	});
@@ -120,9 +121,11 @@ describe("extension provider registration rollback", () => {
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
-			modelRegistry.registerProvider("cliproxyapi", testProviderConfig, "pi-cliproxyapi-provider");
-
 			const runtime = new ExtensionRuntime();
+			// Drained the way session creation drains it: as this runtime's registration. A
+			// session's withdrawal takes away its own registration, not one the host made.
+			modelRegistry.registerProvider("cliproxyapi", testProviderConfig, "pi-cliproxyapi-provider", runtime);
+
 			const events = new EventBus();
 			let replaceProvider: (() => void) | undefined;
 			const extension = await loadExtensionFromFactory(
