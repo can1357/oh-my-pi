@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a `cd` tool that relocates the session's working directory: the session file and artifacts, the process cwd, project settings, the memory scope, the title prompt, and skills all follow, so later tool calls and subagents resolve relative paths in the new directory. The move is all-or-nothing and rolls back if any step fails. ([#17441](https://github.com/can1357/oh-my-pi/pull/17441) by [@iacore](https://github.com/iacore))
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed

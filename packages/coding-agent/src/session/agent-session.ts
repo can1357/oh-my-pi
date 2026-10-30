@@ -473,6 +473,7 @@ import {
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
+import { relocateSessionCwd } from "./cwd-relocation";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -11544,6 +11545,26 @@ export class AgentSession implements SettingsScope {
 		this.#assertVibeSessionTransitionAllowed("move the session");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
+
+	/**
+	 * Relocate this session — session file, artifacts, process cwd, project
+	 * settings, memory scope, title prompt, skills — to an existing directory.
+	 * All-or-nothing: on failure the session and the process are back where they
+	 * were and the thrown message says what went wrong.
+	 */
+	async changeWorkingDirectory(newCwd: string): Promise<string> {
+		const result = await relocateSessionCwd({ session: this, settings: this.settings }, newCwd);
+		if (!result.ok) throw new Error(result.error);
+		if (result.changed) await this.onCwdChanged?.(result.cwd, result.previousCwd);
+		return result.cwd;
+	}
+
+	/**
+	 * Host hook for the side effects a cwd change owns outside the session (the
+	 * interactive status line and terminal title). Set once by the mode that
+	 * owns them; headless hosts leave it unset.
+	 */
+	onCwdChanged?: (newCwd: string, previousCwd: string) => Promise<void> | void;
 
 	// =========================================================================
 	// Model Management
