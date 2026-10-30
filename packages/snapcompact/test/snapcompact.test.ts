@@ -1689,6 +1689,16 @@ describe("archive helpers", () => {
 			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
 		});
 
+		it("cuts a frameless archive's text past maxChars too", () => {
+			const text = `start ${"x".repeat(100)} end`;
+			const archive = { frames: [], totalChars: text.length, truncatedChars: 0, text, textHead: text };
+			expect(snapcompact.viewWithoutFrames("s", archive, { maxChars: text.length }).archive).toBe(archive);
+			const view = snapcompact.viewWithoutFrames("s", archive, { maxChars: 20 });
+			expect(view.archive.textHead).toBe(text.slice(0, 10));
+			expect(view.archive.textTail).toBe(text.slice(-10));
+			expect(view.archive.truncatedChars).toBe(text.length - 20);
+		});
+
 		it("returns an archive with neither frames nor reasoning to drop as is", () => {
 			const archive = { frames: [], totalChars: 3, truncatedChars: 0, textHead: "abc" };
 			expect(snapcompact.viewWithoutFrames("s", archive)).toEqual({ summary: "s", archive });

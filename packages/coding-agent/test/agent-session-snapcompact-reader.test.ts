@@ -497,6 +497,31 @@ describe("snapcompact archive read by another model", () => {
 		expect(large.text).not.toContain("middle history omitted above");
 	});
 
+	it("refits the archive text when another model without image input takes over mid tool loop", async () => {
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager);
+		const middle = "reply 20:";
+		const small: Model = { ...deepseek, contextWindow: 20_000 };
+		const { session, mock } = startSession(sessionManager, small);
+		// By the third call the loop's message lists were already scanned for the small window when the
+		// larger model takes over, as a retry fallback does.
+		const toolCall = { content: [{ type: "toolCall" as const, name: "missing_tool", arguments: {} }] };
+		mock.push(() => toolCall);
+		mock.push(() => {
+			session.agent.setModel(deepseek);
+			return toolCall;
+		});
+		mock.push(() => ({ content: ["done"] }));
+
+		await session.prompt("Continue.");
+		const smallText = requestContent(mock.calls[1]?.context.messages).text;
+		expect(smallText).toContain("middle history omitted above");
+		expect(smallText).not.toContain(middle);
+		const largeText = requestContent(mock.calls[2]?.context.messages).text;
+		expect(largeText).toContain(middle);
+		expect(largeText).not.toContain("middle history omitted above");
+	});
+
 	it("accepts a compaction that shrinks the archive's text for a model without image input", async () => {
 		const sessionManager = SessionManager.inMemory();
 		await seedArchive(sessionManager);

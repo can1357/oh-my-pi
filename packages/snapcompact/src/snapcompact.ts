@@ -2386,8 +2386,8 @@ function keepEnds(archive: Archive, maxChars: number): Archive {
  * {@link viewWithoutThinking} does, without rendering frames this reader
  * cannot see; past `maxChars` the middle of the text is dropped. An archive
  * persisted without that source keeps its text edges and counts the imaged
- * middle as dropped. An archive with neither frames nor reasoning to drop is
- * returned as is.
+ * middle as dropped. An archive with no frames, no reasoning to drop and no
+ * text past `maxChars` is returned as is.
  */
 export function viewWithoutFrames(
 	summary: string,
@@ -2395,7 +2395,8 @@ export function viewWithoutFrames(
 	options: ViewWithoutFramesOptions = {},
 ): ArchiveView {
 	const dropThinking = options.includeThinking === false && summaryIncludesThinking(summary);
-	if (archive.frames.length === 0 && !dropThinking) return { summary, archive };
+	const fits = options.maxChars === undefined || archive.totalChars <= options.maxChars;
+	if (archive.frames.length === 0 && !dropThinking && fits) return { summary, archive };
 	const scrub = (text: string): string => (dropThinking ? textWithoutThinking(text) : text);
 	let textArchive: Archive;
 	if (archive.text) {

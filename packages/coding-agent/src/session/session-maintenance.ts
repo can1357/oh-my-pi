@@ -611,7 +611,7 @@ export class SessionMaintenance {
 	/** How far each live message list was scanned for summaries to swap, and for which kind of reader. */
 	readonly #summaryScans = new WeakMap<
 		readonly AgentMessage[],
-		{ reader: ArchiveReader["key"]; length: number; first: AgentMessage | undefined }
+		{ key: string; length: number; first: AgentMessage | undefined }
 	>();
 	readonly #host: SessionMaintenanceHost;
 
@@ -4752,13 +4752,15 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return;
 		const reader = archiveReader(model);
+		// The views a scan swapped in were fitted to this model's window (#viewWithoutFrames).
+		const scanKey = `${reader.key}|${model.provider}/${model.id}|${this.#archiveTextBudget(model)}`;
 		const lists = activeMessages
 			? [this.#host.agent.state.messages, activeMessages]
 			: [this.#host.agent.state.messages];
 		const scanned = lists.map(list => list.length);
 		const replacements = await this.#summaryReplacements(
 			model,
-			...lists.map(list => list.slice(this.#summaryScanStart(list, reader))),
+			...lists.map(list => list.slice(this.#summaryScanStart(list, scanKey))),
 		);
 		if (replacements.size > 0) {
 			// Re-read after the awaits: the agent may have appended messages meanwhile.
@@ -4778,15 +4780,15 @@ export class SessionMaintenance {
 			}
 		}
 		lists.forEach((list, index) => {
-			this.#summaryScans.set(list, { reader: reader.key, length: scanned[index]!, first: list[0] });
+			this.#summaryScans.set(list, { key: scanKey, length: scanned[index]!, first: list[0] });
 		});
 	}
 
 	/** Where a scan of `list` for summaries to swap starts: past the prefix already
-	 *  scanned for the same kind of reader, unless the list was cleared or refilled. */
-	#summaryScanStart(list: readonly AgentMessage[], reader: ArchiveReader): number {
+	 *  scanned for the same reader and budget, unless the list was cleared or refilled. */
+	#summaryScanStart(list: readonly AgentMessage[], scanKey: string): number {
 		const scan = this.#summaryScans.get(list);
-		return scan?.reader === reader.key && scan.first === list[0] && scan.length <= list.length ? scan.length : 0;
+		return scan?.key === scanKey && scan.first === list[0] && scan.length <= list.length ? scan.length : 0;
 	}
 
 	/**
@@ -4920,27 +4922,31 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Tokens of archive text a reader without image input gets in `model`'s
+	 * window: the share snapcompact sizes an imaged archive to
+	 * ({@link SNAPCOMPACT_POST_COMPACTION_TARGET} of its compaction threshold),
+	 * so an archive built for a larger window still leaves the reader room to
+	 * work and to compact. `undefined` when the window is unknown.
+	 */
+	#archiveTextBudget(model: Model): number | undefined {
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return undefined;
+		const settings = resolveModelCompactionSettings(this.#host.settings, model);
+		return Math.floor(SNAPCOMPACT_POST_COMPACTION_TARGET * resolveThresholdTokens(contextWindow, settings));
+	}
+
+	/**
 	 * `entry`'s archive as `model`, a reader without image input, reads it
 	 * ({@link snapcompact.viewWithoutFrames}), derived from its kept source once
-	 * per entry, reader and budget; `undefined` when that is the original. The
-	 * text gets the share of `model`'s window snapcompact sizes an imaged
-	 * archive to ({@link SNAPCOMPACT_POST_COMPACTION_TARGET} of its compaction
-	 * threshold); past it the middle is dropped, so an archive built for a larger
-	 * window still leaves the reader room to work and to compact.
+	 * per entry, reader and budget; `undefined` when that is the original. Text
+	 * past {@link #archiveTextBudget} loses its middle.
 	 */
 	#viewWithoutFrames(
 		entry: CompactionEntry,
 		reader: ArchiveReader,
 		model: Model,
 	): snapcompact.ArchiveView | undefined {
-		const contextWindow = model.contextWindow ?? 0;
-		const targetTokens =
-			contextWindow > 0
-				? Math.floor(
-						SNAPCOMPACT_POST_COMPACTION_TARGET *
-							resolveThresholdTokens(contextWindow, resolveModelCompactionSettings(this.#host.settings, model)),
-					)
-				: undefined;
+		const targetTokens = this.#archiveTextBudget(model);
 		const key = `${reader.key}|${model.provider}/${model.id}|${targetTokens}`;
 		let views = this.#withoutFramesViews.get(entry);
 		if (!views) {
@@ -4952,8 +4958,9 @@ export class SessionMaintenance {
 			const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
 			const options = { includeThinking: !reader.excludeThinking };
 			let unfolded = snapcompact.viewWithoutFrames(entry.summary, archive, options);
+			// The original too: a frameless archive was sized for the window that compacted.
 			const text = `${unfolded.archive.textHead ?? ""}${unfolded.archive.textTail ?? ""}`;
-			if (unfolded.archive !== archive && targetTokens !== undefined && text.length > 0) {
+			if (targetTokens !== undefined && text.length > 0) {
 				const tokenizer = this.#tokenizer.countsAlike(model) ? this.#tokenizer : new Tokenizer(model);
 				const textTokens = tokenizer.countTokens(text);
 				if (textTokens > targetTokens) {
