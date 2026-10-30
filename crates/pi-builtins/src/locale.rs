@@ -318,6 +318,14 @@ struct Unanswered(String);
 /// from an unenterable working directory as the archive's `UTF-8` where the
 /// reference reports `ANSI_X3.4-1968`. All of those are reported instead.
 ///
+/// That is a deliberate reversal, not an oversight: an earlier revision
+/// answered `ISO-8859-1` for `LOCPATH=missing:/…/latin` from a working
+/// directory with mode 0600, which is what the reference answers there. No
+/// process can enter that directory — the reference is in it, it did not
+/// enter it — so the agreement was luck rather than derivation, and the same
+/// reasoning gave wrong answers everywhere else it was tried. One matching
+/// row is not worth six unsound ones.
+///
 /// The working directory reaches the child as a pathname, so a directory
 /// replaced between this call and the child's `chdir` is entered in place of
 /// the one the shell sits in. [`crate::host::ChildEnv`] holds a pathname and

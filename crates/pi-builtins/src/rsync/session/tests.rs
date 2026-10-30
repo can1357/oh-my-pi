@@ -255,6 +255,12 @@ fn no_search_path_but_the_shells_own_answers() {
 /// `ANSI_X3.4-1968` in the archive one, and this cannot reproduce any of
 /// them — so each is reported rather than answered from a question that was
 /// changed to make it answerable.
+///
+/// The `unsearchable` row is the one that changed on purpose: an earlier
+/// revision answered `ISO-8859-1` there, which is what the reference
+/// answers, by dropping the relative entry. That agreement was luck — the
+/// reference is inside a directory no process can enter — and the same
+/// reasoning answered wrongly in every other row here.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_working_directory_the_child_cannot_enter_is_reported() {
