@@ -288,8 +288,8 @@ export class UsageService implements UsageApi {
 	 * costs that provider alone.
 	 *
 	 * `signal` is the request's bridge when the request carries one. The author sees the admitted
-	 * signal here as it does at every other call: the bridge must exist before ANY author code can
-	 * see a request's signal, and this check is the first author code the fetch path reaches.
+	 * signal here as it does at every other call: the bridge must exist before any author code is
+	 * handed a request's signal, and this check is the first call on the fetch path that is.
 	 */
 	#supports(
 		entry: UsageProviderRegistration,
@@ -436,10 +436,12 @@ export class UsageService implements UsageApi {
 		const entry = runtime ?? this.providerEntryFor(request.provider);
 		if (!entry) return { report: null, runtime };
 
-		// Built before the support check, because that check is the first author code this path
-		// reaches and it is handed the request. One bridge per request, admitted inside each
-		// gated call: the timeout fires on the host's timer, long after a quick fetch is over, so
-		// the signal the provider is handed follows the caller's only while this request runs.
+		// Built before the support check, which is the first author call handed THIS REQUEST'S
+		// signal — not the first author code the path reaches: `report()` evaluates the author's
+		// `cacheVersion` getter while building the cache key, inside its gate and with no signal
+		// of this request. One bridge per request, admitted inside each gated call: the timeout
+		// fires on the host's timer, long after a quick fetch is over, so the signal the provider
+		// is handed follows the caller's only while this request runs.
 		const signal = new AdmittedSignal(entry.gate, params.signal);
 		if (!this.#supports(entry, request.provider, params, signal)) {
 			signal.release();

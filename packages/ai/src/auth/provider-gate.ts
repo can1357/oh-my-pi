@@ -1,3 +1,5 @@
+import type { OAuthCredentials } from "../registry/oauth/types";
+
 /**
  * Lifetime of a provider somebody registered at runtime, as the registries and the call sites see
  * it.
@@ -140,4 +142,56 @@ export class AdmittedSignal {
 		this.#forward = undefined;
 		this.#caller?.removeEventListener("abort", forward);
 	};
+}
+
+/** Every field an `OAuthCredentials` has, and what it holds. `Required` so a field added to the
+ *  type does not compile until someone says how it is copied. */
+const OAUTH_CREDENTIAL_FIELDS: { readonly [K in keyof Required<OAuthCredentials>]: "string" | "number" } = {
+	refresh: "string",
+	access: "string",
+	expires: "number",
+	enterpriseUrl: "string",
+	projectId: "string",
+	email: "string",
+	accountId: "string",
+	apiEndpoint: "string",
+	orgId: "string",
+	orgName: "string",
+	region: "string",
+	inferenceRegion: "string",
+	activeOrganizationId: "string",
+	authorizedAt: "number",
+};
+
+/**
+ * A host-owned copy of the credentials an extension's `login` or `refreshToken` handed back.
+ *
+ * A value an author RETURNS is author code as much as a property it exposes: its fields may be
+ * getters, and the host persists what it reads from them. Read outside the owner's admission —
+ * or after retirement, which both routes reached — that read runs extension code nobody is
+ * answering for, and what it answers is what gets stored. So the fields are read once, here,
+ * inside the admitted call, and nothing afterwards touches the original.
+ *
+ * By schema, like a `UsageReport`: each field the type declares, so a getter the type does not
+ * know about is never consulted, and a function where data belongs is refused with its name.
+ */
+export function copyOAuthCredentials(
+	credentials: OAuthCredentials,
+	provider: string,
+	method: "login" | "refreshToken",
+): OAuthCredentials {
+	const copy: Record<string, unknown> = {};
+	for (const [field, kind] of Object.entries(OAUTH_CREDENTIAL_FIELDS)) {
+		const value: unknown = (credentials as Record<string, unknown>)[field];
+		if (value === undefined) continue;
+		if (typeof value === "function") {
+			throw new Error(
+				`OAuth provider "${provider}": ${method}() returned a function for "${field}", but it must be data. ` +
+					`Compute the value before returning it.`,
+			);
+		}
+		if (typeof value !== kind) continue;
+		copy[field] = value;
+	}
+	return copy as OAuthCredentials;
 }

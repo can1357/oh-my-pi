@@ -8,7 +8,7 @@ import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
-import { AdmittedSignal, callThroughGate } from "./provider-gate";
+import { AdmittedSignal, callThroughGate, copyOAuthCredentials } from "./provider-gate";
 import type { OAuthRefresher } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
@@ -121,9 +121,22 @@ export class OAuthAccounts implements OAuthApi {
 			// others are host functions the author calls and awaits as its own work.
 			const signal = new AdmittedSignal(entry.gate, callbacks.signal);
 			try {
-				({ result, storeCredentialsAs } = await callThroughGate(entry.gate, () =>
-					loginCustomProvider(provider, entry.provider, { ...callbacks, signal: signal.admit() }),
-				));
+				({ result, storeCredentialsAs } = await callThroughGate(entry.gate, async () => {
+					const answered = await loginCustomProvider(provider, entry.provider, {
+						...callbacks,
+						signal: signal.admit(),
+					});
+					// The value an author returns is author code too: its fields may be getters,
+					// and the host persists what it reads from them. Copied here, inside the
+					// admission, so everything below builds from the copy and nothing reads the
+					// original again.
+					return typeof answered.result === "string"
+						? answered
+						: {
+								result: copyOAuthCredentials(answered.result, provider, "login"),
+								storeCredentialsAs: answered.storeCredentialsAs,
+							};
+				}));
 			} finally {
 				signal.release();
 			}

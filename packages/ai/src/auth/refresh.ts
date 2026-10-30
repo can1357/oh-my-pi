@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
-import { AdmittedSignal, callThroughGate } from "./provider-gate";
+import { AdmittedSignal, callThroughGate, copyOAuthCredentials } from "./provider-gate";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -1039,7 +1039,7 @@ export class OAuthRefresher {
 				// The capability read is the author's code as much as the call (it may be a getter),
 				// so both run as the owning session's work, and the function read is the one called.
 				try {
-					refreshPromise = callThroughGate(gate, () => {
+					refreshPromise = callThroughGate(gate, async () => {
 						const refreshToken = custom.refreshToken;
 						if (!refreshToken) {
 							throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
@@ -1047,7 +1047,17 @@ export class OAuthRefresher {
 								provider,
 							});
 						}
-						return Reflect.apply(refreshToken, custom, [credential, admitted.admit()]);
+						const answered: OAuthCredentials = await Reflect.apply(refreshToken, custom, [
+							credential,
+							admitted.admit(),
+						]);
+						// Copied here, inside the admission, and every record built below — the
+						// merged organization scope, the stored entry, the host the region picks
+						// — reads this copy. Read later and field by field, the same getter
+						// answered differently each time: a credential was persisted holding one
+						// organization's id beside another's region, and the region chooses the
+						// API host.
+						return copyOAuthCredentials(answered, provider, "refreshToken");
 					});
 				} catch (error) {
 					admitted.release();

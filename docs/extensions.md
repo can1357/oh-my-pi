@@ -215,11 +215,12 @@ distinct from the built-in one so processes without the extension (older session
 
 ### What the host keeps, and when
 
-A provider registration belongs to the session that made it, and the host reads what it needs
-**once**, while that session is still there to answer for it. Every property of what you hand
-over may be a getter, so a read is a call into your extension: the host takes one read and uses
-what it got, never validating one read and then reading the same name again to use it. Two
-consequences worth knowing before you write a provider.
+Everything crossing the boundary out of your extension is live until the host has copied it:
+the properties you expose, the callbacks you register, the arguments you pass, and the values
+you return. Each of those is your code — any of them may be a getter — so the host reads each
+one **once**, inside the session that owns it, and uses what it got. It never validates one
+read and then reads the same name again, and it never reads a value you returned after the call
+that returned it. Two consequences worth knowing before you write a provider.
 
 **What the host keeps at admission is the data and the callbacks; change either by registering
 again.** `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied,
@@ -233,10 +234,16 @@ happen when the registry admits the registration, which for a queued provider is
 drains the queue rather than when `pi.registerProvider` returns; a change in that gap still
 reaches requests, and is not something to rely on.
 
-**Put values in data fields, not functions.** A function where the host expects data — a
-`toJSON` inside `compat`, a callable `extraBody` — is refused at registration with the field
-named. Those run during request construction, long after the registration, and a session that
-has gone cannot answer for them. Compute the value before you register.
+**Put values in data fields, not functions — in what you register and in what you return.** A
+function where the host expects data — a `toJSON` inside `compat`, a callable `extraBody`, an
+`access` your `login` hands back as a function — is refused with the field named. Those would
+run during request construction or credential storage, long after the call, and a session that
+has gone cannot answer for them. Compute the value before you hand it over.
+
+What you return is copied the same way your registration is, inside the call that returned it:
+a `UsageReport`, and the credentials from `login` and `refreshToken`. Each field the host knows
+is read once, and the record it stores is the one you answered with rather than one assembled
+from several later reads of the same getter.
 
 Several sessions can register the same provider name; a subagent that rebinds its parent's
 extensions does. The registration in force is the most recent one whose session is still alive,
