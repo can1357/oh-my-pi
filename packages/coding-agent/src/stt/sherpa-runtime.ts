@@ -30,11 +30,27 @@ export interface SherpaOfflineRecognizer {
 	decodeAsync(stream: SherpaOfflineStream): Promise<SherpaOfflineResult>;
 }
 
+export interface SherpaOnlineStream {
+	acceptWaveform(audio: { samples: Float32Array; sampleRate: number }): void;
+	inputFinished(): void;
+}
+
+/** The synchronous online API runs only inside the STT subprocess. */
+export interface SherpaOnlineRecognizer {
+	createStream(): SherpaOnlineStream;
+	isReady(stream: SherpaOnlineStream): boolean;
+	decode(stream: SherpaOnlineStream): void;
+	getResult(stream: SherpaOnlineStream): { text: string };
+	isEndpoint(stream: SherpaOnlineStream): boolean;
+	reset(stream: SherpaOnlineStream): void;
+}
+
 /** The native sherpa-onnx module surface used by the STT worker. */
 export interface SherpaRuntime {
 	OfflineRecognizer: {
 		createAsync(config: SherpaOfflineConfig): Promise<SherpaOfflineRecognizer>;
 	};
+	OnlineRecognizer: new (config: SherpaOfflineConfig & { enableEndpoint: boolean }) => SherpaOnlineRecognizer;
 }
 
 /** Loads the nearest working source-workspace sherpa wrapper, including hoisted fallbacks. */

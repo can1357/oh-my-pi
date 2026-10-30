@@ -21,6 +21,7 @@ export * from "./mcp-protocol";
 export * from "./memory-protocol";
 export * from "./omp-protocol";
 export * from "./omp-scope";
+export * from "./out-protocol";
 export * from "./parse";
 export * from "./router";
 export * from "./rule-protocol";

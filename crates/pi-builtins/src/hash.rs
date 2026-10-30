@@ -51,7 +51,7 @@ impl builtins::Command for HashCommand {
 			for name in &self.names {
 				if let Some(path) = context.shell.program_location_cache().get(name) {
 					if self.display_as_usable_input {
-						writeln!(context.stdout(), "builtin hash -p {} {name}", path.to_string_lossy())?;
+						writeln!(context.stdout(), "builtin hash -p {} {name}", path.display())?;
 					} else {
 						let mut prefix = String::new();
 

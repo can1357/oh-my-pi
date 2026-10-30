@@ -240,6 +240,23 @@ fn raw_names_round_trip_through_url_segments() {
 	assert!(is_virtual_path(p("git+ssh://h/r")));
 }
 
+#[cfg(windows)]
+#[test]
+fn drive_relative_paths_resolve_against_the_shell_cwd_not_the_process_cwd() {
+	let p = Path::new;
+	let cwd = p(r"C:\Temp\probe");
+	// Same drive: the remainder joins onto the shell cwd; `C:` is the cwd
+	// itself.
+	assert_eq!(absolute_path(cwd, p("C:")), cwd);
+	assert_eq!(absolute_path(cwd, p("c:sub")), p(r"C:\Temp\probe\sub"));
+	assert_eq!(join_path(p(r"\\?\C:\Temp\probe"), p("C:a")), p(r"\\?\C:\Temp\probe\a"));
+	// Another drive (or a URL cwd) has no shell cwd: the drive root stands in.
+	assert_eq!(absolute_path(cwd, p("D:sub")), p(r"D:\sub"));
+	assert_eq!(absolute_path(p("local://d"), p("C:a")), p(r"C:\a"));
+	// Rooted operands are unchanged.
+	assert_eq!(absolute_path(cwd, p(r"D:\x")), p(r"D:\x"));
+}
+
 #[test]
 fn native_backend_never_resolves_urls_against_the_process_cwd() {
 	let fs = BlockingFs::native();
@@ -508,4 +525,336 @@ fn descriptor_overlay_shares_the_pinned_file() {
 	assert!(!fs.is_native_local("/dev/fd/77"));
 	assert!(fs.remove_file("/dev/fd/77").is_err());
 	assert!(path.exists());
+}
+
+/// A host file opened through a cancelled view fails its reads with the
+/// cancellation error, never `Interrupted` (which std read loops retry
+/// forever); so does a whole-file `read`. The same file through a view
+/// without a token reads as before, and a whole-file read through a
+/// cancellable view is still one allocation of the file's size.
+#[test]
+fn host_reads_through_a_cancelled_view_fail_with_the_cancellation_error() {
+	let dir = TempDir::new("host-cancel");
+	let path = dir.0.join("data");
+	std::fs::write(&path, vec![b'x'; 300_000]).unwrap();
+	let token = CancellationToken::new();
+	let plain = BlockingFs::native();
+	let scoped = plain.with_cancellation(token.clone());
+
+	let mut contents = Vec::new();
+	scoped
+		.open(&path)
+		.unwrap()
+		.read_to_end(&mut contents)
+		.unwrap();
+	assert_eq!(contents.len(), 300_000);
+	assert_eq!(contents.capacity(), 300_000, "sized from the file, not grown by doubling");
+	assert_eq!(scoped.read(&path).unwrap().len(), 300_000);
+
+	let mut opened_before = scoped.open(&path).unwrap();
+	token.cancel();
+	let errors = [
+		opened_before.read(&mut [0; 8]).unwrap_err(),
+		scoped
+			.open(&path)
+			.unwrap()
+			.read_to_end(&mut Vec::new())
+			.unwrap_err(),
+		scoped.read(&path).unwrap_err(),
+	];
+	for err in errors {
+		assert!(is_cancelled(&err), "{err}");
+		assert_ne!(err.kind(), io::ErrorKind::Interrupted);
+	}
+
+	assert_eq!(plain.read(&path).unwrap().len(), 300_000);
+	let mut text = String::new();
+	plain
+		.open(&path)
+		.unwrap()
+		.read_to_string(&mut text)
+		.unwrap();
+	assert_eq!(text.len(), 300_000);
+}
+
+/// Through a cancellable view, opening a FIFO waits for a writer as a
+/// blocking open does, so even a reader of the bare descriptor (an external
+/// child, `$(< f)`) gets a late writer's data. When no writer comes, the open
+/// fails once the token fires and leaves no reader behind for a later writer.
+#[cfg(unix)]
+#[test]
+fn fifo_opens_through_a_cancellable_view_wait_for_a_writer_and_observe_the_token() {
+	use std::os::unix::fs::OpenOptionsExt;
+	let dir = TempDir::new("fifo-cancel");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+
+	let writer_path = fifo.clone();
+	let writer = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		std::fs::write(writer_path, "hi").unwrap();
+	});
+	let opened = scoped.open(&fifo).unwrap();
+	let mut descriptor = opened.native().unwrap();
+	let mut text = String::new();
+	descriptor.read_to_string(&mut text).unwrap();
+	writer.join().unwrap();
+	assert_eq!(text, "hi");
+	drop(opened);
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let err = scoped.open(&fifo).unwrap_err();
+	canceller.join().unwrap();
+	assert!(is_cancelled(&err), "{err}");
+	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+	let late_writer = std::fs::OpenOptions::new()
+		.write(true)
+		.custom_flags(libc::O_NONBLOCK)
+		.open(&fifo)
+		.unwrap_err();
+	assert_eq!(late_writer.raw_os_error(), Some(libc::ENXIO), "a reader was left open");
+}
+
+/// A cancel releases a waiting FIFO open by opening the FIFO for writing,
+/// which this process may not do to a FIFO it can only read. Such an open
+/// must still return as a blocking open does: as soon as a writer connects,
+/// before it writes (a producer may wait for the consumer to act first). It
+/// hands back a blocking descriptor that reads all of the writer's data, and
+/// a cancel still ends the open.
+#[cfg(unix)]
+#[test]
+fn fifo_this_process_cannot_write_still_opens_on_connect_and_observes_the_token() {
+	use std::{
+		io::Write,
+		os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+		sync::mpsc,
+	};
+	let set_mode = |path: &std::path::Path, mode: u32| {
+		std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+	};
+	let dir = TempDir::new("fifo-read-only");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	set_mode(&fifo, 0o400);
+	let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+	// SAFETY: `c_path` is a NUL-terminated string alive for the call.
+	if unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::W_OK, libc::AT_EACCESS) } == 0
+	{
+		eprintln!(
+			"skipped: this process may write a mode 0400 FIFO (root), so the case cannot arise"
+		);
+		return;
+	}
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+
+	// The writer connects, then writes only once the reader's open has
+	// returned, and pauses between two writes, so a descriptor left
+	// non-blocking fails the second read with `WouldBlock`.
+	let (opened_tx, opened_rx) = mpsc::channel::<()>();
+	let writer_path = fifo.clone();
+	let writer = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		set_mode(&writer_path, 0o600);
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.open(&writer_path)
+			.unwrap();
+		set_mode(&writer_path, 0o400);
+		let waited = opened_rx.recv_timeout(Duration::from_secs(2));
+		file.write_all(b"h").unwrap();
+		std::thread::sleep(Duration::from_millis(200));
+		file.write_all(b"i").unwrap();
+		waited
+	});
+	let opened = scoped.open(&fifo).unwrap();
+	let _ = opened_tx.send(());
+	let mut descriptor = opened.native().unwrap();
+	let mut text = String::new();
+	descriptor.read_to_string(&mut text).unwrap();
+	let waited = writer.join().unwrap();
+	assert!(waited.is_ok(), "the open waited for the writer's first byte, not its connection");
+	assert_eq!(text, "hi");
+	drop(opened);
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let err = scoped.open(&fifo).unwrap_err();
+	canceller.join().unwrap();
+	assert!(is_cancelled(&err), "{err}");
+	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+/// An async whole-file read of a host file under a token can wait without
+/// yielding: `Fs::read` for a FIFO's writer that never comes,
+/// `File::read_to_end_async` for data from a writer that connected and never
+/// writes. On a current-thread runtime the task that cancels the token then
+/// never ran, so the read never ended. Both end at the token now.
+#[cfg(unix)]
+#[test]
+fn async_whole_file_reads_end_at_the_token_on_a_current_thread_runtime() {
+	use std::sync::mpsc;
+	let dir = TempDir::new("fifo-current-thread");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+
+	for idle_writer in [false, true] {
+		let token = CancellationToken::new();
+		let writer = idle_writer.then(|| {
+			let path = fifo.clone();
+			std::thread::spawn(move || std::fs::OpenOptions::new().write(true).open(path).unwrap())
+		});
+		let (done_tx, done_rx) = mpsc::channel();
+		let (path, task_token) = (fifo.clone(), token.clone());
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let result = runtime.block_on(async move {
+				let fs = Fs::native().with_cancellation(task_token.clone());
+				tokio::spawn(async move {
+					tokio::time::sleep(Duration::from_millis(200)).await;
+					task_token.cancel();
+				});
+				if idle_writer {
+					fs.open(&path)
+						.await?
+						.read_to_end_async(&mut Vec::new())
+						.await
+				} else {
+					fs.read(&path).await.map(|contents| contents.len())
+				}
+			});
+			let _ = done_tx.send(result);
+		});
+		let result = done_rx.recv_timeout(Duration::from_secs(5));
+		// Ends a read that ignored the runtime's cancellation.
+		token.cancel();
+		if let Some(writer) = writer {
+			drop(writer.join().unwrap());
+		}
+		let err = result
+			.unwrap_or_else(|_| panic!("idle_writer={idle_writer}: the read ignored its token"))
+			.unwrap_err();
+		assert!(is_cancelled(&err), "idle_writer={idle_writer}: {err}");
+	}
+}
+
+/// A FIFO opened non-blocking (`dd iflag=nonblock`) must read without
+/// waiting. On Linux such a FIFO with no writer reports no readiness, so a
+/// read that first waited for readiness blocked until the token fired
+/// instead of returning EOF at once.
+#[cfg(unix)]
+#[test]
+fn fifo_opened_non_blocking_reads_without_waiting() {
+	let dir = TempDir::new("fifo-nonblock");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+	let mut options = OpenOptions::new();
+	options.read(true).custom_flags(libc::O_NONBLOCK);
+	let mut file = scoped.open_with(&fifo, &options).unwrap();
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_secs(2));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let read = file.read(&mut [0; 8]);
+	let elapsed = started.elapsed();
+	assert_eq!(read.ok(), Some(0), "EOF at once");
+	assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+	canceller.join().unwrap();
+}
+
+/// A write-only open of a FIFO (`echo hi > f`) waits for a reader. Through a
+/// cancellable view it still hands the reader its data, and with no reader it
+/// fails once the token fires. With mode 0600 a non-blocking read open
+/// releases the wait, so no writer is left behind: a later reader reads EOF at
+/// once instead of waiting. Mode 0200, which this process may not read,
+/// cannot be released, and the open still ends.
+#[cfg(unix)]
+#[test]
+fn fifo_write_opens_through_a_cancellable_view_wait_for_a_reader_and_observe_the_token() {
+	use std::os::unix::{
+		ffi::OsStrExt,
+		fs::{OpenOptionsExt, PermissionsExt},
+	};
+	for mode in [0o600, 0o200] {
+		let dir = TempDir::new("fifo-write");
+		let fifo = dir.0.join("fifo");
+		BlockingFs::native()
+			.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+			.unwrap();
+		std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(mode)).unwrap();
+		let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+		// SAFETY: `c_path` is a NUL-terminated string alive for the call.
+		let readable =
+			unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::R_OK, libc::AT_EACCESS) }
+				== 0;
+		if mode == 0o200 && readable {
+			eprintln!("skipped mode 0200: this process may read it (root), so the case cannot arise");
+			continue;
+		}
+		let token = CancellationToken::new();
+		let scoped = BlockingFs::native().with_cancellation(token.clone());
+		let mut redirect = OpenOptions::new();
+		redirect.write(true).create(true).truncate(true);
+
+		let reader_path = fifo.clone();
+		let reader = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(150));
+			let set = |mode| {
+				std::fs::set_permissions(&reader_path, std::fs::Permissions::from_mode(mode)).unwrap();
+			};
+			set(0o600);
+			let mut file = std::fs::File::open(&reader_path).unwrap();
+			set(mode);
+			let mut text = String::new();
+			file.read_to_string(&mut text).unwrap();
+			text
+		});
+		let mut writer = scoped.open_with(&fifo, &redirect).unwrap();
+		writer.write_all(b"hi").unwrap();
+		drop(writer);
+		assert_eq!(reader.join().unwrap(), "hi", "mode {mode:o}");
+
+		let canceller = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(150));
+			token.cancel();
+		});
+		let started = std::time::Instant::now();
+		let err = scoped.open_with(&fifo, &redirect).unwrap_err();
+		canceller.join().unwrap();
+		assert!(is_cancelled(&err), "mode {mode:o}: {err}");
+		assert!(started.elapsed() < Duration::from_secs(2), "mode {mode:o}: {:?}", started.elapsed());
+		if mode == 0o600 {
+			let mut late_reader = std::fs::OpenOptions::new()
+				.read(true)
+				.custom_flags(libc::O_NONBLOCK)
+				.open(&fifo)
+				.unwrap();
+			let read = late_reader.read(&mut [0; 8]);
+			assert_eq!(read.ok(), Some(0), "a writer was left open");
+		}
+	}
 }

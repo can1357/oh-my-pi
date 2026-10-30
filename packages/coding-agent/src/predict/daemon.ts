@@ -15,7 +15,7 @@ import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
 import { getHistoryDbPath, getPredictStateDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
-import { JsonLineServer } from "../tiny/worker-server";
+import { JsonLineServer } from "../subprocess/jsonl-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
 import { readForeignPrompts } from "./foreign-history";
@@ -191,7 +191,7 @@ class Engine {
 		}
 		try {
 			const page = db.query<{ id: number; prompt: string }, [number, number]>(
-				"SELECT id, prompt FROM history WHERE id > ? ORDER BY id LIMIT ?",
+				"SELECT id, prompt FROM history WHERE id > ? AND typeof(prompt) = 'text' ORDER BY id LIMIT ?",
 			);
 			for (;;) {
 				const rows = page.all(this.cursor, INGEST_BATCH);
@@ -220,7 +220,6 @@ class TextPredictDaemon {
 	#server = new JsonLineServer<TextPredictRequest, TextPredictResponse>({
 		name: "text-predict",
 		cleanupLabel: "text-predict-daemon",
-		subject: "text-predict daemon",
 		idleMs: IDLE_EXIT_MS,
 		banner: textPredictReadyBanner,
 		onRequest: (request, reply) =>

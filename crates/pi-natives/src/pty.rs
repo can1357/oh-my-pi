@@ -31,6 +31,26 @@ use crate::{
 	task,
 };
 
+/// Effective terminal dimensions shared by PTY sessions and screen emulators.
+#[napi(object)]
+pub struct PtyDimensions {
+	pub cols: u16,
+	pub rows: u16,
+}
+
+impl PtyDimensions {
+	fn new(cols: u16, rows: u16) -> Self {
+		Self { cols: cols.clamp(20, 400), rows: rows.clamp(5, 200) }
+	}
+}
+
+/// Truncate and clamp dimensions to the same limits used by PTY start and
+/// resize.
+#[napi]
+pub fn normalize_pty_dimensions(cols: f64, rows: f64) -> PtyDimensions {
+	PtyDimensions::new(cols as u16, rows as u16)
+}
+
 /// Options for running a command in a PTY session.
 #[napi(object)]
 pub struct PtyStartOptions<'env> {
@@ -190,12 +210,13 @@ impl PtySession {
 		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
+		let dimensions = PtyDimensions::new(options.cols.unwrap_or(120), options.rows.unwrap_or(40));
 		let run_config = PtyRunConfig {
 			command: PtyCommand::Shell { command: options.command, shell: options.shell },
 			cwd:     options.cwd,
 			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			cols:    dimensions.cols,
+			rows:    dimensions.rows,
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -212,12 +233,13 @@ impl PtySession {
 		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
+		let dimensions = PtyDimensions::new(options.cols.unwrap_or(120), options.rows.unwrap_or(40));
 		let run_config = PtyRunConfig {
 			command: PtyCommand::Argv { application: options.application, args: options.args },
 			cwd:     options.cwd,
 			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			cols:    dimensions.cols,
+			rows:    dimensions.rows,
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -231,10 +253,8 @@ impl PtySession {
 	/// Resize the active PTY.
 	#[napi]
 	pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-		self.send_control(ControlMessage::Resize {
-			cols: cols.clamp(20, 400),
-			rows: rows.clamp(5, 200),
-		})
+		let dimensions = PtyDimensions::new(cols, rows);
+		self.send_control(ControlMessage::Resize { cols: dimensions.cols, rows: dimensions.rows })
 	}
 
 	/// Force-kill the active PTY command.
@@ -277,10 +297,9 @@ impl PtySession {
 			*guard = None;
 			drop(guard);
 
-			match run_result {
-				Ok(inner) => inner,
-				Err(err) => Err(Error::from_reason(format!("PTY execution task failed: {err}"))),
-			}
+			run_result
+				.map_err(|err| Error::from_reason(format!("PTY execution task failed: {err}")))
+				.flatten()
 		})
 	}
 

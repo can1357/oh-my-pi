@@ -10,8 +10,8 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import type { ModelKind, ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
+import { getEffectiveTokenCost, getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
 import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
 import { Input } from "../components/input";
@@ -37,7 +37,15 @@ import {
 } from "../keybinding-matchers";
 import { MenuSelection } from "../components/menu-selection";
 import { clampScrollOffset, scrollOffsetForRow } from "../components/scroll-viewport";
-import type { TspPickerColumn, TspPickerGroup, TspPickerItem, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type {
+	TspPickerColumn,
+	TspPickerGroup,
+	TspPickerItem,
+	TspPickerMark,
+	TspPickerProps,
+	TspSpan,
+	TspText,
+} from "@oh-my-pi/pi-wire";
 import { col, md, node, row, span, text } from "../native/describe";
 import { pickerFuzzyHits } from "../native/picker";
 import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
@@ -56,6 +64,7 @@ export type ModelRole =
 	| "memory"
 	| "task"
 	| "advisor"
+	| "widget"
 	| "image"
 	| "web"
 	| "speech"
@@ -72,6 +81,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"memory",
 	"task",
 	"advisor",
+	"widget",
 	"image",
 	"web",
 	"speech",
@@ -89,6 +99,7 @@ export const CHAT_MODEL_ROLE_IDS: ModelRole[] = [
 	"memory",
 	"task",
 	"advisor",
+	"widget",
 ];
 export const KIND_ROLE_IDS: ModelRole[] = ["image", "web", "speech", "dictation", "judge"];
 
@@ -122,6 +133,18 @@ export interface ResolvedModelRoleValue {
 	warning?: string;
 }
 
+/** Where auto-compaction triggers for one model, as the model hub's preview shows it (edited from the Roles view). */
+export interface ModelCompactionPoint {
+	/** Context tokens that trigger auto-compaction; undefined when auto-compaction is off or the window is unknown. */
+	tokens: number | undefined;
+	/** Why it triggers there, in a few words: `fixed`, `85% of 400K base`, `80% of window`. */
+	basis?: string;
+	/** What sets it: the matching `compaction.modelThresholds` key, `global`, or `default`. */
+	source: string;
+	/** The model's own exact entry as editable text (`90k`, `80%`); absent when it has none. */
+	draft?: string;
+}
+
 /** Host-provided preferences and model-role resolution for the browser. */
 export interface ModelBrowserSource extends ModelRoleLookup {
 	/**
@@ -143,6 +166,8 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	getRoleInfo(role: string): ModelBrowserRoleInfo;
 	defaultRoleChain(role: string): string[];
 	resolveRoleValue(value: string | undefined, models: Model[], roleLookup?: ModelRoleLookup): ResolvedModelRoleValue;
+	/** Auto-compaction point for `model`; absent hosts show no compaction row in the preview. */
+	compactionPointFor?(model: Model): ModelCompactionPoint | undefined;
 }
 
 /** Read-only catalog surface consumed by model browsers. */
@@ -247,6 +272,22 @@ export function resolveRoleAssignments(
 	}
 
 	return roles;
+}
+
+/**
+ * Role-resolution pool for a `--models`/`enabledModels` scope: the scoped
+ * models plus every available non-chat runner (judge, search, image, …). The
+ * scope only filters chat models (it feeds Ctrl+P cycling) and runtime role
+ * resolution ignores it for other kinds, so displayed role assignments must too.
+ * Shared by the /models hub and the session picker.
+ */
+export function scopedRolePool(scoped: ReadonlyArray<Model>, registry: ModelBrowserRegistry): Model[] {
+	const pool = [...scoped];
+	for (const model of registry.getAvailable("all")) {
+		if (modelKind(model) === "chat" || scoped.some(entry => modelsAreEqual(entry, model))) continue;
+		pool.push(model);
+	}
+	return pool;
 }
 
 /** Wrap raw models into browser items. */
@@ -373,8 +414,16 @@ export interface SessionModelScope {
 
 /** Catalog inputs a {@link SessionModelScope} is derived from. */
 interface SessionModelScopeInputs {
+	/** Chat models listed as picker rows. */
 	models: ReadonlyArray<Model>;
+	/** Catalog that configured role values resolve against. */
 	allModels: ReadonlyArray<Model>;
+	/**
+	 * Available models of every kind that unconfigured roles auto-select from,
+	 * as at runtime; a chat-only pool would pin `judge` on a chat model while
+	 * the session judges with an available native judge.
+	 */
+	roleModels: ReadonlyArray<Model>;
 	error: string | undefined;
 }
 
@@ -382,21 +431,32 @@ function readSessionModelScopeInputs(
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
 ): SessionModelScopeInputs {
-	if (scopedModels.length > 0) return { models: scopedModels, allModels: scopedModels, error: undefined };
+	if (scopedModels.length > 0) {
+		let roleModels: ReadonlyArray<Model>;
+		let error: string | undefined;
+		try {
+			roleModels = scopedRolePool(scopedModels, registry);
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : String(cause);
+			roleModels = scopedModels;
+		}
+		return { models: scopedModels, allModels: roleModels, roleModels, error };
+	}
 	const loadError = registry.getError();
 	let error = loadError ? String(loadError) : undefined;
-	let models: ReadonlyArray<Model>;
+	let roleModels: ReadonlyArray<Model>;
 	try {
-		models = registry.getAvailable();
+		roleModels = registry.getAvailable("all");
 	} catch (cause) {
 		error = cause instanceof Error ? cause.message : String(cause);
-		models = [];
+		roleModels = [];
 	}
-	return { models, allModels: registry.getAll("all"), error };
+	const models = roleModels.filter(model => modelKind(model) === "chat");
+	return { models, allModels: registry.getAll("all"), roleModels, error };
 }
 
 function scopeFromInputs(settings: ModelBrowserSource, inputs: SessionModelScopeInputs): SessionModelScope {
-	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.models);
+	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.roleModels);
 	const mruOrder = settings.mruOrder;
 	const items = buildBrowserItems(inputs.models);
 	sortModelItems(items, { roles, mruOrder });
@@ -441,6 +501,7 @@ export class SessionModelScopeCache {
 			inputs.error === cachedInputs.error &&
 			sameItems(inputs.models, cachedInputs.models) &&
 			sameItems(inputs.allModels, cachedInputs.allModels) &&
+			sameItems(inputs.roleModels, cachedInputs.roleModels) &&
 			sameItems(this.#settings.mruOrder, cached.mruOrder)
 		) {
 			return cached;
@@ -685,7 +746,7 @@ function declaredPricingStatus(model: Model): Exclude<ModelPricingStatus, "fixed
 function isFreeModel(model: Model): boolean {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return declared === "free";
-	const cost = model.cost;
+	const cost = model.cost ? getEffectiveTokenCost(model.cost) : undefined;
 	const credits = model.factoryDroidCredits;
 	return (!cost || (cost.input === 0 && cost.output === 0)) && (credits === undefined || credits === 0);
 }
@@ -709,7 +770,8 @@ function withCreditBadge(model: Model, price: string): string {
 	const credits = model.factoryDroidCredits;
 	if (credits === undefined) return price;
 	const badge = `${formatCostLeg(credits)}×`;
-	return model.cost.input !== 0 || model.cost.output !== 0 ? `${price} ${badge}` : badge;
+	const cost = getEffectiveTokenCost(model.cost);
+	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
 
 const PRICING_STATUS_LABELS: Record<Exclude<ModelPricingStatus, "fixed">, { short: string; detail: string }> = {
@@ -724,7 +786,8 @@ function formatCostPair(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	return withCreditBadge(model, `$${formatCostLeg(model.cost.input)}/${formatCostLeg(model.cost.output)}`);
+	const cost = getEffectiveTokenCost(model.cost);
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}/${formatCostLeg(cost.output)}`);
 }
 
 /** Detail-pane price fact: `$3/15 per M`, or the declared pricing state in words. */
@@ -746,17 +809,32 @@ function pickerPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	return withCreditBadge(model, `$${formatCostLeg(model.cost.input)}·${formatCostLeg(model.cost.output)}`);
+	const cost = getEffectiveTokenCost(model.cost);
+	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`);
 }
 
 /** `$2 in · $10 out · $0.2 cache` for a model preview. */
 function previewPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].detail;
-	const cost = model.cost;
+	const cost = getEffectiveTokenCost(model.cost);
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
 	return withCreditBadge(model, parts.join(" · "));
+}
+
+/**
+ * A provider's picker mark: the terminal's logo for it, else its initials
+ * (`amazon-bedrock` → `AB`, `anthropic` → `An`) on its own gradient.
+ */
+export function providerMark(providerId: string): TspPickerMark {
+	const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
+	const word = words[0] ?? providerId;
+	const text =
+		words.length >= 2
+			? `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase()
+			: `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
+	return { text, seed: providerId, icon: `provider:${providerId}` };
 }
 
 /** The omp theme token of a thinking level's dot (`thinkingHigh`); none for inherit and auto. */
@@ -840,6 +918,22 @@ export interface ModelPickerCatalogue {
 	readonly itemsAdd?: readonly TspPickerItem[];
 	readonly itemsDel?: readonly string[];
 }
+
+/** The search, fact-column and row props every model `picker` sheet sends ({@link ModelBrowser.pickerRows}). */
+export type ModelPickerRows = Pick<
+	TspPickerProps,
+	| "query"
+	| "cursor"
+	| "columns"
+	| "items"
+	| "itemsAdd"
+	| "itemsDel"
+	| "order"
+	| "hits"
+	| "selected"
+	| "current"
+	| "total"
+>;
 
 /** How {@link ModelBrowser.pickerOrder} heads its rows. */
 export interface ModelPickerGrouping {
@@ -1857,6 +1951,26 @@ export class ModelBrowser implements Component {
 	}
 
 	/**
+	 * A model picker's search field, fact columns and rows: `catalogue` (from
+	 * {@link pickerItems}) in `view` order (from {@link pickerOrder}), the
+	 * selection, and `current` checked. Memoize hosts on its inputs plus
+	 * {@link query}, {@link cursor} and {@link pickerSelected}.
+	 */
+	pickerRows(catalogue: ModelPickerCatalogue, view: ModelPickerOrder, current: string | undefined): ModelPickerRows {
+		return {
+			query: this.query,
+			cursor: this.cursor,
+			columns: MODEL_PICKER_COLUMNS,
+			...catalogue,
+			order: view.order,
+			...(view.hits ? { hits: view.hits } : {}),
+			selected: this.pickerSelected,
+			...(current ? { current: [current] } : {}),
+			total: this.baseCount,
+		};
+	}
+
+	/**
 	 * Picker rows for `catalogue`: the same object while the catalogue, roles
 	 * and row inputs are unchanged, so typing and scope hops never resend it.
 	 * A rebuilt catalogue that differs in a few rows (a provider refresh, a
@@ -1949,6 +2063,7 @@ export class ModelBrowser implements Component {
 		const value: TspPickerItem = {
 			id: item.selector,
 			label: quickRole ? item.id : item.selector,
+			mark: providerMark(item.model.provider),
 			mono: true,
 			...(quickRole ? { detail: `${item.model.provider}/${item.model.id}` } : {}),
 			facts,
@@ -2061,7 +2176,7 @@ export class ModelBrowser implements Component {
 	pickerPreview(mode: "full" | "compact", current?: string): readonly NativeChild[] {
 		const selected = this.getSelected();
 		const item = selected && !this.#isDisabled(selected) ? selected : undefined;
-		const key = `${mode}\0${current ?? ""}`;
+		const key = `${mode}\0${current ?? ""}\0${this.#settings.revision}`;
 		const memo = this.#pickerPreview;
 		if (
 			memo !== undefined &&
@@ -2155,6 +2270,17 @@ export class ModelBrowser implements Component {
 			if (v) facts.push({ k: [span(k, "muted")], v: [span(v, "mono")] });
 		};
 		fact("Context", ctx > 0 ? ctx.toLocaleString("en-US") : undefined);
+		const compaction = this.#settings.compactionPointFor?.(model);
+		if (compaction) {
+			const value =
+				compaction.tokens === undefined
+					? "off"
+					: `${compaction.tokens.toLocaleString("en-US")}${compaction.basis !== undefined ? ` · ${compaction.basis}` : ""}`;
+			facts.push({
+				k: [span("Compacts at", "muted")],
+				v: [span(value, "mono"), span(` · ${compaction.source}`, "dim")],
+			});
+		}
 		fact("Max output", out > 0 ? out.toLocaleString("en-US") : undefined);
 		fact("Price", isFreeModel(model) ? "free" : `${previewPrice(model)} per M`);
 		fact("Speed", speed.length > 0 ? speed.join(" · ") : undefined);

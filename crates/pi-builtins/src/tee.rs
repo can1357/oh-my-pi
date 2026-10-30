@@ -1,6 +1,6 @@
 //! `tee` builtin: copy standard input to standard output and each named file.
 //!
-//! Ported from uutils coreutils 0.8.0. The standalone utility manipulates
+//! A standalone `tee` manipulates
 //! process-global signal disposition for `-i` and SIGPIPE. An in-process builtin
 //! cannot do that safely: `-i` is accepted without changing the shell's signal
 //! policy. Default mode relies on [`crate::host::Sigpipe`]; `-p` and every
@@ -74,8 +74,7 @@ impl Utility for Tee {
 		let files = self
 			.matches
 			.get_many::<OsString>(options::FILE)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let options = Options {
 			append: self.matches.get_flag(options::APPEND),
 			files,

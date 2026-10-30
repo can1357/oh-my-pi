@@ -26,6 +26,8 @@ class FakeBackend implements SessionStorageBackend {
 	failAppends = 0;
 	/** Reject the next N whole-file publishes with a transient failure. */
 	failWrites = 0;
+	holdNextWrite: PromiseWithResolvers<void> | undefined;
+	readonly writeHeld = Promise.withResolvers<void>();
 	#mtime = 1;
 
 	async init(): Promise<void> {}
@@ -68,6 +70,12 @@ class FakeBackend implements SessionStorageBackend {
 		if (this.failWrites > 0) {
 			this.failWrites -= 1;
 			throw new Error("transient backend write failure");
+		}
+		const hold = this.holdNextWrite;
+		if (hold) {
+			this.holdNextWrite = undefined;
+			this.writeHeld.resolve();
+			await hold.promise;
 		}
 		const current = this.files.get(path) ?? null;
 		const actualSize = current === null ? null : Buffer.byteLength(current, "utf8");
@@ -328,5 +336,42 @@ describe("SessionManager + indexed backend durability", () => {
 		const body = backend.files.get(sessionFile) ?? "";
 		expect(body).toContain("first turn");
 		expect(body).toContain("second turn");
+	});
+
+	// The size-check conflict after pruning is covered against the real backend in
+	// sql-session-storage-manager.test.ts.
+	it("recovers IndexedSessionStorage after a rejected deferred publish", async () => {
+		const { backend, storage, manager } = await makeManager();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("expected a session file");
+
+		manager.appendMessage(assistantMessage("seed reply"));
+		manager.appendMessage({ role: "user", content: "before rewrite", timestamp: Date.now() });
+		await manager.flush();
+		await storage.drain();
+
+		const hold = Promise.withResolvers<void>();
+		backend.holdNextWrite = hold;
+		const rewritePublished = manager.rewriteEntries();
+		await backend.writeHeld.promise;
+		backend.failWrites = 1;
+		manager.appendMessage({ role: "user", content: "fenced append", timestamp: Date.now() });
+		manager.appendMessage({ role: "user", content: "after fenced append", timestamp: Date.now() });
+		hold.resolve();
+		await rewritePublished.catch(() => {});
+		await manager.flush().catch(() => {});
+		await storage.drain().catch(() => {});
+
+		manager.appendMessage({ role: "user", content: "later turn 1", timestamp: Date.now() });
+		manager.appendMessage({ role: "user", content: "later turn 2", timestamp: Date.now() });
+		await manager.flush().catch(() => {});
+		await storage.drain().catch(() => {});
+
+		const body = backend.files.get(sessionFile) ?? "";
+		for (const turn of ["fenced append", "after fenced append", "later turn 1", "later turn 2"]) {
+			expect(body).toContain(turn);
+		}
+		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
+		await manager.close();
 	});
 });

@@ -114,6 +114,8 @@ export interface BinaryFetchSuccess {
 	ok: true;
 	buffer: Uint8Array;
 	contentDisposition?: string;
+	/** Full Content-Type header, including charset, when the server supplies one. */
+	contentType?: string;
 }
 
 export type BinaryFetchResult = BinaryFetchSuccess | { ok: false; error?: string };
@@ -209,7 +211,12 @@ export async function fetchBinary(url: string, timeout: number = 20, signal?: Ab
 			}
 		}
 		const buffer = await readResponseWithLimit(response, MAX_BYTES, requestSignal, expectedBytes);
-		return { ok: true, buffer, contentDisposition };
+		return {
+			ok: true,
+			buffer,
+			contentDisposition,
+			contentType: response.headers.get("content-type") || undefined,
+		};
 	} catch (err) {
 		if (signal?.aborted) throw new ToolAbortError();
 		if (requestSignal?.aborted) return { ok: false, error: "aborted" };

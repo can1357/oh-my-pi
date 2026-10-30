@@ -1,8 +1,8 @@
 //! Git output filters.
 
-use std::fmt::Write as _;
+use std::fmt::{NumBuffer, Write as _};
 
-use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
+use crate::minimizer::{MinimizerCtx, MinimizerOutput, engine, primitives};
 
 #[must_use]
 pub fn supports(subcommand: Option<&str>) -> bool {
@@ -35,6 +35,17 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 
 #[must_use]
 pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerOutput {
+	filter_for(ctx, ctx.program, input, exit_code)
+}
+
+/// [`filter`] for a wrapper (`gt`) that delegates to git: `overlay_program` is
+/// the command the engine resolves its overlay pipeline for.
+pub(crate) fn filter_for(
+	ctx: &MinimizerCtx<'_>,
+	overlay_program: &str,
+	input: &str,
+	exit_code: i32,
+) -> MinimizerOutput {
 	if is_show_path_content(ctx.command) || is_stash_patch(ctx.command) {
 		return MinimizerOutput::passthrough(input);
 	}
@@ -43,20 +54,27 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	let text = match ctx.subcommand {
 		Some("status") if is_status_machine_format(ctx.command) => cleaned,
 		Some("status") => condense_status(&cleaned),
+		// Word diffs carry no per-line `+`/`-` prefix, so they cannot be counted.
+		Some("diff" | "show") if prints_word_patch(ctx.command) => cleaned,
 		Some("diff") if has_token(ctx.command, "--summary") => cleaned,
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
-		Some("diff") => {
-			if exit_code == 0 {
-				if let Some(mode) = diff_listing_mode(ctx.command) {
-					compact_diff_listing(&cleaned, mode)
-				} else {
-					compact_diff_output(&cleaned)
-				}
-			} else {
-				compact_diff_output(&cleaned)
-			}
+		Some("diff")
+			if diff_listing_mode(ctx.command).is_none()
+				&& keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) =>
+		{
+			cleaned
 		},
+		Some("diff")
+			if exit_code == 0
+				&& let Some(mode) = diff_listing_mode(ctx.command) =>
+		{
+			compact_diff_listing(&cleaned, mode)
+		},
+		Some("diff") => compact_diff_output(&cleaned),
 		Some("show") if is_show_custom_format(ctx.command) => cleaned,
+		Some("show") if keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) => {
+			cleaned
+		},
 		Some("show") => condense_show(&cleaned),
 		Some("log") if is_log_custom_format(ctx.command) => cleaned,
 		Some("log") => condense_log(&cleaned, 32, 16),
@@ -97,6 +115,28 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	} else {
 		MinimizerOutput::transformed(text, input.len())
 	}
+}
+
+/// A patch the agent asked for comes back whole up to
+/// [`primitives::WHOLE_OUTPUT_BYTES`], unless the pipeline overlaid on
+/// `overlay_program`'s output drops lines (`defs/yadm.toml` caps yadm at 80):
+/// that would cut the patch partway through its first file, where the summary
+/// keeps the stat.
+pub(crate) fn keeps_patch_whole(
+	ctx: &MinimizerCtx<'_>,
+	overlay_program: &str,
+	input: &str,
+	patch: &str,
+	exit_code: i32,
+) -> bool {
+	patch.len() <= primitives::WHOLE_OUTPUT_BYTES
+		&& !engine::overlay_caps_lines(
+			ctx.config,
+			overlay_program,
+			ctx.subcommand,
+			exit_code,
+			input.len(),
+		)
 }
 
 fn is_show_path_content(command: &str) -> bool {
@@ -144,6 +184,43 @@ fn is_stat_format(command: &str) -> bool {
 	command
 		.split_whitespace()
 		.any(|part| part == "--stat" || part.starts_with("--stat="))
+}
+
+/// The last word-diff option wins: `--word-diff=none` turns it off again, and
+/// `--word-diff-regex` and `--color-words` turn it on (git-diff(1)).
+fn is_word_diff(command: &str) -> bool {
+	command
+		.split_whitespace()
+		.fold(false, |on, part| match part {
+			"--word-diff=none" => false,
+			"--word-diff" | "--word-diff-regex" | "--color-words" => true,
+			_ if part.starts_with("--word-diff=")
+				|| part.starts_with("--word-diff-regex=")
+				|| part.starts_with("--color-words=") =>
+			{
+				true
+			},
+			_ => on,
+		})
+}
+
+/// Whether the output holds a word-diff patch: word diff is on, and either a
+/// patch is asked for or no stat or listing option replaces it.
+fn prints_word_patch(command: &str) -> bool {
+	if !is_word_diff(command) {
+		return false;
+	}
+	let parts = || command.split_whitespace();
+	if parts().any(|part| matches!(part, "-p" | "-u" | "--patch")) {
+		return true;
+	}
+	let replaces_patch = is_stat_format(command)
+		|| diff_listing_mode(command).is_some()
+		|| parts().any(|part| {
+			matches!(part, "--shortstat" | "--raw" | "--no-patch" | "-s")
+				|| part.starts_with("--dirstat")
+		});
+	!replaces_patch
 }
 
 #[derive(Clone, Copy)]
@@ -487,14 +564,14 @@ fn format_status_summary(summary: &StatusSummary) -> String {
 		return out;
 	}
 	out.push_str("staged ");
-	out.push_str(&summary.staged.to_string());
+	out.push_str(summary.staged.format_into(&mut NumBuffer::new()));
 	out.push_str(", unstaged ");
-	out.push_str(&summary.unstaged.to_string());
+	out.push_str(summary.unstaged.format_into(&mut NumBuffer::new()));
 	out.push_str(", untracked ");
-	out.push_str(&summary.untracked.to_string());
+	out.push_str(summary.untracked.format_into(&mut NumBuffer::new()));
 	if summary.conflicts > 0 {
 		out.push_str(", conflicts ");
-		out.push_str(&summary.conflicts.to_string());
+		out.push_str(summary.conflicts.format_into(&mut NumBuffer::new()));
 	}
 	out.push('\n');
 	for path in summary.paths.iter().take(40) {
@@ -848,7 +925,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if local.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(local.len() - 24).to_string());
+			out.push_str((local.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -858,7 +935,7 @@ fn condense_branch(input: &str) -> String {
 		.collect::<Vec<_>>();
 	if !remote_only.is_empty() {
 		out.push_str("remote-only (");
-		out.push_str(&remote_only.len().to_string());
+		out.push_str(remote_only.len().format_into(&mut NumBuffer::new()));
 		out.push_str("):");
 		for branch in remote_only.iter().take(24) {
 			out.push(' ');
@@ -866,7 +943,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if remote_only.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(remote_only.len() - 24).to_string());
+			out.push_str((remote_only.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -913,7 +990,7 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 		let changed = file.added + file.removed;
 		out.push_str(&file.path);
 		out.push_str(" | ");
-		out.push_str(&changed.to_string());
+		out.push_str(changed.format_into(&mut NumBuffer::new()));
 		out.push(' ');
 		out.push_str(&diff_bar(file.added, file.removed));
 		out.push('\n');
@@ -923,9 +1000,9 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 	}
 	out.push_str(&format_file_count(files.len()));
 	out.push_str(" changed, ");
-	out.push_str(&total_added.to_string());
+	out.push_str(total_added.format_into(&mut NumBuffer::new()));
 	out.push_str(" insertions(+), ");
-	out.push_str(&total_removed.to_string());
+	out.push_str(total_removed.format_into(&mut NumBuffer::new()));
 	out.push_str(" deletions(-)\n\n--- Changes ---\n");
 
 	for file in files.iter().take(12) {
@@ -961,8 +1038,46 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 	let mut current: Option<DiffFile> = None;
 	let mut current_hunk: Option<DiffHunk> = None;
 	let mut pending_old_path: Option<String> = None;
+	// Old and new lines still owed by the current `@@ -a,b +c,d @@` header.
+	// While either is nonzero, a line is hunk content classified by its first
+	// byte, so a removed `-- comment` or added `++ item` (shown as `--- …` /
+	// `+++ …`) is not mistaken for a file header.
+	let mut hunk_old = 0usize;
+	let mut hunk_new = 0usize;
 
 	for line in input.lines() {
+		if hunk_old > 0 || hunk_new > 0 {
+			match line.as_bytes().first() {
+				Some(b'-') => {
+					hunk_old = hunk_old.saturating_sub(1);
+					if let Some(file) = current.as_mut() {
+						file.removed += 1;
+						push_diff_line(&mut current_hunk, line);
+					}
+					continue;
+				},
+				Some(b'+') => {
+					hunk_new = hunk_new.saturating_sub(1);
+					if let Some(file) = current.as_mut() {
+						file.added += 1;
+						push_diff_line(&mut current_hunk, line);
+					}
+					continue;
+				},
+				// Context; an empty line is context whose leading space was stripped.
+				Some(b' ') | None => {
+					hunk_old = hunk_old.saturating_sub(1);
+					hunk_new = hunk_new.saturating_sub(1);
+					continue;
+				},
+				Some(b'\\') => continue,
+				// Anything else means the counts overstated the hunk: leave it.
+				Some(_) => {
+					hunk_old = 0;
+					hunk_new = 0;
+				},
+			}
+		}
 		if let Some(path) = parse_diff_git_path(line) {
 			flush_hunk(&mut current, &mut current_hunk);
 			if let Some(file) = current.take() {
@@ -1012,6 +1127,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 		}
 		if line.starts_with("@@") {
 			flush_hunk(&mut current, &mut current_hunk);
+			(hunk_old, hunk_new) = parse_hunk_counts(line).unwrap_or((0, 0));
 			current_hunk = Some(DiffHunk { header: line.to_string(), lines: Vec::new() });
 			continue;
 		}
@@ -1046,6 +1162,23 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
 	let _old = parts.next()?;
 	let new = parts.next()?;
 	Some(new.strip_prefix("b/").map_or(new, |path| path).to_string())
+}
+
+/// Old and new line counts of a two-way `@@ -a[,b] +c[,d] @@` header; an
+/// omitted count is 1. Combined (`@@@`) and malformed headers yield `None`.
+fn parse_hunk_counts(line: &str) -> Option<(usize, usize)> {
+	let mut parts = line.strip_prefix("@@ ")?.split(' ');
+	let old = parts.next()?.strip_prefix('-')?;
+	let new = parts.next()?.strip_prefix('+')?;
+	if parts.next()? != "@@" {
+		return None;
+	}
+	let count = |range: &str| {
+		let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+		start.parse::<usize>().ok()?;
+		count.parse::<usize>().ok()
+	};
+	Some((count(old)?, count(new)?))
 }
 
 fn flush_hunk(file: &mut Option<DiffFile>, hunk: &mut Option<DiffHunk>) {
@@ -1378,7 +1511,7 @@ fn condense_fetch(input: &str, exit_code: i32) -> String {
 			out.push_str("ok fetched (up-to-date)\n");
 		} else {
 			out.push_str("ok fetched, ");
-			out.push_str(&updates.to_string());
+			out.push_str(updates.format_into(&mut NumBuffer::new()));
 			out.push_str(" update");
 			if updates != 1 {
 				out.push('s');
@@ -1587,6 +1720,12 @@ mod tests {
 		config: &'a MinimizerConfig,
 	) -> MinimizerCtx<'a> {
 		MinimizerCtx { program: "git", subcommand, command, config }
+	}
+
+	/// A trailing context line that takes a patch past
+	/// [`primitives::WHOLE_OUTPUT_BYTES`] without changing its stat.
+	fn past_whole_budget(patch: &str) -> String {
+		format!("{patch} {}\n", "x".repeat(primitives::WHOLE_OUTPUT_BYTES))
 	}
 
 	#[test]
@@ -1835,11 +1974,12 @@ mod tests {
 	fn show_condenses_commit_stat_and_diff_samples() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("show"), "git show HEAD", &cfg);
-		let input = "commit abcdef1234567890\nAuthor: Somebody\nDate: today\n\n    fix: update \
-		             thing\n\n    Keep useful body line.\n    Signed-off-by: Somebody \
-		             <s@example.com>\n\ndiff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ \
-		             b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
-		let out = filter(&ctx, input, 0);
+		let input = past_whole_budget(
+			"commit abcdef1234567890\nAuthor: Somebody\nDate: today\n\n    fix: update thing\n\n    \
+			 Keep useful body line.\n    Signed-off-by: Somebody <s@example.com>\n\ndiff --git \
+			 a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+		);
+		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("commit abcdef1"));
 		assert!(out.text.contains("fix: update thing"));
@@ -1849,6 +1989,38 @@ mod tests {
 		assert!(out.text.contains("--- Changes ---"));
 		assert!(out.text.contains("-old"));
 		assert!(out.text.contains("+new"));
+	}
+
+	#[test]
+	fn show_past_whole_budget_summarizes_a_small_patch() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("show"), "git show HEAD", &cfg);
+		// The commit message alone takes the output past the budget.
+		let input = format!(
+			"commit abcdef1234567890\nAuthor: Somebody\n\n    {}\n\ndiff --git a/src/lib.rs \
+			 b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+			"word ".repeat(primitives::WHOLE_OUTPUT_BYTES / 5)
+		);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.text.contains("--- Changes ---"), "{}", out.text);
+		assert!(out.text.contains("src/lib.rs | 2"), "{}", out.text);
+	}
+
+	#[test]
+	fn show_within_whole_budget_is_returned_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("show"), "git show HEAD", &cfg);
+		let mut input = String::from(
+			"commit abcdef1234567890\nAuthor: Somebody\nDate: today\n\n    fix: update thing\n\n    \
+			 Signed-off-by: Somebody <s@example.com>\n\ndiff --git a/src/lib.rs b/src/lib.rs\n--- \
+			 a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,30 +1,30 @@\n",
+		);
+		for i in 0..30 {
+			let _ = writeln!(input, " context {i}\n-old {i}\n+new {i}");
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(!out.changed, "{}", out.text);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]
@@ -1979,15 +2151,130 @@ mod tests {
 	}
 
 	#[test]
+	fn diff_hunk_lines_starting_with_header_prefixes_stay_in_their_hunk() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff", &cfg);
+		// A removed `-- old comment` and an added `++ new heading` print as
+		// `--- …` / `+++ …` inside the hunk; the long context line keeps the
+		// input past the minimizer's small-output passthrough.
+		let input = format!(
+			"diff --git a/q.sql b/q.sql\nindex 1..2 100644\n--- a/q.sql\n+++ b/q.sql\n@@ -1,3 +1,3 \
+			 @@\n {}\n--- old comment\n+++ new heading\n-select 1;\n+select 2;\ndiff --git a/r.sql \
+			 b/r.sql\nindex 3..4 100644\n--- a/r.sql\n+++ b/r.sql\n@@ -1 +1 @@\n-old\n+new\n",
+			"x".repeat(17 * 1024)
+		);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed);
+		assert!(out.text.contains("q.sql | 4 "), "{}", out.text);
+		assert!(out.text.contains("r.sql | 2 "), "{}", out.text);
+		assert!(
+			out.text
+				.contains("2 files changed, 3 insertions(+), 3 deletions(-)"),
+			"{}",
+			out.text
+		);
+		assert!(!out.text.contains("new heading |"), "{}", out.text);
+		for line in ["  --- old comment", "  +++ new heading", "  -select 1;", "  +select 2;"] {
+			assert!(out.text.contains(line), "missing {line:?} in {}", out.text);
+		}
+	}
+
+	#[test]
+	fn diff_counts_a_removed_markdown_rule() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff", &cfg);
+		let input = format!(
+			"diff --git a/doc.md b/doc.md\nindex 1..2 100644\n--- a/doc.md\n+++ b/doc.md\n@@ -1,3 \
+			 +1,2 @@\n {}\n----\n text\n",
+			"x".repeat(17 * 1024)
+		);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed, "{}", out.text);
+		assert!(out.text.contains("doc.md | 1 -"), "{}", out.text);
+		assert!(
+			out.text
+				.contains("1 file changed, 0 insertions(+), 1 deletions(-)"),
+			"{}",
+			out.text
+		);
+		assert!(out.text.contains("  ----\n"), "{}", out.text);
+	}
+
+	#[test]
+	fn word_diffs_are_not_summarized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// Color mode puts a line's old and new words on one line, so a changed
+		// Markdown rule starts `---` with no unified-diff prefix. The hunk
+		// header's section text keeps the input past the small-output
+		// passthrough.
+		let input = format!(
+			"diff --git a/doc.md b/doc.md\nindex 1..2 100644\n--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 \
+			 @@ {}\n\x1b[31m---old\x1b[m\x1b[32m+++new\x1b[m\n",
+			"x".repeat(17 * 1024)
+		);
+		let cleaned = primitives::strip_ansi(&input);
+		for command in [
+			"git diff --color-words",
+			"git diff --word-diff=color",
+			"git diff --word-diff-regex=.",
+			"git show --word-diff HEAD",
+		] {
+			let subcommand = command.split_whitespace().nth(1);
+			let ctx = test_ctx(subcommand, command, &cfg);
+			let out = filter(&ctx, &input, 0);
+			assert_eq!(out.text, cleaned, "{command}");
+		}
+	}
+
+	#[test]
+	fn word_diff_with_a_stat_or_listing_is_still_condensed() {
+		assert!(!prints_word_patch("git diff --word-diff --stat"));
+		assert!(!prints_word_patch("git diff --color-words --name-only"));
+		assert!(!prints_word_patch("git show --word-diff --shortstat HEAD"));
+		assert!(prints_word_patch("git diff --word-diff --stat -p"));
+		assert!(prints_word_patch("git show --color-words HEAD"));
+
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff --word-diff --name-only", &cfg);
+		let mut input = String::new();
+		for idx in 0..40 {
+			let _ = writeln!(input, "src/file{idx}.rs");
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed, "{}", out.text);
+		assert!(!out.text.contains("src/file39.rs"), "{}", out.text);
+	}
+
+	#[test]
+	fn word_diff_none_turns_word_diff_off_again() {
+		assert!(!is_word_diff("git diff --word-diff=none"));
+		assert!(!is_word_diff("git diff --color-words --word-diff=none"));
+		assert!(is_word_diff("git diff --word-diff=none --word-diff-regex=."));
+		assert!(is_word_diff("git show --word-diff=plain HEAD"));
+		assert!(!is_word_diff("git diff --stat"));
+	}
+
+	#[test]
+	fn hunk_counts_default_to_one_and_skip_combined_headers() {
+		assert_eq!(parse_hunk_counts("@@ -3,4 +3,5 @@ fn main() {"), Some((4, 5)));
+		assert_eq!(parse_hunk_counts("@@ -1 +1 @@"), Some((1, 1)));
+		assert_eq!(parse_hunk_counts("@@ -0,0 +1,2 @@"), Some((0, 2)));
+		assert_eq!(parse_hunk_counts("@@@ -1,2 -1,2 +1,3 @@@"), None);
+		assert_eq!(parse_hunk_counts("@@ -oops,2 +1,2 @@"), None);
+		assert_eq!(parse_hunk_counts("@@ -,1 +,1 @@"), None);
+	}
+
+	#[test]
 	fn diff_condenses_unified_patch_to_stat_and_hunk_samples() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff HEAD~1", &cfg);
-		let input = "diff --git a/index.html b/index.html\nindex 1b7488b..0ebac4f 100644\n--- \
-		             a/index.html\n+++ b/index.html\n@@ -629,7 +629,7 @@\n       width: 100%;\n-      \
-		             min-width: 800px;\n+      min-width: 1050px;\n@@ -1051,6 +1051,4 @@\n+    /* \
-		             === Share My Gain === */\n+    .share-gain { background: var(--bg); \
-		             }\n-old\n+new\n";
-		let out = filter(&ctx, input, 0);
+		let input = past_whole_budget(
+			"diff --git a/index.html b/index.html\nindex 1b7488b..0ebac4f 100644\n--- \
+			 a/index.html\n+++ b/index.html\n@@ -629,7 +629,7 @@\n       width: 100%;\n-      \
+			 min-width: 800px;\n+      min-width: 1050px;\n@@ -1051,6 +1051,4 @@\n+    /* === Share \
+			 My Gain === */\n+    .share-gain { background: var(--bg); }\n-old\n+new\n",
+		);
+		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("index.html | 6 "), "{}", out.text);
 		assert!(
@@ -1998,6 +2285,22 @@ mod tests {
 		assert!(out.text.contains("@@ -629,7 +629,7 @@"));
 		assert!(out.text.contains("-      min-width: 800px;"));
 		assert!(out.text.contains("+      min-width: 1050px;"));
+	}
+
+	#[test]
+	fn diff_within_whole_budget_is_returned_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff HEAD~1", &cfg);
+		let mut input = String::from(
+			"diff --git a/src/lib.rs b/src/lib.rs\nindex 1b7488b..0ebac4f 100644\n--- \
+			 a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,30 +1,30 @@\n",
+		);
+		for i in 0..30 {
+			let _ = writeln!(input, " context {i}\n-old {i}\n+new {i}");
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(!out.changed, "{}", out.text);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]

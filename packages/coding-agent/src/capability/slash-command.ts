@@ -22,6 +22,8 @@ export interface SlashCommand {
 	description?: string;
 	/** Already-parsed argument hint (`argumentHint` or `argument-hint`). */
 	argumentHint?: string;
+	/** Already-parsed `side: true` frontmatter (literal boolean only), when discovery stripped it from `content`. */
+	side?: boolean;
 	/** Source metadata */
 	_source: SourceMeta;
 }

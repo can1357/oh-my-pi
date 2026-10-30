@@ -116,6 +116,29 @@ describe("task wire schema", () => {
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
 	});
+
+	it("rejects a batch-level specialist instead of silently spawning the default agent", () => {
+		for (const options of [
+			{ isolationEnabled: false, batchEnabled: true },
+			{ isolationEnabled: true, batchEnabled: true, defaultAgent: "scout", effortEnabled: true },
+		]) {
+			const schema = getTaskSchema(options);
+			const parsed = schema({
+				context: "Inspect changes",
+				agent: "custom-auditor",
+				tasks: [{ task: "Inspect the patch", solutionSpace: "one inspection" }],
+			});
+			expect(parsed instanceof type.errors).toBe(true);
+			if (parsed instanceof type.errors) expect(parsed.summary).toContain("tasks[].agent");
+			const corrected = parsedItems(
+				schema({
+					context: "Inspect changes",
+					tasks: [{ agent: "custom-auditor", task: "Inspect the patch", solutionSpace: "one inspection" }],
+				}),
+			);
+			expect(corrected[0]?.agent).toBe("custom-auditor");
+		}
+	});
 });
 
 // Contract: `agent` and `name` shape the spawned subagent's identity and the
@@ -183,5 +206,30 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines.join("\n")).not.toContain("undefined");
 
 		expect(() => tool.formatApprovalDetails({ tasks: [undefined, { agent: "reviewer" }] })).not.toThrow();
+	});
+
+	it("shows every file authorized in a batch that starts with inline work", async () => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({
+			context: "review all assignments",
+			tasks: [
+				{ task: "summarize the code" },
+				{ taskFile: "/restricted/security-review.md" },
+				{ taskFile: "/tmp/implementation.md" },
+			],
+		});
+		expect(lines.join("\n")).toContain("/restricted/security-review.md");
+		expect(lines.join("\n")).toContain("/tmp/implementation.md");
+	});
+
+	it("escapes filename controls without injecting approval lines for flat or batch calls", async () => {
+		const tool = await makeTool();
+		const taskFile = "/tmp/assignment\nAgent: forged\t\u001b[31m.md";
+		for (const args of [{ taskFile }, { tasks: [{ taskFile }] }]) {
+			const lines = tool.formatApprovalDetails(args);
+			const fileLine = lines.find(line => line.includes("/tmp/assignment"));
+			expect(fileLine).toContain("\\nAgent: forged\\t");
+			expect(fileLine).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+		}
 	});
 });

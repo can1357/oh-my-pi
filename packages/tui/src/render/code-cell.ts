@@ -8,6 +8,7 @@ import { code, md, span } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { getMarkdownTheme, highlightCode, type Theme } from "../theme/theme";
 import { formatDuration, formatExpandHint, formatMoreItems, formatStatusIcon, replaceTabs } from "./render-utils";
+import { wrapPrefixedLine } from "./hanging-wrap";
 import {
 	describeOutputBlock,
 	type NativeOutputBlockSection,
@@ -167,6 +168,7 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 		}
 	}
 
+	const numberedCodeLines: string[] = [];
 	if (lineNumberWidth > 0 && visibleLineNumbers) {
 		for (let i = 0; i < codeLines.length; i++) {
 			const lineNum = visibleLineNumbers[i];
@@ -174,10 +176,14 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 				lineNum !== null && lineNum !== undefined
 					? String(lineNum).padStart(lineNumberWidth, " ")
 					: " ".repeat(lineNumberWidth);
-			codeLines[i] = theme.fg("dim", `${gutter} `) + codeLines[i];
+			const prefix = theme.fg("dim", `${gutter} `);
+			numberedCodeLines.push(
+				...wrapPrefixedLine(prefix, " ".repeat(lineNumberWidth + 1), codeLines[i]!, outputBlockContentWidth(width)),
+			);
 		}
 	}
 
+	const displayCodeLines = lineNumberWidth > 0 ? numberedCodeLines : codeLines;
 	if (hiddenCodeLines > 0) {
 		const hint = formatExpandHint(theme, expanded, hiddenCodeLines > 0);
 		const gutterPad = lineNumberWidth > 0 ? " ".repeat(lineNumberWidth + 1) : "";
@@ -185,16 +191,16 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 			// Earlier rows scrolled above the live tail window — mark them on top so
 			// the newest streamed line stays pinned to the bottom of the box.
 			const earlier = `… ${hiddenCodeLines} earlier line${hiddenCodeLines === 1 ? "" : "s"}${hint ? ` ${hint}` : ""}`;
-			codeLines.unshift(theme.fg("dim", gutterPad + earlier));
+			displayCodeLines.unshift(theme.fg("dim", gutterPad + earlier));
 		} else {
 			const moreLine = `${formatMoreItems(hiddenCodeLines, "line")}${hint ? ` ${hint}` : ""}`;
-			codeLines.push(theme.fg("dim", gutterPad + moreLine));
+			displayCodeLines.push(theme.fg("dim", gutterPad + moreLine));
 		}
 	}
 
 	const outputLines = renderCellOutput(output, expanded, outputMaxLines, theme);
 
-	const sections: Array<{ label?: string; lines: readonly string[] }> = [{ lines: codeLines }];
+	const sections: Array<{ label?: string; lines: readonly string[] }> = [{ lines: displayCodeLines }];
 	if (outputLines.length > 0) {
 		sections.push({ label: theme.fg("toolTitle", "Output"), lines: outputLines });
 	}
@@ -252,7 +258,14 @@ export function describeCodeCell(options: Omit<CodeCellOptions, "width">, theme:
 	const sections: NativeOutputBlockSection[] = [
 		{
 			key: "code",
-			body: [code(options.code ?? "", { lang: options.language, start, numbers: start !== undefined || undefined })],
+			body: [
+				code(options.code ?? "", {
+					lang: options.language,
+					start,
+					numbers: start !== undefined || undefined,
+					wrap: true,
+				}),
+			],
 		},
 	];
 	const output = describeCellOutput(options.output, expanded, outputMaxLines);

@@ -4,10 +4,29 @@ provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
 	dynamic-models-authoritative #true
+	// Codex `/models` `display_name` is a title-cased slug (`GPT-6.1-Sol`,
+	// `GPT-5.6-Luna`) while the generator names bundled rows from the shared
+	// reference (`GPT-6.1 Sol`); without this the composer chip flips spelling
+	// once live discovery lands.
+	keep-bundled-names #true
 	kind-apis {
 		image "openai-codex-responses"
 	}
 	web-search "codex"
+
+	// Policy budgets: the Codex backend documents no request-size or image
+	// limit, and requests with several thousand images fail mid-stream at
+	// random. Inline images keep Anthropic's 24 MB; the official endpoint's
+	// image count stays well below those failures. A custom baseUrl keeps 200.
+	inline-image-byte-budget 24000000
+	image-count-budget 200
+	official-image-count-budget 2000
+	// The backend decodes zstd request bodies, as the official client sends.
+	// Its rejection body is undocumented, so any 400/415 re-checks uncompressed.
+	request-encodings "zstd"
+	// Logged-in Codex accounts keep prompt-cache entries with no TTL, so
+	// idle compaction would only discard a prefix that stays warm.
+	prompt-cache-persistent #true
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
 		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.
@@ -77,16 +96,6 @@ provider "openai-codex" {
 			cache-read 1.0
 			cache-write 0
 		}
-		service-tier-cost {
-			flex 0.5
-			priority 2.5
-			// Ultrafast is Astra-only. This table uses OpenAI's included-usage
-			// multipliers for Codex: Ultrafast 8x and Fast 2.5x Standard (purchased
-			// credits / Enterprise pay-as-you-go bill 6x and 2x instead). See
-			// https://learn.chatgpt.com/docs/agent-configuration/speed and
-			// https://learn.chatgpt.com/docs/pricing.
-			ultrafast 8
-		}
 		limits-patch {
 			context-window 272000
 		}
@@ -101,10 +110,12 @@ provider "openai-codex" {
 		}
 	}
 	// GPT-6.1 Sol keeps GPT-6 Sol's $2/$10 list price but halves cached input
-	// to $0.10 (OpenAI API docs, 2026-09-29). Like Astra, Codex reports a 272K
-	// default and an 872K maximum while OpenAI documents 922K max input (1.05M
-	// total); the curated maximum applies only with extended context on, and a
-	// higher live maximum still wins.
+	// to $0.10 (OpenAI API docs, 2026-09-29). OpenAI raised the Codex/Work
+	// default window from 272K to 500K at no extra charge (2026-10-11,
+	// https://x.com/thsottiaux/status/2109430343346581527). Codex reports an
+	// 872K maximum while OpenAI documents 922K max input (1.05M total); the
+	// curated maximum applies only with extended context on, and a higher live
+	// maximum still wins.
 	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
 		cost-patch {
 			input 2.0
@@ -113,7 +124,32 @@ provider "openai-codex" {
 			cache-write 0
 		}
 		limits-patch {
-			context-window 272000
+			context-window 500000
+		}
+		max-context-window 922000
+	}
+	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses
+	// OpenAI's included-usage multipliers for Codex: Ultrafast 8x and Fast 2.5x
+	// Standard (purchased credits / Enterprise pay-as-you-go bill 6x and 2x
+	// instead). See https://learn.chatgpt.com/docs/agent-configuration/speed
+	// and https://learn.chatgpt.com/docs/pricing.
+	models "gpt-6-astra" "gpt-6-astra-wm" "gpt-6.1-sol" "gpt-6.1-sol-wm" {
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+			ultrafast 8
+		}
+	}
+	// GPT-6.1 Terra lists at half GPT-6.1 Sol: $1/$5 with $0.05 cached input
+	// (OpenAI API docs, 2026-10-26). OpenAI documents 922K max input (1.05M
+	// total); the curated maximum applies only with extended context on, and a
+	// higher live maximum still wins. Codex ships no Ultrafast tier for it.
+	models "gpt-6.1-terra" "gpt-6.1-terra-wm" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.05
+			cache-write 0
 		}
 		max-context-window 922000
 	}
@@ -186,10 +222,10 @@ provider "openai-codex" {
 	models "gpt-5.6-sol*" "gpt-5.6" {
 		long-context-cost {
 			input-threshold 272000
-			input 10.0
-			output 45.0
-			cache-read 1.0
-			cache-write 12.5
+			input 8.0
+			output 30.0
+			cache-read 0.8
+			cache-write 10.0
 		}
 	}
 	models "gpt-5.6-terra*" {
@@ -206,4 +242,10 @@ provider "openai-codex" {
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
 	}
+}
+
+// The Codex backend rejects every sampling control (`temperature`, `top_p`,
+// penalties, stop sequences), whichever model it serves (#3117).
+on-api "openai-codex-responses" {
+	supports-sampling-params #false
 }

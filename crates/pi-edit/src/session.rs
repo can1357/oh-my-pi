@@ -10,7 +10,9 @@ use async_trait::async_trait;
 
 use crate::{
 	diff_string::{CompactDiffOptions, build_compact_diff_preview},
-	engine::{EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, StagedFile},
+	engine::{
+		EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, Resolved, StagedFile,
+	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	notebook,
@@ -28,6 +30,10 @@ pub struct SessionConfig {
 	pub allow_fuzzy:        bool,
 	pub fuzzy_threshold:    f64,
 	pub enforce_seen_lines: bool,
+	/// Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+	/// tool cuts lines). Without recorded read provenance, hashline anchors on
+	/// longer lines are rejected because their display may have been cut.
+	pub max_columns:        usize,
 	/// The payload is not JSON (custom-format tool): the buffer is `input`.
 	pub raw_input:          bool,
 }
@@ -141,6 +147,7 @@ impl Session {
 			config.allow_fuzzy,
 			config.fuzzy_threshold,
 			config.enforce_seen_lines,
+			config.max_columns,
 		);
 		let files = FileCache::new(config.policy.clone());
 		Self {
@@ -211,6 +218,44 @@ impl Session {
 		self.generation += 1;
 	}
 
+	/// Drain authored paths that were missing on disk, with no recovery
+	/// answer yet, since the last call (deduped, first-seen order). Passes
+	/// treat them as not recovered; the host searches the working tree for a
+	/// unique suffix match, [`Self::provide_recovery`]s each answer, and
+	/// reruns the pass.
+	pub fn take_recovery_misses(&mut self) -> Vec<String> {
+		self.files.take_recovery_misses()
+	}
+
+	/// Record the host's recovery answer for the missing `authored` path
+	/// (`None`: no unique match) and make [`Self::preview_pending`] true.
+	/// Answers provided before the apply phase serve previews only.
+	pub fn provide_recovery(&mut self, authored: String, answer: Option<Resolved>) {
+		self.files.provide_recovery(authored, answer);
+		self.generation += 1;
+	}
+
+	/// Enter the apply phase (idempotent), stage the finished arguments in
+	/// memory without writing, and list the authored paths that were missing
+	/// on disk with no recovery answer, so the host can answer them before
+	/// [`Self::apply`] writes anything. Staging failures are left for
+	/// [`Self::apply`] to raise. Empty while the arguments are incomplete.
+	pub fn apply_recovery_misses(&mut self) -> Vec<String> {
+		self.begin_apply();
+		self.files.clear();
+		let snapshot = self.args.snapshot();
+		if !snapshot.complete {
+			return Vec::new();
+		}
+		// A probe: staging into the live store would record what a rejection
+		// reveals (unseen lines become seen, so the real apply passes the
+		// guard) and move clipboard registers.
+		let _ = self
+			.engine
+			.stage(&snapshot, &mut self.files, &self.store.fork());
+		self.files.take_recovery_misses()
+	}
+
 	/// Enter the apply phase (idempotent) and list the internal URL targets
 	/// the finished arguments name — section paths and move destinations,
 	/// deduped in payload order — so the host can answer them all in one
@@ -245,7 +290,7 @@ impl Session {
 	fn begin_apply(&mut self) {
 		if !self.applying {
 			self.applying = true;
-			self.files.forget_urls();
+			self.files.forget_answers();
 		}
 	}
 
@@ -492,29 +537,31 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 	if let Some(text) = &file.text_override {
 		return text.clone();
 	}
-	if file.op == FileOp::Delete {
-		return format!("Deleted {}", file.display);
-	}
-	let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
-	let preview = build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
-	let mut lines: Vec<&str> = vec![header];
-	lines.extend(file.before_preview.iter().map(String::as_str));
-	let moved = file
-		.move_to
-		.as_ref()
-		.map(|m| format!("Moved to {}", m.display));
-	if let Some(moved) = &moved {
-		lines.push(moved);
-	}
-	if !preview.is_empty() {
-		lines.push(&preview);
-	}
-	lines.extend(file.after_preview.iter().map(String::as_str));
-	let body = lines
-		.into_iter()
-		.filter(|line| !line.is_empty())
-		.collect::<Vec<_>>()
-		.join("\n");
+	let body = if file.op == FileOp::Delete {
+		format!("Deleted {}", file.display)
+	} else {
+		let preview_source = file.preview_diff.as_deref().unwrap_or(&file.diff);
+		let preview =
+			build_compact_diff_preview(preview_source, &CompactDiffOptions::default()).preview;
+		let mut lines: Vec<&str> = vec![header];
+		lines.extend(file.before_preview.iter().map(String::as_str));
+		let moved = file
+			.move_to
+			.as_ref()
+			.map(|m| format!("Moved to {}", m.display));
+		if let Some(moved) = &moved {
+			lines.push(moved);
+		}
+		if !preview.is_empty() {
+			lines.push(&preview);
+		}
+		lines.extend(file.after_preview.iter().map(String::as_str));
+		lines
+			.into_iter()
+			.filter(|line| !line.is_empty())
+			.collect::<Vec<_>>()
+			.join("\n")
+	};
 	let warnings: Vec<&str> = file
 		.warnings
 		.iter()
@@ -545,16 +592,8 @@ fn prune_snapshots(
 /// errors. Unknown languages never "parse", so they never regress.
 pub fn source_parses(code: &str, path: &str) -> bool {
 	let code = if code.is_empty() { "\n" } else { code };
-	pi_ast::summary::summarize_code(pi_ast::summary::SummaryOptions {
-		code:               code.to_owned(),
-		lang:               None,
-		path:               Some(path.to_owned()),
-		min_body_lines:     None,
-		min_comment_lines:  None,
-		unfold_until_lines: None,
-		unfold_limit_lines: None,
-	})
-	.is_ok_and(|summary| summary.parsed)
+	pi_ast::summary::parse_code_status(code, None, Some(path))
+		.is_ok_and(|language| language.is_some())
 }
 
 /// The persisted bytes differ from what was sent (an editor reformatted on
@@ -599,6 +638,78 @@ mod tests {
 		assert_eq!(strip_trailing_unbalanced_removal("+1|a\n-2|b\n-3|c"), "+1|a");
 		assert_eq!(strip_trailing_unbalanced_removal("-2|b"), "");
 		assert_eq!(strip_trailing_unbalanced_removal("-1|a\n+1|b\n 2|c"), "-1|a\n+1|b\n 2|c");
+	}
+
+	fn patch_session(root: &std::path::Path, input: &str) -> Session {
+		let config = SessionConfig {
+			mode:               EditMode::ApplyPatch,
+			policy:             PathPolicy {
+				cwd:                  root.to_owned(),
+				home_dir:             root.to_owned(),
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
+				plan_active:          false,
+				block_auto_generated: false,
+			},
+			allow_fuzzy:        true,
+			fuzzy_threshold:    0.95,
+			enforce_seen_lines: false,
+			max_columns:        0,
+			raw_input:          false,
+		};
+		let mut session = Session::new(config, EditStore::new());
+		session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+		session.finish();
+		session
+	}
+
+	#[test]
+	fn recovery_answer_feeds_the_rerun_preview() {
+		let tmp = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
+		std::fs::write(tmp.path().join("deep/src/a.ts"), "old\n").unwrap();
+		let mut session = patch_session(
+			tmp.path(),
+			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
+		);
+
+		let missed = session.preview();
+		assert!(missed.files[0].error.is_some(), "{missed:?}");
+		assert_eq!(session.take_recovery_misses(), ["src/a.ts"]);
+
+		session.provide_recovery(
+			"src/a.ts".to_owned(),
+			Some(Resolved {
+				absolute: tmp.path().join("deep/src/a.ts"),
+				display:  "deep/src/a.ts".to_owned(),
+			}),
+		);
+		assert!(session.preview_pending());
+		let recovered = session.preview();
+		assert_eq!(recovered.files[0].display, "deep/src/a.ts");
+		assert!(recovered.files[0].error.is_none(), "{recovered:?}");
+		assert!(session.take_recovery_misses().is_empty());
+	}
+
+	#[test]
+	fn apply_phase_lists_recovery_misses_and_forgets_preview_answers() {
+		let tmp = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
+		std::fs::write(tmp.path().join("deep/src/a.ts"), "old\n").unwrap();
+		let mut session = patch_session(
+			tmp.path(),
+			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
+		);
+		let answer = Resolved {
+			absolute: tmp.path().join("deep/src/a.ts"),
+			display:  "deep/src/a.ts".to_owned(),
+		};
+		session.provide_recovery("src/a.ts".to_owned(), Some(answer.clone()));
+
+		assert_eq!(session.apply_recovery_misses(), ["src/a.ts"]);
+		session.provide_recovery("src/a.ts".to_owned(), Some(answer));
+		assert!(session.apply_recovery_misses().is_empty());
 	}
 
 	#[test]

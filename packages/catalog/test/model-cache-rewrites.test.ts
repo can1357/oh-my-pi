@@ -100,6 +100,9 @@ describe("model cache write churn", () => {
 		const entry = readModelCache("rewrite-test", TTL_MS, () => 2_000, dbPath);
 		expect(entry?.authoritative).toBe(false);
 		expect(entry?.updatedAt).toBe(2_000);
+		// The side row carries freshness and retry authority only; the payload still
+		// records that its models came from an authoritative discovery result.
+		expect(entry?.payloadAuthoritative).toBe(true);
 		expect(payloadRow(dbPath, "rewrite-test")?.authoritative).toBe(1);
 	});
 

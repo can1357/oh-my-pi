@@ -60,7 +60,8 @@ export async function* abortableSource<T>(stream: ReadableStream<T>, signal?: Ab
 
 /**
  * Runs a promise-returning function (`pr`). If the given AbortSignal is aborted before or during
- * execution, the promise is rejected with a standard error.
+ * execution, the promise is rejected with a standard error. A promise passed directly stays
+ * observed, so its later rejection is never unhandled.
  *
  * @param signal - Optional AbortSignal to cancel the operation
  * @param pr - Function returning a promise to run
@@ -71,7 +72,10 @@ export function untilAborted<T>(
 	pr: Promise<T> | (() => Promise<T>),
 ): Promise<T> {
 	if (!signal) return typeof pr === "function" ? pr() : pr;
-	if (signal.aborted) return Promise.reject(new AbortError(signal));
+	if (signal.aborted) {
+		if (typeof pr !== "function") void pr.catch(() => {});
+		return Promise.reject(new AbortError(signal));
+	}
 
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	const onAbort = () => reject(new AbortError(signal));

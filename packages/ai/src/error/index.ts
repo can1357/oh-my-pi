@@ -8,6 +8,7 @@ export * from "./finalize";
 export * from "./flags";
 export * from "./format";
 export * from "./gateway";
+export * from "./network-cause";
 export * from "./oauth";
 export * from "./provider";
 export * from "./rate-limit";

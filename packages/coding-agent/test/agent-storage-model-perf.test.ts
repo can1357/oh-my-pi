@@ -251,6 +251,22 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(storage.getModelPerf().has("openai/gpt-5")).toBe(false);
 	});
 
+	it("skips rows with a NULL model key so perf keys stay selectors", async () => {
+		const storage = await openStorage();
+		const db = new Database(path.join(tempDir.path(), "agent.db"));
+		try {
+			// `TEXT PRIMARY KEY` admits NULL; the model browser iterates every key as a string.
+			db.run("INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms) VALUES (NULL, 3, 300, 3000)");
+			db.run(
+				"INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms) VALUES ('openai/gpt-5', 3, 300, 3000)",
+			);
+		} finally {
+			db.close();
+		}
+
+		expect([...storage.getModelPerf().keys()]).toEqual(["openai/gpt-5"]);
+	});
+
 	it("ignores out-of-range TTFT but keeps the throughput sample", async () => {
 		const storage = await openStorage();
 

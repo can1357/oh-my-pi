@@ -22,9 +22,11 @@ import {
 	type MCPFailureStage,
 	MCPTransportError,
 	mcpTraceIdFromHeaders,
+	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
+import { routeProgressNotification, withProgressToken } from "../progress";
 import {
 	createMCPTimeout,
 	getNeverAbortSignal,
@@ -86,6 +88,7 @@ export class HttpTransport implements MCPTransport {
 	#sessionId: string | null = null;
 	#sseConnection: AbortController | null = null;
 	readonly #requestIds = new RequestIdAllocator();
+	readonly #progressCallbacks = new Map<string | number, NonNullable<MCPRequestOptions["onProgress"]>>();
 	#lifecycleController = new AbortController();
 	readonly #activeRequests = new Set<Promise<unknown>>();
 	readonly #activeFetches = new Set<Promise<Response>>();
@@ -393,6 +396,7 @@ export class HttpTransport implements MCPTransport {
 		}
 		// Notification: has method but no id
 		if ("method" in message && !("id" in message)) {
+			routeProgressNotification(message.method, message.params, token => this.#progressCallbacks.get(token));
 			this.onNotification?.(message.method, message.params);
 		}
 	}
@@ -446,7 +450,7 @@ export class HttpTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
 
 		const generated: Record<string, string> = {
@@ -479,6 +483,7 @@ export class HttpTransport implements MCPTransport {
 		let traceId: string | undefined;
 
 		try {
+			if (options?.onProgress) this.#progressCallbacks.set(id, options.onProgress);
 			const response = await this.#fetch(
 				{ method: "POST", body: JSON.stringify(body), signal: operation.signal },
 				generated,
@@ -559,8 +564,12 @@ export class HttpTransport implements MCPTransport {
 				});
 			}
 			if (error instanceof Error && error.name === "AbortError") throw error;
-			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			// A reset or EOF can follow the server reading the POST; only a refused connection proves it was not sent.
+			const lost = normalized.failure === "reset" || normalized.failure === "eof";
+			throw stage === "decode" || lost ? nonRetryableMCPTransportError(normalized) : normalized;
 		} finally {
+			this.#progressCallbacks.delete(id);
 			releaseCaller?.();
 			operation.clear();
 		}
@@ -618,6 +627,8 @@ export class HttpTransport implements MCPTransport {
 									("result" in message || "error" in message)
 								) {
 									captured = true;
+									// The same SSE batch may contain notifications after this response.
+									this.#progressCallbacks.delete(expectedId);
 									releaseCaller?.();
 									releaseCaller = undefined;
 									operation.clear();
@@ -690,21 +701,7 @@ export class HttpTransport implements MCPTransport {
 						stage: error instanceof SyntaxError ? "decode" : "receive",
 						traceId,
 					});
-					reject(
-						normalized.retryable
-							? new MCPTransportError({
-									transport: normalized.transport,
-									stage: normalized.stage,
-									failure: normalized.failure,
-									message: normalized.message,
-									retryable: false,
-									code: normalized.code,
-									data: normalized.data,
-									traceId: normalized.traceId,
-									cause: normalized,
-								})
-							: normalized,
-					);
+					reject(nonRetryableMCPTransportError(normalized));
 				}
 			} finally {
 				operation.clear();

@@ -11,6 +11,7 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
+import type { RuntimeIdentity } from "./runtime-identity";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -34,6 +35,9 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -49,17 +53,35 @@ export interface SessionHeader {
 	 */
 	additionalDirectories?: string[];
 	parentSession?: string;
+	/**
+	 * Set, to the `parentSession` id, when this session is that same conversation
+	 * continued in a new file because it could not keep writing its own (another
+	 * live process held it, or the file changed under it). Resuming the parent
+	 * resumes the most recently active continuation instead. Forks never set it.
+	 */
+	continuationOf?: string;
 	/** Prior absolute JSONL locations recorded by successful session moves. */
 	previousSessionFiles?: string[];
-	/** Provider prompt-cache identity inherited by exact-route full forks. */
+	/** Local-only provider prompt-cache identity inherited by exact-route full forks; omitted from shares and HTML. */
 	providerPromptCacheKey?: string;
+	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
+	taskPromptCacheKey?: string;
+	/**
+	 * Source session file of a read-only seance fork. Its artifacts stay in the
+	 * source: `history://`, `artifact://`, and `agent://` read them from there.
+	 */
+	seanceSource?: string;
 }
 
 export interface NewSessionOptions {
 	parentSession?: string;
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	taskPromptCacheKey?: string;
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
@@ -72,6 +94,19 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/**
+	 * omp build that wrote this entry, set on every entry this session's process authors. Copies
+	 * (forks, branches, collab replicas) keep the original writer. Absent on older entries.
+	 */
+	runtime?: RuntimeIdentity;
+	/**
+	 * Active leaf at append time, for an entry written off the active branch (late usage,
+	 * a background bash result routed back to the branch it started on). The loader replays
+	 * it instead of treating this entry as the leaf, so resume keeps the branch the live
+	 * session was on. Absence keeps the ordinary last-entry semantics; null records a
+	 * cleared leaf.
+	 */
+	activeLeafId?: string | null;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
@@ -320,6 +355,32 @@ export type SessionEntry =
 	| ModeChangeEntry
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
+
+/** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
+export function sessionEntryLeafId(entry: SessionEntry): string | null {
+	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+}
+
+/** Newest entry that selects itself on replay; skips late-usage markers. */
+export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string | null {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (sessionEntryLeafId(entry) === entry.id) return entry.id;
+	}
+	return null;
+}
+
+/**
+ * Active leaf after replaying entries in file order; an empty or cleared session has no leaf.
+ * A captured leaf that no longer exists (rollback, rewrite) falls back to the newest self-selecting entry.
+ */
+export function resolveSessionLeafId(entries: readonly SessionEntry[]): string | null {
+	const last = entries.at(-1);
+	if (!last) return null;
+	const leafId = sessionEntryLeafId(last);
+	if (leafId === null || leafId === last.id || entries.some(entry => entry.id === leafId)) return leafId;
+	return lastSelfSelectedLeafId(entries);
+}
 
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;

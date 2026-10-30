@@ -76,6 +76,40 @@ async fn multi_file_failure_stages_nothing() {
 }
 
 #[tokio::test]
+async fn a_file_failure_keeps_its_kind_beside_another_file() {
+	for mode in [EditMode::ApplyPatch, EditMode::Sloppy] {
+		let ws = Workspace::new(mode);
+		ws.write("a.rs", SOURCE);
+		std::fs::write(ws.cwd().join("bad.rs"), b"fn caf\xe9() {}\n").unwrap();
+		let section = |path: &str| match mode {
+			EditMode::ApplyPatch => {
+				format!("*** Update File: {path}\n@@\n-    let x = 1;\n+    let x = 2;\n")
+			},
+			_ => sloppy_payload(path),
+		};
+		let payload = |body: String| match mode {
+			EditMode::ApplyPatch => format!("*** Begin Patch\n{body}*** End Patch"),
+			_ => body,
+		};
+		for (target, kind) in [("missing.rs", "file_not_found"), ("bad.rs", "invalid_utf8")] {
+			let alone = ws
+				.apply_raw(&payload(section(target)), &DiskWriter::default())
+				.await
+				.expect_err(target);
+			let writer = DiskWriter::default();
+			let beside = ws
+				.apply_raw(&payload(format!("{}{}", section("a.rs"), section(target))), &writer)
+				.await
+				.expect_err(target);
+			assert_eq!(alone.kind(), kind, "{mode:?}: {alone}");
+			assert_eq!(beside.kind(), kind, "{mode:?}: {beside}");
+			assert!(beside.to_string().starts_with(&format!("[{target}]: ")), "{beside}");
+			assert!(writer.requests.lock().is_empty());
+		}
+	}
+}
+
+#[tokio::test]
 async fn apply_rereads_files_changed_after_preview() {
 	let ws = Workspace::new(EditMode::Replace);
 	ws.write("a.txt", "alpha\nbeta\ngamma\n");
@@ -428,6 +462,7 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 		allow_fuzzy:        true,
 		fuzzy_threshold:    0.95,
 		enforce_seen_lines: false,
+		max_columns:        512,
 		raw_input:          false,
 	};
 	let mut session = Session::new(config, EditStore::new());

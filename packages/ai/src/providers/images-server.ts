@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
+import { isDataUrlMimeType } from "../images/shared";
 import type { ImageGenerationRequest, ImageGenerationResult } from "../images/types";
 
 const imageJsonRequestSchema = type({
@@ -56,7 +57,11 @@ function decodeInputReference(value: unknown): { data: string; mimeType: string 
 	}
 	if (typeof raw !== "string" || raw.length === 0) validation("input image must be base64 or a data URL");
 	const match = raw.match(/^data:([^;]+);base64,(.+)$/s);
-	if (match) return { data: match[2] ?? "", mimeType: match[1] ?? "image/png" };
+	if (match) {
+		const mimeType = match[1] ?? "image/png";
+		if (!isDataUrlMimeType(mimeType)) validation("data URL MIME type must not contain a '#' fragment marker");
+		return { data: match[2] ?? "", mimeType };
+	}
 	if (/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return { data: raw, mimeType: "image/png" };
 	validation("input image URLs are not supported; send a data URL or base64 bytes");
 }

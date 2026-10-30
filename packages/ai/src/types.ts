@@ -40,7 +40,7 @@ import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
-import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
+import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
@@ -405,6 +405,8 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 
 export interface ProviderSessionState {
 	close(): void;
+	/** Release one routing session after its final request, preserving shared provider fallbacks. */
+	releaseSession?(sessionId: string): void;
 }
 
 export interface ProviderResponseMetadata {
@@ -459,8 +461,12 @@ export interface AnthropicCompactionRequest {
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
 	mode: "implicit" | "explicit";
-	/** The only currently supported minimum breakpoint lifetime. */
-	ttl?: "30m";
+	/**
+	 * Minimum cache lifetime. `30m` is OpenAI's default; `12h` (Responses API only)
+	 * bills writes at 2.5× input instead of 1.25×. Defaults to `12h` when
+	 * `cacheRetention` resolves to `long`, otherwise `30m`.
+	 */
+	ttl?: "30m" | "12h";
 	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
 	breakpoint?: "latest-stable-message" | "none";
 }
@@ -495,6 +501,11 @@ export interface StreamOptions {
 	frequencyPenalty?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	/**
+	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
+	 * errors are not replayed above the transport, so retries share this limit.
+	 */
+	maxHttpAttempts?: number;
 	apiKey?: string;
 	/** @internal Stored credential row serving this request, when known. */
 	credentialId?: number;
@@ -603,6 +614,21 @@ export interface StreamOptions {
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/**
+	 * Session a side request branches from, so it can read the parent's cached
+	 * prefix. Providers that keep per-conversation request controls (OpenAI
+	 * `configuration_update` effort baselines) plan the request against a copy
+	 * of that session's controls, never changing the parent's state; the Codex
+	 * backend also routes it with the parent's cache affinity (session headers).
+	 */
+	parentSessionId?: string;
+	/**
+	 * Run at the model's lowest effort where the transport carries the change as
+	 * a per-message control that keeps the cached prefix (Anthropic per-message
+	 * effort, OpenAI `configuration_update`). Elsewhere the requested effort
+	 * applies unchanged: changing request-level reasoning forfeits the cache.
+	 */
+	minimizeEffort?: boolean;
+	/**
 	 * Source of user steering a provider may deliver into the response it is
 	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket).
 	 * Providers without mid-response input ignore it; unclaimed steering stays
@@ -611,8 +637,6 @@ export interface StreamOptions {
 	liveSteering?: LiveSteering;
 	/** Canonical Codex compaction classification; ignored by other providers. */
 	codexCompaction?: CodexCompactionRequestContext;
-	/** Codex Code Mode tool exposure snapshot emitted as `tool_namespaces_info` turn metadata; ignored by other providers. */
-	toolNamespacesInfo?: unknown;
 	/**
 	 * Optional per-provider concurrent request cap for LLM stream calls. Keys are
 	 * provider ids (`model.provider`); positive numeric values cap in-flight
@@ -787,7 +811,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
-	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
@@ -865,6 +889,24 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string; // e.g., for OpenAI responses, the reasoning item ID
 	itemId?: string; // item.id from output_item.added, used to match output_item.done
+	/**
+	 * `true`: `thinking` is a provider-written summary of the model's reasoning
+	 * (OpenAI Responses `summary_text`, Gemini thought summaries). `false`: the
+	 * wire delivered it as the reasoning itself, not marked as a summary
+	 * (chat-completions reasoning fields, Responses `reasoning_text`, Devin
+	 * `thinking`); whether that is the full trace is vouched for per family by
+	 * the catalog's `portable-reasoning`. Unset when provenance is unknown,
+	 * including turns recorded before parsers set it. Only `false` blocks
+	 * replay natively on another host.
+	 */
+	summary?: boolean;
+	/**
+	 * `true`: the block is narration — prose the model addressed to the user
+	 * between tool calls, which the provider returned as a signed thinking block
+	 * (Anthropic connector-text summarization). It stays a thinking block for
+	 * replay; user-facing surfaces present it as answer text.
+	 */
+	narration?: boolean;
 }
 
 export interface RedactedThinkingContent {
@@ -874,11 +916,12 @@ export interface RedactedThinkingContent {
 
 /**
  * Anthropic server-side-fallback boundary marker persisted on assistant
- * turns whose provider request opted into
- * `AnthropicOptions.fallbacks`. Consumers other than the Anthropic
- * provider MUST ignore it — `transformMessages` strips the block on any
- * cross-provider hop and on non-official Anthropic replays, so downstream
- * converters never see it.
+ * turns whose response switched models mid-stream, whether the request
+ * opted into `AnthropicOptions.fallbacks` or a gateway opted in on its
+ * behalf. Consumers other than the Anthropic provider MUST ignore it —
+ * `transformMessages` strips the block on any non-Anthropic hop, and
+ * `convertAnthropicMessages` only puts it on the wire for an opted-in
+ * request to the official endpoint.
  */
 export interface AnthropicFallbackContent {
 	type: "fallback";
@@ -1078,6 +1121,8 @@ export interface AnthropicCompactionPayload {
 	content: string;
 	/** Signature of an on-demand block; replayed verbatim. */
 	signature?: string;
+	/** Net tool changes across the summarized range; covered by the signature, replayed verbatim. */
+	toolChanges?: Record<string, unknown>[];
 	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;
 	/**
@@ -1110,7 +1155,27 @@ export interface AnthropicCompactionFiles {
 	after: number;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
+/**
+ * Records Cursor's server wrote into the client's conversation store for one
+ * assistant turn: the `rootPromptMessagesJson` entries after the user's message,
+ * reasoning signatures and redacted reasoning included. Written and read by the
+ * Cursor provider, which sends them back unchanged to the wire model that produced them.
+ */
+export interface CursorHistoryPayload {
+	type: "cursorHistory";
+	/** Wire route the records were written under, as sent (requested model, details id, max mode, parameters). */
+	wireRoute: string;
+	/** Digest of the turn's opening user message, content and paired tool results when recorded; a rewritten turn rebuilds instead. */
+	digest: string;
+	/** Record bytes (UTF-8 JSON) in conversation order; each blob id is the SHA-256 of its bytes. */
+	records: string[];
+}
+
+export type ProviderPayload =
+	| OpenAIResponsesHistoryPayload
+	| AnthropicMessagePayload
+	| AnthropicCompactionPayload
+	| CursorHistoryPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1182,6 +1247,12 @@ export type AssistantRetryRecovery =
 export interface ContextSnapshot {
 	promptTokens: number; // authoritative provider prompt/input tokens
 	nonMessageTokens: number; // estimated non-message total at send time
+	/**
+	 * Estimated tool-schema tokens included in `nonMessageTokens` (0 when the
+	 * model defers schemas server-side). Lets a later model whose schema policy
+	 * differs rebase the provider anchor instead of inheriting its schemas.
+	 */
+	toolSchemaTokens?: number;
 	/** Estimated prompt tokens removed by local history rewrites after this provider snapshot was recorded. */
 	historyRewriteTokensRemoved?: number;
 	/**
@@ -1239,6 +1310,12 @@ export interface AssistantMessage {
 	 */
 	serviceTier?: ServiceTier;
 	usage: Usage;
+	/**
+	 * Visible output tokens a history rewrite (shake) has since removed from
+	 * `content`. `usage.output` still counts them, so a replay estimate subtracts
+	 * them to keep the turn's reasoning without recharging the removed text.
+	 */
+	elidedOutputTokens?: number;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
 	errorMessage?: string;
@@ -1613,7 +1690,8 @@ export type AssistantMessageEvent =
 export interface AnthropicFallbackCreditHandle {
 	token: string;
 	prefillClaim?: boolean | null;
-	params: unknown;
+	/** The refused request's body, replayed with the credit token on the fallback model. */
+	params: MessageCreateParamsStreaming;
 	betas?: readonly string[];
 	betaHeader?: string;
 	expiresAt: number;
