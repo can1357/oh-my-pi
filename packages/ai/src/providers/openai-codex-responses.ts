@@ -1821,6 +1821,11 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
+	// Opening the socket is this transport's first traffic, and the chokepoint
+	// hold ran before the attestation header and the header build above
+	// awaited. Each websocket retry re-enters this function, so every connect
+	// attempt — and every reconnect after a transport failure — holds here.
+	await holdBeforeDispatch(options?.beforeDispatch, requestSetup.requestSignal);
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,

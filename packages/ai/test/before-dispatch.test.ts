@@ -668,4 +668,95 @@ describe("beforeDispatch", () => {
 
 		expect(sends).toEqual(["response.create:held=false"]);
 	});
+
+	// Opening the socket is traffic of its own, and the chokepoint hold runs
+	// before Codex awaits its attestation header and builds its headers: a
+	// pause landing in that window used to connect anyway.
+	test("holds Codex's websocket connect, not only its request", async () => {
+		const events: string[] = [];
+		const gate = { closed: false };
+		const resumed = Promise.withResolvers<void>();
+		let holds = 0;
+		class ConnectRecordingSocket {
+			static CONNECTING = 0;
+			static OPEN = 1;
+			static CLOSED = 3;
+			readyState = 0;
+			binaryType = "nodebuffer";
+			onopen: ((event: Event) => void) | null = null;
+			onmessage: ((event: MessageEvent) => void) | null = null;
+			onerror: ((event: Event) => void) | null = null;
+			onclose: ((event: Event) => void) | null = null;
+			constructor() {
+				events.push(`connect:held=${gate.closed}`);
+				queueMicrotask(() => {
+					this.readyState = 1;
+					this.onopen?.(new Event("open"));
+				});
+			}
+			send(): void {
+				events.push(`send:held=${gate.closed}`);
+				queueMicrotask(() =>
+					this.onmessage?.(
+						new MessageEvent("message", {
+							data: JSON.stringify({
+								type: "response.completed",
+								response: {
+									id: "resp_connect_hold",
+									status: "completed",
+									output: [],
+									usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
+								},
+							}),
+						}),
+					),
+				);
+			}
+			close(): void {
+				this.readyState = 3;
+			}
+		}
+		const originalWebSocket = globalThis.WebSocket;
+		globalThis.WebSocket = ConnectRecordingSocket as unknown as typeof WebSocket;
+		try {
+			const codex = buildModel({
+				id: "gpt-5.4-mini",
+				name: "Codex Connect Hold",
+				api: "openai-codex-responses",
+				provider: "codex-proxy",
+				baseUrl: "http://127.0.0.1:2455/backend-api/codex",
+				preferWebsockets: true,
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 272_000,
+				maxTokens: 128_000,
+			} satisfies ModelSpec<"openai-codex-responses">);
+
+			await streamSimple(codex, context(), {
+				apiKey: "codex-token",
+				sessionId: "before-dispatch-ws-connect",
+				providerSessionState: new Map(),
+				beforeDispatch: () => {
+					holds += 1;
+					// The pause lands right after the chokepoint hold released,
+					// while Codex is still resolving its attestation header.
+					if (holds === 1) {
+						gate.closed = true;
+						return;
+					}
+					if (!gate.closed) return;
+					queueMicrotask(() => {
+						gate.closed = false;
+						resumed.resolve();
+					});
+					return resumed.promise;
+				},
+			}).result();
+		} finally {
+			globalThis.WebSocket = originalWebSocket;
+		}
+
+		expect(events).toEqual(["connect:held=false", "send:held=false"]);
+	});
 });
