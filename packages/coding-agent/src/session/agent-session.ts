@@ -3498,11 +3498,19 @@ export class AgentSession implements SettingsScope {
 	 * reached once the session is fully idle. Suppressed deliveries
 	 * (acknowledged, or watched by an in-flight `wait`) never wake the loop,
 	 * so they don't count.
+	 *
+	 * Always false without an agent id: such a session registers no delivery
+	 * sink and no async-result yield-queue handler (see the constructor), so no
+	 * job's result can reach it and nothing can re-wake its run. Reporting jobs
+	 * it does not own would also spin every caller of the documented
+	 * `while (hasPendingAsyncWork()) await settleAsyncWork()` loop, since that
+	 * settle is owner-scoped and returns at once without an agent id: the
+	 * predicate and the settle must read the same owner scope.
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		if (!manager) return false;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		if (!manager || !this.#agentId) return false;
+		const ownerFilter = { ownerId: this.#agentId };
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter) ||
