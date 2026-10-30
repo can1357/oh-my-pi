@@ -40,6 +40,7 @@ export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
 export const PipeStreams = nativeBindings.PipeStreams;
 export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
+export const PsHost = nativeBindings.PsHost;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 export const TextPredictor = nativeBindings.TextPredictor;

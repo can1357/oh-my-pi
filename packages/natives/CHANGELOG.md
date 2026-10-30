@@ -12,6 +12,8 @@
 
 - Added a built-in `rsync` implementation to the bash tool, compatible with rsync 3.5.1 and protocol versions 29–33 across Linux, macOS, and Windows. It supports local copies, SSH remote shells via `-e`, and `rsync://` daemons without requiring an installed binary; daemon serving is not supported, and `PI_DISABLE_UUTILS_DESTRUCTIVE` continues to use the system `rsync`.
 - Added built-in `ast-grep` (also available as `sg`) support to the bash tool for structural code search and rewriting, including pattern matching, rewrites, context, headings, and JSON output.
+- Added `TextPredictor` N-API binding for high-performance ghost-text completion engine management
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown.
 
 ### Changed
 
