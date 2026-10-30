@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { SessionEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai";
@@ -102,6 +103,9 @@ describe("automatic fallback shake", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			// Exercise shake, not the independent post-response stale-result reducer.
+			"compaction.dropUseless": false,
+			"compaction.supersedeReads": false,
 			"retry.enabled": true,
 			"retry.modelFallback": true,
 			"retry.fallbackOn": "any",
@@ -309,6 +313,7 @@ describe("automatic fallback shake", () => {
 		seed(8);
 		const codex = session.modelRegistry.getAll().find(model => model.api === "openai-codex-responses");
 		if (!codex) throw new Error("Expected bundled Codex model");
+		auth.keys.setRuntime(codex.provider, "test-key");
 		await session.setModelTemporary(codex);
 		const close = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close });
@@ -367,6 +372,9 @@ describe("automatic fallback shake", () => {
 		try {
 			await started.promise;
 			await cancelled.promise;
+			// Let the timeout race and all continuation microtasks unwind before
+			// observing the barrier; the abort notification itself fires too early.
+			await scheduler.yield();
 			expect(requests.map(request => request.model)).toEqual([`${primary.provider}/${primary.id}`]);
 		} finally {
 			gate.resolve();
@@ -407,6 +415,7 @@ describe("automatic fallback shake", () => {
 		try {
 			await started.promise;
 			await cancelled.promise;
+			await scheduler.yield();
 			expect(requests.map(request => request.model)).toEqual([`${primary.provider}/${primary.id}`]);
 		} finally {
 			gate.resolve();

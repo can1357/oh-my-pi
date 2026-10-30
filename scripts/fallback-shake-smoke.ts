@@ -72,7 +72,7 @@ try {
 		settings,
 		Bun.YAML.stringify({
 			modelRoles: { default: "fake/primary" },
-			compaction: { enabled: false },
+			compaction: { enabled: false, dropUseless: false, supersedeReads: false },
 			retry: {
 				enabled: true,
 				modelFallback: true,
