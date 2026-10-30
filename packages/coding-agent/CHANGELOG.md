@@ -4,7 +4,7 @@
 
 ### Added
 
-- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals.
+- Eval cells can call activatable MCP tools and discoverable devices without activating or mounting them first, while preserving tool restrictions and approvals ([#17464](https://github.com/can1357/oh-my-pi/pull/17464) by [@Xytronix](https://github.com/Xytronix))
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 - Gateway rows discovered from `/v1/models` now keep the `reasoning_effort_map` and `reasoning_required` facts they advertise: a route that serves only low/high/max routes `medium` to `high` instead of the nearest lower tier, and a thinking-off request still sends a tier the route accepts ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
