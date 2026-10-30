@@ -4,7 +4,10 @@
 
 ### Fixed
 
-- A caller's dispatch hold (`StreamOptions.beforeDispatch`) now also covers the Codex websocket, the Cursor run request and the GitLab Duo workflow start, and a cancelled request no longer stays parked on a hold ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- A caller's dispatch hold (`StreamOptions.beforeDispatch`) now also covers the Codex websocket — each connect attempt, each `response.create` and each `response.steer` that carries new input — the Cursor run request and every GitLab Duo workflow socket send, and a cancelled request no longer stays parked on a hold ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- A request held by its caller is no longer failed by a watchdog while it waits: the pre-response budget is a stopwatch the transport stops while it prepares and holds a request, the stream's first-event watchdog counts held time as local work, and the provider timers that used to be armed before dispatch (Anthropic, OpenAI completions and responses, Azure, Bedrock, Google, Vertex, Ollama, Cursor, Devin, Factory, OpenRouter, GitLab Duo) now follow the same rule ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- A reused pre-response guard keeps one budget for the whole call instead of renewing it per attempt, so a provider's own retries can no longer stretch a first-event budget several times over ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- Several dispatch holds on one transport now act as a barrier rather than a sequence, so a gate that closes again while another hold waits still stops the request, and a hold added to a transport that already carries a caller's wrapper no longer rebuilds that wrapper and resets the attempts it counted ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

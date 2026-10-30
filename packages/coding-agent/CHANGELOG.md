@@ -6,6 +6,7 @@
 
 - `/pause` now stops automatic session titles, composer predictions and idle recaps too; a held title is written once you resume ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 - `/pause` now also holds the main turn when the pause lands while its credential resolves, and ending a session no longer leaves a held side request to be paid for on resume ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- `/pause` now also holds every other request a session makes for itself — compaction and handoff summaries (including the provider-native and remote paths), memory extraction and consolidation, judge calls, edit auto-repair, speech rewriting, commit and changelog messages, and the model requests a running tool makes — and a connection prewarm is skipped while paused instead of opening a socket ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
