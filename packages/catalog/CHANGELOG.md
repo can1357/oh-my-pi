@@ -39,7 +39,7 @@
 - Fixed DeepSeek V4.1 Flash image attachments being stripped on publisher-namespaced ids such as `ds/deepseek-flash` ([#16470](https://github.com/can1357/oh-my-pi/pull/16470) by [@ZanDev32](https://github.com/ZanDev32))
 ### Changed
 
-- Re-enable encrypted reasoning replay for the OpenCode Go Muse Spark family; OpenCode Zen keeps its existing compatibility policy.
+- Re-enable encrypted reasoning replay for the OpenCode Go Muse Spark family; OpenCode Zen keeps its existing compatibility policy ([#17284](https://github.com/can1357/oh-my-pi/pull/17284) by [@nico2525nn](https://github.com/nico2525nn)).
 
 ## [18.13.3] - 2026-10-28
 
