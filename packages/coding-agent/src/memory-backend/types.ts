@@ -11,9 +11,10 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 import type { AgentSession } from "../session/agent-session";
 
-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "mnemosyne-oss" | "sharpshooter";
 
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
@@ -23,12 +24,19 @@ export interface MemoryBackendStatus {
 	scope?: string;
 	retainBank?: string;
 	recallBanks?: string[];
+	ownership?: "omp" | "shared";
 	workingCount?: number;
 	episodicCount?: number;
 	tripleCount?: number;
 	lastMemory?: string;
 	lastRecall?: boolean;
 	database?: string;
+	databases?: string[];
+	sdkVersion?: string;
+	pythonVersion?: string;
+	embeddingMode?: "local" | "lexical";
+	consolidationMode?: "local" | "heuristic";
+	clearMode?: string;
 	message?: string;
 	error?: string;
 }
@@ -45,6 +53,7 @@ export interface MemoryBackendSearchItem {
 	source?: string;
 	timestamp?: string;
 	score?: number;
+	bank?: string;
 }
 
 export interface MemoryBackendSearchResult {
@@ -90,6 +99,7 @@ export interface MemoryBackendStartOptions {
 	taskDepth: number;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
+	parentMnemosyneOssSessionState?: MnemosyneOssSessionState;
 }
 
 /** A successful recall, including an empty result, staged until user-turn delivery. */

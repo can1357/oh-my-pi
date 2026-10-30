@@ -71,7 +71,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!cfgAutolearnEnabled.get(session.settings)) return null;
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemosyne-oss" && backend !== "local")
+			return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new LearnTool(session);
 	}
@@ -116,6 +117,21 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				throw new Error(`Mnemopi did not store the lesson: ${reason}`, { cause: error });
+			}
+		} else if (backend === "mnemosyne-oss") {
+			const state = this.session.getMnemosyneOssSessionState?.();
+			const owner = state?.aliasOf ?? state;
+			if (!owner) throw new Error("Mnemosyne OSS backend is not initialised for this session.");
+			try {
+				await owner.save({
+					content: params.memory,
+					context: params.context,
+					source: "coding-agent-learn",
+					importance: 0.8,
+				});
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(`Mnemosyne OSS did not store the lesson: ${reason}`, { cause: error });
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(

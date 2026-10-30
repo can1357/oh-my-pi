@@ -3,6 +3,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { ensureBankExists } from "../hindsight/bank";
+import mnemosyneOssReflectTemplate from "../prompts/memories/mnemosyne-oss-reflect.md" with { type: "text" };
 import reflectDescription from "../prompts/tools/reflect.md" with { type: "text" };
 import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
@@ -34,7 +35,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 
 	static createIf(session: ToolSession): MemoryReflectTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemosyne-oss") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new MemoryReflectTool(session);
 	}
@@ -42,6 +43,20 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 	async execute(_id: string, params: MemoryReflectParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "mnemosyne-oss") {
+				const state = this.session.getMnemosyneOssSessionState?.();
+				const owner = state?.aliasOf ?? state;
+				if (!owner) throw new Error("Mnemosyne OSS backend is not initialised for this session.");
+				const query = params.context?.trim()
+					? `${params.query.trim()}\n\nAdditional context:\n${params.context.trim()}`
+					: params.query;
+				const results = await owner.recall(query, signal);
+				const text =
+					results.length === 0
+						? "No relevant information found to reflect on."
+						: prompt.render(mnemosyneOssReflectTemplate, { items: results }).trim();
+				return { content: [{ type: "text", text }], details: {} };
+			}
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {
