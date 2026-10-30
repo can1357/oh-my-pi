@@ -89,7 +89,12 @@ import {
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+	iterateWithTerminalGrace,
+} from "../utils/idle-iterator";
 import {
 	ANTHROPIC_SLOW_USAGE_LIMIT,
 	ANTHROPIC_USAGE_LIMIT_HEADER,
@@ -1114,6 +1119,16 @@ const PROVIDER_MAX_RETRIES = 10;
  * recovery path (#4900).
  */
 const PING_PROGRESS_MAX_IDLE_MULTIPLIER = 3;
+
+/**
+ * How long to keep reading the HTTP body after `message_stop`. The turn is
+ * complete at that frame, but cancelling a body whose terminal chunk has not
+ * arrived yet makes Bun close the socket instead of returning it to the pool,
+ * so every turn behind a relay that flushes `message_stop` separately pays a
+ * fresh connection (TCP, TLS, slow start). The drain runs after the turn
+ * completes; the window only elapses on hosts that hold the body open.
+ */
+const ANTHROPIC_POST_STOP_GRACE_MS = 2_500;
 
 /**
  * Log a malformed-stream-envelope anomaly without aborting the turn. The strict
@@ -2619,6 +2634,7 @@ const streamAnthropicOnce = (
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
 					let sawMessageStop = false;
+					let messageStopAtMs: number | undefined;
 					// Set when a duplicate message_start splices a second envelope onto
 					// the stream; closed indexes then refuse to reopen so replayed
 					// content cannot duplicate (see content_block_start guard).
@@ -2676,10 +2692,20 @@ const streamAnthropicOnce = (
 							return true;
 						},
 					});
+					const drainRequestAbortController = activeAbortTracker.requestAbortController;
+					const drainedAnthropicStream = iterateWithTerminalGrace(timedAnthropicStream, {
+						finishedAtMs: () => messageStopAtMs,
+						graceMs: ANTHROPIC_POST_STOP_GRACE_MS,
+						// The idle-timeout generator is parked mid-`next()` when the window
+						// closes; aborting the transport settles that read. A bare abort sets
+						// no local reason, so the completed turn is not reported as an error.
+						onGraceEnd: () => drainRequestAbortController.abort(),
+						awaitDrainOnReturn: options?.waitForTerminalDrain,
+					});
 					const observedAnthropicStream =
 						rawSseObserver && !recordsRawSseEvents
-							? observeDecodedAnthropicEvents(timedAnthropicStream, rawSseObserver)
-							: timedAnthropicStream;
+							? observeDecodedAnthropicEvents(drainedAnthropicStream, rawSseObserver)
+							: drainedAnthropicStream;
 					for await (const event of observedAnthropicStream) {
 						sawEvent = true;
 
@@ -3094,7 +3120,9 @@ const streamAnthropicOnce = (
 						} else if (event.type === "message_stop") {
 							sawTerminalEnvelope = true;
 							sawMessageStop = true;
-							// The protocol is complete even if a broken keep-alive leaves the HTTP body open.
+							// The protocol is complete even if a broken keep-alive leaves the HTTP
+							// body open; the terminal-grace wrapper drains the rest in the background.
+							messageStopAtMs = Date.now();
 							break;
 						}
 					}

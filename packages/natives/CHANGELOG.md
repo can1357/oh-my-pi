@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
 ### Fixed
 
 - The bash tool's built-in `rsync` now escapes non-ASCII bytes in the file names it prints unless the shell's locale is a charset the system can load, the way rsync 3.5.1 does; a UTF-8 locale and `--8-bit-output` print them unescaped ([#17401](https://github.com/can1357/oh-my-pi/pull/17401) by [@sjawhar](https://github.com/sjawhar))
