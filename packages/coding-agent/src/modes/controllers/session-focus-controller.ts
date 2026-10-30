@@ -185,7 +185,7 @@ export class SessionFocusController {
 		try {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi();
-			this.ctx.eventController.resetTranscriptAnchors(leaving, id => leaving?.toolCallRunMark(id));
+			this.ctx.eventController.resetTranscriptAnchors(leaving, id => leaving?.toolCallRun(id));
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;
@@ -245,7 +245,7 @@ export class SessionFocusController {
 			// What this session was owed before the view looked away, minus whatever its own run
 			// of that call did while the view was gone: ended, aborted, disposed, or replaced by
 			// another run of the same id — the view saw none of it.
-			this.ctx.eventController.adoptApprovalRecords(target, id => target.toolCallRunMark(id));
+			this.ctx.eventController.adoptApprovalRecords(target, id => target.toolCallRun(id));
 			// `user_wait_start` was published when the dialog opened, which may be
 			// before this attach subscribed: replay it so a session still owing a
 			// person an answer reports blocked rather than working or idle.

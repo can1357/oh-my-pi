@@ -522,15 +522,16 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		// Focus away: the record is parked against the run it describes, and the
 		// session arriving inherits none.
-		controller.resetTranscriptAnchors(mine, () => "run:1");
-		controller.adoptApprovalRecords(other, () => "run:1");
+		const live = { mark: "run:1", live: true };
+		controller.resetTranscriptAnchors(mine, () => live);
+		controller.adoptApprovalRecords(other, () => live);
 		await controller.handleEvent(AGENT_START);
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 
 		// Focus back while that same run is still open: the call is still owed an
 		// answer, and says so again.
 		controller.resetTranscriptAnchors(other, () => undefined);
-		controller.adoptApprovalRecords(mine, () => "run:1");
+		controller.adoptApprovalRecords(mine, () => live);
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
@@ -540,24 +541,49 @@ describe("EventController run status while prompts wait on the user", () => {
 	it("drops a parked record whose own run ended or was replaced while the view was away", async () => {
 		// The view saw none of the events while it was elsewhere: the run it
 		// parked may have been answered, aborted or disposed, and the id may be
-		// running again for something else. Only the same run, still open, brings
-		// the record back — the session is the one that knows which run that is.
+		// running again for something else — and a logical reset can recycle the
+		// id altogether. Only the same run, still open, brings the record back;
+		// the same mark on a run that is over is a reason to drop it.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt" });
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
 		const ctx = createInteractiveModeContext({ session: { getToolByName: () => bash } });
+		const onReturn = [
+			{ mark: "settled:1", live: false },
+			{ mark: "run:2", live: true },
+			{ mark: "disposed", live: false },
+			undefined,
+		];
 
-		for (const markOnReturn of ["settled:1", "run:2", "disposed"]) {
+		for (const current of onReturn) {
 			const controller = new EventController(ctx);
 			const mine = {} as object;
 			await controller.handleEvent(AGENT_START);
 			await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
 			expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
-			controller.resetTranscriptAnchors(mine, () => "run:1");
-			controller.adoptApprovalRecords(mine, () => markOnReturn);
+			controller.resetTranscriptAnchors(mine, () => ({ mark: "run:1", live: true }));
+			controller.adoptApprovalRecords(mine, () => current);
 			expect(report).toHaveBeenLastCalledWith({ state: "working" });
 		}
+	});
+
+	it("drops a parked record whose run had already ended when it was parked", async () => {
+		// The end can reach the session before the view has consumed it, so the
+		// mark captured at parking is already terminal. The same terminal mark on
+		// the way back describes a call that is over either way.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const mine = {} as object;
+		const ended = { mark: "settled:1", live: false };
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
+		controller.resetTranscriptAnchors(mine, () => ended);
+		controller.adoptApprovalRecords(mine, () => ended);
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
 	it("keeps a parked record for a call the session never ran, across repeated returns", async () => {

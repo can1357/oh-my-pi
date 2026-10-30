@@ -295,6 +295,7 @@ import type { BlockedKind } from "../utils/run-status";
 import {
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type ToolCallRunMark,
 	UNNAMED_USER_WAIT_PROMPT,
 	type UserWaitFrame,
 } from "./agent-session-events";
@@ -995,12 +996,18 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Each call this session has run, by id: which run of that id is the current one, and whether
 	 * it is over. A surface that was looking elsewhere saw none of these events, so on the way
-	 * back it compares the mark it kept ({@link toolCallRunMark}) with the mark now: the same run
-	 * still open is the only answer that lets a record it parked come back. A call the session
-	 * never ran has no mark at all and is nobody's to overrule. Cleared with the rest of the
-	 * session-scoped tool state.
+	 * back it compares the mark it kept ({@link toolCallRun}) with the mark now: the same run,
+	 * still open, is the only answer that lets a record it parked come back. A call the session
+	 * never ran has no mark at all and is nobody's to overrule.
+	 *
+	 * The map is cleared when a logical session transition recycles tool-call ids, but the
+	 * numbering is not: a surface can be holding a record from before that transition, and a mark
+	 * that counts from one again would make the next run of a recycled id look like the run that
+	 * record describes. A mark is unique for as long as this session object lives.
 	 */
-	#toolCallRuns = new Map<string, { generation: number; settled: boolean }>();
+	#toolCallRuns = new Map<string, { sequence: number; settled: boolean }>();
+	/** Runs this session has started, ever: the source of the number in a mark. */
+	#toolCallRunSeq = 0;
 	/** True once {@link dispose} begins: nothing this session was asking will ever be answered. */
 	#settledEverything = false;
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
@@ -4013,8 +4020,7 @@ export class AgentSession implements SettingsScope {
 		if (event.type === "tool_execution_start") {
 			// A call that runs again under the same id is a different run, and a
 			// record parked against the one before it does not describe this one.
-			const previous = this.#toolCallRuns.get(event.toolCallId);
-			this.#toolCallRuns.set(event.toolCallId, { generation: (previous?.generation ?? 0) + 1, settled: false });
+			this.#toolCallRuns.set(event.toolCallId, { sequence: ++this.#toolCallRunSeq, settled: false });
 		} else if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
@@ -4030,7 +4036,7 @@ export class AgentSession implements SettingsScope {
 			// order, so only a replayed or reordered stream can make that shape.
 			const run = this.#toolCallRuns.get(event.toolCallId);
 			if (run) run.settled = true;
-			else this.#toolCallRuns.set(event.toolCallId, { generation: 1, settled: true });
+			else this.#toolCallRuns.set(event.toolCallId, { sequence: ++this.#toolCallRunSeq, settled: true });
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -6044,10 +6050,16 @@ export class AgentSession implements SettingsScope {
 	 * of the same id, and a disposed session are all different marks. A call this session never
 	 * ran has no mark at all, because nobody else's bookkeeping is its to overrule.
 	 */
-	toolCallRunMark(toolCallId: string): string | undefined {
-		if (this.#settledEverything) return "disposed";
+	toolCallRun(toolCallId: string): ToolCallRunMark | undefined {
+		if (this.#settledEverything) return { mark: "disposed", live: false };
 		const run = this.#toolCallRuns.get(toolCallId);
-		return run === undefined ? undefined : `${run.settled ? "settled" : "run"}:${run.generation}`;
+		if (run === undefined) return undefined;
+		return { mark: `${run.settled ? "settled" : "run"}:${run.sequence}`, live: !run.settled };
+	}
+
+	/** The mark alone, for a caller that only needs to compare it. */
+	toolCallRunMark(toolCallId: string): string | undefined {
+		return this.toolCallRun(toolCallId)?.mark;
 	}
 
 	/**

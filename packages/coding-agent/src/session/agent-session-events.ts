@@ -159,5 +159,18 @@ export interface UserWaitFrame {
  */
 export const UNNAMED_USER_WAIT_PROMPT = "a dialog waiting for you";
 
+/**
+ * How a session identifies one run of one tool call to a surface that must compare across a gap
+ * it saw nothing through — a focus handover, a reconnect. `mark` is equal only for the same run
+ * of the same call in the same session, and stays unique for that session's whole life, so a
+ * logical reset that recycles call ids cannot hand an old record to a new run. `live` says
+ * whether that run is still going: a surface restoring what it recorded needs both, since the
+ * same terminal mark on both sides still describes a call that is over.
+ */
+export interface ToolCallRunMark {
+	readonly mark: string;
+	readonly live: boolean;
+}
+
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

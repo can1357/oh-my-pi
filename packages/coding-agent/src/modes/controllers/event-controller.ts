@@ -40,7 +40,7 @@ import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSessionEvent, ToolCallRunMark } from "../../session/agent-session";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -1106,7 +1106,11 @@ export class EventController {
 	 */
 	#parkedApprovalRecords = new WeakMap<
 		object,
-		{ prompts: Map<string, RunStatus>; marks: Map<string, string | undefined>; answered: Set<string> }
+		{
+			prompts: Map<string, RunStatus>;
+			marks: Map<string, ToolCallRunMark | undefined>;
+			answered: Set<string>;
+		}
 	>();
 
 	/**
@@ -1115,16 +1119,21 @@ export class EventController {
 	 *
 	 * A parked record describes one run of one call, and the view saw nothing while it was gone:
 	 * that run may have been answered, aborted or disposed, and the id may be running again for
-	 * something else entirely. `runMark` names the run the session is on now, and only a record
-	 * whose own run is still that one comes back — keeping a session's unresolved record is the
-	 * point, resurrecting a finished one or lending it to a later namesake is not.
+	 * something else entirely. `runMark` names the run the session is on now, and a record comes
+	 * back only when that is the same run *and* it is still going — two equal terminal marks
+	 * describe a call that is over, which is a reason to drop the record, not to restore it. A
+	 * call the session never ran has no mark on either side and is nobody's to retire.
 	 */
-	adoptApprovalRecords(session: object, runMark?: (toolCallId: string) => string | undefined): void {
+	adoptApprovalRecords(session: object, runMark?: (toolCallId: string) => ToolCallRunMark | undefined): void {
 		const parked = this.#parkedApprovalRecords.get(session);
 		if (!parked) return;
 		this.#parkedApprovalRecords.delete(session);
-		for (const [toolCallId, mark] of parked.marks) {
-			if (runMark && runMark(toolCallId) !== mark) parked.prompts.delete(toolCallId);
+		if (runMark) {
+			for (const [toolCallId, parkedRun] of parked.marks) {
+				const current = runMark(toolCallId);
+				const sameRun = current?.mark === parkedRun?.mark;
+				if (!sameRun || current?.live === false) parked.prompts.delete(toolCallId);
+			}
 		}
 		this.#blockingPrompts = parked.prompts;
 		// Which calls have a dialog open comes from the frame the attach replays, not from here.
@@ -1141,9 +1150,9 @@ export class EventController {
 	 * rather than dropped, since nothing else can rebuild them, each against
 	 * the run `runMark` names for it now.
 	 */
-	resetTranscriptAnchors(parkFor?: object, runMark?: (toolCallId: string) => string | undefined): void {
+	resetTranscriptAnchors(parkFor?: object, runMark?: (toolCallId: string) => ToolCallRunMark | undefined): void {
 		if (parkFor && (this.#blockingPrompts.size > 0 || this.#answeredBeforeStart.size > 0)) {
-			const marks = new Map<string, string | undefined>();
+			const marks = new Map<string, ToolCallRunMark | undefined>();
 			for (const toolCallId of this.#blockingPrompts.keys()) marks.set(toolCallId, runMark?.(toolCallId));
 			this.#parkedApprovalRecords.set(parkFor, {
 				prompts: this.#blockingPrompts,
