@@ -1620,6 +1620,9 @@ export class AgentSession implements SettingsScope {
 				.catch(error => logger.warn("IRC wake after idle compaction failed", { error: String(error) }))
 				.finally(() => {
 					this.#ircWakesAwaitingIdleCompaction--;
+					// This closure was the last owner of its records, and any settlement attempt made
+					// while it held them was refused. Ask again now that the account is clear.
+					this.#settleOwedAgentEnd();
 				});
 			return;
 		}
@@ -1904,15 +1907,26 @@ export class AgentSession implements SettingsScope {
 	/** Publishes the terminal `agent_end` that a downgraded one withheld, once the tail work it
 	 *  promised a continuation for is gone. Called by every path that consumes that work without
 	 *  starting a turn — the stranded-aside folds, a prompt that folded it and then bailed,
-	 *  {@link beginDispose}'s final flush. Asks before settling, and asks about every owner, not
-	 *  just the queues: a record can live in a closure that is waiting out an idle compaction
-	 *  (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), where
-	 *  `#irc.hasPending()` cannot see it and the continuation it promised has not started yet.
-	 *  {@link ircWakesPending} is the account that covers those too. */
+	 *  {@link beginDispose}'s final flush — and again by every release of a carrier, since the
+	 *  attempt made while a carrier still held the record was refused and nothing else retries it.
+	 *  Asks before settling, and asks about every owner, not just the queues. */
 	#settleOwedAgentEnd(): void {
 		const owed = this.#agentEndOwedTerminal;
 		if (!owed) return;
-		if (this.isStreaming || this.#hasTailContinuationWork() || this.ircWakesPending) return;
+		// A record can also exist in no queue at all, carried by a closure waiting out an idle
+		// compaction (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), where
+		// `#irc.hasPending()` cannot see it and its promised continuation has not started. Those two
+		// counters, not {@link ircWakesPending}: that getter also reports a {@link holdIrcWakes}
+		// hold, and a hold is a restriction on when wakes may run, not evidence that a record is
+		// waiting — `task/executor.ts` holds one across a whole driven run with nothing queued.
+		if (
+			this.isStreaming ||
+			this.#hasTailContinuationWork() ||
+			this.#ircWakesAwaitingIdleCompaction > 0 ||
+			this.#deliveriesAwaitingSessionTransition > 0
+		) {
+			return;
+		}
 		this.#agentEndOwedTerminal = undefined;
 		this.#emit(owed);
 	}
@@ -8837,10 +8851,6 @@ export class AgentSession implements SettingsScope {
 		// directly (auto-continue, queued-hidden drain) are autonomous and
 		// deliberately do not claim it.
 		const generation = this.#promptGeneration;
-		// A prompt admitted while the session was already disposing still runs to a settled turn
-		// (the `alreadyDisposing` contract in #prepareAgentStart); only a disposal that lands
-		// *during* this setup cancels it.
-		const alreadyDisposing = this.#isDisposed;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
@@ -9079,11 +9089,14 @@ export class AgentSession implements SettingsScope {
 			// cancel this prompt from inside that notification. No await separates the fold from
 			// dispatch, but synchronous reentrancy needs none, so re-ask both cancellation signals
 			// before handing the turn to the agent: an abort bumps the generation, while
-			// beginDispose() latches `#isDisposed` and leaves the generation untouched. The folded
-			// records stay delivered — they are in the transcript, and the next turn sends them —
-			// and the `agent_end` they were holding open is closed by the settle drain this bail
-			// unwinds into (#drainStrandedQueuedMessages), or by beginDispose's own flush.
-			if (this.#promptGeneration !== generation || (this.#isDisposed && !alreadyDisposing)) return false;
+			// beginDispose() latches `#isDisposed` and leaves the generation untouched. Disposal is
+			// asked unconditionally, whenever it landed: beginDispose() exists to stop work started
+			// in the async gap before teardown, so a prompt admitted after it, or one disposed while
+			// it waited on maintenance, gets no model call either. The folded records stay delivered
+			// — they are in the transcript, and the next turn sends them — and the `agent_end` they
+			// were holding open is closed by the settle drain this bail unwinds into
+			// (#drainStrandedQueuedMessages), or by beginDispose's own flush.
+			if (this.#promptGeneration !== generation || this.#isDisposed) return false;
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start
@@ -10003,18 +10016,29 @@ export class AgentSession implements SettingsScope {
 		const inFlightEpoch = this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			// The preflight is the last suspension before dispatch, and disposal latches
+			// synchronously: a host that began tearing down inside it must not get a model call,
+			// even though the caller's own disposal check passed before this frame started.
+			if (this.#isDisposed) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			const run = this.agent.prompt(message);
-			// `agent.prompt` claims streaming synchronously before its first await, so this is the
-			// instant the run takes the record — and the only honest acceptance point. It rejects
-			// before ever appending when the agent holds no model or is already busy, and the
-			// returned promise also rejects for failures long after the record is safely in the
-			// transcript; neither is visible from the awaited result.
-			if (delivery && this.agent.state.isStreaming) delivery.owed = false;
+			// Acceptance is this call's own claim, not whether the agent is streaming: a competing
+			// run can hold the agent, in which case `agent.prompt` rejects with AgentBusyError while
+			// `state.isStreaming` is true for that other run — "an owner", not this record's owner.
+			// Probe the synchronous prefix the way turn-recovery's #promptAgentWithIdleRetry does: an
+			// already-rejected promise's reaction job is queued ahead of the await below, so one
+			// microtask turn settles `claimFailed`. The handler rethrows, so the error still surfaces
+			// at `await run`.
+			let claimFailed = false;
+			const run = this.agent.prompt(message).then(undefined, (error: unknown) => {
+				claimFailed = true;
+				throw error;
+			});
+			await Promise.resolve();
+			if (delivery && !claimFailed) delivery.owed = false;
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10433,6 +10457,9 @@ export class AgentSession implements SettingsScope {
 			.catch(error => logger.warn("Requeueing an undelivered custom message failed", { error: String(error) }))
 			.finally(() => {
 				this.#deliveriesAwaitingSessionTransition--;
+				// Same as #wakeForIrc's compaction carrier: a settlement refused while this closure
+				// held the record has to be re-asked once it no longer does.
+				this.#settleOwedAgentEnd();
 			});
 	}
 
@@ -12797,6 +12824,9 @@ export class AgentSession implements SettingsScope {
 			released = true;
 			this.#ircWakeHolds--;
 			this.#resumeStrandedIrcAsides();
+			// The resume returns at once on empty queues, so it is not a settlement attempt. Ask
+			// again here: this release can be what makes a downgraded `agent_end` settleable.
+			this.#settleOwedAgentEnd();
 		};
 	}
 

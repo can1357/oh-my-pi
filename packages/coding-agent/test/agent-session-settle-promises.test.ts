@@ -14,6 +14,7 @@ import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/se
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
+import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -542,5 +543,205 @@ describe("AgentSession settles what it promised", () => {
 			unsubscribe?.();
 		}
 		expect(mock.calls.length).toBe(1);
+	}, 20_000);
+
+	/** Suspends the usage-aware preflight — the last await before an agent-initiated dispatch —
+	 *  on its `nth` entry, so a test can act in the window between the dispatch's own checks and
+	 *  `agent.prompt`. */
+	function gateUsagePreflight(nth: number, entered: PromiseWithResolvers<void>, release: Promise<void>) {
+		const original = TurnRecovery.prototype.maybeApplyUsageAwareFallback;
+		let entries = 0;
+		return spyOn(TurnRecovery.prototype, "maybeApplyUsageAwareFallback").mockImplementation(async function (
+			this: TurnRecovery,
+			...args: Parameters<typeof original>
+		) {
+			if (++entries === nth) {
+				entered.resolve();
+				await release;
+			}
+			return original.apply(this, args);
+		});
+	}
+
+	it("does not take a competing run's streaming state as acceptance of its own record", async () => {
+		const preflightEntered = Promise.withResolvers<void>();
+		const preflightRelease = Promise.withResolvers<void>();
+		const providerEntered = Promise.withResolvers<void>();
+		const providerRelease = Promise.withResolvers<void>();
+		const preflightSpy = gateUsagePreflight(1, preflightEntered, preflightRelease.promise);
+		try {
+			const mock = await sendAsideFromSessionSwitchHook("BUSY_REJECTED_RECORD");
+			await withTimeout(preflightEntered.promise, 5_000, "deferred delivery never reached its preflight");
+
+			// A scheduled continuation takes the agent while the deferred delivery is parked in its
+			// preflight, so `agent.prompt` will reject with AgentBusyError while `isStreaming` is
+			// true — for that other run. Acceptance must be this call's own claim.
+			const target = session;
+			if (target) {
+				target.agent.streamFn = async (...args) => {
+					providerEntered.resolve();
+					await providerRelease.promise;
+					return mock.stream(...args);
+				};
+			}
+			await session?.sendCustomMessage({ customType: "other", content: "COMPETING_CONTINUATION", display: false });
+			session?.resumeAfterAskReanswer();
+			await withTimeout(providerEntered.promise, 5_000, "competing continuation did not start");
+			expect(session?.agent.state.isStreaming).toBe(true);
+
+			preflightRelease.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+			providerRelease.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+			await session?.waitForIdle();
+
+			expect(
+				session?.messages.filter(m => m.role === "custom" && m.content === "BUSY_REJECTED_RECORD"),
+			).toHaveLength(1);
+			expect(session?.ircWakesPending).toBe(false);
+		} finally {
+			preflightRelease.resolve();
+			providerRelease.resolve();
+			preflightSpy.mockRestore();
+		}
+	}, 45_000);
+
+	it("does not start an accepted deferred delivery when disposal lands in its usage preflight", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const preflightSpy = gateUsagePreflight(1, entered, release.promise);
+		try {
+			const mock = await sendAsideFromSessionSwitchHook("DISPOSE_IN_CUSTOM_PREFLIGHT");
+			await withTimeout(entered.promise, 5_000, "deferred delivery never reached its preflight");
+			// The preflight suspends after the dispatch's own post-normalization disposal check, so
+			// it is the boundary that has to re-ask.
+			session?.beginDispose();
+			release.resolve();
+			for (let i = 0; i < 5; i++) await setImmediate();
+
+			expect(mock.calls.length).toBe(0);
+			expect(
+				session?.messages.filter(m => m.role === "custom" && m.content === "DISPOSE_IN_CUSTOM_PREFLIGHT"),
+			).toHaveLength(0);
+		} finally {
+			release.resolve();
+			preflightSpy.mockRestore();
+		}
+	}, 45_000);
+
+	it("closes the promised run once the compaction carrier that blocked the attempt lets go", async () => {
+		const { settles, mock } = await startPooledRunWithStrandedAside();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return { continuationScheduled: false };
+		});
+		try {
+			const compaction = session?.runIdleCompaction();
+			await started.promise;
+			await session?.setWorkPoolYieldItems([]);
+			// The record is now in #wakeForIrc's compaction-wait closure. The user stop makes the
+			// closure fold it instead of waking, and that fold's settlement attempt is refused
+			// because the closure still holds it — nothing but the closure's own release retries.
+			session?.suppressAutoResumeUntilPrompt();
+			await session?.abort({ reason: USER_INTERRUPT_LABEL });
+			release.resolve();
+			await compaction;
+			for (let i = 0; i < 5; i++) await setImmediate();
+			await session?.waitForIdle();
+
+			expect(session?.ircWakesPending).toBe(false);
+			expect(mock.calls.length).toBe(1);
+			expect(settles).toEqual([false, true]);
+		} finally {
+			release.resolve();
+			compactionSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("closes the promised run when disposal drops a compaction-held carrier", async () => {
+		const { settles } = await startPooledRunWithStrandedAside();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			started.resolve();
+			await release.promise;
+			return { continuationScheduled: false };
+		});
+		try {
+			const compaction = session?.runIdleCompaction();
+			await started.promise;
+			await session?.setWorkPoolYieldItems([]);
+			// beginDispose's flush finds nothing — the record is in the carrier — so its settlement
+			// attempt is refused, and the carrier then drops the record on the disposed session.
+			const disposing = session?.dispose();
+			release.resolve();
+			await compaction;
+			for (let i = 0; i < 5; i++) await setImmediate();
+			await disposing;
+
+			expect(settles).toEqual([false, true]);
+		} finally {
+			release.resolve();
+			compactionSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("does not let an empty IRC wake hold keep a promised run open", async () => {
+		const { settles } = await startPooledRunWithStrandedAside();
+		const release = session?.holdIrcWakes();
+		// A hold restricts when wakes may run; it is not evidence that a record is waiting. The
+		// fold below leaves nothing queued, so the run must close even while the hold stands.
+		session?.suppressAutoResumeUntilPrompt();
+		await session?.setWorkPoolYieldItems([]);
+		release?.();
+		await session?.waitForIdle();
+
+		expect(settles).toEqual([false, true]);
+	}, 20_000);
+
+	it("refuses a prompt admitted after beginDispose", async () => {
+		const { mock } = await startPooledRunWithStrandedAside();
+		const before = mock.calls.length;
+		session?.beginDispose();
+
+		await session?.prompt("NEW_WORK_AFTER_DISPOSE");
+		await session?.waitForIdle();
+
+		expect(mock.calls.length).toBe(before);
+		expect(JSON.stringify(session?.messages)).not.toContain("NEW_WORK_AFTER_DISPOSE");
+	}, 20_000);
+
+	it("refuses an admitted prompt that disposal overtakes in its maintenance wait", async () => {
+		const { mock } = await startPooledRunWithStrandedAside();
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactionSpy = spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockImplementation(async () => {
+			reached.resolve();
+			await release.promise;
+			return { continuationScheduled: false };
+		});
+		try {
+			const before = mock.calls.length;
+			const compaction = session?.runIdleCompaction();
+			await reached.promise;
+			const prompt = session?.prompt("DISPOSE_IN_EARLY_MAINTENANCE");
+			await setImmediate();
+			// Admitted before disposal, but it has sent nothing: beginDispose exists to stop work
+			// that starts in exactly this gap.
+			session?.beginDispose();
+			release.resolve();
+			await compaction;
+			await prompt;
+			await session?.waitForIdle();
+
+			expect(mock.calls.length).toBe(before);
+			expect(JSON.stringify(session?.messages)).not.toContain("DISPOSE_IN_EARLY_MAINTENANCE");
+		} finally {
+			release.resolve();
+			compactionSpy.mockRestore();
+		}
 	}, 20_000);
 });
