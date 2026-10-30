@@ -1109,6 +1109,12 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/**
+	 * Aborted by {@link beginDispose}: the lifetime every wait this session owns
+	 * is combined with, so work parked on something no caller's signal covers
+	 * (a `/pause` hold on a side turn) unwinds when the session goes away.
+	 */
+	#disposeAbortController = new AbortController();
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -6165,6 +6171,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#disposeAbortController.abort(new Error("Session disposed"));
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -12636,21 +12643,34 @@ export class AgentSession implements SettingsScope {
 	 * before awaiting so a running session pays no microtask for it.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		// Snapshotted before the entry hold, not after: a `/new` during the hold
+		// replaces the session this turn was asked for, and the readiness check
+		// below is what catches it.
+		const sessionGeneration = this.#sessionGeneration;
+		// Every hold of this turn ends on either of two lifetimes: the caller's
+		// signal and this session's. `/pause` is released by a human, so without
+		// the session's own lifetime a disposed session kept a side turn parked
+		// and then paid for it on resume.
+		const holdSignal = args.signal
+			? AbortSignal.any([args.signal, this.#disposeAbortController.signal])
+			: this.#disposeAbortController.signal;
 		// Entry is not enough: the preparation below awaits image normalization,
 		// history conversion and the side-context hooks, and `/pause` engaged
 		// during any of them would otherwise still reach a provider. Hold again
 		// at each call that spends — the vision request and the side stream.
 		// Each site tests the gate before awaiting, so a running session pays no
 		// microtask for a pause nobody engaged.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
 		}
 		const modelDescription = `${model.provider}/${model.id} (${model.api})`;
-		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			// A hold ends on disposal as well as on the caller's signal, and the
+			// session is gone by the time it does: nothing of this turn may run on.
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -12660,6 +12680,8 @@ export class AgentSession implements SettingsScope {
 				throw new Error("Active session changed during ephemeral turn; retry.");
 			}
 		};
+		// The entry hold is a hold like any other: what changed under it counts.
+		assertEphemeralTurnReady();
 		for (const field of ["maxTokens", "maxContextBytes"] as const) {
 			const cap = args[field];
 			if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
@@ -12685,9 +12707,12 @@ export class AgentSession implements SettingsScope {
 		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
 		// `#normalizeImagesForModel` above already awaited, so the gate can have
 		// closed since the entry test; the description is itself a paid request.
-		if (promptImages?.length && agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
+		if (promptImages?.length && agentPauseGate.paused) {
+			await agentPauseGate.waitUntilResumed(holdSignal);
+			assertEphemeralTurnReady();
+		}
 		const imageDescriptionNotice = promptImages?.length
-			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
+			? await this.#buildImageDescriptionNotice(promptImages, holdSignal)
 			: undefined;
 		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
@@ -12764,7 +12789,8 @@ export class AgentSession implements SettingsScope {
 				// re-dispatches on its own after a rotation. Hold at the gate
 				// there too, where nothing of this layer's own can follow.
 				beforeDispatch: async () => {
-					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
+					if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
+					assertEphemeralTurnReady();
 				},
 				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},
@@ -12779,7 +12805,7 @@ export class AgentSession implements SettingsScope {
 		// The provider boundary: every await above could have spanned a `/pause`,
 		// and `assertEphemeralTurnReady` after the hold rejects a model or
 		// session that changed while the gate held this turn.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
 		assertEphemeralTurnReady();
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);
