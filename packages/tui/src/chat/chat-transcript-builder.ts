@@ -428,6 +428,7 @@ export class ChatTranscriptBuilder {
 			proseOnlyThinking,
 			this.#deps.linkTargets,
 			expandThinkingBlocks,
+			undefined,
 			this.#deps.proseGithubRepo?.(message.timestamp),
 		);
 		assistantComponent.pickReactionTarget(this.container.children);
@@ -464,6 +465,7 @@ export class ChatTranscriptBuilder {
 				proseOnlyThinking,
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
+				undefined,
 				this.#deps.proseGithubRepo?.(segment.timestamp),
 			);
 			this.#mountProse(component);
