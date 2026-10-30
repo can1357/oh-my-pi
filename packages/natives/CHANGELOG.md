@@ -18,6 +18,10 @@
 
 - Improved shell search across local and network filesystems: local searches avoid unexpectedly traversing network mounts, network-backed searches perform more directory operations concurrently, and fd supports parallel traversal together with ignore, pruning, depth, worker, and error-reporting options.
 
+### Changed
+
+- macOS `scroll` now goes the same way as on Windows and Linux: a positive `dy` scrolls down and a positive `dx` right, where macOS scrolled up and left.
+
 ### Fixed
 
 - Fixed binary patches produced by diffText({ binary: true }) and diffNoIndex(…, true) for non-UTF-8 text, such as Latin-1, so patches preserve the original bytes and apply correctly.

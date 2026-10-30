@@ -3109,8 +3109,7 @@ fn background_scroll(
 	dx: f64,
 	dy: f64,
 ) -> CoreResult<()> {
-	let wheel_x = finite_i32(dx, "horizontal scroll delta")?;
-	let wheel_y = finite_i32(dy, "vertical scroll delta")?;
+	let (wheel_x, wheel_y) = quartz_scroll_deltas(dx, dy)?;
 	// A stale hover location makes a nested scroller miss the wheel even though
 	// the event reaches the process.
 	post_hover(source, pid, wid, window, x, y)?;
@@ -4464,10 +4463,7 @@ fn global_scroll(
 	mut before_wheel: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let point = point(x, y)?;
-	let steps = wheel_steps(
-		finite_i32(dx, "horizontal scroll delta")?,
-		finite_i32(dy, "vertical scroll delta")?,
-	);
+	let steps = scroll_plan(dx, dy)?;
 	if steps.is_empty() {
 		return Ok(());
 	}
@@ -4518,6 +4514,20 @@ fn prime_pointer(source: &CGEventSource, point: CGPoint, side: f64) -> CoreResul
 	}
 	control::wait(PRIMER_SETTLE)?;
 	Ok(())
+}
+
+/// API deltas reveal content down/right; Quartz wheel axes point up/left.
+fn quartz_scroll_deltas(dx: f64, dy: f64) -> CoreResult<(i32, i32)> {
+	Ok((
+		finite_i32(dx, "horizontal scroll delta")?.saturating_neg(),
+		finite_i32(dy, "vertical scroll delta")?.saturating_neg(),
+	))
+}
+
+/// The wheel events of a paced scroll by `(dx, dy)` ([`wheel_steps`]).
+fn scroll_plan(dx: f64, dy: f64) -> CoreResult<Vec<(i32, i32)>> {
+	let (wheel_x, wheel_y) = quartz_scroll_deltas(dx, dy)?;
+	Ok(wheel_steps(wheel_x, wheel_y))
 }
 
 /// Splits a pixel scroll into at most `MAX_WHEEL_EVENTS` wheel events whose
@@ -8209,6 +8219,21 @@ mod tests {
 		// input once the bound has passed.
 		activate_then_await(Some(false), Duration::ZERO, || Ok(()), || Some(false), no_wait)
 			.expect("an unreported activation is not an error");
+	}
+
+	#[test]
+	fn scroll_deltas_map_down_and_right_to_negative_quartz_axes() {
+		assert_eq!(quartz_scroll_deltas(40.0, 300.0).unwrap(), (-40, -300));
+		assert_eq!(quartz_scroll_deltas(-40.0, -300.0).unwrap(), (40, 300));
+		assert_eq!(quartz_scroll_deltas(0.0, 0.0).unwrap(), (0, 0));
+		let error = quartz_scroll_deltas(0.0, -3e9).unwrap_err();
+		assert!(error.message.contains("vertical scroll delta -3000000000"), "{}", error.message);
+	}
+
+	#[test]
+	fn paced_scrolls_go_down_and_right_as_negative_wheel_steps() {
+		assert_eq!(scroll_plan(40.0, 300.0).unwrap(), vec![(-4, -30); 10]);
+		assert_eq!(scroll_plan(-40.0, -300.0).unwrap(), vec![(4, 30); 10]);
 	}
 
 	#[test]
