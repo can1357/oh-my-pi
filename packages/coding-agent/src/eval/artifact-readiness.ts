@@ -99,11 +99,18 @@ const HELD_ROOTS_MAX = 64;
  * with no identity behind it at all, which is the thing the hold is for.
  */
 async function holdDirectory(dir: string): Promise<HeldRoot | "absent" | "unheld"> {
+	// Asked before the open, and it is the answer that is recorded: a root
+	// that is there when a cell is given it has a hold from then on, and its
+	// disappearance during the open is a loss rather than an absence. Read the
+	// other way round, a directory deleted mid-open looks like one that never
+	// arrived, and the cell goes on to hold whatever is made at that name.
+	const existed = directoryIdentity(dir) !== undefined;
 	let handle: fs.promises.FileHandle;
 	try {
 		handle = await fs.promises.open(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
 	} catch (error) {
-		return isEnoent(error) ? "absent" : "unheld";
+		if (!isEnoent(error)) return "unheld";
+		return existed ? "unheld" : "absent";
 	}
 	const stat = await handle.stat({ bigint: true });
 	return {
@@ -388,20 +395,31 @@ async function artifactElsewhere(
  * bytes, and this is what serves them: the object that was opened when the
  * answer was made, which nothing standing at the name can take its place in.
  */
-const pinnedFiles = new Map<string, { handle: fs.promises.FileHandle; answer: SettledArtifact }>();
-/** Files kept open for a re-ask at once; the oldest is closed. */
+const pinnedFiles = new Map<string, { handle: fs.promises.FileHandle; answer: SettledArtifact; at: number }>();
+/** Answers held open for a re-ask at once. */
 const PINNED_FILES_MAX = 32;
+/** How long an answer is a reader's before it counts as abandoned. */
+const PINNED_FILE_LEASE_MS = 30_000;
 
 function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact): string {
-	const token = `file-${crypto.randomUUID()}`;
-	pinnedFiles.set(token, { handle, answer });
-	while (pinnedFiles.size > PINNED_FILES_MAX) {
-		const oldest = pinnedFiles.keys().next().value;
-		if (oldest === undefined) break;
-		const dropped = pinnedFiles.get(oldest);
-		pinnedFiles.delete(oldest);
-		void dropped?.handle.close().catch(() => {});
+	// An answer already handed to a reader is that reader's until it comes
+	// back for the bytes or gives up: capacity must not revoke one, because a
+	// reader whose name was replaced has nothing else left to read from. So
+	// the ones that go are the ones nobody can still be waiting on, and when
+	// there are none the *new* answer is refused instead.
+	while (pinnedFiles.size >= PINNED_FILES_MAX) {
+		const expired = [...pinnedFiles].find(([, pinned]) => Date.now() - pinned.at >= PINNED_FILE_LEASE_MS);
+		if (!expired) {
+			void handle.close().catch(() => {});
+			throw new ToolError(
+				`${PINNED_FILES_MAX} artifact answers are outstanding and none has lapsed; ${answer.path} cannot be answered for`,
+			);
+		}
+		pinnedFiles.delete(expired[0]);
+		void expired[1].handle.close().catch(() => {});
 	}
+	const token = `file-${crypto.randomUUID()}`;
+	pinnedFiles.set(token, { handle, answer, at: Date.now() });
 	return token;
 }
 
@@ -436,8 +454,15 @@ async function artifactInDirectory(
 	const name = names.find(entry => entry.startsWith(`${id}.`));
 	if (name === undefined) return null;
 	try {
-		const handle = await fs.promises.open(`${at}/${name}`, "r");
+		// Non-blocking, because an ordinary open of a fifo waits for a writer
+		// before anything can be checked: a name listed a moment ago can be
+		// something that does not answer an open at all.
+		const handle = await fs.promises.open(`${at}/${name}`, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
 		const stat = await handle.stat({ bigint: true });
+		if (!stat.isFile()) {
+			await handle.close();
+			return null;
+		}
 		const answer: SettledArtifact = {
 			path: path.join(path.resolve(where), name),
 			device: String(stat.dev),

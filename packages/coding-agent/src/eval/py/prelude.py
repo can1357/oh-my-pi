@@ -148,20 +148,31 @@ if "__omp_prelude_loaded__" not in globals():
             # writer before any check can run: a name that stopped meaning its
             # file can have become something that does not answer an open at
             # all, and a reader that hangs there never gets to refuse.
-            fd = os.open(answer["path"], os.O_RDONLY | os.O_NONBLOCK)
+            # A name that stopped meaning its file may not open at all — it
+            # was removed, or what is there now refuses this open — and that is
+            # the same answer as opening something else: ask the host, which
+            # still holds the file this answer was about.
             try:
-                stat = os.fstat(fd)
-                if (
-                    stat_module.S_ISREG(stat.st_mode)
-                    and str(stat.st_dev) == answer.get("device")
-                    and str(stat.st_ino) == answer.get("inode")
-                ):
-                    with os.fdopen(os.dup(fd), "rb") as handle:
-                        data = handle.read().decode("utf-8")
+                fd = os.open(answer["path"], os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                fd = -1
+            try:
+                if fd >= 0:
+                    stat = os.fstat(fd)
+                    if (
+                        stat_module.S_ISREG(stat.st_mode)
+                        and str(stat.st_dev) == answer.get("device")
+                        and str(stat.st_ino) == answer.get("inode")
+                    ):
+                        with os.fdopen(os.dup(fd), "rb") as handle:
+                            data = handle.read().decode("utf-8")
+                    else:
+                        data = None
                 else:
                     data = None
             finally:
-                os.close(fd)
+                if fd >= 0:
+                    os.close(fd)
         if data is None:
             # The pathname reaches something else now — its directory was
             # replaced between the answer and this read. The host still holds

@@ -261,14 +261,22 @@ async function readSettledArtifact(
 	// before any check can run: a name that stopped meaning its file can have
 	// become something that does not answer an open at all, and a reader that
 	// hangs there never gets to refuse.
-	const handle = await fs.open(answer.path, nodeFsConstants.O_RDONLY | nodeFsConstants.O_NONBLOCK);
-	try {
-		const stat = await handle.stat({ bigint: true });
-		if (stat.isFile() && String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
-			return await handle.readFile("utf8");
+	// A name that stopped meaning its file may not open at all — it was
+	// removed, or what is there now refuses this open — and that is the same
+	// answer as opening something else: ask the host, which still holds the
+	// file this answer was about.
+	const handle = await fs
+		.open(answer.path, nodeFsConstants.O_RDONLY | nodeFsConstants.O_NONBLOCK)
+		.catch(() => undefined);
+	if (handle) {
+		try {
+			const stat = await handle.stat({ bigint: true });
+			if (stat.isFile() && String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
+				return await handle.readFile("utf8");
+			}
+		} finally {
+			await handle.close();
 		}
-	} finally {
-		await handle.close();
 	}
 	// The pathname reaches something else now — its directory was replaced
 	// between the answer and this read. The host still holds that directory
