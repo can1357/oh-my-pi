@@ -13,6 +13,10 @@ saveTextLockfile = true
 ".lark" = "text"
 
 [test]
+# Marks every child a test spawns as a test child; see scripts/test-preload.ts. Bun reads
+# only the bunfig.toml of the directory `bun test` starts in, so each test root names it.
+preload = ["./scripts/test-preload.ts"]
+
 # bun test does NOT honor .gitignore; prune robomp's repo clones and
 # scratch dirs so a root-level `bun test` doesn't walk into them.
 #
