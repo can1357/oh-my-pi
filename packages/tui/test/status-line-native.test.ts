@@ -304,6 +304,29 @@ describe("prompt-cache expiry wakeup", () => {
 			line.dispose();
 		}
 	});
+
+	it("rebuilds a not-cached card once the local day turns, so its times carry their date", () => {
+		setNativeRendering(true);
+		vi.useFakeTimers();
+		const expiredAt = new Date(2026, 9, 29, 23, 50).getTime();
+		setSystemTime(expiredAt + 60_000);
+		const cold: PromptCacheStatus = { ...WARM, state: "cold", reason: { kind: "expired", at: expiredAt } };
+		const line = cacheStatusLine(CACHE_SETTINGS, () => cold);
+		const repaint = vi.fn();
+		line.watchBranch(repaint);
+		const card = () => JSON.stringify(cacheChip(line)!.hovercard);
+		try {
+			expect(card()).not.toContain("Oct");
+			vi.advanceTimersByTime(9 * 60_000 - 1);
+			expect(repaint).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1);
+			expect(repaint).toHaveBeenCalledTimes(1);
+			expect(card()).toContain("Oct 29");
+		} finally {
+			line.dispose();
+		}
+	});
 });
 
 describe("promptCacheDetails", () => {

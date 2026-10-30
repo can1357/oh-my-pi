@@ -6,8 +6,12 @@ import { isPromptCachePersistent } from "@oh-my-pi/pi-catalog/compat/prompt-cach
 import type { PromptCacheColdReason, PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";
 import type { CacheWarmingStatus, ConfirmedPromptCacheEntry } from "./cache-warmer";
 
-/** A cache entry the session knows of: confirmed by a response this process saw, or inferred from the transcript. */
-export interface ObservedPromptCacheEntry extends ConfirmedPromptCacheEntry {
+/**
+ * A cache entry the session knows of: confirmed by a response this process saw, or inferred from the transcript.
+ * A replaced transcript is read off its own branch instead, so no `history` change reaches here.
+ */
+export interface ObservedPromptCacheEntry extends Omit<ConfirmedPromptCacheEntry, "change"> {
+	change?: Exclude<PromptCacheColdReason, { kind: "expired" | "refresh-missed" }>;
 	inferred: boolean;
 }
 

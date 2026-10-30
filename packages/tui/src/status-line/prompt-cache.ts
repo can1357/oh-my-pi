@@ -70,8 +70,6 @@ export function promptCacheColdReasonText(
 			return "cache retention setting changed";
 		case "compaction":
 			return "context was compacted";
-		case "history":
-			return "conversation was rewound or branched";
 	}
 }
 

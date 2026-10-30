@@ -314,8 +314,19 @@ export interface ConfirmedPromptCacheEntry {
 	refreshMissed: boolean;
 }
 
-/** A difference in the next request that its cached prefix cannot serve. */
-export type PromptCacheChange = Exclude<PromptCacheColdReason, { kind: "expired" | "refresh-missed" }>;
+/**
+ * A difference in the next request that its cached prefix cannot serve. `history`: the
+ * transcript was rewound, branched or replaced, so the armed request no longer leads it.
+ */
+export type PromptCacheChange =
+	| Exclude<PromptCacheColdReason, { kind: "expired" | "refresh-missed" }>
+	| { kind: "history" };
+
+/** What a warm refresh of the current conversation found: when it was sent and whether it read the cache. */
+export interface CacheRefreshOutcome {
+	sentAt: number;
+	hit: boolean;
+}
 
 interface TrackedCacheEntry {
 	model: Model<Api>;
@@ -360,9 +371,10 @@ export class CacheWarmer {
 	readonly #deps: CacheWarmerDeps;
 	/**
 	 * Called with every paid warm response, including one that missed the cache or was aborted after acceptance.
-	 * `sentAt` is when the refresh was sent, the moment a hit restarts the entry's lifetime.
+	 * `refresh` is set when the response answered for the conversation as it still stands (not an error, not
+	 * replaced or outdated): when it was sent, the moment a hit restarts the entry's lifetime, and whether it hit.
 	 */
-	onWarmed?: (message: AssistantMessage, extensionOverride: boolean, sentAt: number) => void;
+	onWarmed?: (message: AssistantMessage, extensionOverride: boolean, refresh: CacheRefreshOutcome | undefined) => void;
 	/** Called when a refresh is handed to the stream; stop decisions and extension vetoes send nothing and skip it. */
 	onRefreshStart?: (refresh: CacheWarmingRefreshStart) => void;
 	/** Called exactly once after each onRefreshStart, unless the host cleared it (dispose) while the refresh was in flight. */
@@ -628,8 +640,15 @@ export class CacheWarmer {
 			const message = await this.#replay(run);
 			// Record before the abort check: a refresh cancelled or replaced after the
 			// provider accepted it was still billed, and spend tracking must see it.
+			// Only a refresh that answered for the conversation as it still stands
+			// says anything about that conversation's cache entry.
 			if (message && message.usage.totalTokens > 0 && this.onWarmed) {
-				this.onWarmed(message, extensionOverride, sentAt);
+				const answered = message.stopReason !== "error" && this.#run === run && run.change() === undefined;
+				this.onWarmed(
+					message,
+					extensionOverride,
+					answered ? { sentAt, hit: message.usage.cacheRead > 0 && message.usage.cacheWrite === 0 } : undefined,
+				);
 				usage = message.usage;
 			}
 			if (this.#run !== run) {
