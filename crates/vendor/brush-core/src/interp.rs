@@ -472,10 +472,29 @@ pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), 
 	ensure_not_cancelled(params)
 }
 
+/// [`loop_checkpoint`] for a step that is itself a stride of work — a byte
+/// stride copied, converted or scanned — rather than one element moved.
+///
+/// Such a step reads the clock every time. Amortising the reading over sixteen
+/// of them assumes the sixteen are cheap, and a stride is not: converting
+/// 64 KiB of `Σ` costs about 1.2 ms, so sixteen of them held the worker for
+/// 19.6 ms at a stretch, sixty-four times over, with the time bound seeing
+/// none of it.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] once the run is cancelled.
+pub(crate) async fn stride_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	yield_after_stride().await;
+	ensure_not_cancelled(params)
+}
+
 /// CPU time the calling thread has used so far.
 ///
 /// Wall-clock time would count every stretch the machine took the thread away
 /// too, which is not this thread holding anything.
+#[cfg(unix)]
 fn worker_cpu_time() -> std::time::Duration {
 	let mut now = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
 	// SAFETY: `clock_gettime` writes only the `timespec` it is given, and
@@ -485,6 +504,32 @@ fn worker_cpu_time() -> std::time::Duration {
 		u64::try_from(now.tv_sec).unwrap_or_default(),
 		u32::try_from(now.tv_nsec).unwrap_or_default(),
 	)
+}
+
+/// Time since the calling thread first read it. **This is wall time, not the
+/// thread's CPU time.**
+///
+/// Windows has a thread CPU clock, `GetThreadTimes`, but it advances only at
+/// the scheduler's tick, 15.6 ms by default: read against a 1 ms bound it
+/// stands still for fifteen of them and then jumps, so the bound would become
+/// the tick. Wall time also counts the stretches the machine took the thread
+/// away, which can only make a checkpoint yield sooner than it had to. The
+/// hold measurements in `tests.rs` read the Unix thread clock and do not run
+/// here, so nothing measures this path.
+#[cfg(windows)]
+fn worker_cpu_time() -> std::time::Duration {
+	thread_local! {
+		static FIRST_READING: std::time::Instant = std::time::Instant::now();
+	}
+	FIRST_READING.with(std::time::Instant::elapsed)
+}
+
+/// No clock: `std::time::Instant` does not exist on every other target this
+/// crate names (`wasm32-unknown-unknown` panics on it). The time bound is off
+/// there, and only Tokio's own budget makes a checkpoint yield.
+#[cfg(not(any(unix, windows)))]
+const fn worker_cpu_time() -> std::time::Duration {
+	std::time::Duration::ZERO
 }
 
 /// How long a worker may run between yields before a checkpoint makes it
@@ -500,10 +545,17 @@ const LONGEST_HOLD_BETWEEN_YIELDS: std::time::Duration = std::time::Duration::fr
 
 /// How many checkpoints pass between readings of the thread's clock.
 ///
-/// A reading is a vDSO call of a few tens of nanoseconds, about the cost of a
-/// checkpoint itself, so it is amortised rather than taken on every one. The
-/// number has to stay small: one checkpoint can stand for a whole byte stride
-/// of work, and the clock cannot bound what it does not see.
+/// `CLOCK_THREAD_CPUTIME_ID` is **not** served by the vDSO on Linux: a
+/// per-thread CPU clock has to be read in the kernel, so a reading is a real
+/// syscall of 100–300 ns — several times what a checkpoint costs. Taking one
+/// per [`element_checkpoint`] would be the kind of charge this file spent six
+/// rounds removing, so an element-sized step amortises it over sixteen.
+///
+/// A stride-sized step does not amortise it at all; see [`stride_checkpoint`].
+/// One 8 KiB stride of case conversion is 150 µs, against which 300 ns is two
+/// parts in a thousand, and sixteen of them would be 2.4 ms of hold the clock
+/// never saw. The amortisation is sound only where the sixteen steps are
+/// cheap, which is what the two entry points separate.
 const CHECKPOINTS_PER_CLOCK_READING: u32 = 16;
 
 /// What this thread has done since it last yielded.
@@ -523,14 +575,41 @@ thread_local! {
 		};
 }
 
+/// When a checkpoint reads the thread's clock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClockReading {
+	/// Once every [`CHECKPOINTS_PER_CLOCK_READING`] checkpoints: for a step
+	/// that moves one element, where sixteen of them are cheap.
+	EverySixteenth,
+	/// Every time: for a step that is itself a stride of work, where one is
+	/// already as much as the bound allows.
+	EveryTime,
+}
+
 /// Yields if this thread has run for [`LONGEST_HOLD_BETWEEN_YIELDS`] since it
 /// last did, reading the clock once every [`CHECKPOINTS_PER_CLOCK_READING`]
 /// checkpoints.
-async fn yield_if_held_too_long() {
+///
+/// For a caller holding a cancellation token rather than execution parameters,
+/// and so unable to use [`loop_checkpoint`]: it checks nothing and returns
+/// nothing.
+pub(crate) async fn yield_if_held_too_long() {
+	yield_if_held(ClockReading::EverySixteenth).await;
+}
+
+/// [`yield_if_held_too_long`] for a step that is itself a stride of work,
+/// which reads the clock every time. See [`stride_checkpoint`].
+pub(crate) async fn yield_after_stride() {
+	yield_if_held(ClockReading::EveryTime).await;
+}
+
+async fn yield_if_held(reading: ClockReading) {
 	let due = HOLD.with(|hold| {
 		let mut state = hold.get();
 		state.checkpoints_since_reading += 1;
-		if state.checkpoints_since_reading < CHECKPOINTS_PER_CLOCK_READING {
+		if reading == ClockReading::EverySixteenth
+			&& state.checkpoints_since_reading < CHECKPOINTS_PER_CLOCK_READING
+		{
 			hold.set(state);
 			return false;
 		}
@@ -672,12 +751,21 @@ impl ElementBudget {
 
 /// Spends `count` checkpoints in a row: the ones
 /// [`ElementBudget::charge`] found due.
+///
+/// A step that owes more than one is a stride of work rather than an element
+/// moved — the charge converts bytes to checkpoints at one per
+/// [`BYTE_CHECKPOINT_STRIDE`] — so it reads the clock every time rather than
+/// every sixteenth.
 pub(crate) async fn loop_checkpoints(
 	params: &ExecutionParameters,
 	count: usize,
 ) -> Result<(), error::Error> {
 	for _ in 0..count {
-		loop_checkpoint(params).await?;
+		if count > 1 {
+			stride_checkpoint(params).await?;
+		} else {
+			loop_checkpoint(params).await?;
+		}
 	}
 	Ok(())
 }
@@ -724,7 +812,7 @@ pub(crate) async fn push_str_in_strides(
 	out.reserve(text.len());
 	let mut rest = text;
 	loop {
-		loop_checkpoint(params).await?;
+		stride_checkpoint(params).await?;
 		if rest.len() <= BYTE_CHECKPOINT_STRIDE {
 			out.push_str(rest);
 			return Ok(());

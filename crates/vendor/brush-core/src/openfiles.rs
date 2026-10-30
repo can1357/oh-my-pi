@@ -489,6 +489,7 @@ enum Readiness {
 /// and the copy made a quarter of a million read attempts in a tenth of a
 /// second, and as many again after its caller had walked away. `EINTR` is the
 /// one failure that means "ask again".
+#[cfg_attr(not(unix), expect(unused_variables, reason = "no poll off Unix: only the sleep runs"))]
 fn wait_until_ready(file: &OpenFile, readiness: Readiness) -> std::io::Result<()> {
 	#[cfg(unix)]
 	{

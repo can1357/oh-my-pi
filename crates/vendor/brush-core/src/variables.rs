@@ -230,8 +230,11 @@ impl ShellVariable {
 	/// preexisting value.
 	///
 	/// An array literal can hold any number of elements, so its assignment
-	/// spends a checkpoint on each one (see [`Self::assign_array`]); a scalar
-	/// is assigned at once (see [`Self::assign_scalar`]).
+	/// spends a checkpoint on each one (see [`Self::assign_array`]). A scalar
+	/// is one value, but one value can be a whole array joined into a string,
+	/// so its conversion is divided too: `copy="${huge[@]}$open"` held the
+	/// worker 94.8 ms at 64 MiB and 734.9 ms at 512 MiB through the
+	/// synchronous [`Self::assign_scalar`].
 	///
 	/// # Arguments
 	///
@@ -245,7 +248,13 @@ impl ShellVariable {
 		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
 		match value {
-			ShellValueLiteral::Scalar(value) => self.assign_scalar(value, append),
+			ShellValueLiteral::Scalar(value) => {
+				if self.is_readonly() {
+					return Err(error::ErrorKind::ReadonlyVariable.into());
+				}
+				let value = self.value_converter().apply_divided(value, params).await?;
+				self.place_scalar(value, append)
+			},
 			ShellValueLiteral::Array(literal) => self.assign_array(literal, append, params).await,
 		}
 	}
@@ -267,6 +276,11 @@ impl ShellVariable {
 		}
 
 		let value = self.convert_value_str_for_assignment(value);
+		self.place_scalar(value, append)
+	}
+
+	/// Stores an already-converted scalar, conditionally appending.
+	fn place_scalar(&mut self, value: String, append: bool) -> Result<(), error::Error> {
 
 		if !append {
 			return match &self.value {
@@ -517,10 +531,30 @@ pub(crate) struct ValueConverter {
 	update_transform: ShellVariableUpdateTransform,
 }
 
+/// How much of a value one case-conversion step converts.
+///
+/// Smaller than [`interp::DIVIDE_COPY_ABOVE_BYTES`], which is a stride for
+/// copying, because converting a byte costs far more than moving one: a
+/// 64 KiB stride of `Σ` measured 1.2 ms optimised and 9.5–11 ms debug, over
+/// the millisecond [`interp::LONGEST_HOLD_BETWEEN_YIELDS`] allows a single
+/// hold, so the stride could not honour the bound the clock exists to
+/// enforce. 8 KiB converts in about 0.15 ms optimised. The extra clock
+/// reading each stride costs 100–300 ns against 150 µs of conversion.
+///
+/// This is the size of a *piece*, not the threshold for dividing at all;
+/// a value shorter than [`interp::DIVIDE_COPY_ABOVE_BYTES`] is converted in
+/// one step, because below that there is nothing worth dividing.
+const CONVERSION_STRIDE_BYTES: usize = 8 * 1024;
+
 impl ValueConverter {
 	/// A converter that leaves every value as it is.
 	pub(crate) const fn identity() -> Self {
 		Self { treat_as_int: false, update_transform: ShellVariableUpdateTransform::None }
+	}
+
+	/// Whether this converter leaves every value exactly as it is.
+	const fn is_identity(self) -> bool {
+		!self.treat_as_int && matches!(self.update_transform, ShellVariableUpdateTransform::None)
 	}
 
 	/// Converts a value in one step.
@@ -538,6 +572,15 @@ impl ValueConverter {
 	/// had already been paid. A charge counts work; only dividing the
 	/// operation interrupts it.
 	///
+	/// Pieces are cut at any character boundary. **Choosing where to cut is
+	/// not a way to make this exact** — an earlier version extended a piece
+	/// until it did not end in `Σ`, which lost the preceding context in one
+	/// direction, missed the following context in the other, and turned an
+	/// all-sigma string into one piece of 1.03 s at 64 MiB. Each `Σ` instead
+	/// asks the whole original string about its neighbours, which is a
+	/// constant-time question for ordinary text and the only thing in a
+	/// lowercase conversion that depends on anything outside one character.
+	///
 	/// # Errors
 	///
 	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
@@ -547,62 +590,77 @@ impl ValueConverter {
 		value: String,
 		params: &ExecutionParameters,
 	) -> Result<String, error::Error> {
+		// Nothing to convert is the common case — an array literal assigned to
+		// a variable with no case or integer attribute — and awaiting this
+		// function per element for it measured 2.88% of pure waste.
+		if self.is_identity() {
+			return Ok(value);
+		}
 		let divisible = !self.treat_as_int
 			&& !matches!(self.update_transform, ShellVariableUpdateTransform::None);
 		if !divisible || value.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
 			return Ok(self.apply(value));
 		}
 
-		// Only the first piece carries `Capitalize`; the rest lowercase, which
-		// is what capitalising the whole string does to them.
-		let continuation = match self.update_transform {
-			ShellVariableUpdateTransform::Capitalize => ShellVariableUpdateTransform::Lowercase,
-			other => other,
-		};
-		let lowercases = matches!(
-			self.update_transform,
-			ShellVariableUpdateTransform::Lowercase | ShellVariableUpdateTransform::Capitalize
-		);
-
 		let mut converted = String::with_capacity(value.len());
-		let mut rest = value.as_str();
-		let mut transform = self.update_transform;
-		while !rest.is_empty() {
-			interp::loop_checkpoint(params).await?;
-			let end = Self::stride_end(rest, lowercases);
-			let (piece, remaining) = rest.split_at(end);
-			let mut piece = piece.to_owned();
-			Self::apply_value_transforms(&mut piece, false, transform);
-			converted.push_str(&piece);
-			transform = continuation;
-			rest = remaining;
+		let mut cut = 0;
+		while cut < value.len() {
+			interp::stride_checkpoint(params).await?;
+			let end = Self::stride_end(&value, cut);
+			Self::convert_piece(&value, cut..end, self.update_transform, &mut converted);
+			cut = end;
 		}
 
 		Ok(converted)
 	}
 
-	/// Where to cut the next piece.
-	///
-	/// **Do not replace this with a plain byte stride.** Case conversion is
-	/// per-character except for one rule: what `Σ` lowercases to depends on
-	/// whether a cased letter follows it — `σ` inside a word, `ς` at its end —
-	/// so a piece that ended straight after a capital sigma would convert it as
-	/// if the string stopped there. Cutting after the sigma keeps that decision
-	/// inside one piece. The caller carries the matching rule for `Capitalize`:
-	/// only the first piece capitalises and the rest lowercase. Neither of
-	/// these is something a latency test can see.
-	fn stride_end(text: &str, lowercases: bool) -> usize {
-		if text.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
-			return text.len();
-		}
-		let mut end = interp::DIVIDE_COPY_ABOVE_BYTES;
+	/// Where the next piece ends: the last character boundary within
+	/// [`CONVERSION_STRIDE_BYTES`].
+	fn stride_end(text: &str, from: usize) -> usize {
+		let mut end = (from + CONVERSION_STRIDE_BYTES).min(text.len());
 		while !text.is_char_boundary(end) {
 			end -= 1;
 		}
-		while lowercases && end < text.len() && text[..end].ends_with('Σ') {
-			end += text[end..].chars().next().map_or(0, char::len_utf8);
-		}
 		end
+	}
+
+	/// Converts `text[piece]` onto `converted`, reading `text` for the context
+	/// a character needs.
+	///
+	/// `Capitalize` applies only at the very start of the value; everywhere
+	/// else it lowercases, which is what capitalising the whole string does.
+	fn convert_piece(
+		text: &str,
+		piece: std::ops::Range<usize>,
+		update_transform: ShellVariableUpdateTransform,
+		converted: &mut String,
+	) {
+		let lowercases = matches!(
+			update_transform,
+			ShellVariableUpdateTransform::Lowercase | ShellVariableUpdateTransform::Capitalize
+		);
+		let capitalizes = matches!(update_transform, ShellVariableUpdateTransform::Capitalize);
+
+		for (offset, character) in text[piece.clone()].char_indices() {
+			let at = piece.start + offset;
+			if capitalizes && at == 0 {
+				// Capitalising is lowercasing and then uppercasing the first
+				// character of *that*, which is not the same as uppercasing the
+				// original: `İ` lowercases to `i` and a combining dot, and only
+				// the `i` is raised again.
+				let mut lowered = character.to_lowercase();
+				if let Some(first) = lowered.next() {
+					converted.extend(first.to_uppercase());
+				}
+				converted.extend(lowered);
+			} else if !lowercases {
+				converted.extend(character.to_uppercase());
+			} else if character == 'Σ' && final_sigma(text, at) {
+				converted.push('ς');
+			} else {
+				converted.extend(character.to_lowercase());
+			}
+		}
 	}
 
 	fn apply_value_transforms(
@@ -621,12 +679,90 @@ impl ValueConverter {
 					// This isn't really title-case; only the first character is capitalized.
 					*s = s.to_lowercase();
 					if let Some(c) = s.chars().next() {
-						s.replace_range(0..1, &c.to_uppercase().to_string());
+						// By the character's own length: `replace_range(0..1)`
+						// panics on a multibyte one, and `ß` is two bytes.
+						s.replace_range(0..c.len_utf8(), &c.to_uppercase().to_string());
 					}
 				},
 			}
 		}
 	}
+}
+
+/// Whether the `Σ` beginning at byte `at` of `text` lowercases to the final
+/// form `ς` rather than `σ`.
+///
+/// Unicode's `Final_Sigma`: a cased character comes before it and none comes
+/// after, skipping case-ignorable characters on both sides. It is the only
+/// rule in a lowercase conversion that depends on anything outside the one
+/// character being converted, which is why a conversion can otherwise be cut
+/// anywhere — and why cutting *around* this rule, as an earlier version did,
+/// cannot be made to work: it needs both sides, and a run of case-ignorable
+/// characters makes either side arbitrarily far away.
+fn final_sigma(text: &str, at: usize) -> bool {
+	let before = scan_for_cased(text[..at].chars().rev());
+	let after = scan_for_cased(text[at + 'Σ'.len_utf8()..].chars());
+	before && !after
+}
+
+/// Walks until a character that is not case-ignorable, and reports whether
+/// that character is cased. Runs out of characters means not cased.
+fn scan_for_cased(characters: impl Iterator<Item = char>) -> bool {
+	for character in characters {
+		match case_role(character) {
+			CaseRole::Ignorable => (),
+			CaseRole::Cased => return true,
+			CaseRole::Neither => return false,
+		}
+	}
+
+	false
+}
+
+/// What a character does to the scan either side of a `Σ`.
+#[derive(Clone, Copy)]
+enum CaseRole {
+	/// Cased: the scan stops here and the answer is yes.
+	Cased,
+	/// Case-ignorable: the scan passes over it.
+	Ignorable,
+	/// Neither: the scan stops here and the answer is no.
+	Neither,
+}
+
+thread_local! {
+	/// Answers already asked. The scan only ever runs next to a `Σ`, so this
+	/// is empty for text that has none, and one entry per distinct neighbour
+	/// for text made of them.
+	static CASE_ROLES: std::cell::RefCell<std::collections::HashMap<char, CaseRole>> =
+		std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// What `character` is, as far as the scan around a `Σ` is concerned.
+///
+/// The standard library is the only Unicode table here, and it is asked the
+/// question it already answers: lowercasing `"<c>Σ"` yields `ς` exactly when
+/// `c` stops the backward scan as cased, and lowercasing `"A<c>Σ"` yields `ς`
+/// exactly when `c` either is cased or is passed over. Keeping one table
+/// rather than two means the branch cannot disagree with `str::to_lowercase`
+/// about what a character is.
+fn case_role(character: char) -> CaseRole {
+	if let Some(known) = CASE_ROLES.with_borrow(|roles| roles.get(&character).copied()) {
+		return known;
+	}
+
+	let mut probe = String::with_capacity(8);
+	probe.push(character);
+	probe.push('Σ');
+	let role = if probe.to_lowercase().ends_with('ς') {
+		CaseRole::Cased
+	} else {
+		probe.insert(0, 'A');
+		if probe.to_lowercase().ends_with('ς') { CaseRole::Ignorable } else { CaseRole::Neither }
+	};
+
+	CASE_ROLES.with_borrow_mut(|roles| roles.insert(character, role));
+	role
 }
 
 impl ShellVariable {
@@ -1298,5 +1434,95 @@ impl From<Vec<String>> for ShellValue {
 impl From<Vec<&str>> for ShellValue {
 	fn from(values: Vec<&str>) -> Self {
 		Self::indexed_array_from_strs(values.as_slice())
+	}
+}
+
+#[cfg(test)]
+mod conversion {
+	use super::*;
+
+	/// Every transform the divided converter has to reproduce.
+	const TRANSFORMS: [ShellVariableUpdateTransform; 3] = [
+		ShellVariableUpdateTransform::Lowercase,
+		ShellVariableUpdateTransform::Uppercase,
+		ShellVariableUpdateTransform::Capitalize,
+	];
+
+	/// Contexts around the character the conversion has to get right. `Σ`
+	/// lowercases to `ς` only when a cased character precedes it and none
+	/// follows, skipping case-ignorable ones — an apostrophe, a combining
+	/// mark, a zero-width joiner — on both sides.
+	const CONTEXTS: [&str; 11] = [
+		"Σ",
+		"Σ!",
+		"ΣA",
+		"Σ'",
+		"Σ'A",
+		"Σ\u{0301}",
+		"Σ\u{0301}A",
+		"Σ\u{200d}A",
+		"ΣΣ",
+		"ΣßΣ",
+		"İΣ",
+	];
+
+	/// Divides a conversion the way an assignment does, without a runtime.
+	fn divided(converter: ValueConverter, value: &str) -> String {
+		let mut converted = String::new();
+		let mut cut = 0;
+		while cut < value.len() {
+			let end = ValueConverter::stride_end(value, cut);
+			ValueConverter::convert_piece(value, cut..end, converter.update_transform, &mut converted);
+			cut = end;
+		}
+
+		converted
+	}
+
+	/// The divided conversion has to agree with the whole-string one
+	/// character for character, at every offset a piece boundary can fall on.
+	///
+	/// A latency change that silently alters text is worse than the hold it
+	/// removes, and nothing else in the suite would see it: an earlier version
+	/// chose its cut points to avoid splitting a sigma's context and got sixty
+	/// of these wrong, in both directions.
+	#[test]
+	fn divided_conversion_matches_whole_string() {
+		let stride = CONVERSION_STRIDE_BYTES;
+		let mut compared = 0;
+		for transform in TRANSFORMS {
+			let converter =
+				ValueConverter { treat_as_int: false, update_transform: transform };
+			for context in CONTEXTS {
+				// Offsets that put a piece boundary just before, inside and
+				// just after the context, and well away from it.
+				for filler in [0, 1, 2, 3, 4, stride - 4, stride - 2, stride - 1, stride, stride + 1]
+				{
+					let value = format!("{}{context}", "A".repeat(filler));
+					let whole = converter.apply(value.clone());
+					let divided = divided(converter, &value);
+					assert_eq!(
+						divided, whole,
+						"{transform:?} of {filler} fillers before {context:?}"
+					);
+					compared += 1;
+				}
+			}
+		}
+
+		assert_eq!(compared, TRANSFORMS.len() * CONTEXTS.len() * 10, "every case ran");
+	}
+
+	/// `Capitalize` replaced the first character by byte index, which is a
+	/// panic when that character is wider than one byte.
+	#[test]
+	fn capitalize_accepts_a_multibyte_first_character() {
+		let converter = ValueConverter {
+			treat_as_int:     false,
+			update_transform: ShellVariableUpdateTransform::Capitalize,
+		};
+		assert_eq!(converter.apply(String::from("ßeta")), "SSeta");
+		assert_eq!(converter.apply(String::from("über")), "Über");
+		assert_eq!(converter.apply(String::new()), "");
 	}
 }
