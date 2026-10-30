@@ -272,9 +272,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
 	 * Called at injection boundaries only (loop start and after a tool batch
-	 * fully settles), so dequeued messages are immediately injected. The
-	 * mid-batch interrupt poll uses {@link hasSteeringMessages} instead and
-	 * never consumes the queue.
+	 * fully settles). The mid-batch interrupt poll uses
+	 * {@link hasSteeringMessages} instead and never consumes the queue.
+	 *
+	 * Taking a message from the queue does not record it. A turn records it
+	 * when it emits the message's events, and between the two the boundary can
+	 * still park on the pause gate or the run can abort. Nothing answers input
+	 * once the run has aborted, so an aborted run records none of what it took:
+	 * the host owns each message until a turn records it, and puts back
+	 * whatever the run did not record.
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
@@ -360,8 +366,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns follow-up messages to process after the agent would otherwise stop.
 	 *
 	 * Called when the agent has no more tool calls and no steering messages.
-	 * If messages are returned, they're added to the context and the agent
-	 * continues with another turn.
+	 * If messages are returned, the agent continues with another turn, which
+	 * records them. As with {@link getSteeringMessages}, taking them does not
+	 * record them: a run that aborts first records none of them, and the host
+	 * puts back whatever the run did not record.
 	 */
 	getFollowUpMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 	/**
