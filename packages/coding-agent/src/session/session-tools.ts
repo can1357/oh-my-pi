@@ -444,10 +444,17 @@ export class SessionTools {
 	 * outside the refresh frame prevents wrappers from retaining rollback maps
 	 * from earlier MCP generations through a shared lexical environment.
 	 *
-	 * What a manager tool is handed when it is called without the agent loop's context: what any
-	 * custom tool is handed (`sdk.ts` `createCustomToolContext`), decided by the context's type
-	 * rather than by who wrote the tool — the session's services as an extension's context hands
-	 * them, the model as a copy (`handHostModel`), and no `Settings`.
+	 * What a manager tool is handed when it is called without the agent loop's context. Manager tools
+	 * are host code: the MCP bridge's (`MCPTool`, `DeferredMCPTool`), a subagent's MCP proxies, and
+	 * whatever an SDK host passes to `refreshMCPTools`. No extension code reaches this factory — an
+	 * extension's tools run through `RegisteredToolAdapter`, an SDK custom tool through
+	 * `createCustomToolContext`, and neither carries `Settings`.
+	 *
+	 * So it hands them the session's `Settings`, as the agent loop's context does: the bridge resolves
+	 * the internal URLs in a tool's arguments with them (`memory://` honors the session's memory
+	 * backend and identity), and a host tool's GitHub cache honors the session's policy, kill switch
+	 * included. The session's services are the surfaces an extension's context hands, the model a
+	 * copy (`handHostModel`): a manager tool reads them, and nothing more is needed.
 	 */
 	readonly #getCustomToolContext = (): CustomToolContext => {
 		const host = this.#host;
@@ -462,6 +469,7 @@ export class SessionTools {
 			abort: () => {
 				host.agent.abort();
 			},
+			settings: host.settings,
 		};
 	};
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];

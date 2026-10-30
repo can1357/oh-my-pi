@@ -40,7 +40,12 @@ import type {
 } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { bindInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import {
+	bindInputScope,
+	hasInputScope,
+	inputRecipient,
+	type ToolRendererScope,
+} from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "../../config/api-key-resolver";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -632,8 +637,9 @@ const handedTUIs = new WeakMap<ToolRendererScope, WeakMap<TUI, TUI>>();
  *   the image budget an image draws through ({@link handImageBudget}) — calls the host's TUI;
  * - an input listener, a focus change and an overlay are the session's, made only while its scope
  *   is live and running in it: a listener is taken off the TUI at the first key after the scope
- *   has gone and is never called again, and an overlay is taken down the moment the TUI's
- *   retirement sweep finds its scope gone (`bindInputScope`). A suspension (`stop`) is made only
+ *   has gone and is never called again; a component the session focuses or shows takes input in
+ *   its scope (`bindInputScope`), and once the scope has gone an overlay is taken down and focus
+ *   goes back to what the session took it from. A suspension (`stop`) is made only
  *   while the scope is live, and only the session's own suspension can be ended (`start`), at any
  *   time, so a session that went while suspended does not leave the host stopped;
  * - everything that steers the host's renderer, its input, its screen and its other components —
@@ -652,7 +658,19 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 	const refuse = (member: string): never => withheld(TUI_SUBJECT, member);
 	/** Each listener the session added, with what takes it off the host's TUI. */
 	const listeners = new Map<InputListener, () => void>();
+	/** Each component the session focused, and what had focus before it took it. */
+	const predecessors = new WeakMap<Component, Component | undefined>();
 	let suspended = false;
+	/**
+	 * Gives `component` — one the session hands the TUI to focus or to show — the session's scope
+	 * before the TUI calls anything of it, unless it takes input in a scope already (a dialog the
+	 * host bound, a child an overlay owns). Without one the TUI would call its `handleInput` as the
+	 * host's own code: outside the session's admission while it is live, untracked, and on after it
+	 * has gone. `retire` is what the host does once the scope has gone.
+	 */
+	const bind = (component: Component, retire: () => Component | undefined): void => {
+		if (!hasInputScope(component)) bindInputScope(component, scope, retire);
+	};
 	const handed: Decided<TUI> = {
 		requestRender: force => tui.requestRender(force === true),
 		requestComponentRender: component => tui.requestComponentRender(component),
@@ -705,7 +723,27 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 		},
 		removeInputListener: listener => listeners.get(listener)?.(),
 		setFocus: component => {
-			if (scope.live) tui.setFocus(component);
+			if (!scope.live) return;
+			if (component === null) {
+				// Giving focus up hands it back to what the session took it from, and only that.
+				const focused = tui.getFocused();
+				if (focused !== null && predecessors.has(focused)) tui.setFocus(predecessors.get(focused) ?? null);
+				return;
+			}
+			const focused = tui.getFocused();
+			if (focused !== component && !predecessors.has(component)) {
+				predecessors.set(component, focused ?? undefined);
+			}
+			// Once the session has gone, focus goes back to what the session took it from — or to
+			// what that one's host put in its place, when it was the session's too — and so does
+			// input still addressed to it.
+			bind(component, () => {
+				const before = predecessors.get(component);
+				const successor = before === undefined || before === component ? undefined : inputRecipient(before);
+				if (tui.getFocused() === component) tui.setFocus(successor ?? null);
+				return successor;
+			});
+			tui.setFocus(component);
 		},
 		showOverlay: (component, options) => {
 			if (!scope.live) return INERT_OVERLAY;
@@ -723,6 +761,12 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 								) as OverlayOptions,
 						);
 			const visible = copied?.visible;
+			// Bound before it is shown: showing it focuses it. The handle exists only once it is shown.
+			const shown: { handle?: OverlayHandle } = {};
+			bind(component, () => {
+				shown.handle?.hide();
+				return undefined;
+			});
 			const handle = tui.showOverlay(
 				component,
 				copied && {
@@ -733,10 +777,7 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 							: undefined,
 				},
 			);
-			bindInputScope(component, scope, () => {
-				handle.hide();
-				return undefined;
-			});
+			shown.handle = handle;
 			return handle;
 		},
 		stop: () => {

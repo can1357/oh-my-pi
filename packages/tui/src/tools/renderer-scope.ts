@@ -277,6 +277,12 @@ export function adoptInputScope(target: Component, owner: Component): void {
 	(bound.adopted ??= new Set()).add(target);
 }
 
+/** Whether `component` already takes input in a scope ({@link bindInputScope},
+ *  {@link adoptInputScope}): a host binding a component an extension hands it keeps that one. */
+export function hasInputScope(component: Component): boolean {
+	return inputScopes.has(component);
+}
+
 /** Whether `component` is an extension's that has been, or is about to be, taken out of input:
  *  its scope has gone. A pure question — it retires nothing. */
 export function isRetiredInputScope(component: Component): boolean {

@@ -50,6 +50,7 @@ import type {
 	ToolResultEventResult,
 } from "../shared-events";
 import {
+	type AuthorDataFields,
 	type AuthorDataSchema,
 	type AuthorDataSite,
 	copyBuiltInData,
@@ -492,13 +493,16 @@ export class HandedSignals {
  *
  * Objects, arrays, maps and sets are copied all the way down; strings and the other primitives are
  * shared, since nothing can change them. Binary data and dates are copied (`copyBuiltInData`), and
- * a regular expression is rebuilt from its source and flags. An object of any other class is copied
- * as the data it holds, as `structuredClone` copies one: its own enumerable string-keyed fields,
- * onto a plain object. An error is copied with its own properties (`message`, `code`, `errno`) and
- * keeps its class. An `AbortSignal` is handed as the counterpart `signals` admits for it, or, when
- * the call hands none, as a signal of its own that follows it. A function is host code, handed as
- * itself to be called. Symbol-keyed host markers stay with the host, as `structuredClone` leaves
- * them.
+ * a regular expression and a URL are rebuilt from what they hold. An object of any other class is
+ * copied as the data it holds, as `structuredClone` copies one: its own enumerable string-keyed
+ * fields, onto a plain object. Its behavior is not data and does not cross: neither its prototype's
+ * methods nor a function held in its own fields — a bound method or an arrow-function field, which
+ * reaches the instance's private state as surely as a method does. An error is copied with its own
+ * properties (`message`, `code`, `errno`) and keeps its class. An `AbortSignal` is handed as the
+ * counterpart `signals` admits for it, or, when the call hands none, as a signal of its own that
+ * follows it. A function in a record, an array or a map is host code the host put there to be
+ * called — a callable tool schema in `getAllTools()` — and is handed as itself. Symbol-keyed host
+ * markers stay with the host, as `structuredClone` leaves them.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
 	return copyHostValue(value, new Map(), signals) as T;
@@ -511,25 +515,86 @@ export function copyHostData<T>(value: T, signals?: HandedSignals): T {
  *
  * The host goes on building requests from its own model after the extension is done with this one
  * — the credential `provider` chooses, the endpoint `baseUrl` names — so the copy is the
- * extension's alone: every field a model has ({@link MODEL_ROW}), read as the host reads it (a
- * class's getter or an inherited field included), copied as data ({@link copyHostData}) onto a
- * plain object. A `resolveHeaders` is the host's code, not data: the copy's calls it on the host's
- * model, with a signal of the host's own that follows the one the extension passes, and answers a
- * copy.
+ * extension's alone: every field a model declares ({@link MODEL_ROW}), and every field of the
+ * shapes those fields declare in turn — its cost, its identity, its thinking — each read as the
+ * host reads it (a class's getter or an inherited field included) and copied onto a plain object.
+ * A `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model, with a
+ * signal of the host's own that follows the one the extension passes, and answers a copy.
  */
 export function handHostModel(model: Model<Api>): Model<Api> {
+	const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
 	const copy: Record<PropertyKey, unknown> = {};
-	for (const [field] of MODEL_ROW.fields) {
+	for (const [field, schema] of MODEL_ROW.fields) {
 		const value: unknown = Reflect.get(model, field);
 		if (value === undefined) continue;
 		copy[field] =
 			field === "resolveHeaders" && typeof value === "function"
 				? handHostResolver(value, model)
-				: copyHostData(value);
+				: copyHostDeclared(value, schema, copies);
 	}
 	// Built from every field `Model` declares (`MODEL_ROW` is checked against it), so it is one.
 	const handed = copy as unknown as Model<Api>;
 	return handed;
+}
+
+/**
+ * Host data copied by the schema of what it is declared to be: a known shape field by field, read
+ * the way a field read reads it — so a class's getter and an inherited field arrive as the host
+ * sees them, which a copy of own enumerable fields would miss — and an open value as data
+ * ({@link copyHostData}). The host's counterpart of `snapshotAuthorData`, without its refusal of
+ * functions: this is the host's data, not an author's.
+ */
+function copyHostDeclared(
+	value: unknown,
+	schema: AuthorDataSchema,
+	copies: Map<AuthorDataSchema, Map<object, unknown>>,
+): unknown {
+	if (typeof value !== "object" || value === null) return value;
+	if (schema.kind === "data" || schema.kind === "callback") return copyHostData(value);
+	let copied = copies.get(schema);
+	if (!copied) {
+		copied = new Map();
+		copies.set(schema, copied);
+	}
+	const known = copied.get(value);
+	if (known !== undefined) return known;
+	if (schema.kind === "items") {
+		if (!Array.isArray(value)) return copyHostData(value);
+		const copy: unknown[] = [];
+		copied.set(value, copy);
+		for (let index = 0; index < value.length; index++)
+			copy[index] = copyHostDeclared(value[index], schema.items, copies);
+		return copy;
+	}
+	if (Array.isArray(value)) return copyHostData(value);
+	const copy: Record<PropertyKey, unknown> = {};
+	copied.set(value, copy);
+	const copyFields = (fields: AuthorDataFields["fields"]): void => {
+		for (const [field, fieldSchema] of fields) {
+			const item = copyHostDeclared(Reflect.get(value, field), fieldSchema, copies);
+			if (item !== undefined) copy[field] = item;
+		}
+	};
+	switch (schema.kind) {
+		case "fields":
+			copyFields(schema.fields);
+			return copy;
+		case "variants": {
+			const tag: unknown = Reflect.get(value, schema.by);
+			const variant = schema.variants.get(tag);
+			if (!variant) return copyHostData(value);
+			if (tag !== undefined) copy[schema.by] = tag;
+			copyFields(variant.fields);
+			return copy;
+		}
+		case "entries":
+			for (const key of Object.keys(value)) {
+				const item = copyHostDeclared(Reflect.get(value, key), schema.entries, copies);
+				// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
+				Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
+			}
+			return copy;
+	}
 }
 
 function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Model<Api>["resolveHeaders"]> {
@@ -556,6 +621,16 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 	}
 	if (types.isRegExp(value)) {
 		const copy = new RegExp(value);
+		copies.set(value, copy);
+		return copy;
+	}
+	if (value instanceof URL) {
+		const copy = new URL(value.href);
+		copies.set(value, copy);
+		return copy;
+	}
+	if (value instanceof URLSearchParams) {
+		const copy = new URLSearchParams(value);
 		copies.set(value, copy);
 		return copy;
 	}
@@ -591,10 +666,15 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 		}
 		return copy;
 	}
+	// A class instance is copied as its data; a function in its own fields is its behavior.
+	const prototype: unknown = Object.getPrototypeOf(value);
+	const record = prototype === Object.prototype || prototype === null;
 	const copy: Record<string, unknown> = {};
 	copies.set(value, copy);
 	for (const key of Object.keys(value)) {
-		const item = copyHostValue(Reflect.get(value, key), copies, signals);
+		const raw: unknown = Reflect.get(value, key);
+		if (!record && typeof raw === "function") continue;
+		const item = copyHostValue(raw, copies, signals);
 		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 		if (key === "__proto__") {
 			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });

@@ -161,7 +161,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
-import { handHostModel } from "../extensibility/extensions/boundary-data";
+import { copyHostData, handHostModel } from "../extensibility/extensions/boundary-data";
 import { runExtensionCompact } from "../extensibility/extensions/compact-handler";
 import {
 	type ExtensionModelRegistry,
@@ -9580,8 +9580,9 @@ export class AgentSession implements SettingsScope {
 			resolvePlanReview: () => false,
 			getPendingPlanReview: () => undefined,
 			openPlanReview: async () => false,
-			getContextUsage: () => this.getContextUsage(),
-			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			// What a read answers with is a copy, as a runner's context hands it.
+			getContextUsage: () => copyHostData(this.getContextUsage()),
+			getAsyncJobSnapshot: () => copyHostData(this.getAsyncJobSnapshot()),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
@@ -9609,8 +9610,8 @@ export class AgentSession implements SettingsScope {
 			reload: async () => {
 				await this.reload();
 			},
-			getSystemPrompt: () => this.systemPrompt,
-			runEphemeralTurn: args => this.runEphemeralTurn(args),
+			getSystemPrompt: () => copyHostData(this.systemPrompt),
+			runEphemeralTurn: async args => copyHostData(await this.runEphemeralTurn(args)),
 			// The SDK always builds a runner (which receives the annotations factory); this runner-less
 			// context only exists for directly constructed sessions, which have no `/annotate` wiring.
 			annotations: UNAVAILABLE_ANNOTATIONS,

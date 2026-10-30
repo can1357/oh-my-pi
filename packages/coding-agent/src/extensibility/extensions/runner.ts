@@ -912,27 +912,32 @@ export class ExtensionRunner {
 		uiContext?: ExtensionUIContext,
 		mode: ExtensionMode = "print",
 	): void {
-		// Copy actions into the shared runtime (all extension APIs reference this)
+		// Copy actions into the shared runtime (all extension APIs reference this). What a read
+		// answers with is a copy: the host keeps its own lists and records, and an extension editing
+		// what it was handed must not edit what the host acts on.
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
-		this.runtime.getActiveTools = actions.getActiveTools;
-		// A copy: each tool's `parameters` is the host's own (a registered tool's is the copy taken
-		// at registration), and an extension editing what it was handed must not edit what the host
-		// validates against. A callable schema is handed as itself; a registered one is frozen.
+		this.runtime.getActiveTools = () => copyHostData(actions.getActiveTools());
+		// Each tool's `parameters` is the host's own (a registered tool's is the copy taken at
+		// registration), and the host validates against it. A callable schema is handed as itself;
+		// a registered one is frozen.
 		this.runtime.getAllTools = () => copyHostData(actions.getAllTools());
 		this.runtime.setActiveTools = async toolNames => {
 			const registrationBarrier = this.#toolRegistrationBarrier;
 			if (registrationBarrier) await registrationBarrier;
 			await actions.setActiveTools(toolNames);
 		};
-		this.runtime.getCommands = actions.getCommands;
+		this.runtime.getCommands = () => copyHostData(actions.getCommands());
 		// The session that hands a model over owns it: the copy is taken inside its admission, and a
 		// `resolveHeaders` the model brings runs as its work (`runExtensionSetModel`).
 		this.runtime.setModel = model => actions.setModel(model, this.runtime);
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
-		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
+		const getServiceTiers = actions.getServiceTiers;
+		this.runtime.getServiceTiers = getServiceTiers
+			? () => copyHostData(getServiceTiers())
+			: throwUnsupportedServiceTierAction;
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
@@ -1813,13 +1818,15 @@ export class ExtensionRunner {
 			get mode() {
 				return runner.#mode;
 			},
-			getContextUsage: () => this.#getContextUsageFn(),
+			// What a read answers with is a copy, here as on `pi`: the host's prompt, its pending plan
+			// review and its job records are what it keeps acting on.
+			getContextUsage: () => copyHostData(this.#getContextUsageFn()),
 			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
 			// hands over here outlives the command that made the call. Owned at acceptance, like
 			// everything the `pi` surface takes.
 			compact: instructionsOrOptions =>
 				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
-			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			getAsyncJobSnapshot: () => copyHostData(this.#getAsyncJobSnapshotFn()),
 			get hasUI() {
 				return runner.hasUI();
 			},
@@ -1844,13 +1851,13 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
-			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
+			getPendingPlanReview: () => copyHostData(this.#getPendingPlanReviewFn()),
 			openPlanReview: () => this.#openPlanReviewFn(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
 				return handSessionModesOnce(getSessionModes());
 			},
-			getSystemPrompt: () => this.#getSystemPromptFn(),
+			getSystemPrompt: () => copyHostData(this.#getSystemPromptFn()),
 			get runEphemeralTurn(): ExtensionContext["runEphemeralTurn"] {
 				const runEphemeralTurn = runner.#runEphemeralTurnFn;
 				return (
@@ -1878,7 +1885,9 @@ export class ExtensionRunner {
 								: undefined,
 							signal: signals.length ? AbortSignal.any(signals) : undefined,
 						};
-						return await runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
+						return copyHostData(
+							await runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request)),
+						);
 					})
 				);
 			},
@@ -1956,7 +1965,6 @@ export class ExtensionRunner {
 		// `model`, `annotations` — and a command that switched models would go on seeing the old one.
 		const context: ExtensionContext = Object.create(this.createContext());
 		return Object.assign(context, {
-			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: (options?: Parameters<ExtensionCommandContext["newSession"]>[0]) =>
 				this.#newSessionHandler(options),

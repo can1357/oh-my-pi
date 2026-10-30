@@ -267,9 +267,20 @@ guidance it summarises with. Both refuse a function where data belongs, and `ctx
 fields `CompactOptions` does not declare.
 
 A model you are handed — `ctx.model`, `ctx.models.list()`/`current()`/`resolve()`, the rows
-`ctx.modelRegistry` answers with — is a copy of every field a model has, whatever object the
-host holds it in, so changing its `baseUrl` or `provider` changes nothing the host sends. Its
-`resolveHeaders` calls the host's own on the host's model. Pass it to `pi.setModel` to select it.
+`ctx.modelRegistry` answers with — is a copy of every field a model declares, and of every field
+of the shapes those declare (its cost, identity, thinking), read as the host reads them, whatever
+objects the host holds them in. Changing its `baseUrl` or `provider` changes nothing the host
+sends. Its `resolveHeaders` calls the host's own on the host's model. Pass it to `pi.setModel` to
+select it.
+
+What `ctx` and `pi` read back — `getSystemPrompt()`, `getContextUsage()`, `getAsyncJobSnapshot()`,
+`getPendingPlanReview()`, `getActiveTools()`, `getAllTools()`, `getCommands()`,
+`getServiceTiers()` — and the events your hooks receive are copies of the host's data. A date, a
+map, a set, binary data, a regular expression and a URL arrive as themselves, copied; an object of
+any other class arrives as a plain object of its own enumerable fields, without its methods —
+prototype methods and function-valued fields, bound or not, alike — because those reach the
+host's private state. A function in a plain record is host code put there to be called (a
+callable schema in `getAllTools()`) and arrives as itself.
 
 What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
 
@@ -277,8 +288,11 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
   `invalidate`), the frame's timing, `terminal.rows`/`columns` and the image budget an image draws
   through reach the host's. An input listener, `setFocus`, `showOverlay` and `stop` take effect
   only while your session is live: a listener is removed at the first key after the session has
-  gone, and an overlay is taken down. `start` ends only a suspension your session started. Members
-  that steer the host's renderer, its input or its other components — `children`, `addChild`,
+  gone, and an overlay is taken down. A component you focus or show takes its keys inside your
+  session, so an asynchronous `handleInput` is your session's work; once the session has gone it
+  takes none, and focus returns to what your session took it from. `setFocus(null)` gives focus
+  back to that, too. `start` ends only a suspension your session started. Members that steer the
+  host's renderer, its input or its other components — `children`, `addChild`,
   `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
   `write` — throw, naming the member.
 - **The keybindings** a `custom` dialog or a `setEditorComponent` factory receives are a manager

@@ -12,6 +12,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { copyHostData } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
 import {
 	handLocalProtocolOptions,
 	handUIContext,
@@ -26,6 +27,7 @@ import type {
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -201,6 +203,161 @@ describe("what a ui factory is handed", () => {
 			afterDispose: true,
 			ended: false,
 		});
+	});
+
+	test("a component the session focuses takes keys in its session, as owned work, and none once it has gone", async () => {
+		const h = await interactiveSession();
+		h.mode.ui.setFocus(h.mode.editor);
+		const seen: Array<{ key: string; inside: boolean }> = [];
+		const started = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		const focusable: Component = {
+			render: () => ["focusable"],
+			invalidate() {},
+			async handleInput(key: string) {
+				seen.push({ key, inside: extensionCallbackScope.getStore() === h.owner });
+				if (key !== "slow") return;
+				started.resolve();
+				await proceed.promise;
+			},
+		};
+		h.ui.setWidget("focus", tui => {
+			tui.setFocus(focusable);
+			return { render: () => ["widget"], invalidate() {} };
+		});
+		const focusedLive = h.mode.ui.getFocused() === focusable;
+		h.mode.ui.injectDebugInput("live");
+		h.mode.ui.injectDebugInput("slow");
+		await started.promise;
+		const owned = h.runner.hasPendingHandlerWork();
+		proceed.resolve();
+		await h.runner.waitForPendingHandlerWork();
+		await h.session.dispose();
+		h.mode.ui.injectDebugInput("after-dispose");
+
+		expect({ focusedLive, owned, seen, focusReturned: h.mode.ui.getFocused() === h.mode.editor }).toEqual({
+			focusedLive: true,
+			owned: true,
+			seen: [
+				{ key: "live", inside: true },
+				{ key: "slow", inside: true },
+			],
+			focusReturned: true,
+		});
+	});
+
+	test("giving focus up hands it back to what the session took it from, and to nothing else", async () => {
+		const h = await interactiveSession();
+		h.mode.ui.setFocus(h.mode.editor);
+		const focusable: Component = { render: () => ["focusable"], invalidate() {}, handleInput() {} };
+		let handedTUI: TUI | undefined;
+		h.ui.setWidget("focus", tui => {
+			handedTUI = tui;
+			return { render: () => ["widget"], invalidate() {} };
+		});
+		if (!handedTUI) throw new Error("the widget factory did not run");
+		// Focus the session did not take is not the session's to give up.
+		handedTUI.setFocus(null);
+		const kept = h.mode.ui.getFocused() === h.mode.editor;
+		handedTUI.setFocus(focusable);
+		handedTUI.setFocus(null);
+
+		expect({ kept, returned: h.mode.ui.getFocused() === h.mode.editor }).toEqual({ kept: true, returned: true });
+	});
+
+	test("a session's prompt is read as a copy: editing it, before disposal or after, changes nothing", async () => {
+		const h = await interactiveSession();
+		await initializeExtensions(h.session, { reportSendError() {}, reportRuntimeError() {} });
+		const prompt = h.runner.createContext().getSystemPrompt();
+		const aliased = prompt === h.session.agent.state.systemPrompt;
+		prompt.push("an extension's edit");
+		const before = [...h.session.systemPrompt];
+		await h.session.dispose();
+		prompt.push("an edit after disposal");
+
+		expect({ aliased, before, after: h.session.systemPrompt }).toEqual({
+			aliased: false,
+			before: ["Test"],
+			after: ["Test"],
+		});
+	});
+});
+
+describe("data the host hands an extension", () => {
+	test("a model held in classes is copied by every field its type declares, nested ones included", async () => {
+		const h = await interactiveSession();
+		const selected = h.session.model;
+		if (!selected) throw new Error("the session has no model");
+		const host: Model = selected;
+		class RateCard {
+			readonly #input = 2;
+			get input() {
+				return this.#input;
+			}
+			get output() {
+				return 8;
+			}
+			get cacheRead() {
+				return 0.2;
+			}
+			get cacheWrite() {
+				return 2.5;
+			}
+		}
+		class Identity {
+			get class() {
+				return host.identity.class;
+			}
+			get family() {
+				return host.identity.family;
+			}
+			get revision() {
+				return host.identity.revision;
+			}
+			get effort() {
+				return host.identity.effort;
+			}
+			get thinkingVariant() {
+				return host.identity.thinkingVariant;
+			}
+			get logicalId() {
+				return host.identity.logicalId;
+			}
+		}
+		// The type promises these shapes; an SDK caller may implement them with classes.
+		const model = { ...host, cost: new RateCard(), identity: new Identity() } as unknown as Model;
+		const ctx = h.runner.createContext(model);
+		const handed = ctx.model;
+		if (!handed) throw new Error("the context hands no model");
+
+		expect(handed.cost).toEqual({ input: 2, output: 8, cacheRead: 0.2, cacheWrite: 2.5 });
+		expect(handed.cost).not.toBeInstanceOf(RateCard);
+		expect(handed.identity.class).toBe(host.identity.class);
+		expect(typeof ctx.models.family(handed)).toBe("string");
+	});
+
+	test("is copied as data: a URL as a URL, a class instance without its behavior, a record's function as itself", () => {
+		class Holder {
+			readonly #secret = "host state";
+			readonly name = "holder";
+			readonly read = (): string => this.#secret;
+			reveal(): string {
+				return this.#secret;
+			}
+		}
+		const check = (value: unknown): boolean => value !== undefined;
+		const original = { url: new URL("https://example.invalid/path?q=1"), holder: new Holder(), check };
+		const copy = copyHostData(original);
+
+		expect(copy.url).toBeInstanceOf(URL);
+		expect(copy.url).not.toBe(original.url);
+		expect(copy.url.href).toBe("https://example.invalid/path?q=1");
+		// Typed as the class it was copied from; it holds only that class's data.
+		const holder: unknown = copy.holder;
+		expect(holder).toEqual({ name: "holder" });
+		expect(Object.getPrototypeOf(holder)).toBe(Object.prototype);
+		expect("read" in copy.holder || "reveal" in copy.holder).toBe(false);
+		expect(copy.check).toBe(check);
 	});
 });
 

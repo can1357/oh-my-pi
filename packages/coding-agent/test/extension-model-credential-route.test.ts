@@ -14,11 +14,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgGithubCacheEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 
 interface Arrival {
 	path: string;
@@ -201,7 +207,7 @@ describe("a model an extension is handed", () => {
 		expect(identities).toEqual({ registry: false, sessionManager: false, model: false });
 	});
 
-	test("by a manager tool called without the loop's context is the session's surfaces, not its services", async () => {
+	test("by a manager tool called without the loop's context is the session's surfaces, with its settings", async () => {
 		const dir = TempDir.createSync("@model-credential-route-tool-");
 		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		cleanups.push(() => {
@@ -213,6 +219,7 @@ describe("a model an extension is handed", () => {
 		if (!row) throw new Error("the bundled catalog is empty");
 		const sessionManager = SessionManager.inMemory(dir.path());
 		const settings = Settings.isolated();
+		cfgGithubCacheEnabled.set(settings, false);
 		const handed: Record<string, unknown> = {};
 		const tool: CustomTool = {
 			name: "mcp__route_probe",
@@ -223,8 +230,10 @@ describe("a model an extension is handed", () => {
 				handed.registry = (ctx.modelRegistry as unknown) === registry;
 				handed.sessionManager = (ctx.sessionManager as unknown) === sessionManager;
 				handed.model = ctx.model === row;
-				handed.settings = ctx.settings === settings;
 				handed.authStorage = "authStorage" in ctx.modelRegistry;
+				// A manager tool is host code: it gets the session's policy, its cache kill switch included.
+				handed.settings = ctx.settings === settings;
+				handed.cacheEnabled = ctx.settings ? cfgGithubCacheEnabled.get(ctx.settings) : "no settings";
 				return { content: [{ type: "text", text: "ok" }] };
 			},
 		};
@@ -244,8 +253,60 @@ describe("a model an extension is handed", () => {
 			registry: false,
 			sessionManager: false,
 			model: false,
-			settings: false,
 			authStorage: false,
+			settings: true,
+			cacheEnabled: false,
 		});
+	});
+});
+
+describe("the MCP bridge called outside the agent loop", () => {
+	test("resolves an internal URL in a tool's arguments by the session's memory policy", async () => {
+		const dir = TempDir.createSync("@mcp-memory-policy-");
+		const priorAgentDir = getAgentDir();
+		setAgentDir(path.join(dir.path(), "agent"));
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		cleanups.push(() => {
+			setAgentDir(priorAgentDir);
+			auth.close();
+			dir.removeSync();
+		});
+		const registry = new ModelRegistry(auth, path.join(dir.path(), "models.json"));
+		const row = registry.getAll()[0];
+		if (!row) throw new Error("the bundled catalog is empty");
+		const settings = Settings.isolated();
+		cfgMemoryBackend.set(settings, "off");
+		// A summary a local memory backend left behind: with the backend off, no URL resolves to it.
+		const stale = path.join(getMemoryRoot(getAgentDir(), dir.path()), "memory_summary.md");
+		await Bun.write(stale, "stale memory");
+		const sent: unknown[] = [];
+		const reply = { content: [{ type: "text", text: "ok" }] };
+		const transport = createMockTransport(new Map([["tools/call", [reply, reply]]]), (method, params) => {
+			if (method === "tools/call") sent.push((params?.arguments as { file?: unknown } | undefined)?.file);
+		});
+		const tool = new MCPTool(createMockConnection({ tools: {} }, transport), {
+			name: "consume_file",
+			inputSchema: { type: "object", properties: { file: { type: "string" } }, required: ["file"] },
+		});
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model: row, systemPrompt: ["test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings,
+			modelRegistry: registry,
+		});
+		cleanups.push(() => session.dispose());
+		// The control: the same tool called with the session's settings, as the agent loop calls it.
+		// The bridge reads only these two of the context it is handed.
+		await tool.execute("control", { file: "memory://root" }, undefined, {
+			settings,
+			sessionManager,
+		} as unknown as Parameters<MCPTool["execute"]>[3]);
+		await session.refreshMCPTools([tool]);
+		const registered = session.getToolByName(tool.name);
+		if (!registered) throw new Error("the manager tool was not registered");
+		await registered.execute("manager", { file: "memory://root" }, undefined);
+
+		expect(sent).toEqual(["memory://root", "memory://root"]);
 	});
 });
