@@ -547,31 +547,18 @@ function censusChange(before: Map<string, string>, after: Map<string, string>): 
  * the ordinary one — reclaims exactly as before.
  */
 async function collectReferencedBlobHashes(
-	sessionRoots: string[],
-	exactSessionFiles: string[],
+	sessionNames: string[],
 	blobDir: string,
 ): Promise<{ hashes: Set<string>; unresolved: string[]; leases: FileLockHandle[] }> {
-	// Every discovered name, deduplicated only as text. Collapsing them by a
-	// normalisation that resolves symlinks dropped an alias before anything
-	// opened it — and a guard that would have refused on that alias never
-	// ran, because the name it was about was gone. Which of two names
-	// survived depended on sort order, which is not a thing a deletion may
-	// depend on. Names collapse here only when they are the same text; two
-	// names that turn out to be one file collapse below, on the identity of
-	// the file this run holds, which is the only reason two entries should
-	// ever be one.
-	const names = new Set<string>();
+	// The names come from the census, so the set this reads is exactly the
+	// set that is compared afterwards. They are deduplicated as text and no
+	// further: a key that resolved symlinks dropped an alias before anything
+	// opened it, and the guard that would have refused over that alias never
+	// ran. Two names that turn out to be one file collapse below, on the
+	// identity of the file this run holds, which is the only reason two
+	// entries should ever be one.
+	const names = new Set<string>(sessionNames);
 	const decoder = new TextDecoder();
-	for (const root of sessionRoots) {
-		for (const file of [
-			...(await collectJsonlFiles(root)),
-			...(await collectCompressedJsonlFiles(root)),
-			...(await collectBackupJsonlFiles(root)),
-		]) {
-			names.add(file);
-		}
-	}
-	for (const file of exactSessionFiles) names.add(file);
 
 	const blobDirAtStart = await statIfPresent(blobDir);
 	const hashes = new Set<string>();
@@ -579,6 +566,8 @@ async function collectReferencedBlobHashes(
 	const read = new Set<string>();
 	// Held, not probed: released by the caller once the deletions are done.
 	const leases: FileLockHandle[] = [];
+	/** Session ids this run already holds, so it cannot collide with itself. */
+	const leasedIds = new Set<string>();
 	for (const file of names) {
 		// Opened first, and what this run trusts afterwards is the identity
 		// of the object it holds. Not the pathname: `/proc/self/fd/<n>` is
@@ -616,40 +605,42 @@ async function collectReferencedBlobHashes(
 						`prove which of them lie on that route`,
 				);
 			}
+			// Identity first, lease second. Taking a lease per *name* made
+			// this run collide with itself: a journal and its backup, two
+			// hard links to one journal, or two files carrying one header id
+			// each had their session claimed twice, and the second claim —
+			// blocked by the first, which is this very run — was reported as
+			// another running process. Three quiet trees with no writer at
+			// all refused that way.
+			const identity = await held.stat();
+			const key = `${identity.dev}:${identity.ino}`;
+			if (read.has(key)) continue;
+			read.add(key);
 			// A descriptor freezes the file's identity, not its bytes. A
 			// writer that owns this session can truncate it and put the same
 			// text back between this read and the candidate scan — and omp's
 			// own writer does rewrite in place: `FileSessionStorage` rolls a
 			// failed append back with `ftruncateSync` on its own handle, and
 			// `updateSessionTitle` writes the title slot at offset zero
-			// through `r+`. So this is an ordinary concurrent session, not a
-			// hostile process, and re-reading the bytes would only be the
-			// same re-derivation one step later. What closes it is the
-			// mechanism that already says who is writing: a session a live
-			// process holds is not one this run may reclaim against.
-			//
-			// Taking the lease and giving it straight back proves nothing:
-			// the writer this is about simply starts a moment later, between
-			// the release and the deletion, and adds a reference to a blob
-			// this run has already decided is unreferenced. The lease is
-			// held from here until the deletions are done.
-			const lease = await tryAcquireSessionFileLease(file);
-			if (lease === null) {
-				unresolved.push(
-					`${file} is owned by a running process, so its references cannot be read as settled; ` +
-						`close it and run \`omp gc --blobs --apply\` again`,
-				);
-				continue;
+			// through `r+`. Taking the lease and giving it straight back
+			// proves nothing either: the writer simply starts between the
+			// release and the deletion. So the lease is taken here and held
+			// until the deletions are done — once per session id, because a
+			// second file carrying the same id is this run's own claim
+			// looking back at it.
+			const sessionId = await readSessionHeaderId(file).catch(() => undefined);
+			if (sessionId !== undefined && !leasedIds.has(sessionId)) {
+				const lease = tryAcquireSessionLease(sessionId);
+				if (lease === null) {
+					unresolved.push(
+						`${file} is owned by a running process, so its references cannot be read as settled; ` +
+							`close it and run \`omp gc --blobs --apply\` again`,
+					);
+					continue;
+				}
+				leasedIds.add(sessionId);
+				leases.push(lease);
 			}
-			if (lease) leases.push(lease);
-			// Two names that turn out to be one file are read once, and the
-			// identity that says so is the opened file's own, not a guess
-			// made about their names beforehand. The link check above has
-			// already run for every name, so a route is never lost to this.
-			const identity = await held.stat();
-			const key = `${identity.dev}:${identity.ino}`;
-			if (read.has(key)) continue;
-			read.add(key);
 			// The format comes from the bytes, not from the name. A
 			// compressed transcript at a blob-hash name has no suffix to
 			// read, and parsing it as plain text saw none of its references
@@ -859,27 +850,15 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
-	// Every name every source offers, kept as text. A map keyed by a
-	// normalising comparison let one source overwrite another's entry: a
-	// registry marker reached through a symlinked directory and a breadcrumb
-	// naming the same physical file collapsed to one key, the breadcrumb won
-	// it, and the route that would have been refused was gone before any
-	// check ran. The rule is the same here as inside the collector — no name
-	// collapses another by name; two entries become one only after they are
-	// opened and found to be one file.
-	const exactSessionFiles: string[] = [];
-	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
-		// `lstat`, and a failure is not an absence: a registered path that
-		// loops or cannot be read is a session this run cannot account for,
-		// and it is carried to the refusal below rather than thrown out of
-		// the command as a stack trace.
-		const standing = await fs.lstat(file).catch(() => undefined);
-		if (!standing?.isFile() && !standing?.isSymbolicLink()) continue;
-		exactSessionFiles.push(file);
-	}
-	exactSessionFiles.push(...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))));
+	// The baseline census *is* the source set. Gathering the registry and
+	// breadcrumb names separately beforehand left a name that appeared
+	// between the two steps in both censuses and in neither comparison, so a
+	// terminal breadcrumb registering an existing external transcript made
+	// that transcript invisible: never opened, never counted, its blob
+	// deleted while it stayed registered and readable. One listing answers
+	// both questions, so the thing compared is the thing read.
 	const before = await sessionTreeCensus(defaultRoots, options.agentDir);
-	const referenced = await collectReferencedBlobHashes(defaultRoots, exactSessionFiles, blobDir);
+	const referenced = await collectReferencedBlobHashes([...(before.entries?.keys() ?? [])], blobDir);
 	// Every session read above is still held. The decision about which blobs
 	// are unreferenced and the deletions that act on it happen inside that
 	// hold, because a lease taken and given back is only a question about a

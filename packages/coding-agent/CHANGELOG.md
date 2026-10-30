@@ -4,7 +4,8 @@
 
 ### Breaking Changes
 
-- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs and checkpoints database WAL files, but it no longer moves cold sessions into `archive/sessions`, where nothing in this release can find or read them. A configuration that sets `gc.archive` true still enables the phase without `--archive`, and `--archive` still asks for it by name ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it no longer moves cold sessions into `archive/sessions`, where nothing in this release can find or read them. A configuration that sets `gc.archive` true still enables the phase without `--archive`, and `--archive` still asks for it by name ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --apply` no longer reclaims unreferenced blobs by default (`gc.blobs` is now off), so an ordinary maintenance run checkpoints the database WAL files and cannot delete a session's data at all. Deciding that a blob is unreferenced means reading every session that could refer to it, and a session can be created, forked, moved to a sibling or appended to while that reading happens, so the answer describes a tree that no longer exists; a guard strong enough to notice the change refuses whenever anything is writing, which is inert rather than safe. Pass `--blobs`, or set `gc.blobs`, on a machine whose sessions are quiescent ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

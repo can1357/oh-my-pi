@@ -4,7 +4,16 @@
  */
 import { register } from "../config/registry";
 
-export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: true });
+// Opt-in, default off, because reference discovery cannot be made sound
+// while sessions are being written. Deciding that a blob is unreferenced
+// means reading every session that could refer to it, and a session can be
+// created, forked, moved to a sibling or appended to while that reading is
+// happening — so the answer describes a tree that no longer exists. Guards
+// that notice the change make the phase refuse whenever anything is
+// writing, which is useless rather than wrong; guards that do not, delete
+// live data. Neither is a thing to run by default. `--blobs`, or
+// `gc.blobs`, turns it on for a machine whose sessions are quiescent.
+export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: false });
 
 // Opt-in, like `gc.stale` and for a stronger reason: archiving is the one
 // phase that moves a session out of the sessions tree, and nothing in this
