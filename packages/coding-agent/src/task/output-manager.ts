@@ -147,11 +147,12 @@ export class AgentOutputManager {
 			// The names this session has spent cannot be read, so no suffix can
 			// be known to be free — `-2` least of all, since it is the one a
 			// previous disambiguation would have taken. A name nothing can
-			// already have is the only safe answer, and the failure is logged
-			// where it happened.
+			// already have is the only safe answer; it still goes through the
+			// same scoping as any other, so a nested child keeps its parent's
+			// prefix.
 			const unique = `${id}-${mintSessionId().slice(-8)}`;
 			this.#taken.add(unique);
-			return unique;
+			return this.#parentPrefix ? `${this.#parentPrefix}.${unique}` : unique;
 		}
 		let candidate = id;
 		for (let n = 2; this.#taken.has(candidate); n++) {

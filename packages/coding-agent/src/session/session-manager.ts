@@ -330,20 +330,16 @@ async function reproduceArtifactFile(
 	}
 }
 
-/** Unlink `name` inside a held directory, and only while it is still the object `created` records. */
+/** Take `name` back out of a held directory, and only while it is still the object `created` records. */
 async function removeHeldEntry(
 	into: PinnedDirectory,
 	name: string,
 	created: ObjectIdentity | undefined,
 ): Promise<void> {
-	if (!created) return;
-	const at = `${into.at}/${name}`;
-	const now = await fs.promises
-		.lstat(at, { bigint: true })
-		.then(identityOf)
-		.catch(() => undefined);
-	if (!now || !thisCopysToRemove(now, created)) return;
-	await fs.promises.unlink(at).catch(() => {});
+	// The same two steps as any other removal — the name must still reach the
+	// object, and the object is judged where only this copy can name it. A
+	// failure path is not an exception to holding what it deletes.
+	if (created) await removeIfStillOurs(into, name, created, name);
 }
 
 /** Reproduce the directory `from` into the held staging directory `into`. */
@@ -893,32 +889,61 @@ async function removeIfStillOurs(
 		return;
 	}
 	// Then, that nothing took its place between that answer and this removal.
-	// Moving it aside is one atomic step, and what moves is judged where only
-	// this copy can name it: the object is still on disk, so its inode cannot
-	// have been recycled by a replacement, and a replacement is therefore a
-	// different inode. Anything that is not this copy's is put back.
-	const asideName = `.omp-removing-${mintSessionId()}`;
-	const aside = `${dir.at}/${asideName}`;
+	// The entry is moved into a directory made here — `mkdir` fails rather
+	// than overwrites, so the place it is moved to cannot be anybody else's —
+	// and judged there, where the object is still on disk and its inode
+	// therefore cannot have been recycled by a replacement. Anything that is
+	// not this copy's is left in that directory rather than put back over
+	// whatever now holds the original name.
+	const asideDir = await makeExclusiveDirectory(dir);
+	if (!asideDir) return;
 	try {
-		await fs.promises.rename(at, aside);
-	} catch (error) {
-		if (!isEnoent(error)) logger.warn("Could not set a session artifact aside to remove it", { path: staged });
-		return;
+		try {
+			await fs.promises.rename(at, `${asideDir.at}/entry`);
+		} catch (error) {
+			if (!isEnoent(error)) logger.warn("Could not set a session artifact aside to remove it", { path: staged });
+			return;
+		}
+		const moved = await fs.promises
+			.lstat(`${asideDir.at}/entry`, { bigint: true })
+			.then(identityOf)
+			.catch(() => undefined);
+		if (moved && sameNode(moved, before)) {
+			if (moved.directory) await emptyPinnedDirectory(asideDir, staged, undefined);
+			else await fs.promises.unlink(`${asideDir.at}/entry`).catch(() => {});
+			return;
+		}
+		logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
+		try {
+			// Exclusive again: if something has taken the original name since,
+			// it keeps it, and what was moved stays where nothing serves it.
+			await fs.promises.link(`${asideDir.at}/entry`, at);
+			await fs.promises.unlink(`${asideDir.at}/entry`).catch(() => {});
+		} catch {
+			logger.warn("Could not put back an object that was not this copy's", {
+				path: staged,
+				kept: asideDir.path,
+			});
+		}
+	} finally {
+		await asideDir.close();
+		await fs.promises.rmdir(`${dir.at}/${path.basename(asideDir.path)}`).catch(() => {});
 	}
-	const moved = await fs.promises
-		.lstat(aside, { bigint: true })
-		.then(identityOf)
-		.catch(() => undefined);
-	if (moved && sameNode(moved, before)) {
-		await fs.promises.unlink(aside).catch(() => {});
-		return;
+}
+
+/** A directory created here, under a name nothing else can already hold. */
+async function makeExclusiveDirectory(dir: PinnedDirectory): Promise<PinnedDirectory | undefined> {
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const name = `.omp-removing-${mintSessionId()}`;
+		try {
+			await fs.promises.mkdir(`${dir.at}/${name}`);
+		} catch (error) {
+			if (isEexist(error)) continue;
+			return undefined;
+		}
+		return await pinDirectory(`${dir.at}/${name}`, undefined, path.join(dir.path, name));
 	}
-	logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
-	try {
-		await fs.promises.rename(aside, at);
-	} catch {
-		logger.warn("Could not put back an object that was not this copy's", { path: staged, aside: asideName });
-	}
+	return undefined;
 }
 
 /** Remove an unpublished staging tree and give up its lease, whatever happens. */
@@ -957,56 +982,119 @@ async function publishArtifactStaging(
 	destination: string,
 	created: Map<string, ObjectIdentity>,
 ): Promise<Set<string> | undefined> {
-	const root = await pinDirectory(staging.path, stagingIdentity(staging));
-	if (!root) {
-		logger.warn("Session artifact staging is no longer the directory that was created; nothing was published", {
-			staging: staging.path,
-		});
-		return undefined;
-	}
-	let staged: string[];
+	// The directory both names live in, held for the handover: the rename is
+	// then resolved from a descriptor on each side rather than from two
+	// pathnames, so a staging directory substituted at that instant cannot be
+	// what moves.
+	const parent = await pinDirectory(path.dirname(staging.path));
+	if (!parent) return undefined;
 	try {
-		const mounts = await mountsUnder(staging.path);
-		if (mounts === undefined || mounts.length > 0) {
-			logger.warn("Session artifact staging is mounted or unverifiable; nothing was published from it", {
+		const root = await pinDirectory(
+			`${parent.at}/${path.basename(staging.path)}`,
+			stagingIdentity(staging),
+			staging.path,
+		);
+		if (!root) {
+			logger.warn("Session artifact staging is no longer the directory that was created; nothing was published", {
 				staging: staging.path,
-				mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
 			});
 			return undefined;
 		}
-		// The marker goes first, because every step after it is part of the
-		// handover: a copy killed before this point is still recognisable as
-		// an abandoned staging tree by whoever sweeps next, and nothing after
-		// it may touch the tree that is about to be checked.
-		await fs.promises.unlink(`${root.at}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
-		staged = await fs.promises.readdir(root.at);
-		// Last before the rename: nothing between this and the tree becoming
-		// reachable, because a check made after that cannot withhold anything.
-		const changed = await firstChangedObject(root, created);
-		if (changed) {
-			logger.warn("A staged session artifact is not the object that was copied; nothing was published", {
-				staging: staging.path,
-				staged: changed,
-			});
-			return undefined;
+		let staged: string[];
+		try {
+			// Every object in the tree, found by walking it rather than by
+			// reading back the record: a file somebody else added to the stage
+			// is not in the record, and a check that only visits what the copy
+			// wrote would publish it as this session's artifact.
+			staged = await fs.promises.readdir(root.at);
+			const unexpected = await firstUnexpectedObject(root, "", created);
+			if (unexpected) {
+				logger.warn("A staged session artifact is not the object that was copied; nothing was published", {
+					staging: staging.path,
+					staged: unexpected,
+				});
+				return undefined;
+			}
+			// Last before the handover; a check made after it cannot withhold
+			// anything, because a reader can already have opened what it would
+			// take back.
+			const mounts = await mountsUnder(staging.path);
+			if (mounts === undefined || mounts.length > 0) {
+				logger.warn("Session artifact staging is mounted or unverifiable; nothing was published from it", {
+					staging: staging.path,
+					mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
+				});
+				return undefined;
+			}
+		} finally {
+			await root.close();
 		}
+		const published = staged.filter(name => name !== ARTIFACT_STAGING_MARKER);
+		try {
+			await fs.promises.rename(
+				`${parent.at}/${path.basename(staging.path)}`,
+				`${parent.at}/${path.basename(destination)}`,
+			);
+			// The marker travels with the tree and is taken out of the
+			// destination afterwards: removing it first would leave a crash
+			// between the two with a staging tree nothing can recognise.
+			await fs.promises
+				.unlink(`${parent.at}/${path.basename(destination)}/${ARTIFACT_STAGING_MARKER}`)
+				.catch(() => {});
+			return new Set(published);
+		} catch (error) {
+			if (!isEnotempty(error) && !isEexist(error) && !isEnotdir(error)) {
+				logger.warn("Could not publish a session's copied artifacts", {
+					staging: staging.path,
+					destination,
+					error: toError(error).message,
+				});
+				return undefined;
+			}
+		}
+		return await mergeIntoDestination(staging, destination, published);
 	} finally {
-		await root.close();
+		await parent.close();
 	}
+}
+
+/**
+ * The first object in the staged tree that the copy did not create, or the
+ * first created object that is no longer what it was, by walking what is
+ * actually there.
+ */
+async function firstUnexpectedObject(
+	dir: PinnedDirectory,
+	stagedUnder: string,
+	created: Map<string, ObjectIdentity>,
+): Promise<string | undefined> {
+	let entries: fs.Dirent[];
 	try {
-		await fs.promises.rename(staging.path, destination);
-		return new Set(staged);
+		entries = await fs.promises.readdir(dir.at, { withFileTypes: true });
 	} catch (error) {
-		if (!isEnotempty(error) && !isEexist(error) && !isEnotdir(error)) {
-			logger.warn("Could not publish a session's copied artifacts", {
-				staging: staging.path,
-				destination,
-				error: toError(error).message,
-			});
-			return undefined;
+		return `${stagedUnder || "."}: ${toError(error).message}`;
+	}
+	for (const entry of entries) {
+		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
+		if (!stagedUnder && entry.name === ARTIFACT_STAGING_MARKER) continue;
+		const record = created.get(staged);
+		if (!record) return staged;
+		const now = await fs.promises
+			.lstat(`${dir.at}/${entry.name}`, { bigint: true })
+			.then(identityOf)
+			.catch(() => undefined);
+		if (!now || !sameObject(now, record)) return staged;
+		if (!record.directory) continue;
+		const child = await pinDirectory(`${dir.at}/${entry.name}`, record, path.join(dir.path, entry.name));
+		if (!child) return staged;
+		try {
+			const deeper = await firstUnexpectedObject(child, staged, created);
+			if (deeper) return deeper;
+		} finally {
+			await child.close();
 		}
 	}
-	return await mergeIntoDestination(staging, destination, staged);
+	return undefined;
 }
 
 /**
@@ -1116,24 +1204,6 @@ async function moveIntoHeldDirectory(
 		});
 		return false;
 	}
-}
-
-/**
- * The first object the copy produced that is no longer the object it produced,
- * read through the directory that holds them, or `undefined` when they all are.
- */
-async function firstChangedObject(
-	root: PinnedDirectory,
-	created: Map<string, ObjectIdentity>,
-): Promise<string | undefined> {
-	for (const [staged, identity] of created) {
-		const now = await fs.promises
-			.lstat(`${root.at}/${staged}`, { bigint: true })
-			.then(identityOf)
-			.catch(() => undefined);
-		if (!now || !sameObject(now, identity)) return staged;
-	}
-	return undefined;
 }
 
 /**
