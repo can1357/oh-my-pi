@@ -67,6 +67,7 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { MuseTool } from "../muse";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -91,6 +92,7 @@ import {
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
 	cfgSecurityEnabled,
+	cfgMuseEnabled,
 	cfgTodoEnabled,
 	cfgToolsXdev,
 	cfgWebSearchEnabled,
@@ -154,6 +156,7 @@ export type {
 	FindingDetails,
 	SubmitReviewDetails,
 } from "@oh-my-pi/pi-tui/tools/task";
+export * from "../muse";
 export * from "./security-scan";
 export * from "./think";
 export * from "./todo";
@@ -588,6 +591,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
+	muse: s => new MuseTool(s),
 	wait: s => new WaitTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
@@ -805,6 +809,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "task") {
 			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
 		}
+		if (name === "muse") return cfgMuseEnabled.get(session.settings);
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {

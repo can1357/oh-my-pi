@@ -855,6 +855,31 @@ export const cfgSecurityEnabled = register({
 	},
 });
 
+export const cfgMuseEnabled = register({
+	id: "muse.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Muse Code",
+		description:
+			"Enable opt-in delegation to the installed Muse Code client (muse exec). Uses the client's licensed provider, keeps its sandbox and approvals, and never enables --yolo",
+	},
+});
+
+export const cfgMusePath = register({
+	id: "muse.path",
+	type: "string",
+	default: "muse",
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Muse Binary",
+		description: "Name or absolute path of the Muse Code client the muse tool invokes (default: muse on PATH)",
+	},
+});
+
 export const cfgAskEnabled = register({
 	id: "ask.enabled",
 	type: "boolean",
@@ -1144,6 +1169,7 @@ export const cfgBuiltinToolGates = combine({
 	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
+	muse: cfgMuseEnabled,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

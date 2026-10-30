@@ -18,6 +18,7 @@ import { grepToolRenderer } from "./grep";
 import { waitToolRenderer } from "./wait";
 import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
+import { museToolRenderer } from "./muse";
 import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
 import { resolveRenderer } from "./resolve";
@@ -44,6 +45,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	apply_patch: editToolRenderer,
 	find: findToolRenderer,
 	glob: globToolRenderer,
+	muse: museToolRenderer,
 	grep: grepToolRenderer,
 	lsp: lspToolRenderer,
 	wait: waitToolRenderer,
