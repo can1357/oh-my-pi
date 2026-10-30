@@ -6,7 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
-import { resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { resolveSeanceSource, restoreSeanceSession, validateSeanceParams } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { getAgentDir, getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string, cwd: string) {
@@ -78,6 +78,22 @@ async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("seance batch validation", () => {
+	it.each([
+		[undefined, "`sourceSession`"],
+		["anthropic/claude-sonnet-4-5", "`sourceSession` and `model`"],
+	])("names only the misplaced fields when model is %s", (model, fields) => {
+		expect(
+			validateSeanceParams({
+				params: { sourceSession: "saved-source", ...(model !== undefined ? { model } : {}), tasks: [] },
+				batchEnabled: true,
+				defaultAgent: "task",
+				seanceAdvertised: true,
+			}),
+		).toBe(`Put ${fields} on the individual \`seance\` item inside \`tasks[]\`.`);
+	});
 });
 
 describe("seance source resolution", () => {

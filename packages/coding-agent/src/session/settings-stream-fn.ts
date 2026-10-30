@@ -12,6 +12,7 @@
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { isFactoryDroidModel } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
@@ -49,7 +50,7 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	return Math.max(1, Math.trunc(value * 1000));
 }
 
-/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`). */
+/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`), and server-side fallback opt-out. */
 export interface SettingsStreamSlowModeContext {
 	/** Defaults to the process-wide lane registry. */
 	lanes?: AnthropicSlowModeLanes;
@@ -59,6 +60,8 @@ export interface SettingsStreamSlowModeContext {
 	notify?: (level: "info" | "warning" | "error", message: string) => void;
 	/** Record which account lane served the session's latest Anthropic request. */
 	onLane?: (lane: string) => void;
+	/** Never inject the opt-in server-side fallback chain (per-call `model` workers never switch models). */
+	disableServerSideFallback?: boolean;
 }
 
 /**
@@ -107,7 +110,9 @@ export function createSettingsAwareStreamFn(
 		// layer picks it up, sends the beta header, and honors the response
 		// signals. Models without a rule-assigned chain are untouched.
 		const serverSideFallbackChain =
-			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
+			streamOptions?.fallbacks === undefined &&
+			!slowModeContext?.disableServerSideFallback &&
+			cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
 		const fallbacks =
@@ -171,6 +176,10 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
+			// The Factory transport attaches its own refusal chain, so a per-call switch must reach it.
+			...(slowModeContext?.disableServerSideFallback && isFactoryDroidModel(model)
+				? { disableServerSideFallback: true }
+				: {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);

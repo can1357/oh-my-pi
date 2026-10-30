@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolCall, SpeculativeOperationSink } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -27,6 +28,7 @@ async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
 
 describe("taskFile dispatch", () => {
 	let directory: string;
+	const fileModel = createMockModel({ id: "file-worker" });
 	const managers: AsyncJobManager[] = [];
 	const executions: ExecutorOptions[] = [];
 	const gates = new Map<string, PromiseWithResolvers<void>>();
@@ -101,6 +103,11 @@ describe("taskFile dispatch", () => {
 			}),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
+			modelRegistry: {
+				getAll: () => [fileModel],
+				getAvailable: () => [fileModel],
+				awaitBackgroundRefresh: async () => {},
+			},
 			localProtocolOptions: { getArtifactsDir: () => path.join(directory, "artifacts") },
 			asyncJobManager: manager,
 		} as unknown as ToolSession);
@@ -120,6 +127,62 @@ describe("taskFile dispatch", () => {
 
 		expect(result.isError).toBe(true);
 		expect(textOf(result)).toContain("task.file");
+		expect(executions).toHaveLength(0);
+	});
+
+	it.each(
+		[false, true].flatMap(batch =>
+			["mock/file-worker", "@review", ["@review"]].map(model => [batch, model] as const),
+		),
+	)("combines taskFile with an approved per-call model (batch=%s, model=%j)", async (batch, model) => {
+		const source = "Complete the file-backed assignment.";
+		const taskFile = await writeTaskFile("approved-model.md", source);
+		const tool = await createTool(batch, undefined, {
+			"task.perCallModel": "on",
+			modelRoles: { review: "mock/file-worker" },
+		});
+		const item = { name: "FileModel", taskFile, model, solutionSpace: "one defined change" };
+
+		const result = await tool.execute("file-model", batch ? { context: "Shared context.", tasks: [item] } : item);
+
+		expect(result.isError, textOf(result)).not.toBe(true);
+		expect(executions).toHaveLength(1);
+		expect(executions[0]).toMatchObject({
+			assignment: source,
+			modelOverride: ["mock/file-worker"],
+			perCallModelGrants: { agentName: "task" },
+		});
+		expect(result.details?.results[0]).toMatchObject({
+			taskFile,
+			taskFileSha256: await sha256(new TextEncoder().encode(source)),
+		});
+	});
+
+	it.each([
+		["off", false],
+		["off", true],
+		["eval", false],
+		["eval", true],
+	] as const)("checks the per-call gate before reading taskFile (mode=%s, batch=%s)", async (mode, batch) => {
+		const tool = await createTool(batch, undefined, { "task.perCallModel": mode });
+		const item = { taskFile: path.join(directory, "missing.md"), model: "@review" };
+
+		const result = await tool.execute("file-model-disabled", batch ? { context: "Context.", tasks: [item] } : item);
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain(`task.perCallModel: ${mode}`);
+		expect(executions).toHaveLength(0);
+	});
+
+	it.each([false, true])("rejects unapproved models on file-backed tasks (batch=%s)", async batch => {
+		const taskFile = await writeTaskFile("unapproved-model.md", "Must not run on an unapproved model.");
+		const tool = await createTool(batch, undefined, { "task.perCallModel": "on", modelRoles: {} });
+		const item = { taskFile, model: "mock/file-worker" };
+
+		const result = await tool.execute("file-model-unapproved", batch ? { context: "Context.", tasks: [item] } : item);
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("not approved");
 		expect(executions).toHaveLength(0);
 	});
 
