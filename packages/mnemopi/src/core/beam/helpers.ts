@@ -5,6 +5,7 @@ import { cjkFtsTerms, containsSpacelessCjk, ftsQueryTerms, hasCjk, isCjkChar, re
 import { currentEmbeddingModel, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
+import { forgetCachedEmbeddings } from "./embedding-cache";
 import type { BeamMemoryState, JsonValue, Metadata } from "./types";
 
 export type Vector = number[];
@@ -745,6 +746,10 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 				}
 			});
 			insertMany(items);
+			forgetCachedEmbeddings(
+				beam.db,
+				items.map(item => item.memoryId),
+			);
 			// A recall taken while these vectors were still generating cached an FTS-only ranking, and
 			// committing vectors changes what recall returns -- so that cache must be dropped, or the
 			// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
