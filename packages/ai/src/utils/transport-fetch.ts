@@ -8,10 +8,14 @@ import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request
 
 /** What {@link transportFetch} stamps on a fetch it built. */
 interface TransportFetchStamp {
+	/** The model it was built for, so {@link withoutDispatchHold} can rebuild it. */
+	model: Model<Api>;
 	/** The fetch it wraps, so a later hold rebuilds from it instead of layering onto it. */
 	base: FetchImpl;
 	/** Every hold baked in, in the order they were supplied. */
 	holds: readonly DispatchHold[];
+	/** The same transport with no hold, built once on demand for cleanup traffic. */
+	unheld?: FetchImpl;
 }
 
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
@@ -49,7 +53,26 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		stamp?.base ??
 		given ??
 		(model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
-	const holds: readonly DispatchHold[] = hold ? [...(stamp?.holds ?? []), hold] : (stamp?.holds ?? []);
+	return buildTransportFetch(model, base, hold ? [...(stamp?.holds ?? []), hold] : (stamp?.holds ?? []));
+}
+
+/**
+ * The same transport without the caller's dispatch hold, for the traffic whose
+ * purpose is to *stop* paid work: a workflow stop, a cancellation, a session
+ * teardown. Gating those behind a hold a human releases is backwards — the
+ * remote work the request would end keeps running, and spending, for the whole
+ * pause. Everything else the wrapper does (User-Agent, `NODE_EXTRA_CA_CERTS`,
+ * proxy, `PI_REQ_DEBUG`) still applies. A fetch this layer did not build, or
+ * one with no hold, is returned unchanged.
+ */
+export function withoutDispatchHold(fetchImpl: FetchImpl): FetchImpl {
+	const stamp = (fetchImpl as TransportFetch)[TRANSPORT_FETCH];
+	if (!stamp || stamp.holds.length === 0) return fetchImpl;
+	stamp.unheld ??= buildTransportFetch(stamp.model, stamp.base, []);
+	return stamp.unheld;
+}
+
+function buildTransportFetch(model: Model<Api>, base: FetchImpl, holds: readonly DispatchHold[]): TransportFetch {
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -68,7 +91,7 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		return debug ? debug.wrapResponse(response) : response;
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = { base, holds };
+	fetch[TRANSPORT_FETCH] = { model, base, holds };
 	return fetch;
 }
 

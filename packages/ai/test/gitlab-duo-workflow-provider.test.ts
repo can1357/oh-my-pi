@@ -39,6 +39,7 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
@@ -1292,6 +1293,81 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		await run;
 
 		expect(sentWhileHeld).toEqual([false]);
+	});
+	// Cleanup runs the other way round: the stop PATCH is what ends the remote
+	// workflow's spending, so holding it behind a gate a human releases leaves
+	// that workflow running for the whole pause.
+	it("sends the workflow stop even while the caller's gate holds everything else", async () => {
+		const gate = { closed: false };
+		// Never resolved: the gate stays closed for the rest of the test, exactly
+		// as a `/pause` nobody has lifted yet.
+		const parked = Promise.withResolvers<void>();
+		const hold = () => (gate.closed ? parked.promise : undefined);
+		const stoppedWhileHeld: boolean[] = [];
+		const base: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return new Response(
+					JSON.stringify({
+						data: {
+							aiChatAvailableModels: {
+								defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+								selectableModels: [],
+								pinnedModel: null,
+							},
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows/") && init?.method === "PATCH") {
+				stoppedWhileHeld.push(gate.closed);
+				return new Response("{}", { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send() {},
+				close() {},
+			};
+			// The socket dies and the caller pauses in the same moment: the
+			// workflow is left running on the server, and only the stop ends it.
+			queueMicrotask(() => {
+				gate.closed = true;
+				socket.onerror?.(new Event("error"));
+			});
+			return socket;
+		};
+
+		const outcome = await Promise.race([
+			streamGitLabDuoWorkflow(model, context, {
+				apiKey: "[REDACTED]",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: transportFetch(model, base, hold),
+				webSocketFactory,
+				beforeDispatch: hold,
+			})
+				.result()
+				.then(
+					() => "settled",
+					() => "settled",
+				),
+			Bun.sleep(1_000).then(() => "parked on the hold"),
+		]);
+
+		expect(outcome).toBe("settled");
+		expect(stoppedWhileHeld).toEqual([true]);
 	});
 
 	it("retries once on a fresh workflow when the server returns the generic processing error", async () => {

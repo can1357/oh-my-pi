@@ -25,6 +25,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
 import { redactSensitiveCredentials } from "./transform-messages";
 
@@ -1810,8 +1811,15 @@ async function stopGitLabDuoWorkflow(
 	// caller must still fire the server-side stop, but a stalled PATCH here would
 	// otherwise leave the `runGitLabDuoWorkflow` promise unresolved forever — the
 	// bounded budget keeps cleanup best-effort in both directions.
+	//
+	// For the same reason it skips the caller's dispatch hold: this PATCH ends
+	// paid work rather than starting it, and parking it behind a `/pause` would
+	// leave the remote workflow running — and billing — until a human resumes.
+	// The rest of the transport (proxy, CA bundle, User-Agent, PI_REQ_DEBUG)
+	// still applies.
+	const stopFetch = withoutDispatchHold(fetchImpl);
 	try {
-		await fetchImpl(gitLabApiUrl(baseUrl, `/api/v4/ai/duo_workflows/workflows/${encodeURIComponent(workflowId)}`), {
+		await stopFetch(gitLabApiUrl(baseUrl, `/api/v4/ai/duo_workflows/workflows/${encodeURIComponent(workflowId)}`), {
 			method: "PATCH",
 			headers: {
 				Authorization: `Bearer ${apiKey}`,
