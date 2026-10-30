@@ -191,6 +191,19 @@ jobs:
               cargo deny --locked --offline check licenses sources
          - name: Type check workspace
            run: bun run ci:check:full
+         - name: Check changelog entries
+           if: github.event_name == 'pull_request'
+           env:
+              PR_NUMBER: ${{ github.event.pull_request.number }}
+              PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+              PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+           run: |
+              # Two-dot diff against the PR base: added lines are what this branch
+              # introduces, whether or not it is merged up to date.
+              git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+              bun scripts/check-changelog-attribution.ts \
+                --base "${{ github.event.pull_request.base.sha }}" \
+                --pr "$PR_NUMBER" --author "$PR_AUTHOR" --association "$PR_ASSOCIATION"
          - name: Build collab web
            run: bun run collab:web:build
 
