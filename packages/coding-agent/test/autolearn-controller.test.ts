@@ -1,16 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import {
-	Agent,
-	type AgentMessage,
-	type AgentOptions,
-	type AgentTool,
-	SentToolDefinitions,
-} from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentOptions, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	FetchImpl,
-	Message,
 	Model,
 	ProviderSessionState,
 	Tool,
@@ -436,35 +429,76 @@ describe("isolated auto-learn capture", () => {
 		expect(mock.calls.every(call => call.options?.sessionId !== "primary-session")).toBe(true);
 	});
 
-	it("re-declares the tools the primary withdrew from the definitions it sent", async () => {
-		const mock = createMockModel({
-			responses: [{ content: ["Primary answer."] }, { content: ["Nothing to keep."] }],
+	it("re-declares on the wire the tools the primary withdrew, from the definitions it sent", async () => {
+		const mock = createMockModel({ responses: [{ content: ["Primary answer."] }] });
+		const built = buildModel({
+			id: "claude-test",
+			name: "Anthropic test",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
 		});
+		const anthropic = { ...built, compat: { ...built.compat, supportsMidConversationToolChanges: true } };
 		const readTool = captureTool("read", "Read files");
 		const learnTool = captureTool("learn", "Remember a fact");
+		// The primary sent both, then withdrew `read`; its last response kept a declaration that still names it.
+		const declaring: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Read it." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-test",
+			usage: ZERO_USAGE,
+			stopReason: "stop",
+			timestamp: 2,
+			requestControls: { messageIndex: 1, tools: { declared: ["read", "learn"], deferred: [], active: ["learn"] } },
+		};
 		const sourceAgent = new Agent({
-			initialState: { model: mock, systemPrompt: ["Test"], tools: [readTool, learnTool] },
+			initialState: {
+				model: anthropic,
+				systemPrompt: ["Test"],
+				tools: [readTool, learnTool],
+				messages: [{ role: "user", content: "Read the file", timestamp: 1 }, declaring],
+			},
 			convertToLlm,
 			streamFn: mock.stream,
 		});
 		await sourceAgent.prompt("Earlier task");
 		sourceAgent.setTools([learnTool]);
-		let seeded: SentToolDefinitions | undefined;
+		let requestBody = "";
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestBody = requestBodyText(init) ?? "";
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "x" } }),
+				{
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		}) as typeof fetch;
 		await createAutoLearnCaptureRunner({
 			sourceAgent,
 			captureTools: () => [learnTool],
-			createAgent: options => {
-				seeded = options.sentToolDefinitions;
-				return new Agent({ ...options, convertToLlm, streamFn: mock.stream });
-			},
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: (requestModel, context, streamOptions) =>
+						streamAnthropic(requestModel as Model<"anthropic-messages">, context, {
+							...streamOptions,
+							apiKey: "sk-ant-api-test",
+							fetch: fetchMock,
+						}),
+				}),
 		})("Capture");
 
-		const replayed = [
-			{ role: "assistant", requestControls: { tools: { declared: ["read", "learn"] } } },
-		] as Message[];
-		const learnWire = mock.calls[0]?.context.tools?.filter(t => t.name === "learn") ?? [];
-		expect(seeded?.inactiveFor(replayed, learnWire)?.map(t => t.name)).toEqual(["read"]);
-		expect(new SentToolDefinitions().inactiveFor(replayed, learnWire)).toBeUndefined();
+		const tools = (JSON.parse(requestBody) as { tools?: { name: string }[] }).tools ?? [];
+		expect(tools.map(t => t.name)).toEqual(["read", "learn"]);
 	});
 
 	for (const via of ["headers", "resolveHeaders"] as const) {
@@ -490,7 +524,15 @@ describe("isolated auto-learn capture", () => {
 				headers: gateway,
 				compat: { ...built.compat, supportsMidConversationToolChanges: true },
 			};
-			const umans = via === "headers" ? wire : { ...wire, headers: undefined, resolveHeaders: async () => gateway };
+			// The resolver answers once with the gateway header, and the primary moves on while it is pending.
+			let resolves = 0;
+			const primary: { agent?: Agent } = {};
+			const resolveHeaders = async () => {
+				resolves++;
+				primary.agent?.appendMessage({ role: "user", content: "Late primary turn", timestamp: 9 });
+				return resolves === 1 ? gateway : {};
+			};
+			const umans = via === "headers" ? wire : { ...wire, headers: undefined, resolveHeaders };
 			const webSearch = captureTool("web_search", "Search the web");
 			const readTool = captureTool("read", "Read files");
 			const learnTool = captureTool("learn", "Remember a fact");
@@ -524,9 +566,12 @@ describe("isolated auto-learn capture", () => {
 				streamFn: mock.stream,
 			});
 			await sourceAgent.prompt("Earlier task");
+			primary.agent = sourceAgent;
 			let requestBody = "";
+			let requestGateway = null as string | null;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
 				requestBody = requestBodyText(init) ?? "";
+				requestGateway = new Headers(init?.headers).get("X-Umans-Websearch-Provider");
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "x" } }),
 					{
@@ -542,14 +587,24 @@ describe("isolated auto-learn capture", () => {
 					new Agent({
 						...options,
 						convertToLlm,
-						streamFn: (_requestModel, context, streamOptions) =>
-							streamAnthropic(wire, context, { ...streamOptions, apiKey: "test-key", fetch: fetchMock }),
+						// The model the capture sends with, as `streamSimple` would hand it on.
+						streamFn: (requestModel, context, streamOptions) =>
+							streamAnthropic(requestModel as Model<"anthropic-messages">, context, {
+								...streamOptions,
+								apiKey: "test-key",
+								fetch: fetchMock,
+							}),
 					}),
 			})("Capture");
 
 			const tools = (JSON.parse(requestBody) as { tools?: { name: string }[] }).tools ?? [];
 			expect(tools.map(t => t.name)).toEqual(["_read", "_learn"]);
 			expect(requestBody).not.toContain("web_search");
+			// The request goes out with the headers the tool list was built from, resolved once.
+			expect(requestGateway).toBe("native");
+			expect(resolves).toBe(via === "headers" ? 0 : 1);
+			// Built from the turn as it stood when the capture started.
+			expect(requestBody).not.toContain("Late primary turn");
 		});
 	}
 

@@ -1736,13 +1736,11 @@ export interface AutoLearnCaptureRunnerOptions {
 }
 
 /**
- * A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. `headers`
- * are the model's resolved request headers (`resolveHeaders`), which can switch a host tool on.
+ * A tool the host runs itself, never dispatching the call to the client: a refused copy could not stop it. `model`
+ * carries its resolved headers, which can switch a host tool on.
  */
-function hostRunsTool(model: Model, name: string, headers: Record<string, string> | undefined): boolean {
-	return (
-		model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name, headers)
-	);
+function hostRunsTool(model: Model, name: string): boolean {
+	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1752,18 +1750,34 @@ export function createAutoLearnCaptureRunner(
 	return async (content, signal) => {
 		const captureTools = options.captureTools();
 		if (captureTools.length === 0 || signal?.aborted) return;
-		const captureModel = options.sourceAgent.state.model;
-		if (!captureModel) return;
-		// Configured headers live behind `resolveHeaders` until the stream resolves them; resolve them for the tool list.
-		const captureHeaders = await captureModel.resolveHeaders?.(signal);
-		const hostRuns = (name: string) => hostRunsTool(captureModel, name, captureHeaders);
+		// One snapshot of the source turn before any await: the primary keeps running while a capture is built.
+		const source = options.sourceAgent.state;
+		const sourceModel = source.model;
+		if (!sourceModel) return;
+		const sourceSystemPrompt = [...source.systemPrompt];
+		const sourceThinkingLevel = source.thinkingLevel;
+		const sourceDisableReasoning = source.disableReasoning;
+		const sourceTools = [...source.tools];
+		const sourceMessages = [...source.messages];
+		const sourceSentToolDefinitions = options.sourceAgent.copySentToolDefinitions();
+		const capturePromptCacheKey =
+			options.primaryPromptCacheKey?.(sourceModel) ??
+			options.sourceAgent.promptCacheKey ??
+			options.sourceAgent.sessionId;
+		// Configured headers live behind `resolveHeaders`. Resolve them once, as `streamSimple` would, and send the
+		// request with them: the tool list and the request must agree on which tools the host runs.
+		const captureModel: Model = sourceModel.resolveHeaders
+			? { ...sourceModel, resolveHeaders: undefined, headers: { ...(await sourceModel.resolveHeaders(signal)) } }
+			: sourceModel;
+		if (signal?.aborted) return;
+		const hostRuns = (name: string) => hostRunsTool(captureModel, name);
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
 		const stripInheritedReasoning =
 			captureModel.api === "openai-responses" ||
 			(captureModel.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
-		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
+		const captureMessages = sourceMessages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
 				let content = message.content;
 				if (
@@ -1790,13 +1804,13 @@ export function createAutoLearnCaptureRunner(
 		});
 		const captureAgent = options.createAgent({
 			initialState: {
-				systemPrompt: [...options.sourceAgent.state.systemPrompt],
+				systemPrompt: sourceSystemPrompt,
 				model: captureModel,
-				thinkingLevel: options.sourceAgent.state.thinkingLevel,
-				disableReasoning: options.sourceAgent.state.disableReasoning,
+				thinkingLevel: sourceThinkingLevel,
+				disableReasoning: sourceDisableReasoning,
 				// A provider-executed tool is dropped instead: that costs the prefix only where the gateway search is on.
 				tools: captureToolList(
-					options.sourceAgent.state.tools.filter(tool => !hostRuns(tool.name)),
+					sourceTools.filter(tool => !hostRuns(tool.name)),
 					captureTools,
 				),
 				messages: captureMessages,
@@ -1804,13 +1818,10 @@ export function createAutoLearnCaptureRunner(
 			sessionId: captureSessionId,
 			// The key the primary loop sent, so a provider that routes by it (OpenAI `prompt_cache_key`) serves the
 			// capture from the primary prompt's cache. The provider session id above stays the capture's own (#10869).
-			promptCacheKey:
-				options.primaryPromptCacheKey?.(captureModel) ??
-				options.sourceAgent.promptCacheKey ??
-				options.sourceAgent.sessionId,
+			promptCacheKey: capturePromptCacheKey,
 			// The replayed history's `requestControls` declare tools the primary withdrew (Anthropic `tool_removal`);
 			// their sent definitions keep that declaration byte-identical. A host-run tool is never declared again.
-			sentToolDefinitions: options.sourceAgent.copySentToolDefinitions(name => !hostRuns(name)),
+			sentToolDefinitions: sourceSentToolDefinitions.copy(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
