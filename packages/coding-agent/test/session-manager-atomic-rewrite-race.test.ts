@@ -14,6 +14,7 @@ import {
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	type SessionStorageWriteOptions,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -152,6 +153,31 @@ class CloseGatedRewriteStorage extends MemorySessionStorage {
 		this.writeTextSync(path, content);
 	}
 }
+
+/** Parks atomic publishes until released and fails the next synchronous full rewrite, as a full disk would. */
+class FailingFencedRewriteStorage extends MemorySessionStorage {
+	readonly rewriteStarted = Promise.withResolvers<void>();
+	readonly allowRewrite = Promise.withResolvers<void>();
+	failNextSyncRewrite = false;
+
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		this.rewriteStarted.resolve();
+		await this.allowRewrite.promise;
+		await super.writeTextAtomic(path, content, options);
+	}
+
+	override writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
+		if (this.failNextSyncRewrite) {
+			this.failNextSyncRewrite = false;
+			throw new Error("ENOSPC: synthetic synchronous rewrite failure");
+		}
+		super.writeTextSync(path, content, options);
+	}
+}
+
+const userTurn = (content: string) => ({ role: "user" as const, content, timestamp: Date.now() });
+const userTurnsOf = (entries: readonly SessionEntry[]) =>
+	entries.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : []));
 
 describe("SessionManager atomic rewrite race", () => {
 	it("keeps post-compaction appends on the current JSONL path", async () => {
@@ -329,13 +355,57 @@ describe("SessionManager atomic rewrite race", () => {
 		expect(storage.guardRejections).toBeGreaterThanOrEqual(1);
 		expect(storage.detachedLines).toEqual([]);
 	});
+
+	it("restores an append whose fenced synchronous rewrite failed before a later append extends the file", async () => {
+		const storage = new FailingFencedRewriteStorage();
+		const sessionManager = SessionManager.create("/cwd", "/sessions", storage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model");
+
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "seed response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(userTurn("before rewrite"));
+		await sessionManager.flush();
+
+		// A maintenance rewrite holds the fence, so the next append is persisted
+		// only by a synchronous full rewrite, and that rewrite fails.
+		const rewritePublished = sessionManager.rewriteEntries();
+		await storage.rewriteStarted.promise;
+		storage.failNextSyncRewrite = true;
+		sessionManager.appendMessage(userTurn("fenced append"));
+		// Its successor is parented to the fenced append, so it must not land
+		// on the file until the fenced append is there too.
+		sessionManager.appendMessage(userTurn("after failed rewrite"));
+		storage.allowRewrite.resolve();
+		await rewritePublished;
+
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const reloaded = await SessionManager.open(sessionFile, "/sessions", storage, {
+			initialCwd: "/cwd",
+			suppressBreadcrumb: true,
+		});
+		expect(userTurnsOf(reloaded.getEntries())).toEqual(["before rewrite", "fenced append", "after failed rewrite"]);
+		expect(userTurnsOf(reloaded.getBranch())).toEqual(["before rewrite", "fenced append", "after failed rewrite"]);
+		await sessionManager.close();
+	});
 });
 describe("SessionManager cross-process rewrite freshness", () => {
-	const userTurn = (content: string) => ({ role: "user" as const, content, timestamp: Date.now() });
-	const userTurnsOf = (entries: readonly SessionEntry[]) =>
-		entries.flatMap(entry =>
-			entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : [],
-		);
 	const ourTurnsAfter = Array.from({ length: 5 }, (_, turn) => `our turn ${turn} after the conflict`);
 
 	/** Reports session `ownedElsewhere` as held by another live process, as `claimSession` does for a session a second omp writes. */

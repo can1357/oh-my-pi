@@ -1834,12 +1834,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			await liveBridge.stop();
 			await session.dispose();
 		} catch (error) {
-			if (!persistenceFailure || error !== persistenceFailure) throw error;
+			// The latch holds the latest failure, which may not be the one the observer first heard.
+			const latched = persistenceFailure && session.sessionManager.getPersistenceFailure();
+			if (!latched || error !== latched) throw error;
 			// The notice frame this failure queued must reach the client before the
 			// process ends (review 3983906393).
 			await outputWriter.close();
 			try {
-				if (!process.stderr.write(`${formatPersistenceDurabilityFailure(persistenceFailure.message)}\n`)) {
+				if (!process.stderr.write(`${formatPersistenceDurabilityFailure(latched.message)}\n`)) {
 					const { promise, resolve } = Promise.withResolvers<void>();
 					// A closed stream never emits `drain`; resolve on error/close too
 					// so an undeliverable mirror cannot strand the exit.
