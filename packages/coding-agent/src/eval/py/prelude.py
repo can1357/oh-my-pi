@@ -34,6 +34,8 @@ if "__omp_prelude_loaded__" not in globals():
     _OMP_ARTIFACT_SELECTOR_RE = re.compile(r"^(\d+)(:.*)$")
     # Holds bound at a cell's first read, by (cell, artifacts directory).
     _OMP_BOUND_ROOTS: dict = {}
+    # The answer each cell has consumed, returned with its next question.
+    _OMP_SPENT_ANSWERS: dict = {}
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme.
@@ -118,11 +120,17 @@ if "__omp_prelude_loaded__" not in globals():
                 # answers from the directory the cell was started on, not from
                 # whatever its pathname reaches when the read lands.
                 "token": token,
+                # The answer this cell has finished with: its slot goes back at
+                # consumption rather than at a timeout.
+                "release": _OMP_SPENT_ANSWERS.pop(_bind_key, None),
             },
         )
         details = answer.get("details") if isinstance(answer, dict) else None
         if not isinstance(details, dict) or not isinstance(details.get("path"), str):
             return None
+        spent = details.get("file")
+        if isinstance(spent, str) and spent:
+            _OMP_SPENT_ANSWERS[_bind_key] = spent
         bound = details.get("root")
         if isinstance(bound, str) and bound:
             # This cell's binding, not the kernel's: the next cell is assigned

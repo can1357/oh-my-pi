@@ -220,6 +220,7 @@ async function evictUnusedHold(): Promise<boolean> {
 export async function releaseArtifactRoots(): Promise<void> {
 	for (const pinned of pinnedFiles.values()) await pinned.handle.close().catch(() => {});
 	pinnedFiles.clear();
+	pinnedPerScope.clear();
 	const held = [...heldRoots.values()];
 	heldRoots.clear();
 	tokensByPath.clear();
@@ -257,7 +258,13 @@ export async function resolveSettledArtifact(
 	signal?: AbortSignal,
 	wantText = false,
 	file?: string,
+	release?: string,
 ): Promise<SettledArtifact | null> {
+	// The answer this reader has finished with. A pin exists for the gap
+	// between answering and consuming, and nothing else: a reader that got
+	// what it needed says so with its next question rather than leaving the
+	// slot to a timeout.
+	if (release) await releasePinnedArtifact(release);
 	// A re-ask is for the object already opened, never for the name again:
 	// the reader is here because the name stopped meaning that object, and
 	// resolving it a second time is what it was trying to avoid.
@@ -301,7 +308,11 @@ async function answerFromHold(
 ): Promise<SettledArtifact | null> {
 	// One rule decides a read, and it is about the object rather than the
 	// route: a read is refused when what is reached is not what this answer
-	// was about. A root that was moved, replaced or recreated but still
+	// was about. A cell whose root was moved and put back — the same inode,
+	// restored — is refused too, and the reason is not that the directory must
+	// be a different one: it is that this cell, holding no descriptor across
+	// the gap, cannot prove it is the same. A new cell acquires it and reads
+	// it in the ordinary way. A root that was moved, replaced or recreated but still
 	// reaches the same file is not a reason to refuse — the reader has the
 	// artifact, by another name — and that is why the substituted file, the
 	// foreign symlink and the fifo are all caught, each of them by being a
@@ -346,7 +357,7 @@ async function settledArtifactIn(
 			// for an answer this loop is going to throw away holds a slot
 			// nobody will ever come back for, and a listing overtaken by a
 			// copy is exactly that.
-			return found ? await finalAnswer(found, wantText) : null;
+			return found ? await finalAnswer(found, wantText, where) : null;
 		}
 		await found?.handle.close();
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
@@ -415,7 +426,16 @@ async function artifactElsewhere(
  * bytes, and this is what serves them: the object that was opened when the
  * answer was made, which nothing standing at the name can take its place in.
  */
-const pinnedFiles = new Map<string, { handle: fs.promises.FileHandle; answer: SettledArtifact; at: number }>();
+interface PinnedFile {
+	handle: fs.promises.FileHandle;
+	answer: SettledArtifact;
+	at: number;
+	scope: string;
+}
+
+const pinnedFiles = new Map<string, PinnedFile>();
+/** How many answers each session may have outstanding, so one cannot deny another. */
+const pinnedPerScope = new Map<string, number>();
 /**
  * The clock a lease is measured on.
  *
@@ -437,25 +457,40 @@ const PINNED_FILES_MAX = 32;
  */
 const PINNED_FILE_LEASE_MS = 2_000;
 
-function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact): string {
+/** Give back the pin on an answer its reader has consumed. */
+export async function releasePinnedArtifact(file: string): Promise<void> {
+	const pinned = pinnedFiles.get(file);
+	if (!pinned) return;
+	pinnedFiles.delete(file);
+	const left = (pinnedPerScope.get(pinned.scope) ?? 1) - 1;
+	if (left > 0) pinnedPerScope.set(pinned.scope, left);
+	else pinnedPerScope.delete(pinned.scope);
+	await pinned.handle.close().catch(() => {});
+}
+
+function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, scope: string): string {
 	// An answer already handed to a reader is that reader's until it comes
 	// back for the bytes or gives up: capacity must not revoke one, because a
 	// reader whose name was replaced has nothing else left to read from. So
 	// the ones that go are the ones nobody can still be waiting on, and when
 	// there are none the *new* answer is refused instead.
-	while (pinnedFiles.size >= PINNED_FILES_MAX) {
-		const expired = [...pinnedFiles].find(([, pinned]) => leaseClock() - pinned.at >= PINNED_FILE_LEASE_MS);
+	while ((pinnedPerScope.get(scope) ?? 0) >= PINNED_FILES_MAX) {
+		const expired = [...pinnedFiles].find(
+			([, pinned]) => pinned.scope === scope && leaseClock() - pinned.at >= PINNED_FILE_LEASE_MS,
+		);
 		if (!expired) {
 			void handle.close().catch(() => {});
 			throw new ToolError(
-				`${PINNED_FILES_MAX} artifact answers are outstanding and none has lapsed; ${answer.path} cannot be answered for`,
+				`${PINNED_FILES_MAX} artifact answers are outstanding for ${scope} and none has lapsed; ${answer.path} cannot be answered for`,
 			);
 		}
+		void releasePinnedArtifact(expired[0]);
 		pinnedFiles.delete(expired[0]);
-		void expired[1].handle.close().catch(() => {});
+		pinnedPerScope.set(scope, (pinnedPerScope.get(scope) ?? 1) - 1);
 	}
 	const token = `file-${crypto.randomUUID()}`;
-	pinnedFiles.set(token, { handle, answer, at: leaseClock() });
+	pinnedFiles.set(token, { handle, answer, at: leaseClock(), scope });
+	pinnedPerScope.set(scope, (pinnedPerScope.get(scope) ?? 0) + 1);
 	return token;
 }
 
@@ -465,11 +500,10 @@ async function textFromPinnedFile(file: string): Promise<SettledArtifact | null>
 	if (!pinned) {
 		throw new ToolError("the artifact this session was told to read is no longer held open");
 	}
-	pinnedFiles.delete(file);
 	try {
 		return { ...pinned.answer, text: await pinned.handle.readFile("utf8") };
 	} finally {
-		await pinned.handle.close();
+		await releasePinnedArtifact(file);
 	}
 }
 
@@ -480,7 +514,7 @@ interface OpenArtifact {
 }
 
 /** The answer to hand out: its bytes if they were asked for, otherwise a pin on the file. */
-async function finalAnswer(found: OpenArtifact, wantText: boolean): Promise<SettledArtifact> {
+async function finalAnswer(found: OpenArtifact, wantText: boolean, scope: string): Promise<SettledArtifact> {
 	if (wantText) {
 		try {
 			return { ...found.answer, text: await found.handle.readFile("utf8") };
@@ -488,7 +522,7 @@ async function finalAnswer(found: OpenArtifact, wantText: boolean): Promise<Sett
 			await found.handle.close();
 		}
 	}
-	return { ...found.answer, file: pinFile(found.handle, found.answer) };
+	return { ...found.answer, file: pinFile(found.handle, found.answer, scope) };
 }
 
 async function artifactInDirectory(at: string, where: string, id: string): Promise<OpenArtifact | null> {

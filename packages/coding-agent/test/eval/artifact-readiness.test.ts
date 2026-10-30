@@ -7,6 +7,7 @@ import {
 	EVAL_ARTIFACTS_READY_BRIDGE_NAME,
 	holdArtifactRoot,
 	releaseArtifactRoots,
+	releasePinnedArtifact,
 	resolveSettledArtifact,
 } from "../../src/eval/artifact-readiness";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
@@ -339,6 +340,53 @@ describe("eval artifact readiness", () => {
 			const second = await resolveSettledArtifact(session, "8", late, first?.root);
 			expect(second?.path).toBe(path.join(late, "8.read.log"));
 			expect(second?.inode).toBe(first?.inode as string);
+		} finally {
+			await releaseArtifactRoots();
+		}
+	});
+
+	it("gives an answer's slot back when the reader has consumed it, per session", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const mine = path.join(tempDir.path(), "2026-01-01T00-00-04-000Z_mine");
+		const theirs = path.join(tempDir.path(), "2026-01-01T00-00-05-000Z_theirs");
+		fs.mkdirSync(mine, { recursive: true });
+		fs.mkdirSync(theirs, { recursive: true });
+		fs.writeFileSync(path.join(theirs, "0.read.log"), "ANOTHER SESSION'S");
+
+		try {
+			// Forty ordinary reads, each giving back the one before it: a pin
+			// is for the gap between answering and consuming, so reads that
+			// finished must not hold the slots.
+			let spent: string | undefined;
+			for (let n = 0; n < 40; n++) {
+				fs.writeFileSync(path.join(mine, `${n}.read.log`), `MINE ${n}`);
+				const answer = await resolveSettledArtifact(
+					sessionWithArtifacts(mine),
+					String(n),
+					mine,
+					undefined,
+					undefined,
+					false,
+					undefined,
+					spent,
+				);
+				expect(answer?.path).toBe(path.join(mine, `${n}.read.log`));
+				spent = answer?.file;
+			}
+			if (spent) await releasePinnedArtifact(spent);
+
+			// And the quota is one session's: a session holding all of its
+			// answers cannot stop another from reading.
+			const held: string[] = [];
+			for (let n = 0; n < 32; n++) {
+				fs.writeFileSync(path.join(mine, `h${n}.read.log`), `HELD ${n}`);
+				const answer = await resolveSettledArtifact(sessionWithArtifacts(mine), `h${n}`, mine);
+				if (answer?.file) held.push(answer.file);
+			}
+			expect(held.length).toBe(32);
+			const other = await resolveSettledArtifact(sessionWithArtifacts(theirs), "0", theirs);
+			expect(other?.path).toBe(path.join(theirs, "0.read.log"));
+			for (const file of held) await releasePinnedArtifact(file);
 		} finally {
 			await releaseArtifactRoots();
 		}

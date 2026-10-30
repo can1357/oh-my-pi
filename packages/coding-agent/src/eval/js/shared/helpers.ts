@@ -55,6 +55,7 @@ export interface HelperContext {
 		token?: string,
 		text?: boolean,
 		file?: string,
+		release?: string,
 	): Promise<SettledArtifactAnswer | null>;
 }
 
@@ -199,8 +200,9 @@ async function resolveArtifactPath(ctx: HelperContext, root: string, id: string)
 	// a verdict and a listing a copy can be announced, and the listing would
 	// be of a directory half an inheritance had reached.
 	if (ctx.resolveArtifact) {
-		const answer = await ctx.resolveArtifact(id, root, rootToken(ctx, root));
+		const answer = await ctx.resolveArtifact(id, root, rootToken(ctx, root), false, undefined, takeSpentAnswer(ctx));
 		bindRoot(ctx, answer);
+		rememberSpentAnswer(ctx, answer);
 		return answer?.path;
 	}
 	let files: string[];
@@ -235,8 +237,16 @@ async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<
 	if (match === null || match[1].toLowerCase() !== "artifact" || !ARTIFACT_ID_RE.test(match[2])) return undefined;
 	const root = ctx.localRoots().artifact;
 	if (!root) return undefined;
-	const answer = await ctx.resolveArtifact(match[2], root, rootToken(ctx, root));
+	const answer = await ctx.resolveArtifact(
+		match[2],
+		root,
+		rootToken(ctx, root),
+		false,
+		undefined,
+		takeSpentAnswer(ctx),
+	);
 	bindRoot(ctx, answer);
+	rememberSpentAnswer(ctx, answer);
 	return answer ?? undefined;
 }
 
@@ -256,6 +266,25 @@ const ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/i;
 function bindRoot(ctx: HelperContext, answer: SettledArtifactAnswer | null | undefined): void {
 	if (answer?.root) ctx.localRoots()[ARTIFACT_ROOT_TOKEN] ??= answer.root;
 }
+
+/**
+ * The answer this cell has finished with, carried to the host with its next
+ * question so the slot it holds goes back at consumption rather than at a
+ * timeout. The last read of a cell leaves one, which its lease covers.
+ */
+function takeSpentAnswer(ctx: HelperContext): string | undefined {
+	const roots = ctx.localRoots();
+	const spent = roots[SPENT_ANSWER];
+	if (spent) delete roots[SPENT_ANSWER];
+	return spent;
+}
+
+function rememberSpentAnswer(ctx: HelperContext, answer: SettledArtifactAnswer | null | undefined): void {
+	if (answer?.file) ctx.localRoots()[SPENT_ANSWER] = answer.file;
+}
+
+/** Where a cell keeps the answer it has consumed until its next question. */
+const SPENT_ANSWER = "__artifactSpent";
 
 /** The hold this cell reads through: the one it was given, or the one its first read bound. */
 function rootToken(ctx: HelperContext, _root: string): string | undefined {

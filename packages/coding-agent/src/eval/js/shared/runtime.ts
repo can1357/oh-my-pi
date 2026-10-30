@@ -107,6 +107,7 @@ export interface RuntimeOptions {
 		token?: string,
 		text?: boolean,
 		file?: string,
+		release?: string,
 	): Promise<SettledArtifactAnswer | null>;
 }
 
@@ -435,7 +436,14 @@ export class JsRuntime {
 			// — so a failure here fails the read.
 			...(opts.resolveArtifact
 				? {
-						resolveArtifact: async (id: string, root: string, token?: string, text?: boolean, file?: string) => {
+						resolveArtifact: async (
+							id: string,
+							root: string,
+							token?: string,
+							text?: boolean,
+							file?: string,
+							release?: string,
+						) => {
 							// Through the reader's own run, so the wait belongs
 							// to that cell's timeout and its abort ends it. The
 							// host answers this one name with the session's own
@@ -444,8 +452,15 @@ export class JsRuntime {
 							// and no reading of error text to find it.
 							const hooks = this.#activeHooks("tool");
 							const value = hooks
-								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root, token, text, file })
-								: await opts.resolveArtifact!(id, root, token, text, file);
+								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {
+										id,
+										root,
+										token,
+										text,
+										file,
+										release,
+									})
+								: await opts.resolveArtifact!(id, root, token, text, file, release);
 							return settledArtifactOf(value);
 						},
 					}

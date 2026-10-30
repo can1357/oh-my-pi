@@ -189,7 +189,7 @@ describe("python prelude", () => {
 				// `text: false` and no `file`: the kernel asks for the file, and
 				// only asks for the bytes if what it opens is not what it was
 				// told about. `token` is the hold the cell was given.
-				args: { file: null, id: "12", root: artifacts.path(), text: false, token: null },
+				args: { file: null, id: "12", release: null, root: artifacts.path(), text: false, token: null },
 				run: "",
 				session: "test-session",
 			},
