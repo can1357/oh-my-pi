@@ -169,3 +169,38 @@ describe("flushCompactionQueue loop parking", () => {
 		expect(getLoopPrompt()).toBe("queued body");
 	});
 });
+
+describe("flushCompactionQueue after a queued compaction", () => {
+	function heldBehindQueuedCompaction(branch: Array<{ id: string }>) {
+		const { ctx, prompt } = makeCtx([{ text: "held behind /compact", mode: "followUp" }], undefined, "forward");
+		const restoreCompactionQueueToEditor = mock(() => {});
+		Object.assign(ctx, {
+			yieldCompaction: undefined,
+			// Set by the queued pass when it took over from the request.
+			compactionQueueOrigin: { sessionId: "s1", leafId: "e1" },
+			sessionManager: { getSessionId: () => "s1", getBranch: () => branch },
+			restoreCompactionQueueToEditor,
+		});
+		return { ctx, prompt, restoreCompactionQueueToEditor };
+	}
+
+	test("hands the held follow-ups back when /tree moved to another branch during the pass", async () => {
+		const { ctx, prompt, restoreCompactionQueueToEditor } = heldBehindQueuedCompaction([{ id: "e9" }]);
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(ctx.compactionQueueOrigin).toBeUndefined();
+	});
+
+	test("delivers them when the branch still continues from where they were queued", async () => {
+		const { ctx, prompt, restoreCompactionQueueToEditor } = heldBehindQueuedCompaction([{ id: "e1" }, { id: "e2" }]);
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		expect(restoreCompactionQueueToEditor).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ctx.compactionQueueOrigin).toBeUndefined();
+	});
+});

@@ -5,6 +5,13 @@
 ### Fixed
 
 - Added opt-in `retry.continueClassifierRefusals` recovery: without an active fallback, classifier refusals can continue on the same model with a hidden neutral reminder that preserves useful visible text while excluding refusal metadata and private thinking. Empty refusals use the same path, bounded separately by `retry.maxClassifierRefusalContinuations` (default 2); turns with tools or media remain terminal ([#17413](https://github.com/can1357/oh-my-pi/pull/17413) by [@szybnev](https://github.com/szybnev)).
+### Added
+
+- Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
 ## [18.14.0] - 2026-10-29
 
