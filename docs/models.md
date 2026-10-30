@@ -1221,7 +1221,8 @@ directory's `models.yml` takes precedence over `models.yaml`.
 
 ## Failure mode
 
-If `models.yml` / `models.yaml` fails schema or validation checks:
+If `models.yml` / `models.yaml` fails to parse or fails schema or validation checks:
 
-- registry keeps operating with built-in models
+- at startup, the registry keeps operating with built-in models
+- on a reload in a running session (for example after a half-saved edit), the registry keeps the last config that loaded, including its providers, overrides and API keys, until the file loads again; deleting the file still drops it
 - error is exposed via `ModelRegistry.getError()` and surfaced in UI/notifications
