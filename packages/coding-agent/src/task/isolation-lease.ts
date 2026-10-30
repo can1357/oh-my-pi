@@ -383,11 +383,22 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 	let pending: (() => Promise<void>) | undefined;
 	try {
 		if (workspace.pendingTeardown === undefined) return;
-		if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return;
+		// The owner's own session counts as much as anyone else's. Excluding it
+		// let a teardown delete the workspace its own child was still writing
+		// in; the run's result no longer depends on that exclusion, because the
+		// capture at release has already happened by the time this runs.
+		if (await hasLiveIsolationLease(baseDir)) return;
 		// A writer that gave up its lease but has not finished is still a user:
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.
-		if (await hasUnfinishedWriter(baseDir)) return;
+		if (await hasUnfinishedWriter(baseDir)) {
+			// Deliberately kept until that process exits, so waiting for it must
+			// not keep *this* one alive: the record is on disk and reclamation
+			// takes the workspace afterwards.
+			workspace.poll?.unref?.();
+			workspace.watcher?.unref?.();
+			return;
+		}
 		pending = workspace.pendingTeardown;
 		workspace.pendingTeardown = undefined;
 		disarmTeardownWatch(workspace);
@@ -479,7 +490,7 @@ export async function deferTeardownWhileLeased(
 	workspace.poll ??= setInterval(() => {
 		void runPendingTeardownIfIdle(baseDir);
 	}, LEASE_POLL_MS);
-	if ((await hasLiveIsolationLease(baseDir, workspace.agentId)) || (await hasUnfinishedWriter(baseDir))) return true;
+	if ((await hasLiveIsolationLease(baseDir)) || (await hasUnfinishedWriter(baseDir))) return true;
 	// Nobody is here after all, and the caller is about to do the work itself.
 	workspace.pendingTeardown = undefined;
 	disarmTeardownWatch(workspace);

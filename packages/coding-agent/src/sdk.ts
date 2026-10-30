@@ -4495,6 +4495,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// and a kernel behind it.
 		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd(), { agentId: resolvedAgentId });
 		let workspaceLeaseTimer: NodeJS.Timeout | undefined;
+		/** Record publication and clearing that disposal must not finish ahead of. */
+		let pendingWriterWork: Promise<void> | undefined;
 		let workspaceLeaseDropped = false;
 		/**
 		 * One record for this session, created at most once and cleared at most
@@ -4502,7 +4504,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		 * grace — left the second uncleared, and a workspace nobody could reuse.
 		 */
 		let writerRecord: Promise<() => Promise<void>> | undefined;
-		const recordWriter = (): Promise<() => Promise<void>> => {
+		/**
+		 * Bumped by every clear, so a grace timer armed before that clear
+		 * cannot recreate a record nobody is left to clear.
+		 */
+		let writerRecordGeneration = 0;
+		const recordWriter = (generation: number): Promise<() => Promise<void>> => {
+			if (generation !== writerRecordGeneration) return Promise.resolve(async () => {});
 			writerRecord ??= markUnfinishedWriter(sessionManager.getCwd());
 			return writerRecord;
 		};
@@ -4514,6 +4522,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				try {
 					await clear();
 					writerRecord = undefined;
+					writerRecordGeneration += 1;
 					return;
 				} catch (error) {
 					logger.warn("could not clear this session's unfinished-writer record; retrying", {
@@ -4550,7 +4559,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the workspace is a user of it, and dropping the lease when disposal
 		// merely starts lets the owner delete the directory under that write.
 		disposeCallbacks.add(() => {
-			void (async () => {
+			// Awaited by the dispose wrapper below: a detached callback lets
+			// disposal end while this session's record is still unpublished,
+			// and an unpublished record protects nothing.
+			pendingWriterWork = (async () => {
 				// Disposal ending is not proof that a handler it abandoned at its
 				// timeout has stopped. When it did, the record stays: it names
 				// this process, so it retires when this process does, and until
@@ -4560,7 +4572,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.warn("keeping this session's unfinished-writer record: disposal abandoned a shutdown handler", {
 						id: resolvedAgentId,
 					});
-					await recordWriter().catch(error => {
+					await recordWriter(writerRecordGeneration).catch(error => {
 						logger.warn("could not record this session as an unfinished writer", { error: String(error) });
 					});
 				} else {
@@ -4575,9 +4587,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		beginDisposeCallbacks.add(() => {
 			// Recorded for the whole of disposal: a shutdown handler that outruns
 			// its own timeout is still writing here while disposal finishes.
-			void recordWriter().catch(error => {
-				logger.warn("could not record this session as an unfinished writer", { error: String(error) });
-			});
+			const armedGeneration = writerRecordGeneration;
+			pendingWriterWork = recordWriter(armedGeneration)
+				.then(() => undefined)
+				.catch(error => {
+					logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+				});
 			workspaceLeaseTimer = setTimeout(() => {
 				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
 					id: resolvedAgentId,
@@ -4586,7 +4601,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// The same record, not a second one. Giving the lease up is how a
 				// stalled disposal stops holding a kernel; it is not a statement
 				// that this session has stopped writing.
-				void recordWriter()
+				void recordWriter(armedGeneration)
 					.catch(error => {
 						logger.warn("could not record an unfinished writer on the workspace", {
 							error: String(error),
@@ -5506,6 +5521,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem?.();
 					for (const callback of disposeCallbacks) callback();
 					disposeCallbacks.clear();
+					// Disposal does not end while this session's writer record is
+					// still being published or cleared: an unpublished record
+					// protects nothing, and the owner's cleanup runs the moment
+					// disposal returns.
+					await pendingWriterWork;
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
 					unsubscribeMcpNotifications = undefined;

@@ -648,6 +648,32 @@ function getTaskIsolationSegment(repoRoot: string, id: string): string {
 }
 
 /**
+ * Create a directory for one materialisation, under a name nothing has used.
+ *
+ * `mkdir` without `recursive` is the test: it creates the name or fails with
+ * `EEXIST`, and that answer comes from the kernel rather than from an
+ * assumption about clocks and counters. A surviving descendant — a git hook
+ * child still running after its owner died — then writes into a path that can
+ * never be handed out again, which is the whole point of minting one.
+ */
+async function mintSandboxDirectory(repoRoot: string, id: string): Promise<string> {
+	const parent = getWorktreeDir("");
+	await fs.mkdir(parent, { recursive: true });
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 64; attempt += 1) {
+		const candidate = await resolveSandboxIdentity(getWorktreeDir(getTaskIsolationSegment(repoRoot, id)));
+		try {
+			await fs.mkdir(candidate);
+			return candidate;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			lastError = error;
+		}
+	}
+	throw new Error(`Could not mint an unused isolation workspace under ${parent}`, { cause: lastError });
+}
+
+/**
  * Submodule pointers in copied checkouts may target the source admin directory
  * or one under the root `.git` that detach removes. Materialize missing trees
  * from parents down, then detach admin state from leaves up.
@@ -692,7 +718,12 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = await resolveSandboxIdentity(getWorktreeDir(getTaskIsolationSegment(repoRoot, id)));
+	// The filesystem decides whether a name has been handed out, not a
+	// generator: a mint is a prediction — two processes with the same clock and
+	// the same entropy produced the same one, and the second materialisation
+	// destroyed the first's output — while `mkdir` without `recursive` either
+	// creates the directory or says `EEXIST`, which is the fact itself.
+	const baseDir = await mintSandboxDirectory(repoRoot, id);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -855,8 +886,13 @@ async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ r
 	try {
 		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	} catch (error) {
+		// Classified from what the layer actually returns: the native lock
+		// reports descriptor exhaustion as a `GenericFailure` whose message
+		// carries the reason, so matching only on `error.code` never fired and
+		// the caller was told another run had held the sandbox for a minute.
 		const code = (error as NodeJS.ErrnoException | undefined)?.code;
-		if (code === "EMFILE" || code === "ENFILE") {
+		const text = error instanceof Error ? error.message : String(error);
+		if (code === "EMFILE" || code === "ENFILE" || /EMFILE|ENFILE|too many open files/i.test(text)) {
 			throw new Error(
 				`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code}). ` +
 					"Nothing is holding the workspace; raise the open-file limit (`ulimit -n`) or reduce how many " +
