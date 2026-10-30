@@ -802,6 +802,30 @@ describe("AgentSession derived queued custom display", () => {
 		const remaining = session.agent.peekSteeringQueue();
 		expect(remaining.map(m => (m.role === "custom" ? m.customType : m.role))).toEqual(["ultrathink-notice", "user"]);
 	});
+
+	it("pops several queued follow-ups newest-first, each tagged followUp", async () => {
+		fixture = await createRealSession();
+		const { session } = fixture;
+		for (const text of ["one", "two", "three"]) {
+			session.agent.followUp({ role: "user", content: text, attribution: "user", timestamp: Date.now() });
+		}
+
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "three", mode: "followUp" });
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "two", mode: "followUp" });
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "one", mode: "followUp" });
+		expect(session.popLastQueuedMessage()).toBeUndefined();
+	});
+
+	it("tags a popped message with the queue it came from", async () => {
+		fixture = await createRealSession();
+		const { session } = fixture;
+		queueUserSteer(session, "steer me");
+		session.agent.followUp({ role: "user", content: "follow me", attribution: "user", timestamp: Date.now() });
+
+		// Steering pops first, and the candidate determines the resubmit mode.
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "steer me", mode: "steer" });
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "follow me", mode: "followUp" });
+	});
 });
 
 function createStubInteractiveModeContextForUiHelpers(

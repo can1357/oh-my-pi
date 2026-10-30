@@ -130,7 +130,8 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 
 		new InputController(ctx).handleDequeue();
 
-		expect(getText()).toBe("compaction two");
+		// A queued follow-up restores as its explicit `/queue` command.
+		expect(getText()).toBe("/queue compaction two");
 		expect((ctx.compactionQueuedMessages as CompactionQueuedMessage[]).map(m => m.text)).toEqual(["compaction one"]);
 	});
 });

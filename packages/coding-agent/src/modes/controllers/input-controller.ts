@@ -48,7 +48,7 @@ import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensib
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
-import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { RecalledQueuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -1089,6 +1089,13 @@ export class InputController {
 			// compaction queueing) is main-session-only. A tool-approval dialog
 			// owning the composer is the main session's, so its draft steers main.
 			if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
+				// A restored follow-up arrives as its `/queue` command; the focused
+				// composer has no builtin dispatcher, so queue it directly.
+				const queuedBody = this.#queueCommandBody(text);
+				if (queuedBody) {
+					await this.#submitToFocusedSession(queuedBody, "followUp");
+					return;
+				}
 				await this.#submitToFocusedSession(text, "steer");
 				return;
 			}
@@ -1438,7 +1445,7 @@ export class InputController {
 				// momentarily idle. The editor already cleared itself on Enter, so
 				// falling through here would silently swallow the message. Submit a
 				// real prompt directly; if a background turn starts in the gap,
-				// `streamingBehavior: "steer"` preserves the typed-message queueing
+				// `streamingBehavior` preserves the typed-message queueing
 				// semantics instead of throwing AgentBusyError.
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
@@ -1828,8 +1835,24 @@ export class InputController {
 		// left in the queue keep theirs so their delivery echo is still recognized
 		// as local and does not blank the editor the dequeue just restored to.
 		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
-		this.#restoreEntriesToEditor([popped]);
+		// A follow-up comes back as the `/queue` command it was sent with, so the
+		// queue stays explicit: Enter re-queues it through the same command path,
+		// and deleting the prefix turns the draft into an ordinary steer. Steering
+		// entries need no prefix because Enter already steers.
+		const currentText = this.ctx.editor.getText();
+		const currentBody = this.#queueCommandBody(currentText);
+		const entry =
+			popped.mode === "followUp" || currentBody !== undefined
+				? { ...popped, text: `/queue ${popped.text}` }
+				: popped;
+		this.#restoreEntriesToEditor([entry], currentBody);
 		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	/** Body of a `/queue <message>` submission, or undefined for any other draft. */
+	#queueCommandBody(text: string): string | undefined {
+		const parsed = parseSlashCommand(text);
+		return parsed?.name === "queue" ? parsed.args : undefined;
 	}
 
 	/**
@@ -1837,7 +1860,7 @@ export class InputController {
 	 * Only the main session owns the separate compaction queue; focused views
 	 * must not restore its messages into a subagent's composer.
 	 */
-	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	#popLastQueuedMessage(): RecalledQueuedMessage | undefined {
 		const yieldCompaction = this.ctx.focusedAgentId ? undefined : this.ctx.yieldCompaction;
 		// Steering pops first, as in `AgentSession.popLastQueuedMessage`. Behind a yield compaction,
 		// the session's follow-ups are older than it: the follow-ups it holds go next, then the request.
@@ -1851,7 +1874,7 @@ export class InputController {
 		if (compaction.length > 0) {
 			const last = compaction[compaction.length - 1];
 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-			return { text: last.text, images: last.images };
+			return { text: last.text, images: last.images, mode: last.mode };
 		}
 		if (yieldCompaction) {
 			this.ctx.yieldCompaction = undefined;
@@ -2084,6 +2107,9 @@ export class InputController {
 		let imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
+		// The follow-up key is already a follow-up: a restored `/queue <message>`
+		// draft drops the command instead of sending its text to the model.
+		text = this.#queueCommandBody(text) ?? text;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {

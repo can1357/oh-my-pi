@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Dequeueing a queued follow-up with Alt+Up now restores it as an explicit `/queue <message>` draft, so resubmitting queues it again instead of steering the running turn ([#17442](https://github.com/can1357/oh-my-pi/pull/17442) by [@mixsoulgithub](https://github.com/mixsoulgithub)).
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
 ## [18.14.0] - 2026-10-29

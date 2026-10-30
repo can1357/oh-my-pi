@@ -618,6 +618,13 @@ export interface ResetSessionContextResult {
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 
+/**
+ * A queued user message recalled into the composer, tagged with the queue it came
+ * from so resubmitting keeps the delivery mode it was queued under. `mode` is
+ * omitted for a queued `/compact` request: Enter there stays an immediate compaction.
+ */
+export type RecalledQueuedMessage = RestoredQueuedMessage & { mode?: "steer" | "followUp" };
+
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;

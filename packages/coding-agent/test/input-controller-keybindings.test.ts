@@ -120,6 +120,9 @@ async function createContext() {
 		abort,
 		retry,
 		prewarmModelConnection: vi.fn(),
+		customCommands: [],
+		promptTemplates: [],
+		slashCommands: [],
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -230,6 +233,10 @@ async function createContext() {
 		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
+		flushPendingBashComponents: vi.fn(),
+		handleQueueCommand: vi.fn(async () => {}),
+		skillCommands: new Set<string>(),
+		fileSlashCommands: new Set<string>(),
 		handlePlanModeCommand: vi.fn(),
 		handleNewCommand: vi.fn(),
 		showTreeSelector: vi.fn(),
@@ -294,6 +301,7 @@ async function createContext() {
 			handleBtwFollowUpKey,
 			showError,
 			isGuidedGoalInterviewActive,
+			handleQueueCommand: ctx.handleQueueCommand as Mock<(body: string, detached?: unknown) => Promise<void>>,
 		},
 	};
 }
@@ -816,7 +824,7 @@ describe("InputController keybinding setup", () => {
 		}
 		expect(restored).toEqual([
 			"steer mid-run",
-			"now continue",
+			"/queue now continue",
 			"/compact keep the API notes",
 			"sent before the compaction",
 		]);
@@ -1609,5 +1617,120 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("InputController dequeue delivery mode", () => {
+	it("restores a follow-up as an explicit /queue command", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		(ctx.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		Object.assign(ctx.session, {
+			popLastQueuedMessage: () => ({ text: "queued follow-up", mode: "followUp" }),
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/queue queued follow-up");
+
+		editor.setText("/queue queued follow-up, edited");
+		await editor.onSubmit!("/queue queued follow-up, edited");
+		// The visible command re-enters the queue path; nothing steers the running turn.
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith("queued follow-up, edited", undefined);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
+
+	it("restores a steering entry without a prefix", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		(ctx.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		Object.assign(ctx.session, { popLastQueuedMessage: () => ({ text: "steer me", mode: "steer" }) });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("steer me");
+
+		await editor.onSubmit!("steer me");
+		expect(spies.prompt).toHaveBeenCalledWith("steer me", { streamingBehavior: "steer", images: undefined });
+	});
+
+	it("keeps one /queue prefix when several follow-ups are restored before submitting", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const queue = [
+			{ text: "second", mode: "followUp" as const },
+			{ text: "third", mode: "followUp" as const },
+		];
+		Object.assign(ctx.session, { popLastQueuedMessage: () => queue.pop() });
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/queue third");
+		controller.handleDequeue();
+		// Newest-first, and the earlier restored command is folded into the body
+		// instead of nesting a second `/queue` inside the first.
+		expect(editor.getText()).toBe("/queue second\n\nthird");
+	});
+
+	it("re-queues several restored follow-ups in their original order", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const queue = [
+			{ text: "first", mode: "followUp" as const },
+			{ text: "second", mode: "followUp" as const },
+			{ text: "third", mode: "followUp" as const },
+		];
+		Object.assign(ctx.session, { popLastQueuedMessage: () => queue.pop() });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		const bodies: string[] = [];
+		(spies.handleQueueCommand as Mock<(body: string) => Promise<void>>).mockImplementation(async (body: string) => {
+			bodies.push(body);
+		});
+		for (const restored of ["third", "second", "first"]) {
+			// The real editor clears itself on Enter; the stub keeps the last draft.
+			editor.setText("");
+			controller.handleDequeue();
+			expect(editor.getText()).toBe(`/queue ${restored}`);
+			await editor.onSubmit!(`/queue ${restored}, edited`);
+		}
+		expect(bodies).toEqual(["third, edited", "second, edited", "first, edited"]);
+
+		// A plain draft afterwards still steers.
+		editor.setText("plain steer");
+		await editor.onSubmit!("plain steer");
+		expect(spies.prompt).toHaveBeenCalledWith("plain steer", { streamingBehavior: "steer", images: undefined });
+	});
+
+	it("drops the prefix when the follow-up key submits a restored draft", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		(ctx.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		Object.assign(ctx.session, {
+			popLastQueuedMessage: () => ({ text: "queued follow-up", mode: "followUp" }),
+		});
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/queue queued follow-up");
+
+		await controller.handleFollowUp();
+		expect(spies.prompt).toHaveBeenCalledWith("queued follow-up", {
+			streamingBehavior: "followUp",
+			images: undefined,
+		});
+	});
+
+	it("restores a compaction-queue follow-up as its /queue command", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		Object.assign(ctx, { compactionQueuedMessages: [], yieldCompaction: undefined });
+		Object.assign(ctx.session, { isCompacting: true, popLastQueuedMessage: () => undefined });
+		ctx.compactionQueuedMessages.push({ text: "held follow-up", mode: "followUp" });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/queue held follow-up");
+
+		await editor.onSubmit!("/queue held follow-up");
+		expect(spies.handleQueueCommand).toHaveBeenCalledWith("held follow-up", undefined);
 	});
 });
