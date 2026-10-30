@@ -6412,6 +6412,12 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// Its runs are over from here, not from whenever the teardown that follows
+		// finishes: a wrapper that awaits other cleanup between the two leaves a
+		// window in which this session still claims to be running a call, and a
+		// surface reconciling what it parked would restore an approval nobody can
+		// answer. Ids this session never ran stay unmarked, disposed or not.
+		this.#settledEverything = true;
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6449,7 +6455,8 @@ export class AgentSession implements SettingsScope {
 	#disposeCall?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		// A disposed session finishes nothing: whatever it was asking about will
-		// never be answered, so no surface may report it as still owed.
+		// never be answered, so no surface may report it as still owed. Said here
+		// too for a caller that disposes without the wrapper's `beginDispose`.
 		this.#settledEverything = true;
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;

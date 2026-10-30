@@ -382,6 +382,31 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(target.hasSettledToolCall("never-ran-here")).toBe(true);
 	});
 
+	it("ends its runs when disposal begins, not when the teardown after it finishes", async () => {
+		// A wrapper awaits other cleanup between `beginDispose()` and `dispose()`,
+		// and a focus handover can land in that gap. A call still marked live
+		// there would have its parked approval restored over a session that is
+		// already going away, with nobody left to answer it.
+		const target = createSession([
+			{ content: [{ type: "toolCall", name: "question", arguments: {} }], stopReason: "toolUse" },
+			{ content: ["done"] },
+		]);
+		let ownCallId: string | undefined;
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "tool_execution_start") ownCallId = event.toolCallId;
+		});
+		const running = target.prompt("ask me");
+		await asked.promise;
+		answered.resolve("yes");
+		await running;
+		unsubscribe();
+
+		target.beginDispose();
+		expect(target.toolCallRun(ownCallId!)).toEqual({ mark: "disposed", live: false });
+		expect(target.toolCallRun("never-ran-here")).toBeUndefined();
+		await target.dispose();
+	});
+
 	it("claims no dialog raised inside another agent's call of the same id", async () => {
 		// Two sessions can legitimately be executing a call of the same id at
 		// once. A dialog raised inside one agent's execution is that agent's; the
