@@ -153,7 +153,7 @@ describe.each([
 
 		// One message carries the reason and what to run instead; no separate notice repeats it.
 		expect(error).toContain(`snapcompact needs a vision-capable model (${reason})`);
-		expect(error).toContain("Run /compact to fall back to soft compaction");
+		expect(error).toContain("Run /compact soft instead");
 		// Explicit no-LLM request must never reach the provider-backed summarizer.
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(harness.notices.filter(notice => notice.includes("vision-capable"))).toEqual([]);

@@ -1278,17 +1278,15 @@ export class SessionMaintenance {
 				throw new Error("No configured compaction method can run manually.");
 			}
 			// `/compact snapcompact` pins the order to snapcompact alone, so its
-			// blockers name what the user can run instead.
+			// blockers name the `/compact` mode of the next manual method (remote or
+			// soft): plain `/compact` can run an experimental rollover instead.
 			const snapcompactFailure = (reason: string): Error => {
 				if (!explicitSnapcompact) return new Error(reason);
-				const fallback = resolveCompactionMethodOrder(compactionSettings.methodOrder).find(
-					method => method !== "snapcompact" && runsManually(method),
-				);
-				return new Error(
-					fallback
-						? `${reason}. Run /compact to fall back to ${fallback} compaction.`
-						: `${reason}. Run /compact soft to summarize with the active model instead.`,
-				);
+				const fallback =
+					resolveCompactionMethodOrder(compactionSettings.methodOrder).find(
+						method => method !== "snapcompact" && runsManually(method),
+					) ?? "soft";
+				return new Error(`${reason}. Run /compact ${fallback} instead.`);
 			};
 
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
