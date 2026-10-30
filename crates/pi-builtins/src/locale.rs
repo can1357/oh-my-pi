@@ -421,7 +421,7 @@ fn loaded_codeset_here(locale: &str) -> Codeset {
 		if handle.is_null() {
 			return Codeset::Unloadable;
 		}
-		let codeset = libc::nl_langinfo_l(libc::CODESET, handle);
+		let codeset = codeset_of_locale(handle);
 		let answer = match codeset.is_null() {
 			true => Codeset::Unloadable,
 			false => Codeset::Loaded(std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned()),
@@ -429,6 +429,34 @@ fn loaded_codeset_here(locale: &str) -> Codeset {
 		libc::freelocale(handle);
 		answer
 	}
+}
+
+/// `nl_langinfo_l(CODESET, …)`, which the Rust bindings declare on Linux
+/// and not on the BSDs, where the C library has it all the same.
+///
+/// # Safety
+///
+/// `handle` is a live locale object, and the string it lends out lives only
+/// until that object is freed.
+#[cfg(target_os = "linux")]
+unsafe fn codeset_of_locale(handle: libc::locale_t) -> *mut libc::c_char {
+	// SAFETY: the caller's contract.
+	unsafe { libc::nl_langinfo_l(libc::CODESET, handle) }
+}
+
+/// `nl_langinfo_l(CODESET, …)`, declared here because the Rust bindings do
+/// not declare it for this target.
+///
+/// # Safety
+///
+/// As for the Linux one.
+#[cfg(all(unix, not(target_os = "linux")))]
+unsafe fn codeset_of_locale(handle: libc::locale_t) -> *mut libc::c_char {
+	unsafe extern "C" {
+		fn nl_langinfo_l(item: libc::nl_item, locale: libc::locale_t) -> *mut libc::c_char;
+	}
+	// SAFETY: the caller's contract, and `CODESET` is the item this asks for.
+	unsafe { nl_langinfo_l(libc::CODESET, handle) }
 }
 
 /// Whether an entry of `value` makes `name` resolve against the working
@@ -708,7 +736,7 @@ fn locale_utility_output(
 /// [`locale_utility_output`] against one named program: everything the
 /// chosen stream carried, from a child that ran to a normal end, or why
 /// there is none.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn locale_utility_output_at(
 	program: &std::path::Path,
 	categories: &[&str],
@@ -721,15 +749,6 @@ fn locale_utility_output_at(
 	use std::os::unix::ffi::OsStrExt as _;
 
 	let report = Unanswered;
-	#[cfg(not(target_os = "linux"))]
-	{
-		let _ = (program, categories, locale, env, cwd, ask);
-		return Err(report(
-			"a child cannot be held by anything but its number here, so the locale utility is not started"
-				.to_owned(),
-		));
-	}
-	#[cfg(target_os = "linux")]
 	if children_are_reaped_for_us() {
 		return Err(report(
 			"this process has the kernel reap its children, so the locale utility's end cannot be observed \
@@ -805,13 +824,47 @@ fn locale_utility_output_at(
 			return Err(report(format!("{named} could not enter the shell's working directory")));
 		},
 		Completion::Exited(CHILD_NO_PROGRAM) => return Err(report(format!("{named} would not run"))),
+		Completion::Exited(CHILD_NO_SETUP) => {
+			return Err(report(format!("{named} could not be set up to answer")));
+		},
 		Completion::Exited(status) => return Err(report(format!("{named} exited with status {status}"))),
 		Completion::Ended(how) => return Err(report(format!("{named} {how}"))),
 	}
 	Ok(answer)
 }
 
+/// [`locale_utility_output_at`] where a child cannot be held by anything
+/// but its number.
+///
+/// Nothing is started: the whole of the query's process lifetime — making
+/// the child and the handle together, watching it, ending its group and
+/// reaping it — is Linux's `clone3` and `pidfd`, and a child that could
+/// only be reached by a recyclable number is one this code will not make.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn locale_utility_output_at(
+	_program: &std::path::Path,
+	_categories: &[&str],
+	_locale: &str,
+	_env: &LocaleEnv,
+	_cwd: Option<&std::path::Path>,
+	_ask: Ask,
+) -> Result<Vec<u8>, Unanswered> {
+	Err(Unanswered(
+		"a child cannot be held by anything but its number here, so the locale utility is not started".to_owned(),
+	))
+}
+
 /// A file with no name and no directory, for the utility's answer.
+///
+/// Unlike the pipe it replaced, this is a channel the writer can go back
+/// over: a utility that writes a diagnostic and then truncates it leaves
+/// nothing behind, and the query accepts what remains, where the pipe would
+/// have carried the diagnostic and refused. What is read is the state of
+/// the file when the child ended, not everything the child wrote. That is a
+/// weaker contract with a broken helper and not a boundary against a lying
+/// one — a utility free to invent a codeset never needed to hide anything —
+/// and it is the price of the one descriptor that lets the handle and the
+/// answer both fit where two are free.
 #[cfg(target_os = "linux")]
 fn memory_file() -> std::io::Result<std::os::fd::OwnedFd> {
 	use std::os::fd::FromRawFd as _;
@@ -969,6 +1022,10 @@ const CHILD_NO_DIRECTORY: libc::c_int = 125;
 #[cfg(target_os = "linux")]
 const CHILD_NO_PROGRAM: libc::c_int = 126;
 
+/// The status the child uses when a step of its own setup failed.
+#[cfg(target_os = "linux")]
+const CHILD_NO_SETUP: libc::c_int = 124;
+
 /// `clone3`'s argument block, as much of it as this uses.
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -992,11 +1049,32 @@ struct CloneArgs {
 /// leaves a child that nothing here can end — five refusals used to leave
 /// five of them.
 #[cfg(target_os = "linux")]
-static CLONE3_IS_THERE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
 	// SAFETY: a null argument block with a zero size is refused before the
 	// kernel reads anything, so this makes no process either way.
-	let refused = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<CloneArgs>(), 0usize) };
-	refused < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
+	let cloned = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<CloneArgs>(), 0usize) };
+	let clone3 = cloned < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS);
+	// SAFETY: a descriptor number no process can have open answers `EBADF`
+	// where the kernel knows `P_PIDFD` and `EINVAL` where it does not;
+	// neither waits for anything. A negative number is refused as an
+	// identifier before the kernel looks at the kind at all, so it has to be
+	// a large positive one. `P_PIDFD` is 3.
+	let mut ended: libc::siginfo_t = unsafe { std::mem::zeroed() };
+	let watched = unsafe {
+		libc::syscall(
+			libc::SYS_waitid,
+			3,
+			libc::c_int::MAX,
+			&raw mut ended,
+			libc::WEXITED | libc::WNOHANG,
+			std::ptr::null_mut::<libc::c_void>(),
+		)
+	};
+	let by_handle = watched < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL);
+	// Both, and asked together: `clone3` arrived in Linux 5.3 and waiting
+	// by handle in 5.4, so a kernel between them would make a child this
+	// code could then neither watch nor reap.
+	clone3 && by_handle
 });
 
 /// Starts the locale utility, in its own process group, with `answer` as
@@ -1004,11 +1082,23 @@ static CLONE3_IS_THERE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| 
 /// as its working directory when one is given.
 ///
 /// The two `/dev/null`s are opened by the child, not here, which keeps this
-/// process's cost at the one answer pipe — the whole margin the lookup has
+/// process's cost at the one answer file — the whole margin the lookup has
 /// under a descriptor limit that leaves two free. `clone3` without
 /// `CLONE_VM` leaves the child a copy of this process, as `fork` does, so
 /// everything it does before `execve` is async-signal-safe and reads only
 /// values built before the call.
+///
+/// Every step of that setup is required, and a child that cannot take one
+/// of them ends instead of carrying on: a `/dev/null` that would not open
+/// used to leave the utility writing its answer onto the caller's own
+/// standard output, a `setpgid` that failed left a descendant nothing
+/// would end, and a `setrlimit` that failed left the answer unbounded.
+///
+/// Signals are blocked across the clone and every disposition is put back
+/// to default in the child, which is the pre-exec contract `posix_spawn`
+/// was keeping here: a handler of this process's that ran between the
+/// clone and the `execve` wrote into the answer and turned a loadable
+/// locale into a refusal.
 #[cfg(target_os = "linux")]
 fn start_locale_utility(
 	program: &std::ffi::CStr,
@@ -1020,7 +1110,7 @@ fn start_locale_utility(
 ) -> Result<ChildHandle, std::io::Error> {
 	use std::os::fd::FromRawFd as _;
 
-	if !*CLONE3_IS_THERE {
+	if !*CAN_HOLD_A_CHILD {
 		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
 	}
 	let (taken, discarded) = match ask {
@@ -1034,19 +1124,34 @@ fn start_locale_utility(
 		exit_signal: u64::try_from(libc::SIGCHLD).unwrap_or_default(),
 		..CloneArgs::default()
 	};
+	// SAFETY: both sets are filled in by the calls that take them, and the
+	// mask this thread had is put back on both sides of the clone.
+	let held = unsafe {
+		let mut every = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+		let mut held = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+		libc::sigfillset(every.as_mut_ptr());
+		libc::sigemptyset(held.as_mut_ptr());
+		libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), held.as_mut_ptr());
+		held.assume_init()
+	};
 	// SAFETY: the argument block is initialised and outlives the call; the
 	// kernel writes `handle` in this process. The child branch below ends in
 	// `execve` or `_exit`, so no destructor and no `atexit` handler of this
 	// process's runs there.
 	let child = unsafe { libc::syscall(libc::SYS_clone3, &raw const args, size_of::<CloneArgs>()) };
-	if child < 0 {
-		return Err(std::io::Error::last_os_error());
-	}
 	if child == 0 {
 		// SAFETY: this is the whole of the child, and every call here is
 		// async-signal-safe.
 		unsafe {
-			libc::setpgid(0, 0);
+			// No handler this process installed may run here, and the mask
+			// this thread had is what the utility should start with.
+			for signal in 1..=libc::SIGRTMAX() {
+				libc::signal(signal, libc::SIG_DFL);
+			}
+			libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut());
+			if libc::setpgid(0, 0) != 0 {
+				libc::_exit(CHILD_NO_SETUP);
+			}
 			// What a pipe used to do by filling up: a utility that writes
 			// past this dies on `SIGXFSZ` instead of filling memory with an
 			// answer that was never going to be one. One byte over the
@@ -1056,17 +1161,19 @@ fn start_locale_utility(
 				rlim_cur: LOCALE_ANSWER_LIMIT as libc::rlim_t + 1,
 				rlim_max: LOCALE_ANSWER_LIMIT as libc::rlim_t + 1,
 			};
-			libc::setrlimit(libc::RLIMIT_FSIZE, &raw const cap);
-			if libc::dup2(answer, taken) < 0 {
-				libc::_exit(CHILD_NO_PROGRAM);
+			if libc::setrlimit(libc::RLIMIT_FSIZE, &raw const cap) != 0 {
+				libc::_exit(CHILD_NO_SETUP);
 			}
 			let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-			if null >= 0 {
-				libc::dup2(null, 0);
-				libc::dup2(null, discarded);
-				if null > 2 {
-					libc::close(null);
-				}
+			if null < 0
+				|| libc::dup2(answer, taken) < 0
+				|| libc::dup2(null, 0) < 0
+				|| libc::dup2(null, discarded) < 0
+			{
+				libc::_exit(CHILD_NO_SETUP);
+			}
+			if null > 2 {
+				libc::close(null);
 			}
 			if let Some(cwd) = cwd
 				&& libc::chdir(cwd.as_ptr()) != 0
@@ -1077,6 +1184,13 @@ fn start_locale_utility(
 			libc::_exit(CHILD_NO_PROGRAM);
 		}
 	}
+	let cloned = match child < 0 {
+		true => Err(std::io::Error::last_os_error()),
+		false => Ok(()),
+	};
+	// SAFETY: putting back the mask this thread had before the clone.
+	unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const held, std::ptr::null_mut()) };
+	cloned?;
 	if handle < 0 {
 		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
 	}

@@ -551,9 +551,16 @@ fn a_competing_reaper_does_not_turn_the_query_into_a_stray_signal() {
 		);
 	}
 	// Nothing is left for the kernel to carry: every query either reaped
-	// its own child or never started one.
-	let left = fs::read_to_string(format!("/proc/self/task/{}/children", std::process::id())).unwrap_or_default();
-	assert!(left.trim().is_empty(), "children left behind: {left}");
+	// its own child or never started one. The children of *every* task,
+	// because the query ran on a worker and `/proc/self/task/<pid>` is the
+	// main thread's; and a list that cannot be read is a failure here, not
+	// an empty one.
+	let tasks = fs::read_dir("/proc/self/task").expect("this process's task list");
+	for task in tasks {
+		let task = task.expect("a task of this process");
+		let left = fs::read_to_string(task.path().join("children")).expect("a task's children");
+		assert!(left.trim().is_empty(), "children left behind by {:?}: {left}", task.file_name());
+	}
 }
 
 /// Every caller of [`crate::locale::locale_loadable`] models
