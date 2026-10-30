@@ -100,10 +100,14 @@ export function getCodexProviderSessionState(
 
 /** Forget append baselines after a history rewrite without closing the live connection. */
 export function resetCodexWebSocketAppendState(state: CodexWebSocketSessionState): void {
+	// Append history and queued steering have independent lifetimes. Only
+	// connection closure, acquisition, or a failed steer retires its ownership.
 	state.canAppend = false;
 	state.lastRequest = undefined;
+	state.lastUnhookedRequest = undefined;
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
+	state.appendStateVersion += 1;
 }
 
 /** Current Codex transport selection and connection status for host diagnostics. */

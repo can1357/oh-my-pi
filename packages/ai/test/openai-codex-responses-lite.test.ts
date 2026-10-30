@@ -554,7 +554,7 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 	});
 
 	it("rotates compaction turns by phase and reuses one operation across fan-out calls", async () => {
-		const model = createCodexModel("gpt-5.1-codex");
+		const model = createCodexModel("gpt-5.1-codex", { preferWebsockets: false });
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const captured: CapturedCodexRequest[] = [];
 		const fetchMock = createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => {
