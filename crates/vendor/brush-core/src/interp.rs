@@ -452,10 +452,18 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 /// runs a step that does. The length of a script bounds nothing: a generated
 /// script is as long as its data (a `case` arm with a hundred thousand
 /// alternatives, a keyed array literal of a million elements), and each of
-/// those steps is ready at once. A loop that usually runs once (the stages of
-/// a pipeline, the items and assignments of a command) skips its first step,
-/// which the checkpoint that led to it covers: every 128 units spent cost a
-/// yield, and on a hot path those add up.
+/// those steps is ready at once.
+///
+/// A loop may leave its first step to the checkpoint that led to it only
+/// where the loop typically runs more than once and no single step is
+/// unbounded, that is, none does work that grows with the data without
+/// spending a checkpoint of its own. A loop that usually runs once (the stages
+/// of a pipeline, the items and assignments of a command, the alternatives of
+/// a `case` arm) would otherwise usually have no checkpoint of its own, and
+/// whether the one that led to it is close enough would be a property of every
+/// path into it: one step can do all the work after that checkpoint is spent.
+/// Those loops spend one on every step, and the cost of that on the hot path,
+/// a yield for every 128 spent, is accepted.
 pub(crate) async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
 	// After the cooperative yield, so a cancellation raised while this task was
@@ -992,10 +1000,7 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		// The checkpoint that led to this pipeline covers its first stage.
-		if current_pipeline_index > 0 {
-			loop_checkpoint(params).await?;
-		}
+		loop_checkpoint(params).await?;
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1445,9 +1450,9 @@ impl Execute for ast::ForClauseCommand {
 			}
 
 			// Update the variable.
-			shell.env_mut().update_or_add(
+			shell.env_mut().update_or_add_scalar(
 				&self.variable_name,
-				ShellValueLiteral::Scalar(value),
+				value,
 				|_| Ok(()),
 				EnvironmentLookup::Anywhere,
 				EnvironmentScope::Global,
@@ -1493,17 +1498,18 @@ impl Execute for ast::CaseClauseCommand {
 		let mut force_execute_next_case = false;
 
 		for case in &self.cases {
-			loop_checkpoint(params).await?;
 			if force_execute_next_case {
+				// A fall-through (`;&`) runs this arm without testing it.
+				loop_checkpoint(params).await?;
 				force_execute_next_case = false;
 			} else {
 				let mut matches = false;
-				for (index, pattern) in case.patterns.iter().enumerate() {
-					// One arm can carry any number of alternatives (`a|b|…)`); the
-					// arm's own checkpoint covers the first.
-					if index > 0 {
-						loop_checkpoint(params).await?;
-					}
+				for pattern in &case.patterns {
+					// A script can have any number of arms, and one arm any number
+					// of alternatives (`a|b|…)`). Each one tested spends a
+					// checkpoint, so every arm spends at least one: the parser
+					// gives each arm a pattern.
+					loop_checkpoint(params).await?;
 					let expanded_pattern = expansion::basic_expand_pattern(shell, params, pattern)
 						.await?
 						.set_extended_globbing(shell.options().extended_globbing)
@@ -1790,12 +1796,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
-		let items = prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter);
-		for (index, item) in items.enumerate() {
-			// The checkpoint that led to this command covers its first item.
-			if index > 0 {
-				loop_checkpoint(&params).await?;
-			}
+		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
+			loop_checkpoint(&params).await?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
@@ -1925,11 +1927,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			}
 		} else {
 			// No command to run; assignments must be applied to this shell.
-			for (index, assignment) in assignments.into_iter().enumerate() {
-				// The checkpoint that led to this command covers its first assignment.
-				if index > 0 {
-					loop_checkpoint(&params).await?;
-				}
+			for assignment in assignments {
+				loop_checkpoint(&params).await?;
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
 				apply_assignment(
@@ -1975,11 +1974,8 @@ async fn execute_command(
 	// before returning.
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
-	for (index, assignment) in assignments.iter().enumerate() {
-		// The checkpoint that led to this command covers its first assignment.
-		if index > 0 {
-			loop_checkpoint(&params).await?;
-		}
+	for assignment in &assignments {
+		loop_checkpoint(&params).await?;
 		// Ensure it's tagged as exported and created in the command scope.
 		apply_assignment(
 			assignment,
@@ -2076,7 +2072,9 @@ async fn expand_assignment_value(
 					// Array elements are treated as regular words, not assignments
 					let split_expanded_value =
 						expansion::full_expand_and_split_word(shell, params, value).await?;
+					// One element can expand to any number of words (`"${a[@]}"`).
 					for expanded_value in split_expanded_value {
+						loop_checkpoint(params).await?;
 						expanded_values.push((None, expanded_value.into()));
 					}
 				}
@@ -2141,7 +2139,9 @@ async fn apply_assignment(
 					// Array elements are treated as regular words, not assignments
 					let values =
 						expansion::full_expand_and_split_word(shell, params, unexpanded_value).await?;
+					// One element can expand to any number of words (`"${a[@]}"`).
 					for value in values {
+						loop_checkpoint(params).await?;
 						elements.push((None, value));
 					}
 				}
@@ -2203,7 +2203,7 @@ async fn apply_assignment(
 					export = true;
 				}
 
-				existing_value.assign(new_value, assignment.append)?;
+				existing_value.assign(new_value, assignment.append, params).await?;
 			}
 
 			if export {
@@ -2218,9 +2218,7 @@ async fn apply_assignment(
 	// If we fell down here, then we need to add it.
 	let new_value = if let Some(array_index) = array_index {
 		match new_value {
-			ShellValueLiteral::Scalar(s) => {
-				ShellValue::indexed_array_from_literals(ArrayLiteral(vec![(Some(array_index), s)]))
-			},
+			ShellValueLiteral::Scalar(s) => ShellValue::indexed_array_with_element(&array_index, s),
 			ShellValueLiteral::Array(_) => {
 				return Err(error::ErrorKind::AssigningListToArrayMember.into());
 			},
@@ -2231,7 +2229,9 @@ async fn apply_assignment(
 				export = export || shell.options().export_variables_on_modification;
 				ShellValue::String(s)
 			},
-			ShellValueLiteral::Array(values) => ShellValue::indexed_array_from_literals(values),
+			ShellValueLiteral::Array(values) => {
+				ShellValue::indexed_array_from_literals(values, params).await?
+			},
 		}
 	};
 

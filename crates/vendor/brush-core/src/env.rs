@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-	Shell, error, extensions,
+	ExecutionParameters, Shell, error, extensions,
 	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
 };
 
@@ -464,6 +464,10 @@ impl ShellEnvironment {
 	/// Update a variable in the environment, or add it if it doesn't already
 	/// exist.
 	///
+	/// An array literal spends a checkpoint on each element (see
+	/// [`ShellVariable::assign`]); [`Self::update_or_add_scalar`] assigns a
+	/// scalar without a run.
+	///
 	/// # Arguments
 	///
 	/// * `name` - The name of the variable to update or add.
@@ -473,10 +477,57 @@ impl ShellEnvironment {
 	/// * `lookup_policy` - The policy to use when looking up the variable.
 	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
 	///   already exist.
-	pub fn update_or_add<N: Into<String>>(
+	/// * `params` - The execution parameters of the run doing the update.
+	pub async fn update_or_add<N: Into<String>>(
 		&mut self,
 		name: N,
 		value: variables::ShellValueLiteral,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		let auto_export = self.export_variables_on_modification;
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
+	/// Update a variable in the environment with a scalar, or add it if it
+	/// doesn't already exist.
+	///
+	/// Nothing in a scalar's assignment grows with how many elements the
+	/// variable holds (see [`ShellVariable::assign_scalar`]), so this takes no
+	/// run: arithmetic and the shell's own bookkeeping use it.
+	///
+	/// # Arguments
+	///
+	/// * `name` - The name of the variable to update or add.
+	/// * `value` - The value to assign to the variable.
+	/// * `updater` - A function to call to update the variable after assigning
+	///   the value.
+	/// * `lookup_policy` - The policy to use when looking up the variable.
+	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
+	///   already exist.
+	pub fn update_or_add_scalar<N: Into<String>>(
+		&mut self,
+		name: N,
+		value: String,
 		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
 		lookup_policy: EnvironmentLookup,
 		scope_if_creating: EnvironmentScope,
@@ -485,14 +536,14 @@ impl ShellEnvironment {
 
 		let auto_export = self.export_variables_on_modification;
 		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
 			updater(var)
 		} else {
 			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
@@ -530,14 +581,7 @@ impl ShellEnvironment {
 			var.assign_at_index(index, value, false)?;
 			updater(var)
 		} else {
-			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![(
-					Some(index),
-					value,
-				)])),
-				false,
-			)?;
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value));
 			updater(&mut var)?;
 
 			self.add(name, var, scope_if_creating)

@@ -21,7 +21,7 @@ use crate::{
 	openfiles::{self, OpenFiles},
 	pathsearch, processes,
 	results::{ExecutionSpawnResult, ExecutionWaitResult},
-	sys, trace_categories, traps, variables,
+	sys, trace_categories, traps,
 };
 
 thread_local! {
@@ -458,9 +458,9 @@ pub(crate) async fn on_preexecute(
 	// Set BASH_COMMAND before invoking the DEBUG trap (and generally before
 	// executing commands).
 	let full_cmd = cmd.args.iter().map(|arg| arg.to_string()).join(" ");
-	cmd.shell.env_mut().update_or_add(
+	cmd.shell.env_mut().update_or_add_scalar(
 		"BASH_COMMAND",
-		variables::ShellValueLiteral::Scalar(full_cmd),
+		full_cmd,
 		|_| Ok(()),
 		env::EnvironmentLookup::Anywhere,
 		env::EnvironmentScope::Global,
@@ -1179,13 +1179,31 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 	params.disable_command_output_marking();
 
+	// A subshell that is only an input redirection ("< file") has no command to
+	// run and no output of its own: it is the file. Parse here, before the pipe
+	// exists, and read the file straight into the result. Routing it through a
+	// pipe that this same task then drains is what let `$(<file)` take the
+	// runtime: the write parks a thread until the drain makes room, and the
+	// drain cannot run while a worker is parked. See `openfiles::copy_async`.
+	let parse_result = subshell.parse_string(s);
+	if let Ok(program) = &parse_result
+		&& let Some(redir) = try_unwrap_bare_input_redir_program(program)
+	{
+		interp::setup_redirect(&mut subshell, &mut params, redir).await?;
+		let contents = openfiles::read_to_end_detached(params.stdin(&subshell)).await?;
+		shell.set_last_exit_status(0);
+		return String::from_utf8(contents).map_err(|_invalid| {
+			error::Error::from(std::io::Error::from(std::io::ErrorKind::InvalidData))
+		});
+	}
+
 	// Set up pipe so we can read the output.
 	let (reader, writer) = std::io::pipe()?;
 	params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
 	let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
 
-	let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
+	let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, parse_result));
 
 	let output_str = async_reader.read_to_string().await?;
 
@@ -1204,23 +1222,9 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 
 async fn run_substitution_command(
 	mut shell: Shell<impl extensions::ShellExtensions>,
-	mut params: ExecutionParameters,
-	command: String,
+	params: ExecutionParameters,
+	parse_result: Result<ast::Program, brush_parser::ParseError>,
 ) -> Result<ExecutionResult, error::Error> {
-	// Parse the string into a whole shell program.
-	let parse_result = shell.parse_string(command);
-
-	// Check for a command that is only an input redirection ("< file").
-	// If detected, emulate `cat file` to stdout and return immediately.
-	// If we failed to parse, then we'll fall below and handle it there.
-	if let Ok(program) = &parse_result {
-		if let Some(redir) = try_unwrap_bare_input_redir_program(program) {
-			interp::setup_redirect(&mut shell, &mut params, redir).await?;
-			openfiles::copy_async(params.stdin(&shell), params.stdout(&shell)).await?;
-			return Ok(ExecutionResult::new(0));
-		}
-	}
-
 	// TODO(source-info): review this
 	let source_info = crate::SourceInfo::from("main");
 

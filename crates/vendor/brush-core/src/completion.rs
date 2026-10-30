@@ -666,16 +666,16 @@ impl Spec {
 		// Move to a subshell so we can start filling out variables.
 		let mut shell = shell.clone();
 
-		let vars_and_values: Vec<(&str, ShellValueLiteral)> = vec![
-			("COMP_LINE", context.input_line.into()),
-			("COMP_POINT", context.cursor_index.to_string().into()),
-			("COMP_KEY", context.trigger.comp_key().to_string().into()),
-			("COMP_TYPE", context.trigger.comp_type().to_string().into()),
+		let vars_and_values: Vec<(&str, String)> = vec![
+			("COMP_LINE", context.input_line.to_owned()),
+			("COMP_POINT", context.cursor_index.to_string()),
+			("COMP_KEY", context.trigger.comp_key().to_string()),
+			("COMP_TYPE", context.trigger.comp_type().to_string()),
 		];
 
 		// Fill out variables.
 		for (var, value) in vars_and_values {
-			shell.env_mut().update_or_add(
+			shell.env_mut().update_or_add_scalar(
 				var,
 				value,
 				|v| {
@@ -744,15 +744,20 @@ impl Spec {
 		tracing::debug!(target: trace_categories::COMPLETION, "[calling completion func '{function_name}']: {}",
             vars_and_values.iter().map(|(k, v)| std::format!("{k}={v}")).collect::<Vec<String>>().join(" "));
 
+		let params = shell.default_exec_params();
 		let mut vars_to_remove = Vec::with_capacity(vars_and_values.len());
 		for (var, value) in vars_and_values {
-			shell.env_mut().update_or_add(
-				var,
-				value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					var,
+					value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&params,
+				)
+				.await?;
 
 			vars_to_remove.push(var);
 		}
@@ -770,7 +775,6 @@ impl Spec {
 		// `release_trap_delivery_block()` always runs.
 		shell.acquire_trap_delivery_block();
 
-		let params = shell.default_exec_params();
 		let invoke_result = shell
 			.invoke_function(function_name, args.iter(), &params)
 			.await;

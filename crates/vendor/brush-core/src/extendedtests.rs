@@ -247,13 +247,17 @@ async fn apply_binary_predicate(
 					.collect(),
 			));
 
-			shell.env_mut().update_or_add(
-				"BASH_REMATCH",
-				captures_value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					"BASH_REMATCH",
+					captures_value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					params,
+				)
+				.await?;
 
 			Ok(matches)
 		},

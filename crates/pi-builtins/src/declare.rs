@@ -139,7 +139,7 @@ impl builtins::Command for DeclareCommand {
 						result = ExecutionResult::general_error();
 					}
 				} else {
-					if !self.process_declaration(&mut context, declaration, verb)? {
+					if !self.process_declaration(&mut context, declaration, verb).await? {
 						result = ExecutionResult::general_error();
 					}
 				}
@@ -225,7 +225,7 @@ impl DeclareCommand {
 		}
 	}
 
-	fn process_declaration(
+	async fn process_declaration(
 		&self,
 		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		declaration: &brush_core::CommandArg,
@@ -242,7 +242,7 @@ impl DeclareCommand {
 
 		// Extract the variable name and the initial value being assigned (if any).
 		let (name, assigned_index, initial_value, name_is_array) =
-			Self::declaration_to_name_and_value(declaration)?;
+			Self::declaration_to_name_and_value(declaration, &context.params).await?;
 
 		// Special-case: `local -`
 		if name == "-" && matches!(verb, DeclareVerb::Local) {
@@ -283,7 +283,7 @@ impl DeclareCommand {
 
 			if let Some(initial_value) = initial_value {
 				// We append if the declaration included an explicit index.
-				var.assign(initial_value, assigned_index.is_some())?;
+				var.assign(initial_value, assigned_index.is_some(), &context.params).await?;
 			}
 
 			self.apply_attributes_after_update(var, verb)?;
@@ -320,7 +320,7 @@ impl DeclareCommand {
 			self.apply_attributes_before_update(&mut var)?;
 
 			if let Some(initial_value) = initial_value {
-				var.assign(initial_value, false)?;
+				var.assign(initial_value, false, &context.params).await?;
 			}
 
 			if context.shell.options().export_variables_on_modification && !var.value().is_array() {
@@ -341,8 +341,9 @@ impl DeclareCommand {
 		Ok(true)
 	}
 
-	fn declaration_to_name_and_value(
+	async fn declaration_to_name_and_value(
 		declaration: &brush_core::CommandArg,
+		params: &brush_core::ExecutionParameters,
 	) -> Result<(String, Option<String>, Option<ShellValueLiteral>, bool), brush_core::Error> {
 		let name;
 		let assigned_index;
@@ -410,11 +411,9 @@ impl DeclareCommand {
 						}
 					},
 					ast::AssignmentValue::Array(a) => {
-						initial_value = Some(ShellValueLiteral::Array(ArrayLiteral(
-							a.iter()
-								.map(|(i, v)| (i.as_ref().map(|w| w.value.clone()), v.value.clone()))
-								.collect(),
-						)));
+						initial_value = Some(ShellValueLiteral::Array(
+							ArrayLiteral::from_assignment_elements(a, params).await?,
+						));
 						name_is_array = true;
 					},
 				}

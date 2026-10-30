@@ -52,7 +52,7 @@ impl builtins::Command for ExportCommand {
 
 		let mut result = ExecutionResult::success();
 		for decl in &self.declarations {
-			let current_result = self.process_decl(&mut context, decl)?;
+			let current_result = self.process_decl(&mut context, decl).await?;
 			if !current_result.is_success() {
 				result = current_result;
 			}
@@ -63,7 +63,7 @@ impl builtins::Command for ExportCommand {
 }
 
 impl ExportCommand {
-	fn process_decl(
+	async fn process_decl(
 		&self,
 		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		decl: &brush_core::CommandArg,
@@ -106,30 +106,31 @@ impl ExportCommand {
 
 				let value = match &assignment.value {
 					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(s.flatten()),
-					ast::AssignmentValue::Array(a) => {
-						variables::ShellValueLiteral::Array(variables::ArrayLiteral(
-							a.iter()
-								.map(|(k, v)| (k.as_ref().map(|k| k.flatten()), v.flatten()))
-								.collect(),
-						))
-					},
+					ast::AssignmentValue::Array(a) => variables::ShellValueLiteral::Array(
+						variables::ArrayLiteral::from_assignment_elements(a, &context.params).await?,
+					),
 				};
 
 				// Update the variable with the provided value and then mark it exported.
-				context.shell.env_mut().update_or_add(
-					name,
-					value,
-					|var| {
-						if self.unexport {
-							var.unexport();
-						} else {
-							var.export();
-						}
-						Ok(())
-					},
-					EnvironmentLookup::Anywhere,
-					EnvironmentScope::Global,
-				)?;
+				context
+					.shell
+					.env_mut()
+					.update_or_add(
+						name,
+						value,
+						|var| {
+							if self.unexport {
+								var.unexport();
+							} else {
+								var.export();
+							}
+							Ok(())
+						},
+						EnvironmentLookup::Anywhere,
+						EnvironmentScope::Global,
+						&context.params,
+					)
+					.await?;
 			},
 		}
 

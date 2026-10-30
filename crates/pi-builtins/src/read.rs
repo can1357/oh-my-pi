@@ -151,7 +151,9 @@ impl builtins::Command for ReadCommand {
 			skip_ifs_splitting,
 			self.array_variable.as_deref(),
 			&self.variable_names,
-		)?;
+			&context.params,
+		)
+		.await?;
 
 		Ok(result)
 	}
@@ -164,29 +166,34 @@ impl builtins::Command for ReadCommand {
 /// - Named variables: Split input by IFS and assign to each variable, with
 ///   remainder to last
 /// - Default (`REPLY`): Assign entire input line to the `REPLY` variable
-fn assign_input_to_variables(
+async fn assign_input_to_variables(
 	shell: &mut brush_core::Shell<impl brush_core::ShellExtensions>,
 	input_line: Option<&str>,
 	ifs: &str,
 	skip_ifs_splitting: bool,
 	array_variable: Option<&str>,
 	variable_names: &[String],
+	params: &brush_core::ExecutionParameters,
 ) -> Result<(), brush_core::Error> {
 	if let Some(array_variable) = array_variable {
 		let literal_fields = build_array_fields(input_line, ifs, skip_ifs_splitting);
-		shell.env_mut().update_or_add(
-			array_variable,
-			variables::ShellValueLiteral::Array(variables::ArrayLiteral(literal_fields)),
-			|_| Ok(()),
-			env::EnvironmentLookup::Anywhere,
-			env::EnvironmentScope::Global,
-		)?;
+		shell
+			.env_mut()
+			.update_or_add(
+				array_variable,
+				variables::ShellValueLiteral::Array(variables::ArrayLiteral(literal_fields)),
+				|_| Ok(()),
+				env::EnvironmentLookup::Anywhere,
+				env::EnvironmentScope::Global,
+				params,
+			)
+			.await?;
 	} else if !variable_names.is_empty() {
 		assign_to_named_variables(shell, input_line, ifs, skip_ifs_splitting, variable_names)?;
 	} else {
-		shell.env_mut().update_or_add(
+		shell.env_mut().update_or_add_scalar(
 			"REPLY",
-			variables::ShellValueLiteral::Scalar(input_line.unwrap_or_default().to_owned()),
+			input_line.unwrap_or_default().to_owned(),
 			|_| Ok(()),
 			env::EnvironmentLookup::Anywhere,
 			env::EnvironmentScope::Global,
@@ -222,9 +229,9 @@ fn assign_to_named_variables(
 			fields.pop_front().unwrap_or_default()
 		};
 
-		shell.env_mut().update_or_add(
+		shell.env_mut().update_or_add_scalar(
 			name,
-			variables::ShellValueLiteral::Scalar(value),
+			value,
 			|_| Ok(()),
 			env::EnvironmentLookup::Anywhere,
 			env::EnvironmentScope::Global,

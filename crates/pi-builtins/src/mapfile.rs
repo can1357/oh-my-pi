@@ -96,13 +96,18 @@ impl builtins::Command for MapFileCommand {
 		// target array before reading; callbacks then see earlier assigned entries
 		// but not the entry that is currently being delivered to the callback.
 		if self.origin.is_none() {
-			context.shell.env_mut().update_or_add(
-				&self.array_var_name,
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![])),
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			context
+				.shell
+				.env_mut()
+				.update_or_add(
+					&self.array_var_name,
+					variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![])),
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&context.params,
+				)
+				.await?;
 		}
 
 		if let Some(result) = self.read_entries(input_file, &mut context).await? {

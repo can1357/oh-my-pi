@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use brush_parser::ast;
 
-use crate::{ExecutionParameters, Shell, env, expansion, extensions, variables};
+use crate::{ExecutionParameters, Shell, env, expansion, extensions};
 
 /// Maximum recursion depth for arithmetic variable dereference chains
 /// (e.g., a=b, b=c, c=a would cycle through variable dereferences).
@@ -369,9 +369,9 @@ fn assign(
 		ast::ArithmeticTarget::Variable(name) => {
 			shell
 				.env_mut()
-				.update_or_add(
+				.update_or_add_scalar(
 					name.as_str(),
-					variables::ShellValueLiteral::Scalar(value.to_string()),
+					value.to_string(),
 					|_| Ok(()),
 					env::EnvironmentLookup::Anywhere,
 					env::EnvironmentScope::Global,

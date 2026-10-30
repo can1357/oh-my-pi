@@ -1,8 +1,9 @@
-//! `$(<file)` copies a file into the substitution pipe that the caller drains
-//! on the same runtime. These pin the two ways that copy used to take a thread
-//! nothing could get back — a Tokio worker parked inside `write`, then a
-//! blocking-pool thread a cancellation could not reclaim — and that it streams
-//! rather than buffering a whole side.
+//! `$(<file)` used to copy a file into a pipe that the caller drains on the
+//! same runtime. These pin the ways that copy took a thread nothing could get
+//! back — a Tokio worker parked inside `write`, a blocking-pool slot a
+//! cancellation could not reclaim, a worker parked reading a stream with no
+//! descriptor to show — that it streams rather than buffering a whole side,
+//! and that it leaves the handles it is given exactly as it found them.
 #![cfg(unix)]
 
 use std::{
@@ -219,10 +220,11 @@ fn a_fifo_substitution_reads_every_byte() {
 	assert_eq!(outcome, (false, Some(0)), "(the whole stream arrived)");
 }
 
-/// `/dev/null` is a character device the reactor refuses to register. The copy
-/// has to notice and read it in place instead of failing.
+/// `/dev/null` is a character device, so it is read on a thread of its own
+/// rather than in place — a character device can be a terminal, and a terminal
+/// waits for a person. An empty one still has to read as empty.
 #[test]
-fn a_character_device_the_reactor_refuses_still_copies() {
+fn a_character_device_substitution_reads_as_empty() {
 	let dir = tempfile::tempdir().expect("temp dir");
 	let root = dir.path().to_path_buf();
 
@@ -337,4 +339,196 @@ fn a_virtual_source_reaches_a_native_pipe_before_it_is_fully_read() {
 		bytes.as_slice(),
 		"every byte arrived, in order"
 	);
+}
+
+/// A stream that answers `read` from a prefix first and a pipe afterwards.
+///
+/// `shows_descriptor` decides whether it lets a caller borrow the pipe's
+/// descriptor. Neither answer licenses reading that descriptor instead of
+/// calling `read`: showing one does not make the prefix go away, and hiding one
+/// does not make the pipe stop waiting.
+#[derive(Debug)]
+struct PrefixedStream {
+	prefix:           std::io::Cursor<Vec<u8>>,
+	pipe:             Arc<Mutex<std::io::PipeReader>>,
+	shows_descriptor: bool,
+}
+
+impl Clone for PrefixedStream {
+	fn clone(&self) -> Self {
+		Self {
+			prefix:           self.prefix.clone(),
+			pipe:             self.pipe.clone(),
+			shows_descriptor: self.shows_descriptor,
+		}
+	}
+}
+
+impl std::io::Read for PrefixedStream {
+	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		let from_prefix = std::io::Read::read(&mut self.prefix, buf)?;
+		if from_prefix > 0 {
+			return Ok(from_prefix);
+		}
+		std::io::Read::read(&mut *self.pipe.lock().expect("pipe"), buf)
+	}
+}
+
+impl std::io::Write for PrefixedStream {
+	fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+		Err(std::io::ErrorKind::Unsupported.into())
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
+}
+
+impl brush_core::openfiles::Stream for PrefixedStream {
+	fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+		Box::new(self.clone())
+	}
+
+	fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
+		Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into())
+	}
+
+	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+		if !self.shows_descriptor {
+			return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
+		}
+		// SAFETY: the descriptor belongs to `self.pipe`, which this stream keeps
+		// alive, and the borrow cannot outlive `self`.
+		Ok(unsafe {
+			use std::os::fd::AsRawFd as _;
+			std::os::fd::BorrowedFd::borrow_raw(self.pipe.lock().expect("pipe").as_raw_fd())
+		})
+	}
+}
+
+/// A stream with no descriptor to show, reading from a pipe whose writer comes
+/// late.
+///
+/// Refusing `try_borrow_as_fd` says nothing about whether a `read` can wait:
+/// reading such a stream in place parked the runtime's only worker, and the
+/// task meant to feed it never ran. The sleep here runs on that same worker,
+/// so it finishes only if the read left the worker alone.
+#[test]
+fn a_stream_with_no_descriptor_does_not_park_the_worker() {
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	let source = PrefixedStream {
+		prefix:           std::io::Cursor::new(Vec::new()),
+		pipe:             Arc::new(Mutex::new(reader)),
+		shows_descriptor: false,
+	};
+
+	let copied = on_single_worker(1, Duration::from_secs(20), async move {
+		let copy = tokio::spawn(copy_async(
+			OpenFile::Stream(Box::new(source)),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		// Only reached if the read left the worker free for this timer.
+		std::io::Write::write_all(&mut writer, b"late").expect("write");
+		drop(writer);
+		copy.await.expect("copy task").is_ok()
+	})
+	.expect("the stream read held the runtime's only worker");
+
+	assert!(copied, "the copy finished once its writer arrived");
+}
+
+/// A stream answers `read` for itself. Reading its descriptor instead skipped
+/// everything the stream had already buffered.
+#[test]
+fn a_stream_keeps_its_own_read_contract() {
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	std::io::Write::write_all(&mut writer, b"tail").expect("write");
+	drop(writer);
+	let source = PrefixedStream {
+		prefix:           std::io::Cursor::new(b"prefix-".to_vec()),
+		pipe:             Arc::new(Mutex::new(reader)),
+		shows_descriptor: true,
+	};
+
+	let sink = tempfile::tempfile().expect("sink");
+	let mut inspect = sink.try_clone().expect("sink handle");
+	on_single_worker(1, Duration::from_secs(20), async move {
+		copy_async(OpenFile::Stream(Box::new(source)), OpenFile::from(sink)).await
+	})
+	.expect("the runtime answered")
+	.expect("copy");
+
+	std::io::Seek::rewind(&mut inspect).expect("rewind");
+	let mut got = String::new();
+	std::io::Read::read_to_string(&mut inspect, &mut got).expect("read back");
+	assert_eq!(got, "prefix-tail", "the stream's own prefix came through");
+}
+
+/// `std::io::Stdin` holds a line of input of its own. Reading its descriptor
+/// instead lost whatever had already been buffered out of the pipe.
+#[test]
+fn a_buffered_standard_input_is_not_bypassed() {
+	use std::os::fd::AsRawFd as _;
+
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	std::io::Write::write_all(&mut writer, b"one\ntwo\n").expect("write");
+	drop(writer);
+	// SAFETY: replaces this test process's own standard input; nextest gives
+	// each test a process of its own.
+	assert_eq!(unsafe { libc::dup2(reader.as_raw_fd(), 0) }, 0);
+	drop(reader);
+
+	let mut first = String::new();
+	std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut first).expect("first line");
+	assert_eq!(first, "one\n", "the first line went into stdin's own buffer");
+
+	let sink = tempfile::tempfile().expect("sink");
+	let mut inspect = sink.try_clone().expect("sink handle");
+	on_single_worker(1, Duration::from_secs(20), async move {
+		copy_async(OpenFile::from(std::io::stdin()), OpenFile::from(sink)).await
+	})
+	.expect("the runtime answered")
+	.expect("copy");
+
+	std::io::Seek::rewind(&mut inspect).expect("rewind");
+	let mut got = String::new();
+	std::io::Read::read_to_string(&mut inspect, &mut got).expect("read back");
+	assert_eq!(got, "two\n", "the buffered remainder came through");
+}
+
+/// Nothing a copy does may be visible through another descriptor duplicated
+/// from the same `open`, **while it runs** and not only once it is over.
+/// Setting `O_NONBLOCK` to poll one was: a child process holding the shell's
+/// standard input saw `EAGAIN`, a second copy of the same handle failed
+/// `WouldBlock`, and an abandoned copy left the flag behind.
+#[test]
+fn a_copy_leaves_the_descriptors_status_flags_alone() {
+	fn flags(fd: &impl std::os::fd::AsRawFd) -> libc::c_int {
+		// SAFETY: `F_GETFL` only reads, and the descriptor is open.
+		unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) }
+	}
+
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	let observer = reader.try_clone().expect("second descriptor");
+	let before = flags(&observer);
+	assert_eq!(before, flags(&reader), "both descriptors start on the same description");
+
+	let watched = observer.try_clone().expect("third descriptor");
+	let sink = tempfile::tempfile().expect("sink");
+	let during = on_single_worker(1, Duration::from_secs(20), async move {
+		let copy = tokio::spawn(copy_async(OpenFile::from(reader), OpenFile::from(sink)));
+		// The writer is still open, so the copy is waiting on the pipe here.
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		let during = flags(&watched);
+		std::io::Write::write_all(&mut writer, b"payload").expect("write");
+		drop(writer);
+		copy.await.expect("copy task").expect("copy");
+		during
+	})
+	.expect("the runtime answered");
+
+	assert_eq!(during, before, "the copy did not change the shared description while it ran");
+	assert_eq!(flags(&observer), before, "nor did it leave anything behind");
+	assert_eq!(during & libc::O_NONBLOCK, 0, "no other holder of this pipe sees EAGAIN");
 }

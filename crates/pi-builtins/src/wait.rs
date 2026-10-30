@@ -5,7 +5,6 @@ use brush_core::{
 	env::{EnvironmentLookup, EnvironmentScope},
 	int_utils,
 	jobs::{Job, JobSelector},
-	variables::ShellValueLiteral,
 };
 use clap::Parser;
 
@@ -167,9 +166,9 @@ fn assign_wait_variable(
 	name: &str,
 	value: String,
 ) -> Result<(), brush_core::Error> {
-	shell.env_mut().update_or_add(
+	shell.env_mut().update_or_add_scalar(
 		name,
-		ShellValueLiteral::Scalar(value),
+		value,
 		|_| Ok(()),
 		EnvironmentLookup::Anywhere,
 		EnvironmentScope::Global,

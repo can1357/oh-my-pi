@@ -402,4 +402,318 @@ mod regression {
 
 		assert_eq!(outcome, (true, false), "(uncancelled assigned them all, cancelled stopped)");
 	}
+
+	/// How long a run keeps its only worker between checkpoints, measured
+	/// inside a window the script marks. The measure reads a thread's CPU
+	/// clock, which these platforms have.
+	#[cfg(unix)]
+	mod held_worker {
+		use std::{
+			collections::BTreeMap,
+			sync::{Mutex, MutexGuard, PoisonError},
+		};
+
+		use super::*;
+		use crate::{
+			ShellState,
+			variables::{ShellValueUnsetType, ShellVariableUpdateTransform},
+		};
+
+		/// Where the window [`longest_hold`] measures opened and closed, in the
+		/// run's CPU time. A script opens it by reading `$open` and closes it by
+		/// reading `$close`.
+		static WINDOW: Mutex<Window> = Mutex::new(Window { opened: None, closed: None });
+
+		/// Serializes the tests that share [`WINDOW`]: `cargo test` runs the
+		/// tests of one binary on threads of one process.
+		static MEASURED_RUN: Mutex<()> = Mutex::new(());
+
+		struct Window {
+			opened: Option<Duration>,
+			closed: Option<Duration>,
+		}
+
+		fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+			mutex.lock().unwrap_or_else(PoisonError::into_inner)
+		}
+
+		/// CPU time the calling thread has used so far.
+		///
+		/// The runs below have one worker thread, so the difference between two
+		/// readings on it is the work the worker did between them. Wall-clock
+		/// time would count every stretch the machine took the thread away too.
+		fn worker_cpu_time() -> Duration {
+			let mut now = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+			// SAFETY: `clock_gettime` writes only the `timespec` it is given.
+			let status =
+				unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+			assert_eq!(status, 0, "the thread CPU clock is readable");
+			Duration::new(
+				u64::try_from(now.tv_sec).expect("seconds"),
+				u32::try_from(now.tv_nsec).expect("nanoseconds"),
+			)
+		}
+
+		fn open_window(_shell: &dyn ShellState) -> ShellValue {
+			lock(&WINDOW).opened.get_or_insert_with(worker_cpu_time);
+			ShellValue::String(String::new())
+		}
+
+		fn close_window(_shell: &dyn ShellState) -> ShellValue {
+			lock(&WINDOW).closed.get_or_insert_with(worker_cpu_time);
+			ShellValue::String(String::new())
+		}
+
+		/// Runs `command` on one worker beside a task that asks for that worker
+		/// back each time it gets it, and returns the longest stretch of the
+		/// window between `$open` and `$close` that the run kept the worker,
+		/// the window's length, and whether the command succeeded.
+		///
+		/// Every step of the run is ready at once, so the other task gets the
+		/// worker only where the run spends a checkpoint, and the stretches
+		/// between its turns are the run's stretches without one. That catches
+		/// a stretch wherever it falls, however many checkpoints the run spent
+		/// before it, which a cancellation raised at the run's first yield
+		/// cannot. Both lengths are the worker's CPU time.
+		fn longest_hold(
+			command: &str,
+			prepare: fn(&mut Shell<DefaultShellExtensions>),
+		) -> (Duration, Duration, bool) {
+			let _serial = lock(&MEASURED_RUN);
+			*lock(&WINDOW) = Window { opened: None, closed: None };
+
+			let command = command.to_owned();
+			let (turns, succeeded) = on_single_worker(Duration::from_secs(600), move || async move {
+				let run_done = Arc::new(AtomicBool::new(false));
+
+				let asking_done = run_done.clone();
+				let asking = tokio::spawn(async move {
+					let mut turns = vec![];
+					while !asking_done.load(Ordering::Acquire) {
+						turns.push(worker_cpu_time());
+						tokio::task::yield_now().await;
+					}
+					turns
+				});
+
+				let run = tokio::spawn(async move {
+					let mut shell = Shell::builder().build().await.expect("shell");
+					prepare(&mut shell);
+					let window_variables: [(&str, fn(&dyn ShellState) -> ShellValue); 2] =
+						[("open", open_window), ("close", close_window)];
+					for (name, getter) in window_variables {
+						let variable = ShellVariable::new(ShellValue::Dynamic { getter, setter: |_| () });
+						shell.env_mut().set_global(name, variable).expect("window variable");
+					}
+					let params = shell.default_exec_params();
+					let succeeded = shell
+						.run_string(command, &crate::SourceInfo::default(), &params)
+						.await
+						.is_ok_and(|result| result.is_success());
+					run_done.store(true, Ordering::Release);
+					succeeded
+				});
+
+				let succeeded = run.await.expect("run task");
+				(asking.await.expect("asking task"), succeeded)
+			})
+			.expect("the measured run finished");
+
+			let window = lock(&WINDOW);
+			let opened = window.opened.expect("the command opened the window");
+			let closed = window.closed.expect("the command closed the window");
+			let longest = std::iter::once(opened)
+				.chain(turns.into_iter().filter(|turn| (opened..closed).contains(turn)))
+				.chain(std::iter::once(closed))
+				.tuple_windows()
+				.map(|(earlier, later)| later - earlier)
+				.max()
+				.unwrap_or_default();
+			(longest, closed - opened, succeeded)
+		}
+
+		/// Asserts that `command` succeeded and that no stretch of its window
+		/// kept the worker for an eighth of the window or more. A pass with no
+		/// checkpoint is one stretch as long as the window.
+		fn assert_yields_throughout(command: &str, prepare: fn(&mut Shell<DefaultShellExtensions>)) {
+			let (longest, window, succeeded) = longest_hold(command, prepare);
+			eprintln!("HOLD {command}: longest={longest:?} window={window:?} succeeded={succeeded}");
+			assert!(succeeded, "{command}: the run succeeded");
+			assert!(
+				longest * 8 < window,
+				"{command}: kept its worker for {longest:?} of a {window:?} window"
+			);
+		}
+
+		/// How many elements the array window tests copy: enough that one pass
+		/// over them is a stretch far longer than a hundred and twenty-eight of
+		/// its steps.
+		const ARRAY_ELEMENTS: u64 = 1 << 20;
+
+		/// `seed`: `ARRAY_ELEMENTS` distinct values, `v0` onwards.
+		fn seeded(shell: &mut Shell<DefaultShellExtensions>) {
+			let values: BTreeMap<u64, String> =
+				(0..ARRAY_ELEMENTS).map(|index| (index, format!("v{index}"))).collect();
+			shell
+				.env_mut()
+				.set_global("seed", ShellVariable::new(ShellValue::IndexedArray(values)))
+				.expect("seed");
+		}
+
+		/// `seed`, and `assoc` declared associative (`declare -A`).
+		fn seeded_with_associative(shell: &mut Shell<DefaultShellExtensions>) {
+			seeded(shell);
+			shell
+				.env_mut()
+				.set_global(
+					"assoc",
+					ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::AssociativeArray)),
+				)
+				.expect("assoc");
+		}
+
+		/// `assoc`: `ARRAY_ELEMENTS` entries, `k0=v0` onwards.
+		fn associative(shell: &mut Shell<DefaultShellExtensions>) {
+			let values: BTreeMap<String, String> =
+				(0..ARRAY_ELEMENTS).map(|index| (format!("k{index}"), format!("v{index}"))).collect();
+			shell
+				.env_mut()
+				.set_global("assoc", ShellVariable::new(ShellValue::AssociativeArray(values)))
+				.expect("assoc");
+		}
+
+		/// Building an array from its expanded elements is one pass over all of
+		/// them, and it starts after the last element's expansion has spent its
+		/// last checkpoint. With none in the pass, `copy=("${seed[@]}" "$x")`
+		/// kept its worker for the whole insertion, and a cancellation raised
+		/// meanwhile took effect only once every element was assigned. Each
+		/// case opens the window on its last element, so what is left in it is
+		/// the insertion: replacing and appending, indexed and associative, and
+		/// with the variable's case conversion applied to each element.
+		#[test]
+		fn array_insertion_yields_throughout() {
+			let n = ARRAY_ELEMENTS;
+			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 5] = [
+				(
+					format!(
+						"copy=(\"${{seed[@]}}\" \"$open\"); closed=$close; (( ${{#copy[@]}} == {n} + 1 ))"
+					),
+					seeded,
+				),
+				(
+					format!(
+						"copy=(first); copy+=(\"${{seed[@]}}\" \"$open\"); closed=$close; (( \
+						 ${{#copy[@]}} == {n} + 2 ))"
+					),
+					seeded,
+				),
+				// Unkeyed elements alternate key and value; the last key gets "".
+				(
+					format!(
+						"assoc=(\"${{seed[@]}}\" \"$open\"k); closed=$close; (( ${{#assoc[@]}} == {n} / 2 \
+						 + 1 ))"
+					),
+					seeded_with_associative,
+				),
+				(
+					format!(
+						"assoc=([first]=1); assoc+=(\"${{seed[@]}}\" \"$open\"k); closed=$close; (( \
+						 ${{#assoc[@]}} == {n} / 2 + 2 ))"
+					),
+					seeded_with_associative,
+				),
+				(
+					"copy=(\"${seed[@]}\" \"$open\"); closed=$close; [[ ${copy[1]} == V1 ]]".to_owned(),
+					|shell| {
+						seeded(shell);
+						let mut copy = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+						copy.set_update_transform(ShellVariableUpdateTransform::Uppercase);
+						shell.env_mut().set_global("copy", copy).expect("copy");
+					},
+				),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(&command, prepare);
+			}
+		}
+
+		/// `${name[@]}` and its kin copied every element in one pass before the
+		/// first field was built, so the checkpoint on each field came only
+		/// after the copy. Each case opens the window just before the
+		/// expansion, after the command's earlier words have spent their
+		/// checkpoints.
+		#[test]
+		fn element_copy_yields_throughout() {
+			let n = ARRAY_ELEMENTS;
+			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 7] = [
+				(
+					format!("words=(\"$open\" ${{seed[@]}}\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"),
+					seeded,
+				),
+				(
+					format!("words=(\"$open\" ${{!seed[@]}}\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"),
+					seeded,
+				),
+				(
+					format!("words=(\"$open\" ${{seed[@]:1}}\"$close\"); (( ${{#words[@]}} == {n} ))"),
+					seeded,
+				),
+				(format!("words=(\"$open\" \"$@\"\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"), |shell| {
+					*shell.current_shell_args_mut() =
+						(0..ARRAY_ELEMENTS).map(|index| format!("v{index}")).collect();
+				}),
+				(
+					format!("words=(\"$open\" ${{assoc[@]}}\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"),
+					associative,
+				),
+				(
+					format!("words=(\"$open\" ${{!assoc[@]}}\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"),
+					associative,
+				),
+				// `${seed@a}` only reads what kind of value `seed` holds, but read
+				// it from a copy of the whole array; the copy beside it gives the
+				// window a length to measure against.
+				(
+					format!(
+						"words=(\"$open\" ${{seed@a}} ${{seed[@]}}\"$close\"); [[ ${{words[1]}} == a ]] && \
+						 (( ${{#words[@]}} == {n} + 2 ))"
+					),
+					seeded,
+				),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(&command, prepare);
+			}
+		}
+
+		/// One word piece can stand for millions of fields (`"${seed[@]}"`),
+		/// and putting them in their place in the word was one synchronous
+		/// pass each: joining them onto the fields before them, marking them
+		/// quoted inside double quotes, concatenating them for `"${seed[*]}"`,
+		/// and joining them into the one string a scalar holds. All of it ran
+		/// after the expansion's last checkpoint, inside one brace element's
+		/// single checkpoint. Each case opens the window as late as its pass
+		/// allows.
+		#[test]
+		fn coalescing_yields_throughout() {
+			let n = ARRAY_ELEMENTS;
+			let cases = [
+				// Joining onto the `x` before them: the window opens once the
+				// expansion and its quoting are done.
+				format!("words=(x\"${{seed[@]}}$open\"\"$close\"); (( ${{#words[@]}} == {n} ))"),
+				// Marking each field quoted.
+				format!("words=(\"$open${{seed[@]}}$close\"); (( ${{#words[@]}} == {n} ))"),
+				// Concatenating them into one field.
+				"words=(\"$open${seed[*]}$close\"); (( ${#words[@]} == 1 ))".to_owned(),
+				// Joining them into the one string a scalar holds.
+				"joined=\"${seed[@]}$open\"; closed=$close; [[ ${joined:0:6} == 'v0 v1 ' ]]".to_owned(),
+			];
+
+			for command in cases {
+				assert_yields_throughout(&command, seeded);
+			}
+		}
+	}
 }

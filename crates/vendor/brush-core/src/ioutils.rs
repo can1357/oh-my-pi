@@ -51,6 +51,11 @@ impl openfiles::Stream for FailingReaderWriter {
 	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, crate::error::Error> {
 		Err(crate::error::ErrorKind::CannotConvertToNativeFd.into())
 	}
+
+	/// Every operation fails at once; nothing waits.
+	fn may_wait_for_peer(&self) -> bool {
+		false
+	}
 }
 
 impl std::io::Read for FailingReaderWriter {

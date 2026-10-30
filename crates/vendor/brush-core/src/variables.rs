@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-	error, escape, extensions,
+	ExecutionParameters, error, escape, extensions, interp,
 	shell::{Shell, ShellState},
 };
 
@@ -229,135 +229,186 @@ impl ShellVariable {
 	/// Assign the given value to the variable, conditionally appending to the
 	/// preexisting value.
 	///
+	/// An array literal can hold any number of elements, so its assignment
+	/// spends a checkpoint on each one (see [`Self::assign_array`]); a scalar
+	/// is assigned at once (see [`Self::assign_scalar`]).
+	///
 	/// # Arguments
 	///
 	/// * `value` - The value to assign to the variable.
 	/// * `append` - Whether or not to append the value to the preexisting value.
-	pub fn assign(&mut self, value: ShellValueLiteral, append: bool) -> Result<(), error::Error> {
+	/// * `params` - The execution parameters of the run doing the assignment.
+	pub async fn assign(
+		&mut self,
+		value: ShellValueLiteral,
+		append: bool,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		match value {
+			ShellValueLiteral::Scalar(value) => self.assign_scalar(value, append),
+			ShellValueLiteral::Array(literal) => self.assign_array(literal, append, params).await,
+		}
+	}
+
+	/// Assign the given scalar to the variable, conditionally appending to the
+	/// preexisting value. On an array this sets (or appends to) element `0`.
+	///
+	/// Nothing here is proportional to how many elements the variable holds,
+	/// so it needs no checkpoint and callers with no run to cancel (an
+	/// arithmetic expression, a builtin's own bookkeeping) can use it.
+	///
+	/// # Arguments
+	///
+	/// * `value` - The value to assign to the variable.
+	/// * `append` - Whether or not to append the value to the preexisting value.
+	pub fn assign_scalar(&mut self, value: String, append: bool) -> Result<(), error::Error> {
 		if self.is_readonly() {
 			return Err(error::ErrorKind::ReadonlyVariable.into());
 		}
 
-		let value = self.convert_value_literal_for_assignment(value);
+		let value = self.convert_value_str_for_assignment(value);
 
-		if append {
-			match (&self.value, &value) {
-				// If we're appending an array to a declared-but-unset variable (or appending
-				// anything to a declared-but-unset array), then fill it out first.
-				(ShellValue::Unset(_), ShellValueLiteral::Array(_))
-				| (
-					ShellValue::Unset(
-						ShellValueUnsetType::IndexedArray | ShellValueUnsetType::AssociativeArray,
-					),
-					_,
-				) => {
-					self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
-				},
-				// If we're appending a scalar to a declared-but-unset variable, then
-				// start with the empty string. This will result in the right thing happening,
-				// even in treat-as-integer cases.
-				(ShellValue::Unset(_), ShellValueLiteral::Scalar(_)) => {
-					self.assign(ShellValueLiteral::Scalar(String::new()), false)?;
-				},
-				// If we're trying to append an array to a string, we first promote the string to be
-				// an array with the string being present at index 0.
-				(ShellValue::String(_), ShellValueLiteral::Array(_)) => {
-					self.convert_to_indexed_array()?;
-				},
-				_ => (),
-			}
-
-			let treat_as_int = self.is_treated_as_integer();
-			let update_transform = self.get_update_transform();
-
-			match &mut self.value {
-				ShellValue::String(base) => match value {
-					ShellValueLiteral::Scalar(suffix) => {
-						if treat_as_int {
-							let int_value =
-								base.parse::<i64>().unwrap_or(0) + suffix.parse::<i64>().unwrap_or(0);
-							base.clear();
-							base.push_str(int_value.to_string().as_str());
-						} else {
-							base.push_str(suffix.as_str());
-							Self::apply_value_transforms(base, treat_as_int, update_transform);
-						}
-						Ok(())
-					},
-					ShellValueLiteral::Array(_) => {
-						// This case was already handled (see above).
-						Ok(())
-					},
-				},
-				ShellValue::IndexedArray(existing_values) => match value {
-					ShellValueLiteral::Scalar(new_value) => {
-						self.assign_at_index(String::from("0"), new_value, append)
-					},
-					ShellValueLiteral::Array(new_values) => {
-						ShellValue::update_indexed_array_from_literals(existing_values, new_values);
-						Ok(())
-					},
-				},
-				ShellValue::AssociativeArray(existing_values) => match value {
-					ShellValueLiteral::Scalar(new_value) => {
-						self.assign_at_index(String::from("0"), new_value, append)
-					},
-					ShellValueLiteral::Array(new_values) => {
-						ShellValue::update_associative_array_from_literals(existing_values, new_values)
-					},
-				},
-				ShellValue::Unset(_) => unreachable!("covered in conversion above"),
-				// TODO(dynamic): implement appending to dynamic vars
-				ShellValue::Dynamic { .. } => Ok(()),
-			}
-		} else {
-			match (&self.value, value) {
-				// If we're updating an array value with a string, then treat it as an update to
-				// just the "0"-indexed element of the array.
-				(
-					ShellValue::IndexedArray(_)
-					| ShellValue::AssociativeArray(_)
-					| ShellValue::Unset(
-						ShellValueUnsetType::AssociativeArray | ShellValueUnsetType::IndexedArray,
-					),
-					ShellValueLiteral::Scalar(s),
-				) => self.assign_at_index(String::from("0"), s, false),
-
-				// If we're updating an indexed array value with an array, then preserve the array
-				// type. We also default to using an indexed array if we are
-				// assigning an array to a previously string-holding variable.
-				(
-					ShellValue::IndexedArray(_)
-					| ShellValue::Unset(ShellValueUnsetType::IndexedArray | ShellValueUnsetType::Untyped)
-					| ShellValue::String(_)
-					| ShellValue::Dynamic { .. },
-					ShellValueLiteral::Array(literal_values),
-				) => {
-					self.value = ShellValue::indexed_array_from_literals(literal_values);
-					Ok(())
-				},
-
-				// If we're updating an associative array value with an array, then preserve the
-				// array type.
-				(
-					ShellValue::AssociativeArray(_)
-					| ShellValue::Unset(ShellValueUnsetType::AssociativeArray),
-					ShellValueLiteral::Array(literal_values),
-				) => {
-					self.value = ShellValue::associative_array_from_literals(literal_values)?;
-					Ok(())
-				},
-
+		if !append {
+			return match &self.value {
+				// Updating an array with a string updates its "0" element.
+				ShellValue::IndexedArray(_)
+				| ShellValue::AssociativeArray(_)
+				| ShellValue::Unset(
+					ShellValueUnsetType::AssociativeArray | ShellValueUnsetType::IndexedArray,
+				) => self.assign_at_index(String::from("0"), value, false),
 				// Handle updates to dynamic values; for now we just drop them.
 				// TODO(dynamic): Allow updates to dynamic values
-				(ShellValue::Dynamic { .. }, _) => Ok(()),
-
-				// Assign a scalar value to a scalar or unset (and untyped) variable.
-				(ShellValue::String(_) | ShellValue::Unset(_), ShellValueLiteral::Scalar(s)) => {
-					self.value = ShellValue::String(s);
+				ShellValue::Dynamic { .. } => Ok(()),
+				ShellValue::String(_) | ShellValue::Unset(ShellValueUnsetType::Untyped) => {
+					self.value = ShellValue::String(value);
 					Ok(())
 				},
-			}
+			};
+		}
+
+		match &self.value {
+			// Appending to a declared-but-unset array fills it out first.
+			ShellValue::Unset(ShellValueUnsetType::IndexedArray | ShellValueUnsetType::AssociativeArray) => {
+				self.fill_unset_with_empty_array();
+			},
+			// Appending to a declared-but-unset scalar starts from the empty
+			// string, which comes out right even when it is treated as an
+			// integer.
+			ShellValue::Unset(ShellValueUnsetType::Untyped) => {
+				self.value = ShellValue::String(self.convert_value_str_for_assignment(String::new()));
+			},
+			_ => (),
+		}
+
+		let treat_as_int = self.is_treated_as_integer();
+		let update_transform = self.get_update_transform();
+
+		match &mut self.value {
+			ShellValue::String(base) => {
+				if treat_as_int {
+					let int_value = base.parse::<i64>().unwrap_or(0) + value.parse::<i64>().unwrap_or(0);
+					base.clear();
+					base.push_str(int_value.to_string().as_str());
+				} else {
+					base.push_str(value.as_str());
+					Self::apply_value_transforms(base, treat_as_int, update_transform);
+				}
+				Ok(())
+			},
+			ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_) => {
+				self.assign_at_index(String::from("0"), value, true)
+			},
+			// TODO(dynamic): implement appending to dynamic vars
+			ShellValue::Dynamic { .. } => Ok(()),
+			ShellValue::Unset(_) => unreachable!("filled in above"),
+		}
+	}
+
+	/// Assign the given array literal to the variable, conditionally appending
+	/// its elements to the preexisting ones.
+	///
+	/// The literal can hold any number of elements, so building the array
+	/// spends a checkpoint on each element: on its own, the pass is ready at
+	/// once and holds the worker for as long as it runs, and it comes after
+	/// the expansion of the last element has spent its own last checkpoint.
+	/// A cancelled replacement leaves the variable as it was; a cancelled
+	/// append keeps the elements it has already added, as `mapfile` keeps the
+	/// lines it has read.
+	async fn assign_array(
+		&mut self,
+		literal: ArrayLiteral,
+		append: bool,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		if self.is_readonly() {
+			return Err(error::ErrorKind::ReadonlyVariable.into());
+		}
+
+		let convert = self.value_converter();
+
+		if !append {
+			let value = match &self.value {
+				// An associative array stays associative.
+				ShellValue::AssociativeArray(_)
+				| ShellValue::Unset(ShellValueUnsetType::AssociativeArray) => {
+					let mut values = BTreeMap::new();
+					ShellValue::update_associative_array_from_literals(&mut values, literal, convert, params)
+						.await?;
+					ShellValue::AssociativeArray(values)
+				},
+				// Anything else becomes (or stays) an indexed array.
+				ShellValue::IndexedArray(_)
+				| ShellValue::Unset(ShellValueUnsetType::IndexedArray | ShellValueUnsetType::Untyped)
+				| ShellValue::String(_)
+				| ShellValue::Dynamic { .. } => {
+					let mut values = BTreeMap::new();
+					ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+						.await?;
+					ShellValue::IndexedArray(values)
+				},
+			};
+			self.value = value;
+			return Ok(());
+		}
+
+		match &self.value {
+			// Appending to a declared-but-unset variable fills it out first.
+			ShellValue::Unset(_) => self.fill_unset_with_empty_array(),
+			// Appending to a string first makes it element `0` of an array.
+			ShellValue::String(_) => self.convert_to_indexed_array()?,
+			_ => (),
+		}
+
+		match &mut self.value {
+			ShellValue::IndexedArray(existing_values) => {
+				ShellValue::update_indexed_array_from_literals(existing_values, literal, convert, params)
+					.await
+			},
+			ShellValue::AssociativeArray(existing_values) => {
+				ShellValue::update_associative_array_from_literals(
+					existing_values,
+					literal,
+					convert,
+					params,
+				)
+				.await
+			},
+			// TODO(dynamic): implement appending to dynamic vars
+			ShellValue::Dynamic { .. } => Ok(()),
+			ShellValue::Unset(_) | ShellValue::String(_) => unreachable!("converted above"),
+		}
+	}
+
+	/// Gives a declared-but-unset variable the empty array its declaration
+	/// stands for: associative after `declare -A`, indexed otherwise.
+	fn fill_unset_with_empty_array(&mut self) {
+		if let ShellValue::Unset(unset_type) = &self.value {
+			self.value = match unset_type {
+				ShellValueUnsetType::AssociativeArray => ShellValue::AssociativeArray(BTreeMap::new()),
+				ShellValueUnsetType::IndexedArray | ShellValueUnsetType::Untyped => {
+					ShellValue::IndexedArray(BTreeMap::new())
+				},
+			};
 		}
 	}
 
@@ -379,7 +430,10 @@ impl ShellVariable {
 	) -> Result<(), error::Error> {
 		match &self.value {
 			ShellValue::Unset(_) => {
-				self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
+				if self.is_readonly() {
+					return Err(error::ErrorKind::ReadonlyVariable.into());
+				}
+				self.fill_unset_with_empty_array();
 			},
 			ShellValue::String(_) => {
 				self.convert_to_indexed_array()?;
@@ -441,29 +495,20 @@ impl ShellVariable {
 		}
 	}
 
-	fn convert_value_literal_for_assignment(&self, value: ShellValueLiteral) -> ShellValueLiteral {
-		match value {
-			ShellValueLiteral::Scalar(s) => {
-				ShellValueLiteral::Scalar(self.convert_value_str_for_assignment(s))
-			},
-			ShellValueLiteral::Array(literals) => ShellValueLiteral::Array(ArrayLiteral(
-				literals
-					.0
-					.into_iter()
-					.map(|(k, v)| (k, self.convert_value_str_for_assignment(v)))
-					.collect(),
-			)),
-		}
+	fn convert_value_str_for_assignment(&self, s: String) -> String {
+		self.value_converter()(s)
 	}
 
-	fn convert_value_str_for_assignment(&self, mut s: String) -> String {
-		Self::apply_value_transforms(
-			&mut s,
-			self.is_treated_as_integer(),
-			self.get_update_transform(),
-		);
-
-		s
+	/// Returns what this variable's attributes (`declare -i`, `-l`, `-u`,
+	/// `-c`) make of a value assigned to it, for applying one element at a
+	/// time.
+	fn value_converter(&self) -> impl Fn(String) -> String + Copy + Send + Sync + 'static {
+		let treat_as_int = self.is_treated_as_integer();
+		let update_transform = self.get_update_transform();
+		move |mut value| {
+			Self::apply_value_transforms(&mut value, treat_as_int, update_transform);
+			value
+		}
 	}
 
 	fn apply_value_transforms(
@@ -528,7 +573,15 @@ impl ShellVariable {
 
 	/// Returns the canonical attribute flag string for this variable.
 	pub fn attribute_flags(&self, shell: &Shell<impl extensions::ShellExtensions>) -> String {
-		let value = self.resolve_value(shell);
+		// Only the kind of value counts, so a stored value is read in place:
+		// copying an array to look at it costs a pass over every element.
+		let resolved;
+		let value = if let ShellValue::Dynamic { getter, .. } = &self.value {
+			resolved = getter(shell);
+			&resolved
+		} else {
+			&self.value
+		};
 
 		let mut result = String::new();
 
@@ -688,6 +741,31 @@ impl From<Vec<&str>> for ShellValueLiteral {
 #[derive(Clone, Debug)]
 pub struct ArrayLiteral(pub Vec<(Option<String>, String)>);
 
+impl ArrayLiteral {
+	/// Copies the expanded elements of an array assignment (`name=(…)`, as a
+	/// declaration builtin receives it) into a literal.
+	///
+	/// The builtin holds the elements borrowed, and they can be any number, so
+	/// each copy spends a checkpoint.
+	///
+	/// # Arguments
+	///
+	/// * `elements` - The expanded keys and values.
+	/// * `params` - The execution parameters of the run doing the assignment.
+	pub async fn from_assignment_elements(
+		elements: &[(Option<brush_parser::ast::Word>, brush_parser::ast::Word)],
+		params: &ExecutionParameters,
+	) -> Result<Self, error::Error> {
+		let mut literal = Vec::with_capacity(elements.len());
+		for (key, value) in elements {
+			interp::loop_checkpoint(params).await?;
+			literal.push((key.as_ref().map(|key| key.value.clone()), value.value.clone()));
+		}
+
+		Ok(Self(literal))
+	}
+}
+
 /// Style for formatting a shell variable's value.
 #[derive(Copy, Clone, Debug)]
 pub enum FormatStyle {
@@ -750,71 +828,98 @@ impl ShellValue {
 
 	/// Returns a new indexed array value constructed from the given literals.
 	///
+	/// Spends a checkpoint on each element, as [`ShellVariable::assign`] does.
+	///
 	/// # Arguments
 	///
 	/// * `literals` - The literals to construct the indexed array from.
-	pub fn indexed_array_from_literals(literals: ArrayLiteral) -> Self {
+	/// * `params` - The execution parameters of the run building the array.
+	pub async fn indexed_array_from_literals(
+		literals: ArrayLiteral,
+		params: &ExecutionParameters,
+	) -> Result<Self, error::Error> {
 		let mut values = BTreeMap::new();
-		Self::update_indexed_array_from_literals(&mut values, literals);
+		Self::update_indexed_array_from_literals(&mut values, literals, |value| value, params).await?;
 
-		Self::IndexedArray(values)
+		Ok(Self::IndexedArray(values))
 	}
 
-	fn update_indexed_array_from_literals(
-		existing_values: &mut BTreeMap<u64, String>,
-		literal_values: ArrayLiteral,
-	) {
-		let mut new_key = if let Some((largest_index, _)) = existing_values.last_key_value() {
-			largest_index + 1
-		} else {
-			0
-		};
-
-		for (key, value) in literal_values.0 {
-			if let Some(key) = key {
-				new_key = key.parse().unwrap_or(0);
-			}
-
-			existing_values.insert(new_key, value);
-			new_key += 1;
-		}
-	}
-
-	/// Returns a new associative array value constructed from the given
-	/// literals.
+	/// Returns an indexed array holding `value` alone, at the index that
+	/// `[index]=value` names in an array literal.
 	///
 	/// # Arguments
 	///
-	/// * `literals` - The literals to construct the associative array from.
-	pub fn associative_array_from_literals(literals: ArrayLiteral) -> Result<Self, error::Error> {
-		let mut values = BTreeMap::new();
-		Self::update_associative_array_from_literals(&mut values, literals)?;
-
-		Ok(Self::AssociativeArray(values))
+	/// * `index` - The index of the element.
+	/// * `value` - The element.
+	pub fn indexed_array_with_element(index: &str, value: String) -> Self {
+		Self::IndexedArray(BTreeMap::from([(literal_index(index), value)]))
 	}
 
-	fn update_associative_array_from_literals(
+	/// Adds the elements of `literal_values` to `existing_values`, each after
+	/// the one before unless it names its own index (`[index]=value`), and each
+	/// passed through `convert`.
+	///
+	/// The literal can hold any number of elements and nothing in the loop
+	/// waits on anything, so it spends a checkpoint on each element.
+	async fn update_indexed_array_from_literals(
+		existing_values: &mut BTreeMap<u64, String>,
+		literal_values: ArrayLiteral,
+		convert: impl Fn(String) -> String,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let mut new_key = existing_values
+			.last_key_value()
+			.map_or(0, |(largest_index, _)| largest_index + 1);
+
+		for (key, value) in literal_values.0 {
+			interp::loop_checkpoint(params).await?;
+			if let Some(key) = key {
+				new_key = literal_index(&key);
+			}
+
+			existing_values.insert(new_key, convert(value));
+			new_key += 1;
+		}
+
+		Ok(())
+	}
+
+	/// Adds the elements of `literal_values` to `existing_values`, each value
+	/// passed through `convert`. Either every element names its key
+	/// (`[key]=value`), or none of the first does and the elements alternate
+	/// key and value.
+	///
+	/// The literal can hold any number of elements and nothing in the loop
+	/// waits on anything, so it spends a checkpoint on each element.
+	async fn update_associative_array_from_literals(
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
+		convert: impl Fn(String) -> String,
+		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
 		let mut literal_values = literal_values.0.into_iter();
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
+		interp::loop_checkpoint(params).await?;
+		let first_value = convert(first_value);
 
 		if let Some(first_key) = first_key {
 			existing_values.insert(first_key, first_value);
 
 			for (key, value) in literal_values {
+				interp::loop_checkpoint(params).await?;
 				let Some(key) = key else {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
 
-				existing_values.insert(key, value);
+				existing_values.insert(key, convert(value));
 			}
 		} else {
 			let mut current_key = Some(first_value);
 			for (key, value) in literal_values {
+				interp::loop_checkpoint(params).await?;
+				let value = convert(value);
 				let value = if let Some(key) = key {
 					let mut word = String::with_capacity(key.len() + value.len() + 3);
 					word.push('[');
@@ -937,28 +1042,6 @@ impl ShellValue {
 		}
 	}
 
-	/// Returns the keys of the elements in this variable.
-	pub fn element_keys(&self, shell: &Shell<impl extensions::ShellExtensions>) -> Vec<String> {
-		match self {
-			Self::Unset(_) => vec![],
-			Self::String(_) => vec!["0".to_owned()],
-			Self::AssociativeArray(array) => array.keys().map(|k| k.to_owned()).collect(),
-			Self::IndexedArray(array) => array.keys().map(|k| k.to_string()).collect(),
-			Self::Dynamic { getter, .. } => getter(shell).element_keys(shell),
-		}
-	}
-
-	/// Returns the values of the elements in this variable.
-	pub fn element_values(&self, shell: &Shell<impl extensions::ShellExtensions>) -> Vec<String> {
-		match self {
-			Self::Unset(_) => vec![],
-			Self::String(s) => vec![s.to_owned()],
-			Self::AssociativeArray(array) => array.values().map(|v| v.to_owned()).collect(),
-			Self::IndexedArray(array) => array.values().map(|v| v.to_owned()).collect(),
-			Self::Dynamic { getter, .. } => getter(shell).element_values(shell),
-		}
-	}
-
 	/// Converts this value to a string.
 	pub fn to_cow_str(&self, shell: &Shell<impl extensions::ShellExtensions>) -> Cow<'_, str> {
 		self.try_get_cow_str(shell).unwrap_or(Cow::Borrowed(""))
@@ -1025,6 +1108,12 @@ impl ShellValue {
 			Self::Dynamic { getter, .. } => getter(shell).to_assignable_str(index, shell),
 		}
 	}
+}
+
+/// The index `[index]=value` names in an indexed array literal; anything but
+/// a number names `0`.
+fn literal_index(index: &str) -> u64 {
+	index.parse().unwrap_or(0)
 }
 
 fn get_key_for_indexed_array(

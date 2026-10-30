@@ -9,7 +9,6 @@ use crate::{
 	env::{EnvironmentLookup, EnvironmentScope},
 	error, openfiles, pathsearch,
 	sys::users,
-	variables,
 };
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
@@ -47,18 +46,18 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		let pwd = cleaned_path.to_string_lossy().to_string();
 
-		self.env.update_or_add(
+		self.env.update_or_add_scalar(
 			"PWD",
-			variables::ShellValueLiteral::Scalar(pwd),
+			pwd,
 			|_| Ok(()),
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,
 		)?;
 		let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);
 
-		self.env.update_or_add(
+		self.env.update_or_add_scalar(
 			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
+			oldpwd.to_string_lossy().to_string(),
 			|_| Ok(()),
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,

@@ -11,7 +11,7 @@ use crate::{
 	braceexpansion, commands, env, error, escape, extensions, interp, patterns, prompt,
 	shell::Shell,
 	sys, trace_categories,
-	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
+	variables::{ShellValue, ShellValueUnsetType},
 };
 
 /// Options to customize the behavior of the word expander.
@@ -50,13 +50,6 @@ struct Expansion {
 impl Default for Expansion {
 	fn default() -> Self {
 		Self { fields: vec![], concatenate: true, from_array: false, undefined: false }
-	}
-}
-
-impl From<Expansion> for String {
-	fn from(value: Expansion) -> Self {
-		// TODO(IFS): Use IFS instead for separator?
-		value.fields.into_iter().map(Self::from).join(" ")
 	}
 }
 
@@ -99,19 +92,31 @@ impl Expansion {
 
 	/// Appends `next` as if its text directly followed this expansion's: its
 	/// first field joins this one's last, and the rest follow.
-	fn coalesce(&mut self, next: Self) {
-		for (i, mut field) in next.fields.into_iter().enumerate() {
-			match self.fields.last_mut() {
-				Some(last) if i == 0 => {
-					last.0.append(&mut field.0);
-				},
-				_ => self.fields.push(field),
+	///
+	/// `next` can hold a field for every element of an array (`${name[@]}`),
+	/// and this runs after the expansion that made them has spent its last
+	/// checkpoint, so each field placed spends one. A call that places none
+	/// one at a time (no fields, or nothing to join them onto, when they move
+	/// over whole) spends one too, being a step of its caller's loop over the
+	/// pieces of a word.
+	async fn coalesce(&mut self, next: Self, params: &ExecutionParameters) -> Result<(), error::Error> {
+		if self.fields.is_empty() || next.fields.is_empty() {
+			interp::loop_checkpoint(params).await?;
+			if self.fields.is_empty() {
+				self.fields = next.fields;
+			}
+		} else {
+			for (index, field) in next.fields.into_iter().enumerate() {
+				interp::loop_checkpoint(params).await?;
+				join_or_push(&mut self.fields, index == 0, field.0);
 			}
 		}
 
 		// TODO(expansion): What if expansions have different concatenation values?
 		self.concatenate = next.concatenate;
 		self.from_array = next.from_array;
+
+		Ok(())
 	}
 
 	fn polymorphic_len(&self) -> usize {
@@ -122,21 +127,36 @@ impl Expansion {
 		}
 	}
 
-	fn polymorphic_subslice(&self, index: usize, end: usize) -> Self {
+	/// Returns elements `index..end` of an array's expansion, or characters
+	/// `index..end` of anything else.
+	///
+	/// An array's expansion has a field per element, so taking a range of
+	/// them spends a checkpoint on each field up to the end of the range.
+	async fn polymorphic_subslice(
+		self,
+		index: usize,
+		end: usize,
+		params: &ExecutionParameters,
+	) -> Result<Self, error::Error> {
 		let len = end - index;
 
 		// If we came from an array, then interpret `index` and `end` as indices
 		// into the elements.
 		if self.from_array {
-			let actual_len = min(len, self.fields.len() - index);
-			let fields = self.fields[index..(index + actual_len)].to_vec();
+			let mut fields = Vec::with_capacity(min(len, self.fields.len() - index));
+			for (position, field) in self.fields.into_iter().enumerate().take(end) {
+				interp::loop_checkpoint(params).await?;
+				if position >= index {
+					fields.push(field);
+				}
+			}
 
-			Self {
+			Ok(Self {
 				fields,
 				concatenate: self.concatenate,
 				undefined: self.undefined,
 				from_array: self.from_array,
-			}
+			})
 		} else {
 			// Otherwise, interpret `index` and `end` as indices into the string contents.
 			let mut fields = vec![];
@@ -202,12 +222,12 @@ impl Expansion {
 				}
 			}
 
-			Self {
+			Ok(Self {
 				fields,
 				concatenate: self.concatenate,
 				undefined: self.undefined,
 				from_array: self.from_array,
-			}
+			})
 		}
 	}
 }
@@ -222,6 +242,15 @@ impl WordField {
 
 	pub fn len(&self) -> usize {
 		self.0.iter().fold(0, |acc, piece| acc + piece.len())
+	}
+}
+
+/// Puts `pieces` at the end of `fields`: onto the last field when `join` is
+/// set and there is one, else as a field of their own.
+fn join_or_push(fields: &mut Vec<WordField>, join: bool, mut pieces: Vec<ExpansionPiece>) {
+	match fields.last_mut() {
+		Some(WordField(last)) if join => last.append(&mut pieces),
+		_ => fields.push(WordField(pieces)),
 	}
 }
 
@@ -564,7 +593,29 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// Apply tilde-expansion, parameter expansion, command substitution, and
 	/// arithmetic expansion.
 	pub async fn basic_expand_to_str(&mut self, word: &str) -> Result<String, error::Error> {
-		Ok(String::from(self.basic_expand(word).await?))
+		let expansion = self.basic_expand(word).await?;
+		self.join_fields(expansion).await
+	}
+
+	/// Joins the fields of `expansion` into one string, separated by spaces.
+	///
+	/// `x="${name[@]}"` joins a field for every element of the array, after
+	/// the expansion has spent its last checkpoint, so each field joined
+	/// spends one.
+	async fn join_fields(&self, expansion: Expansion) -> Result<String, error::Error> {
+		let mut joined = String::new();
+		for (index, field) in expansion.fields.into_iter().enumerate() {
+			interp::loop_checkpoint(self.params).await?;
+			// TODO(IFS): Use IFS instead for separator?
+			if index > 0 {
+				joined.push(' ');
+			}
+			for piece in field.0 {
+				joined.push_str(piece.as_str());
+			}
+		}
+
+		Ok(joined)
 	}
 
 	async fn basic_expand_opt_pattern(
@@ -666,8 +717,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// Expand each brace element separately (tildes, parameters, command
 		// substitutions, arithmetic), separating elements with a splittable
 		// space so downstream field splitting yields one field per element.
-		// Each expansion coalesces into the result as it is made, so the
-		// element checkpoint covers that work too.
+		// Each expansion coalesces into the result as it is made. That spends
+		// checkpoints of its own rather than leaning on this element's: one
+		// piece can stand for a field per element of an array, and by the time
+		// they are joined in, this element's checkpoint is far behind.
 		let mut coalesced = Expansion::default();
 		for (index, element) in brace_expanded_words.iter().enumerate() {
 			// A brace range sets this count, not the script: `{1..3000000}` is
@@ -675,7 +728,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			// a native filesystem.
 			interp::loop_checkpoint(self.params).await?;
 			if index > 0 {
-				coalesced.coalesce(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
+				let separator = Expansion::from(ExpansionPiece::Splittable(String::from(" ")));
+				coalesced.coalesce(separator, self.params).await?;
 			}
 
 			let pieces = if self.heredoc_mode {
@@ -691,7 +745,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 			for piece in pieces {
 				let piece_expansion = self.expand_word_piece(piece.piece).await?;
-				coalesced.coalesce(piece_expansion);
+				coalesced.coalesce(piece_expansion, self.params).await?;
 			}
 		}
 
@@ -1079,6 +1133,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 	/// Helper function to process pieces within a double-quoted sequence.
 	/// This ensures proper handling of concatenation and field building.
+	///
+	/// One piece can stand for a field per element of an array
+	/// (`"${name[@]}"`), and quoting them comes after the expansion that made
+	/// them has spent its last checkpoint, so each field quoted spends one. A
+	/// piece with no fields spends one too, being a step of this loop.
 	async fn process_double_quoted_pieces(
 		&mut self,
 		pieces: Vec<brush_parser::word::WordPieceWithSource>,
@@ -1090,46 +1149,31 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			let Expansion { fields: this_fields, concatenate, .. } =
 				self.expand_word_piece(piece.piece).await?;
 
-			let fields_to_append = if concatenate {
-				#[expect(unstable_name_collisions)]
-				let mut concatenated: Vec<ExpansionPiece> = this_fields
-					.into_iter()
-					.map(|WordField(pieces)| {
-						pieces
-							.into_iter()
-							.map(|piece| piece.make_unsplittable())
-							.collect()
-					})
-					.intersperse(vec![ExpansionPiece::Unsplittable(concatenation_joiner.to_string())])
-					.flatten()
-					.collect();
+			if this_fields.is_empty() {
+				interp::loop_checkpoint(self.params).await?;
+			}
 
-				// If there were no pieces, make sure there's an empty string after
-				// concatenation.
-				if concatenated.is_empty() {
-					concatenated.push(ExpansionPiece::Splittable(String::new()));
+			// The piece's first field joins the field before it.
+			if concatenate {
+				// Every field, joined by IFS's first character, makes one quoted
+				// string; with no fields, an empty one.
+				let mut concatenated = String::new();
+				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
+					interp::loop_checkpoint(self.params).await?;
+					if index > 0 {
+						concatenated.push(concatenation_joiner);
+					}
+					for piece in pieces {
+						concatenated.push_str(piece.as_str());
+					}
 				}
-
-				vec![WordField(concatenated)]
+				join_or_push(&mut fields, true, vec![ExpansionPiece::Unsplittable(concatenated)]);
 			} else {
-				this_fields
-			};
-
-			for (i, WordField(next_pieces)) in fields_to_append.into_iter().enumerate() {
-				// Flip to unsplittable.
-				let mut next_pieces: Vec<_> = next_pieces
-					.into_iter()
-					.map(|piece| piece.make_unsplittable())
-					.collect();
-
-				if i == 0
-					&& let Some(WordField(last_pieces)) = fields.last_mut()
-				{
-					last_pieces.append(&mut next_pieces);
-					continue;
+				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
+					interp::loop_checkpoint(self.params).await?;
+					let pieces = pieces.into_iter().map(ExpansionPiece::make_unsplittable).collect();
+					join_or_push(&mut fields, index == 0, pieces);
 				}
-
-				fields.push(WordField(next_pieces));
 			}
 		}
 
@@ -1184,8 +1228,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 						ParameterState::DefinedEmptyString,
 					) => Ok(expanded_parameter),
 					_ => {
-						let expanded_default_value =
-							String::from(self.expand_parameter_word(default_value).await?);
+						let expanded_default_value = self.expand_parameter_word(default_value).await?;
+						let expanded_default_value = self.join_fields(expanded_default_value).await?;
 						self
 							.assign_to_parameter(&parameter, expanded_default_value.clone())
 							.await?;
@@ -1366,31 +1410,31 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				};
 
 				#[expect(clippy::cast_sign_loss)]
-				Ok(expanded_parameter
-					.polymorphic_subslice(expanded_offset as usize, end_offset as usize))
+				expanded_parameter
+					.polymorphic_subslice(expanded_offset as usize, end_offset as usize, self.params)
+					.await
 			},
 			brush_parser::word::ParameterExpr::Transform {
 				parameter,
 				indirect,
 				op: ParameterTransformOp::ToAttributeFlags,
 			} => {
-				if let (_, _, Some(var)) = self
-					.try_resolve_parameter_to_variable(&parameter, indirect)
-					.await?
-				{
-					Ok(var.attribute_flags(self.shell).into())
-				} else {
-					Ok(String::new().into())
-				}
+				let (name, _) = self.try_resolve_parameter_to_variable(&parameter, indirect).await?;
+				let flags = name
+					.and_then(|name| {
+						self.shell.env().get(&name).map(|(_, var)| var.attribute_flags(self.shell))
+					})
+					.unwrap_or_default();
+				Ok(flags.into())
 			},
 			brush_parser::word::ParameterExpr::Transform {
 				parameter,
 				indirect,
 				op: ParameterTransformOp::ToAssignmentLogic,
 			} => {
-				if let (Some(name), index, Some(var)) = self
-					.try_resolve_parameter_to_variable(&parameter, indirect)
-					.await?
+				let (name, index) = self.try_resolve_parameter_to_variable(&parameter, indirect).await?;
+				if let Some(name) = name
+					&& let Some((_, var)) = self.shell.env().get(&name)
 				{
 					let assignable_value_str = var
 						.value()
@@ -1551,21 +1595,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				}
 			},
 			brush_parser::word::ParameterExpr::MemberKeys { variable_name, concatenate } => {
-				let keys = if let Some((_, var)) = self.shell.env().get(variable_name) {
-					var.value().element_keys(self.shell)
+				let fields = if let Some((_, var)) = self.shell.env().get(variable_name) {
+					self.element_fields(var.value(), true).await?
 				} else {
 					vec![]
 				};
 
-				Ok(Expansion {
-					fields: keys
-						.into_iter()
-						.map(|key| WordField(vec![ExpansionPiece::Splittable(key)]))
-						.collect(),
-					concatenate,
-					from_array: true,
-					undefined: false,
-				})
+				Ok(Expansion { fields, concatenate, from_array: true, undefined: false })
 			},
 		}
 	}
@@ -1610,9 +1646,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				env::EnvironmentScope::Global,
 			)
 		} else {
-			self.shell.env_mut().update_or_add(
+			self.shell.env_mut().update_or_add_scalar(
 				variable_name,
-				variables::ShellValueLiteral::Scalar(value),
+				value,
 				|_| Ok(()),
 				env::EnvironmentLookup::Anywhere,
 				env::EnvironmentScope::Global,
@@ -1620,27 +1656,31 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		}
 	}
 
+	/// Returns the name of the variable `parameter` refers to, and the index it
+	/// names in it, if any.
+	///
+	/// Callers read the variable where it is stored: a copy of an array costs
+	/// a pass over every element.
 	async fn try_resolve_parameter_to_variable(
 		&mut self,
 		parameter: &brush_parser::word::Parameter,
 		indirect: bool,
-	) -> Result<(Option<String>, Option<String>, Option<ShellVariable>), error::Error> {
+	) -> Result<(Option<String>, Option<String>), error::Error> {
 		if !indirect {
-			Ok(self.try_resolve_parameter_to_variable_without_indirect(parameter))
+			Ok(Self::try_resolve_parameter_to_variable_without_indirect(parameter))
 		} else {
 			let expansion = self.expand_parameter(parameter, false).await?;
-			let parameter_str: String = expansion.into();
+			let parameter_str = self.join_fields(expansion).await?;
 			let inner_parameter =
 				brush_parser::word::parse_parameter(parameter_str.as_str(), &self.parser_options)?;
-			Ok(self.try_resolve_parameter_to_variable_without_indirect(&inner_parameter))
+			Ok(Self::try_resolve_parameter_to_variable_without_indirect(&inner_parameter))
 		}
 	}
 
 	fn try_resolve_parameter_to_variable_without_indirect(
-		&self,
 		parameter: &brush_parser::word::Parameter,
-	) -> (Option<String>, Option<String>, Option<ShellVariable>) {
-		let (name, index) = match parameter {
+	) -> (Option<String>, Option<String>) {
+		match parameter {
 			brush_parser::word::Parameter::Positional(_)
 			| brush_parser::word::Parameter::Special(_) => (None, None),
 			brush_parser::word::Parameter::Named(name) => (Some(name.to_owned()), Some("0".into())),
@@ -1650,13 +1690,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate: _concatenate } => {
 				(Some(name.to_owned()), None)
 			},
-		};
-
-		let var = name
-			.as_ref()
-			.and_then(|name| self.shell.env().get(name).map(|(_, var)| var.clone()));
-
-		(name, index, var)
+		}
 	}
 
 	fn undefined_expansion(
@@ -1705,7 +1739,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		if !indirect {
 			Ok(expansion)
 		} else {
-			let parameter_str: String = expansion.into();
+			let parameter_str = self.join_fields(expansion).await?;
 			let inner_parameter =
 				brush_parser::word::parse_parameter(parameter_str.as_str(), &self.parser_options)?;
 
@@ -1723,14 +1757,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		match parameter {
 			brush_parser::word::Parameter::Positional(p) => {
 				if *p == 0 {
-					Ok(self.expand_special_parameter(&brush_parser::word::SpecialParameter::ShellName))
+					self.expand_special_parameter(&brush_parser::word::SpecialParameter::ShellName).await
 				} else if let Some(parameter) = self.shell.current_shell_args().get((p - 1) as usize) {
 					Ok(Expansion::from(parameter.to_owned()))
 				} else {
 					self.undefined_expansion(parameter, allow_unset_vars)
 				}
 			},
-			brush_parser::word::Parameter::Special(s) => Ok(self.expand_special_parameter(s)),
+			brush_parser::word::Parameter::Special(s) => self.expand_special_parameter(s).await,
 			brush_parser::word::Parameter::Named(n) => {
 				if !env::valid_variable_name(n.as_str()) {
 					Err(error::ErrorKind::BadSubstitution(n.clone()).into())
@@ -1776,29 +1810,50 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				}
 			},
 			brush_parser::word::Parameter::NamedWithAllIndices { name, concatenate } => {
-				if let Some((_, var)) = self.shell.env().get(name) {
-					let values = var.value().element_values(self.shell);
-					let mut fields = Vec::with_capacity(values.len());
-					for value in values {
-						// `${name[@]}` has as many fields as the array has elements.
-						interp::loop_checkpoint(self.params).await?;
-						fields.push(WordField(vec![ExpansionPiece::Splittable(value)]));
-					}
-
-					Ok(Expansion {
-						fields,
-						concatenate: *concatenate,
-						from_array: true,
-						undefined: false,
-					})
+				let fields = if let Some((_, var)) = self.shell.env().get(name) {
+					self.element_fields(var.value(), false).await?
 				} else {
-					Ok(Expansion {
-						fields:      vec![],
-						concatenate: *concatenate,
-						from_array:  true,
-						undefined:   false,
-					})
-				}
+					vec![]
+				};
+
+				Ok(Expansion { fields, concatenate: *concatenate, from_array: true, undefined: false })
+			},
+		}
+	}
+
+	/// One field per element of `value`, or per key when `keys` is set:
+	/// `${name[@]}` and `${!name[@]}`.
+	///
+	/// Each element is copied as its field is made, with a checkpoint: an
+	/// array can hold any number of elements, and copying them waits on
+	/// nothing. A dynamic value is resolved once, as
+	/// [`crate::ShellVariable::resolve_value`] does.
+	async fn element_fields(
+		&self,
+		value: &ShellValue,
+		keys: bool,
+	) -> Result<Vec<WordField>, error::Error> {
+		let resolved;
+		let value = if let ShellValue::Dynamic { getter, .. } = value {
+			resolved = getter(&*self.shell);
+			&resolved
+		} else {
+			value
+		};
+
+		match value {
+			ShellValue::Unset(_) | ShellValue::Dynamic { .. } => Ok(vec![]),
+			ShellValue::String(_) if keys => Ok(vec![WordField::from(String::from("0"))]),
+			ShellValue::String(s) => Ok(vec![WordField::from(s.clone())]),
+			ShellValue::IndexedArray(array) if keys => {
+				fields_from(self.params, array.keys().map(u64::to_string)).await
+			},
+			ShellValue::IndexedArray(array) => fields_from(self.params, array.values().cloned()).await,
+			ShellValue::AssociativeArray(array) if keys => {
+				fields_from(self.params, array.keys().cloned()).await
+			},
+			ShellValue::AssociativeArray(array) => {
+				fields_from(self.params, array.values().cloned()).await
 			},
 		}
 	}
@@ -1819,19 +1874,18 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(index_to_use)
 	}
 
-	fn expand_special_parameter(
+	async fn expand_special_parameter(
 		&self,
 		parameter: &brush_parser::word::SpecialParameter,
-	) -> Expansion {
-		match parameter {
+	) -> Result<Expansion, error::Error> {
+		let expansion = match parameter {
 			brush_parser::word::SpecialParameter::AllPositionalParameters { concatenate } => {
-				let args = self.shell.current_shell_args().iter();
-
 				Expansion {
-					fields:      args
-						.into_iter()
-						.map(|param| WordField(vec![ExpansionPiece::Splittable(param.to_owned())]))
-						.collect(),
+					fields:      fields_from(
+						self.params,
+						self.shell.current_shell_args().iter().cloned(),
+					)
+					.await?,
 					concatenate: *concatenate,
 					from_array:  true,
 					undefined:   false,
@@ -1861,7 +1915,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 					.current_shell_name()
 					.map_or_else(String::new, |name| name.to_string()),
 			),
-		}
+		};
+
+		Ok(expansion)
 	}
 
 	async fn expand_arithmetic_expr(
@@ -2042,6 +2098,22 @@ fn to_initial_capitals(s: &str) -> String {
 	result
 }
 
+/// Makes a field of each of `values`, spending a checkpoint on each: there is
+/// one for every element of an array or every positional parameter, and
+/// making them waits on nothing.
+async fn fields_from(
+	params: &ExecutionParameters,
+	values: impl Iterator<Item = String>,
+) -> Result<Vec<WordField>, error::Error> {
+	let mut fields = Vec::with_capacity(values.size_hint().0);
+	for value in values {
+		interp::loop_checkpoint(params).await?;
+		fields.push(WordField::from(value));
+	}
+
+	Ok(fields)
+}
+
 async fn transform_expansion<F, FReturn>(
 	params: &ExecutionParameters,
 	expansion: Expansion,
@@ -2101,6 +2173,7 @@ mod tests {
 	use anyhow::Result;
 
 	use super::*;
+	use crate::ShellVariable;
 
 	#[tokio::test]
 	async fn test_full_expansion() -> Result<()> {
