@@ -182,7 +182,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(lines.filter(line => line.includes("›"))).toHaveLength(1);
 
 		const native = JSON.stringify(component.describe?.());
-		expect(native).toContain('{"t":"› ","s":"warning"},{"t":"Read the second module","s":"muted em"}');
+		expect(native).toContain('{"t":"› ","s":"error dim"},{"t":"Read the second module","s":"muted em"}');
 		expect(native).not.toContain("Nobody owns this");
 	});
 

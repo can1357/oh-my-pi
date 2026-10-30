@@ -24,14 +24,27 @@ export interface StepSummary {
 	readonly tone?: StepSummaryTone;
 }
 
+/**
+ * Marker color per tone: accent for a clean step, full error red when every call failed, and a faded error red
+ * when only some did. The fade keeps a partial failure apart from the accent in every theme (warning sits next to
+ * the accent's hue in several), while still reading as the lesser form of a failure.
+ */
+function stepSummaryMarkerColor(tone: StepSummaryTone | undefined): { color: "accent" | "error"; faded: boolean } {
+	return tone ? { color: "error", faded: tone === "warning" } : { color: "accent", faded: false };
+}
+
 /** A step summary for the ANSI transcript: toned marker (accent for a clean step), then the caption in muted italics. */
 export function formatStepSummary(summary: StepSummary): string {
-	return `${theme.fg(summary.tone ?? "accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", summary.text))}`;
+	const { color, faded } = stepSummaryMarkerColor(summary.tone);
+	const marker = theme.fg(color, STEP_SUMMARY_MARKER);
+	// SGR 2 (faint) on, then 22 (normal intensity) off: the native path parses this back to the `dim` span token.
+	return `${faded ? `\x1b[2m${marker}\x1b[22m` : marker} ${theme.italic(theme.fg("muted", summary.text))}`;
 }
 
 /** A step summary as native spans, matching {@link formatStepSummary}. */
 export function stepSummarySpans(summary: StepSummary): TspSpan[] {
-	return [span(`${STEP_SUMMARY_MARKER} `, summary.tone ?? "accent"), span(summary.text, "muted em")];
+	const { color, faded } = stepSummaryMarkerColor(summary.tone);
+	return [span(`${STEP_SUMMARY_MARKER} `, faded ? `${color} dim` : color), span(summary.text, "muted em")];
 }
 
 /** A trimmed copy of `summary`; `undefined` when its caption is blank. */
