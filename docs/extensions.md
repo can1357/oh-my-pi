@@ -944,14 +944,15 @@ another dialog's words can be read to mean. A dialog raised outside any call, an
 a finished call left running, name none and own none: nothing retires their caller's record but its
 own end.
 
-Attribution is per execution and per agent. Two agents in one process can hold the same tool-call id
-at once and are never confused for each other, and a call that `retry` runs again is a new execution
-— the earlier one being over says nothing about this one. Within a live execution, timers and
-detached promises keep the identity; a `ui` a call was handed keeps the id too, but it counts only
-while that call is still running, so a holder that keeps the `ui` past the call owns nothing with it.
-Some boundaries lose the ambient identity: a `worker` callback, and work resumed on an
-`AsyncResource` created before the execution. Pass `toolCallId` explicitly from such a callback when
-the dialog is still that call's.
+Attribution names a run of a call, never the id on its own. Two agents in one process can hold the
+same tool-call id at once and are never confused for each other; an executor bound to no agent
+claims none of theirs; and a call that `retry` runs again is a new run — the earlier one being over
+says nothing about this one, and a dialog left open over a finished run stops naming its call so
+the next run of that id answers for itself. Within a live run, timers and detached promises keep
+the identity, and a `ui` a call was handed resolves to the run of that call the dialog is raised
+inside — so a holder that keeps the `ui` past the call names nothing with it. Some boundaries lose
+the ambient identity: a `worker` callback, and work resumed on an `AsyncResource` created before
+the run. Pass `toolCallId` explicitly from such a callback when the dialog is still that call's.
 
 None of this survives a restart: waits are not persisted, so reopening a session restores no open
 dialog and approves nothing — an unfinished call that was waiting comes back with no wait and no

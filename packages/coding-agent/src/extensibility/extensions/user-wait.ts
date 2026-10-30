@@ -1,3 +1,4 @@
+import { toolExecutionOnChain } from "@oh-my-pi/pi-agent-core";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { UserWaitFrame } from "../../session/agent-session-events";
 import type { BlockedKind } from "../../utils/run-status";
@@ -64,19 +65,25 @@ type Method = (...args: unknown[]) => unknown;
  * call declares otherwise through {@link declaredKind} — an approval a host without an approval
  * dialog raises as a `select` is one such: `askDialog` carries its questions, and the dialogs whose
  * first argument is their title carry that. A dialog that fits none of these (a custom component)
- * keeps the generic label. Every frame carries the call the dialog was raised for: the one the call
- * itself declared, else the call this `ui` was handed to. The second is marked captured, because a
- * holder keeps such a `ui` after its call is over and the session must weigh it accordingly.
+ * keeps the generic label. Every frame carries the call the dialog was raised for: the one the
+ * call itself declared, else the run of the call this `ui` was handed to, matched against the
+ * executions this dialog is being raised inside. What travels is the run, never the bare id — the
+ * holder keeps this `ui` after the call is over, and a later call can reuse the id.
  */
 function describeDialog(method: string, args: readonly unknown[], ownerToolCallId?: string): UserWaitFrame {
 	const generic = genericDialogLabel(method);
 	const declared = declaredKind(args);
 	const declaredCall = declaredToolCallId(args);
-	const toolCallId = declaredCall ?? ownerToolCallId;
+	const ownerExecution =
+		declaredCall === undefined && ownerToolCallId !== undefined
+			? toolExecutionOnChain(undefined, ownerToolCallId)
+			: undefined;
 	const call =
-		toolCallId === undefined
-			? {}
-			: { toolCallId, ...(declaredCall === undefined ? { toolCallIdCaptured: true } : {}) };
+		declaredCall !== undefined
+			? { toolCallId: declaredCall }
+			: ownerExecution
+				? { toolCallExecution: ownerExecution }
+				: {};
 	if (method === "approve") {
 		const prompt = args[0];
 		const compact = isRecord(prompt) ? prompt.compact : undefined;
@@ -109,9 +116,11 @@ function describeDialog(method: string, args: readonly unknown[], ownerToolCallI
  * settles on its own and the agent goes on, possibly with nobody at the machine, so its time stays the agent's. Every
  * other member passes through. Members are read from `ui` on every access, so one it replaces later is the one called.
  *
- * `toolCallId` is the call whose execution this `ui` belongs to, when it belongs to one: every dialog it raises names
- * that call unless the call itself declares another, so a surface tracking the call learns when its own dialog
- * settles. A `ui` shared by the whole session names none.
+ * `toolCallId` is the call this `ui` was handed to, when it belongs to one: every dialog it raises names the run of
+ * that call it is being raised inside, unless the call declares a call of its own, so a surface tracking the call
+ * learns when its own dialog settles. A dialog raised with no such run on its chain — from a `ui` kept past the
+ * call, or from a callback that lost the context — names nothing, and a `ui` shared by the whole session never
+ * names a call at all.
  */
 export function trackUserWaits(
 	ui: ExtensionUIContext,

@@ -38,8 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
-	executingToolCallId,
-	isExecutingToolCall,
+	currentToolExecution,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -47,6 +46,7 @@ import {
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
+	type ToolExecution,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -1243,9 +1243,14 @@ export class AgentSession implements SettingsScope {
 	 * id, in the order the dialogs opened. While any is open the computer turn
 	 * is ended. The oldest is the one published and replayed: when it settles
 	 * while others are still open, the next one is published in its place, so no
-	 * surface keeps naming a dialog that is gone.
+	 * surface keeps naming a dialog that is gone. `execution` is the run that
+	 * claimed the call, when one did: its end withdraws the claim, so a dialog
+	 * still open over a finished run stops naming a call another run may reuse.
 	 */
-	#openUserWaits = new Map<number, UserWaitFrame>();
+	#openUserWaits = new Map<
+		number,
+		{ prompt: string; kind?: BlockedKind; toolCallId?: string; execution?: ToolExecution }
+	>();
 	#userWaitSeq = 0;
 	/**
 	 * The `user_wait_start` frame currently published for the open dialogs, kept
@@ -1415,7 +1420,7 @@ export class AgentSession implements SettingsScope {
 	async waitForUser<T>(
 		dialog: () => Promise<T>,
 		prompt?: string,
-		options?: { kind?: BlockedKind; toolCallId?: string; toolCallIdCaptured?: boolean },
+		options?: { kind?: BlockedKind; toolCallId?: string; toolCallExecution?: ToolExecution },
 	): Promise<T> {
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
@@ -1449,32 +1454,41 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * The call a dialog belongs to. A caller that names the call it is asking about is taken at its
-	 * word. A `ui` handed to a call carries that call's id for as long as the caller holds it, which
-	 * outlasts the call, so such an id (`toolCallIdCaptured`) counts only while this agent is
-	 * running that call. With neither, the call whose execution raised the dialog is read from the
-	 * async context the loop binds around `tool.execute`: a host that opens its own approval through
-	 * the plain `waitForUser` therefore still says which call owes the answer, without naming it and
-	 * without anyone reading its words.
+	 * What a dialog is recorded against. A caller that names the call it is asking about asserts
+	 * that about this moment and is taken at its word. A `ui` handed to a call carries the run it
+	 * was handed to, not an id a later call could reuse, and that run identifies the dialog's call
+	 * only while it lasts. With neither, the execution that raised the dialog is read from the
+	 * async context the loop binds around `tool.execute`: a host that opens its own approval
+	 * through the plain `waitForUser` therefore still says which call owes the answer, without
+	 * naming it and without anyone reading its words.
 	 *
-	 * Both are scoped to this session's agent and to one execution. Two agents in a process can hold
-	 * the same call id at once, and an interrupted call that `retry` runs again is a new execution
-	 * of the same id — the earlier one being over says nothing about this one. Work that outlives an
-	 * execution (a timer a tool left running) sees its scope finished and claims no call. The call
-	 * being executed need not have been announced yet: the loop buffers `tool_execution_start` while
-	 * `execute` already runs, which is how a host's own approval opens before its call is announced.
+	 * Everything here is scoped to this session's agent and to one run. Two agents in a process can
+	 * hold the same call id at once; an interrupted call that `retry` runs again is a new run of
+	 * the same id; and work that outlives a run (a timer a tool left behind) sees that run finished
+	 * and claims no call. The call being executed need not have been announced yet: the loop
+	 * buffers `tool_execution_start` while `execute` already runs, which is how a host's own
+	 * approval opens before its call is announced.
 	 */
 	#owningToolCall(
-		options: { toolCallId?: string; toolCallIdCaptured?: boolean } | undefined,
-	): { toolCallId: string } | undefined {
+		options: { toolCallId?: string; toolCallExecution?: ToolExecution } | undefined,
+	): { toolCallId: string; execution?: ToolExecution } | undefined {
 		const owner = this.agent;
 		const named = options?.toolCallId;
 		if (named !== undefined) {
-			if (!options?.toolCallIdCaptured) return { toolCallId: named };
-			return isExecutingToolCall(owner, named) ? { toolCallId: named } : undefined;
+			// Pair a named call with the run that is making the claim, when there is one, so the
+			// claim expires with that run rather than with the turn.
+			const executing = currentToolExecution(owner);
+			return executing?.toolCallId === named ? { toolCallId: named, execution: executing } : { toolCallId: named };
 		}
-		const executing = executingToolCallId(owner);
-		return executing === undefined ? undefined : { toolCallId: executing };
+		const captured = options?.toolCallExecution;
+		if (captured) {
+			// Only this agent's own run: another agent's call of the same id, and an executor bound
+			// to no agent, are not this session's to answer for.
+			const mine = captured.owner === owner && typeof captured.toolCallId === "string";
+			return mine && !captured.finished ? { toolCallId: captured.toolCallId, execution: captured } : undefined;
+		}
+		const executing = currentToolExecution(owner);
+		return executing === undefined ? undefined : { toolCallId: executing.toolCallId, execution: executing };
 	}
 
 	/**
@@ -1498,8 +1512,11 @@ export class AgentSession implements SettingsScope {
 		}
 		const frame = this.#openUserWaits.values().next().value;
 		if (frame === undefined) return;
+		// A dialog whose claiming run has ended keeps standing, but stops naming its call: the id
+		// is free for another run, and saying this dialog is that run's would hand one run's answer
+		// to another.
 		const toolCalls = [...this.#openUserWaits.values()]
-			.map(open => open.toolCallId)
+			.map(open => (open.execution?.finished ? undefined : open.toolCallId))
 			.filter((id): id is string => id !== undefined);
 		const published = this.#openUserWait;
 		const samePrompt = frame.prompt === published?.prompt && frame.kind === published?.kind;

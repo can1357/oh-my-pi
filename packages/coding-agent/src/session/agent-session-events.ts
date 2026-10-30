@@ -1,4 +1,4 @@
-import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, ThinkingLevel, ToolExecution } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
@@ -131,17 +131,19 @@ export interface UserWaitFrame {
 	/** Absent when the opener named no classification; such a wait reads as a question. */
 	kind?: BlockedKind;
 	/**
-	 * The tool call this dialog belongs to, when it was opened for one: a tool's approval, an ACP
-	 * permission request. Absent for a dialog that stands on its own (an MCP sign-in, a `cfg://`
+	 * The tool call this dialog's own caller named, when it named one: an ACP permission request,
+	 * an approval a tool asks for. A caller that names a call asserts it about this moment, so it
+	 * is taken at its word. Absent for a dialog that stands on its own (an MCP sign-in, a `cfg://`
 	 * write, an extension's own question), which owns no call and so retires none.
 	 */
 	toolCallId?: string;
 	/**
-	 * True when {@link toolCallId} was not named by this call but taken from the `ui` the call was
-	 * handed: its holder keeps that `ui`, and the id with it, after the call is over. Such an id
-	 * counts only while the agent is still running that call.
+	 * The execution the `ui` this dialog came from was handed to, when it came from a call's own
+	 * `ui`. Its holder keeps that `ui` after the call is over, and a later call can reuse the id,
+	 * so what is kept is the run itself: it identifies the dialog's call only while that run lasts.
+	 * Never serialized — it is an in-process handle, not part of any wire frame.
 	 */
-	toolCallIdCaptured?: boolean;
+	toolCallExecution?: ToolExecution;
 }
 
 /**

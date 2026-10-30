@@ -7,7 +7,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, runInToolCall } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -387,6 +387,66 @@ describe("AgentSession computer display hold per turn", () => {
 			await running;
 			await other.dispose();
 		}
+	});
+
+	it("names a call from the run that raised the dialog, not from an executor with no agent", async () => {
+		// A bridge that belongs to no agent can be running a call of the same id.
+		// Its run is nobody's to answer for: a dialog raised inside it names no
+		// call of this session, whose own call of that id is still waiting.
+		const target = createSession([{ content: ["done"] }]);
+		const answer = Promise.withResolvers<void>();
+		await runInToolCall("question-1", async () => {
+			const wait = target.waitForUser(() => answer.promise, "a dialog from an unowned run");
+			expect(target.activeUserWait()?.toolCalls).toBeUndefined();
+			answer.resolve();
+			await wait;
+		});
+	});
+
+	it("attributes a call run again after an interruption to the new run", async () => {
+		// `retry` re-executes an interrupted call under the same id. The run that
+		// was interrupted is over; this one is not, and its dialog is its own.
+		const target = createSession([{ content: ["done"] }]);
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		const owner = target.agent;
+		await runInToolCall(owner, "question-1", async () => {
+			const wait = target.waitForUser(() => first.promise, "the interrupted run's dialog");
+			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
+			first.resolve();
+			await wait;
+		});
+		await runInToolCall(owner, "question-1", async () => {
+			const wait = target.waitForUser(() => second.promise, "the new run's dialog");
+			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
+			second.resolve();
+			await wait;
+		});
+	});
+
+	it("stops naming a call once the run that claimed it ends, leaving the dialog open", async () => {
+		// A dialog can outlive the run that raised it. The id is then free for
+		// another run, so the open dialog stops naming it: answering the old
+		// dialog must not answer for whatever is running under that id now.
+		const target = createSession([{ content: ["done"] }]);
+		const stale = Promise.withResolvers<void>();
+		const fresh = Promise.withResolvers<void>();
+		const owner = target.agent;
+		let staleWait: Promise<void> | undefined;
+		await runInToolCall(owner, "question-1", async () => {
+			staleWait = target.waitForUser(() => stale.promise, "the dialog left open");
+			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
+		});
+		await runInToolCall(owner, "question-1", async () => {
+			const wait = target.waitForUser(() => fresh.promise, "the new run's dialog");
+			expect(target.activeUserWait()?.toolCalls).toEqual(["question-1"]);
+			fresh.resolve();
+			await wait;
+		});
+		// Only the stale dialog is left, and it names nothing.
+		expect(target.activeUserWait()?.toolCalls).toBeUndefined();
+		stale.resolve();
+		await staleWait;
 	});
 
 	it("delivers the newer snapshot last when a listener opens a dialog inside a frame", async () => {

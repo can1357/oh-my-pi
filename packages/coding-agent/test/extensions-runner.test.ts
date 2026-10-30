@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, type AgentTool, type AgentToolContext, runInToolCall } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -175,9 +175,15 @@ describe("ExtensionRunner", () => {
 			sessionManager,
 			modelRegistry,
 		);
-		const frames: UserWaitFrame[] = [];
+		// The execution is live state, so each frame is read as it opens.
+		const frames: Array<{ prompt: string; declared?: string; call?: string; finished?: boolean }> = [];
 		runner.setUserWaitTracker((dialog, frame) => {
-			frames.push(frame);
+			frames.push({
+				prompt: frame.prompt,
+				declared: frame.toolCallId,
+				call: frame.toolCallExecution?.toolCallId,
+				finished: frame.toolCallExecution?.finished,
+			});
 			return dialog();
 		});
 		runner.initialize(
@@ -210,70 +216,24 @@ describe("ExtensionRunner", () => {
 			{ select: async () => "yes", notify: () => {} } as unknown as ExtensionUIContext,
 		);
 
-		await runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui.select("Proceed?", ["yes"]);
+		const owner = {};
+		let keptPastTheCall: ExtensionUIContext | undefined;
+		await runInToolCall(owner, "call-1", async () => {
+			const ui = runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui;
+			keptPastTheCall = ui;
+			await ui.select("Proceed?", ["yes"]);
+			await ui.select("Declared by the call", ["yes"], { toolCallId: "call-2" });
+		});
+		// The holder keeps the `ui`; the run it was handed to is over, and no run of
+		// that call is on this chain, so the dialog names none.
+		await keptPastTheCall!.select("After the call", ["yes"]);
 		await runner.createContext().ui.select("Unrelated?", ["yes"]);
 
 		expect(frames).toEqual([
-			{ prompt: "Proceed?", kind: "question", toolCallId: "call-1", toolCallIdCaptured: true },
-			{ prompt: "Unrelated?", kind: "question" },
-		]);
-	});
-
-	it("marks a call's ui id as captured, so a holder keeping the ui past the call claims nothing", async () => {
-		// The `ui` handed to a call keeps that call's id for as long as anyone
-		// holds it, which outlasts the call. The frame marks such an id as
-		// captured so the session can weigh it against the call still running,
-		// while an id the call itself declares is taken at its word.
-		const result = await loadTestExtensions();
-		const runner = new ExtensionRunner(
-			result.extensions,
-			result.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-		);
-		const frames: UserWaitFrame[] = [];
-		runner.setUserWaitTracker((dialog, frame) => {
-			frames.push(frame);
-			return dialog();
-		});
-		runner.initialize(
-			{
-				sendMessage: () => {},
-				sendUserMessage: () => {},
-				appendEntry: () => {},
-				setLabel: () => {},
-				getActiveTools: () => [],
-				getAllTools: () => [],
-				setActiveTools: async () => {},
-				getCommands: () => [],
-				setModel: async () => false,
-				getThinkingLevel: () => undefined,
-				setThinkingLevel: () => {},
-				getSessionName: () => undefined,
-				setSessionName: async () => {},
-			},
-			{
-				getModel: () => undefined,
-				isIdle: () => true,
-				abort: () => {},
-				hasPendingMessages: () => false,
-				shutdown: () => {},
-				getContextUsage: () => undefined,
-				compact: async () => {},
-				getSystemPrompt: () => [],
-			},
-			undefined,
-			{ select: async () => "yes", notify: () => {} } as unknown as ExtensionUIContext,
-		);
-
-		const ui = runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui;
-		await ui.select("From the call's own ui", ["yes"]);
-		await ui.select("Declared by the call", ["yes"], { toolCallId: "call-2" });
-
-		expect(frames).toEqual([
-			{ prompt: "From the call's own ui", kind: "question", toolCallId: "call-1", toolCallIdCaptured: true },
-			{ prompt: "Declared by the call", kind: "question", toolCallId: "call-2" },
+			{ prompt: "Proceed?", declared: undefined, call: "call-1", finished: false },
+			{ prompt: "Declared by the call", declared: "call-2", call: undefined, finished: undefined },
+			{ prompt: "After the call", declared: undefined, call: undefined, finished: undefined },
+			{ prompt: "Unrelated?", declared: undefined, call: undefined, finished: undefined },
 		]);
 	});
 

@@ -2,32 +2,41 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "./types";
 
-/** One run of one tool call: whose it is, which call, and whether that run has finished. */
-interface ToolExecutionScope {
+/**
+ * One run of one tool call: whose it is, which call, and whether that run has finished. A holder
+ * keeps the run itself, never its id — a later run can reuse the id, and then the id alone says
+ * nothing about which of the two the holder meant.
+ */
+export interface ToolExecution {
 	/** The agent running it, or undefined for an executor bound to no agent (a standalone bridge). */
 	readonly owner: object | undefined;
 	readonly toolCallId: string;
-	finished: boolean;
+	/** True once this run returned; work that outlives it belongs to nobody still running. */
+	readonly finished: boolean;
 }
 
-const executingToolCall = new AsyncLocalStorage<ToolExecutionScope>();
-/** Stands in for an execution bound to no agent, which answers to whoever asks. */
-const UNOWNED_EXECUTIONS = {};
-/** Live runs per owner, counted: a retry re-runs the same call id, and a call can be re-entered. */
+interface MutableToolExecution extends ToolExecution {
+	finished: boolean;
+	/** The execution this one runs inside, when a tool invoked another. */
+	readonly parent: MutableToolExecution | undefined;
+}
+
+const executingToolCall = new AsyncLocalStorage<MutableToolExecution>();
+/** Live runs per owner, counted: a retry re-runs one id, and two runs of one id can overlap. */
 const liveExecutions = new WeakMap<object, Map<string, number>>();
 
 /**
- * Run one execution of a tool call with the call and its owner on the async context, so work the
- * tool starts — however deep, and across awaits — is attributable to the call it belongs to
- * without the tool passing the id down by hand. Work started outside any `execute` (a host's own
- * background handler, a dialog raised by the surface) sees nothing, and work that outlives the
- * execution sees a scope marked finished rather than a live call.
+ * Run one execution of a tool call with that execution on the async context, so work the tool
+ * starts — however deep, and across awaits — is attributable to the call it belongs to without the
+ * tool passing anything down by hand. Work started outside any `execute` (a host's own background
+ * handler, a dialog raised by the surface) sees nothing, and work that outlives the execution sees
+ * it marked finished rather than a live call.
  *
- * Identity is per execution, not per id: an interrupted call that `retry` runs again is a new
- * execution of the same id, and the earlier one being over says nothing about this one. An
- * executor that belongs to no agent (a bridge built on its own) binds an unowned execution, which
- * answers to whoever asks; a loop that names its owner answers only to that owner, so two agents
- * holding the same call id at once are never confused for each other.
+ * Identity is the execution, not the id: an interrupted call that `retry` runs again is a new
+ * execution of the same id, and the earlier one being over says nothing about this one. Two agents
+ * can hold one id at once, so an execution answers only to the agent running it; an executor that
+ * belongs to no agent (a bridge built on its own) binds an unowned one, which no agent claims —
+ * an id alone is not evidence that one agent's dialog is another's call.
  */
 export function runInToolCall<T>(toolCallId: string, run: () => Promise<T>): Promise<T>;
 export function runInToolCall<T>(owner: object | undefined, toolCallId: string, run: () => Promise<T>): Promise<T>;
@@ -41,47 +50,68 @@ export async function runInToolCall<T>(
 	const owner = unowned ? undefined : (ownerOrToolCallId as object | undefined);
 	const toolCallId = unowned ? (ownerOrToolCallId as string) : (toolCallIdOrRun as string);
 	const run = unowned ? toolCallIdOrRun : maybeRun!;
-	const scope: ToolExecutionScope = { owner, toolCallId, finished: false };
-	const key = owner ?? UNOWNED_EXECUTIONS;
-	let live = liveExecutions.get(key);
-	if (!live) {
-		live = new Map();
-		liveExecutions.set(key, live);
+	const execution: MutableToolExecution = {
+		owner,
+		toolCallId,
+		finished: false,
+		parent: executingToolCall.getStore(),
+	};
+	const live = owner ? (liveExecutions.get(owner) ?? new Map<string, number>()) : undefined;
+	if (owner && live) {
+		liveExecutions.set(owner, live);
+		live.set(toolCallId, (live.get(toolCallId) ?? 0) + 1);
 	}
-	live.set(toolCallId, (live.get(toolCallId) ?? 0) + 1);
 	try {
-		return await executingToolCall.run(scope, run);
+		return await executingToolCall.run(execution, run);
 	} finally {
-		scope.finished = true;
-		const remaining = (live.get(toolCallId) ?? 1) - 1;
-		if (remaining > 0) live.set(toolCallId, remaining);
-		else live.delete(toolCallId);
+		execution.finished = true;
+		if (live) {
+			const remaining = (live.get(toolCallId) ?? 1) - 1;
+			if (remaining > 0) live.set(toolCallId, remaining);
+			else live.delete(toolCallId);
+		}
 	}
 }
 
 /**
- * The tool call whose execution the current async context belongs to, or undefined: outside any
- * execution, inside one that has finished, or — when `owner` is given — inside one belonging to
- * another agent sharing this process. Asking without an owner reports whatever is executing here,
- * which is what an observer wants and what a caller with no agent of its own has.
+ * The execution the current async context belongs to, or undefined: outside any execution, inside
+ * one that has finished, or inside one `owner` is not running — another agent's call of the same
+ * id, or an executor bound to no agent, neither of which is this agent's to answer for. Asking
+ * without an owner reports whatever is executing here, which is what an observer wants.
  */
+export function currentToolExecution(owner?: object): ToolExecution | undefined {
+	const execution = executingToolCall.getStore();
+	if (!execution || execution.finished) return undefined;
+	if (owner !== undefined && execution.owner !== owner) return undefined;
+	return execution;
+}
+
+/** The call {@link currentToolExecution} belongs to, for a caller that needs only its id. */
 export function executingToolCallId(owner?: object): string | undefined {
-	const scope = executingToolCall.getStore();
-	if (!scope || scope.finished) return undefined;
-	if (owner !== undefined && scope.owner !== undefined && scope.owner !== owner) return undefined;
-	return scope.toolCallId;
+	return currentToolExecution(owner)?.toolCallId;
 }
 
 /**
- * Whether `toolCallId` is being executed right now for `owner`, or by an executor bound to no
- * agent. For a caller holding an id it did not receive from the call itself: a `ui` handed to a
- * call keeps that id after the call is over, and the id alone cannot say whether it is still live.
+ * The run of `toolCallId` this work is inside: the matching execution on the current chain, which
+ * is this work's own call or one that invoked it. A holder with an id and no chain to match it
+ * against — a `ui` kept past its call, a callback that lost the context — resolves nothing, and an
+ * id another agent or another run of the same call holds is never reachable from here.
+ */
+export function toolExecutionOnChain(owner: object | undefined, toolCallId: string): ToolExecution | undefined {
+	for (let scope = executingToolCall.getStore(); scope; scope = scope.parent) {
+		if (scope.finished || scope.toolCallId !== toolCallId) continue;
+		if (owner !== undefined && scope.owner !== owner) continue;
+		return scope;
+	}
+	return undefined;
+}
+
+/**
+ * Whether `owner` is running `toolCallId` anywhere right now. An observation, not an identity:
+ * what a dialog belongs to is the execution that raised it, never an id another run can reuse.
  */
 export function isExecutingToolCall(owner: object, toolCallId: string): boolean {
-	return (
-		(liveExecutions.get(owner)?.get(toolCallId) ?? 0) > 0 ||
-		(liveExecutions.get(UNOWNED_EXECUTIONS)?.get(toolCallId) ?? 0) > 0
-	);
+	return (liveExecutions.get(owner)?.get(toolCallId) ?? 0) > 0;
 }
 
 /**

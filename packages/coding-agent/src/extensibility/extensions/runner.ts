@@ -10,6 +10,7 @@ import {
 	type AgentToolUpdateCallback,
 	isNonBlankContext,
 	joinAdditionalContext,
+	type ToolExecution,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -1046,9 +1047,11 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * The `ui` a tool call's own context gets: dialogs it raises name that call, so the wait each
-	 * one opens says whose it is and a surface tracking the call sees its own dialog settle. A
-	 * context built for no particular call keeps the session-wide wrapper, which names none.
+	 * The `ui` a tool call's own context gets: dialogs it raises name the run of that call they are
+	 * raised inside, so the wait each one opens says whose it is and a surface tracking the call
+	 * sees its own dialog settle — while a holder that keeps the `ui` past the call, where no such
+	 * run is on the chain, names nothing with it. A context built for no call keeps the
+	 * session-wide wrapper, which names none.
 	 */
 	#uiForCall(toolCallId: string | undefined): ExtensionUIContext {
 		const raw = this.#rawUiContext;

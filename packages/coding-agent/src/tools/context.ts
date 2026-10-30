@@ -35,7 +35,7 @@ export class ToolContextStore {
 	#uiContext: ExtensionUIContext | undefined;
 	/** The host's own `ui`, before tracking: a per-call wrapper is built from this. */
 	#rawUiContext: ExtensionUIContext | undefined;
-	/** The last per-call wrapper handed out, so repeated calls for one tool call share it. */
+	/** The last per-call wrapper handed out, so repeated contexts for one run share it. */
 	#callUiContext: { toolCallId: string; ui: ExtensionUIContext } | undefined;
 	#hasUI = false;
 	#toolNames: string[] = [];
@@ -60,10 +60,11 @@ export class ToolContextStore {
 	}
 
 	/**
-	 * The `ui` this call gets: dialogs it raises name the call, so the wait each one opens says
-	 * whose it is and a surface tracking that call learns when its own dialog settles rather than
-	 * when the last unrelated one does. A context built for no particular call keeps the shared
-	 * wrapper, which names none.
+	 * The `ui` this call gets: dialogs it raises name the run of this call they are raised inside,
+	 * so the wait each one opens says whose it is and a surface tracking that call learns when its
+	 * own dialog settles rather than when the last unrelated one does. A holder that keeps the
+	 * `ui` past the call, where no such run is on the chain, names nothing with it, and a context
+	 * built for no call keeps the shared wrapper, which names none.
 	 */
 	#uiFor(toolCall?: ToolCallContext): ExtensionUIContext | undefined {
 		const raw = this.#rawUiContext;
