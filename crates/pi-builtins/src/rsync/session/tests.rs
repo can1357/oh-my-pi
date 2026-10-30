@@ -966,6 +966,14 @@ fn a_query_leaves_the_callers_signal_settings_alone() {
 /// the reset loop deleted the inherited handler runs in the child
 /// instead, writes the child's own number into the record below, and the
 /// child goes on to the `execve` it cannot do — so both halves fail.
+///
+/// The storm carries a second signal, one the caller *ignores*. That is
+/// the caller's own instruction and it has to reach the utility: a child
+/// that put it back to default would die on the very delivery that proves
+/// the window was hit, and this requires that no child ever did. What it
+/// cannot reach is the case the same mistake was found in — an ignored
+/// disposition whose *read* is denied — because denying one read needs a
+/// kernel filter, which lives in this lane's harness rather than here.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
@@ -998,25 +1006,33 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	// SAFETY: nextest gives this test its own process; the disposition and
 	// the process group are both put back below. `SA_RESTART` keeps the
 	// storm from turning this process's own calls into `EINTR`.
-	let (kept, grouped) = unsafe {
+	let (kept, ignored, grouped) = unsafe {
 		let mut catching: libc::sigaction = std::mem::zeroed();
 		catching.sa_sigaction = note_whoever_runs_this as libc::sighandler_t;
 		catching.sa_flags = libc::SA_RESTART;
 		libc::sigemptyset(&raw mut catching.sa_mask);
 		let mut kept: libc::sigaction = std::mem::zeroed();
 		assert_eq!(libc::sigaction(libc::SIGUSR1, &raw const catching, &raw mut kept), 0);
+		// And one the caller *ignores*, which is its own instruction and
+		// has to reach the utility: a child that put it back to default
+		// would die on the storm's own delivery of it.
+		let ignored = libc::signal(libc::SIGUSR2, libc::SIG_IGN);
+		assert_ne!(ignored, libc::SIG_ERR);
 		let was = libc::getpgrp();
 		// Its own group, so the storm reaches this test and its children
 		// and nothing else the runner has going.
 		assert_eq!(libc::setpgid(0, 0), 0, "a group of this test's own: {}", std::io::Error::last_os_error());
-		(kept, was)
+		(kept, ignored, was)
 	};
 	let storming = std::sync::Arc::new(AtomicBool::new(true));
 	let until = std::sync::Arc::clone(&storming);
 	let storm = std::thread::spawn(move || {
 		while until.load(Ordering::Relaxed) {
 			// SAFETY: the group is this test's own, made above.
-			unsafe { libc::kill(0, libc::SIGUSR1) };
+			unsafe {
+				libc::kill(0, libc::SIGUSR2);
+				libc::kill(0, libc::SIGUSR1);
+			}
 			// A gap, because a storm with none starves this process: every
 			// delivery interrupts the query's own waiting, and the whole
 			// test made no progress in 90 seconds. A fifth of a
@@ -1029,12 +1045,17 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	let program = dir.path().join("locale-no-such-program");
 	let mut taken = None;
 	let mut last = String::new();
+	let mut died_ignoring = None;
 	for _ in 0..64 {
 		let answer = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &|_| None);
 		let crate::locale::Codeset::Unasked(why) = &answer else {
 			panic!("a program that is not there answered: {answer:?}");
 		};
 		last = why.clone();
+		if why.contains(&format!("ended on signal {}", libc::SIGUSR2)) {
+			died_ignoring = Some(why.clone());
+			break;
+		}
 		if why.contains(&format!("ended on signal {}", libc::SIGUSR1)) {
 			taken = Some(why.clone());
 			break;
@@ -1045,6 +1066,7 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 	// SAFETY: putting back what this test changed, before it can fail.
 	unsafe {
 		libc::sigaction(libc::SIGUSR1, &raw const kept, std::ptr::null_mut());
+		libc::signal(libc::SIGUSR2, ignored);
 		libc::setpgid(0, grouped);
 	}
 	let ran: Vec<i32> = fs::read(&record)
@@ -1054,6 +1076,10 @@ fn an_inherited_handler_does_not_run_in_the_child_before_exec() {
 		.collect();
 	assert!(ran.is_empty(), "the handler ran in the child before its `execve`: {ran:?}");
 	assert!(taken.is_some(), "no query took the signal before its `execve`, so nothing was proved: {last}");
+	assert!(
+		died_ignoring.is_none(),
+		"a disposition the caller ignores was not left ignored: {died_ignoring:?}"
+	);
 }
 
 /// A name is the name of locale data, whatever punctuation it carries.

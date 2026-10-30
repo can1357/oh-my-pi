@@ -1211,24 +1211,42 @@ fn start_locale_utility(
 			//
 			// * the disposition is read, and a *caught* one is put back
 			//   to default — an ignored one is left alone;
-			// * a disposition that cannot be read is set to default
-			//   anyway, which ends any handler on it without knowing what
-			//   was there;
-			// * a signal that can be neither read nor set is kept
-			//   *blocked* in the mask the utility starts with, because a
-			//   blocked signal cannot be delivered before the `execve`,
-			//   and the `execve` drops the handler;
+			// * where the read is refused, the *set* is asked for the old
+			//   disposition in the same call, which is what the read was
+			//   going to say: a handler it has just replaced stays
+			//   replaced, and an ignored disposition is put straight
+			//   back, because that one is the caller's own instruction
+			//   and `execve` carries it through. Setting default blind
+			//   instead gains nothing — `execve` resets a caught
+			//   disposition by itself — and cost a utility its ignored
+			//   `SIGPIPE`: with the read of 13 denied, it raised the
+			//   signal and died on it where it used to answer;
+			// * a signal that can be neither read nor set, or whose
+			//   ignored disposition cannot be put back, is kept *blocked*
+			//   in the mask the utility starts with, because a blocked
+			//   signal cannot be delivered before the `execve`, and the
+			//   `execve` drops the handler;
 			// * and a signal that cannot be blocked either ends the
 			//   child, because nothing is left to make it safe.
 			//
 			// The numbers the library keeps for itself — 32 and 33 on
-			// glibc 2.39, 32 to 34 on musl — reach the third step: they
-			// can be neither read nor set, and `sigaddset` will not name
-			// them, so the bit goes in directly and the mask is restored
-			// through the kernel's own call, which does not take them
-			// back out as `pthread_sigmask` does. They are then blocked
-			// in the utility, where the library never delivered them to
-			// an application anyway.
+			// glibc 2.39, 32 to 34 on musl — reach the blocking step:
+			// they can be neither read nor set, and `sigaddset` will not
+			// name them, so the bit goes in directly and the mask is
+			// restored through the kernel's own call, which does not take
+			// them back out as `pthread_sigmask` does. They are then
+			// blocked in the utility, where the library never delivered
+			// them to an application anyway.
+			//
+			// The cost of that last rung, stated rather than engineered
+			// around: a signal blocked there stays blocked in the
+			// utility, so a utility that needs that very signal
+			// delivered does not get it — measured, a stand-in that
+			// raises `SIGUSR1` to itself exits 78 when neither reading
+			// nor setting 10 is permitted. There is no fourth thing to
+			// do with a disposition that can be neither read nor set:
+			// the signal is blocked, or its handler is left alive, or
+			// the query answers nothing at all.
 			let mut starts_with = held;
 			for signal in 1..=libc::SIGRTMAX() {
 				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
@@ -1250,15 +1268,27 @@ fn start_locale_utility(
 					}
 					continue;
 				}
-				if libc::sigaction(signal, &raw const default, std::ptr::null_mut()) == 0 {
-					continue;
+				// The read was refused, so the set is asked what was
+				// there. It answers atomically: nothing of this
+				// process's runs in between.
+				let mut was = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+				if libc::sigaction(signal, &raw const default, was.as_mut_ptr()) == 0 {
+					let was = was.assume_init();
+					if was.sa_sigaction != libc::SIG_IGN
+						|| libc::sigaction(signal, &raw const was, std::ptr::null_mut()) == 0
+					{
+						continue;
+					}
 				}
 				// `sigaddset` first, and the bit itself where the library
-				// refuses the number: the first word of a signal set is
-				// the kernel's own mask, signal `n` in bit `n - 1`.
+				// refuses the number. A signal set is the kernel's own
+				// array of words, signal `n` in bit `n - 1` of it.
 				if libc::sigaddset(&raw mut starts_with, signal) != 0 {
-					let word = (&raw mut starts_with).cast::<u64>();
-					word.write_unaligned(word.read_unaligned() | 1u64 << (signal - 1));
+					let place = usize::try_from(signal - 1).unwrap_or_default();
+					let wide = 8 * size_of::<libc::c_ulong>();
+					let one: libc::c_ulong = 1;
+					let word = (&raw mut starts_with).cast::<libc::c_ulong>().add(place / wide);
+					word.write_unaligned(word.read_unaligned() | one << (place % wide));
 				}
 			}
 			// The mask this thread had, plus whatever could be neither
@@ -1288,10 +1318,12 @@ fn start_locale_utility(
 			}
 			// Every signal that had to be blocked is blocked. `SIGKILL`
 			// and `SIGSTOP` never are, and were never put in.
-			let wanted = (&raw const starts_with).cast::<u64>().read_unaligned();
-			let held_now = (&raw const on).cast::<u64>().read_unaligned();
-			if wanted & !held_now != 0 {
-				libc::_exit(CHILD_NO_SETUP);
+			let wanted = (&raw const starts_with).cast::<libc::c_ulong>();
+			let held_now = (&raw const on).cast::<libc::c_ulong>();
+			for word in 0..KERNEL_SIGSET_BYTES / size_of::<libc::c_ulong>() {
+				if wanted.add(word).read_unaligned() & !held_now.add(word).read_unaligned() != 0 {
+					libc::_exit(CHILD_NO_SETUP);
+				}
 			}
 			if libc::setpgid(0, 0) != 0 {
 				libc::_exit(CHILD_NO_SETUP);
