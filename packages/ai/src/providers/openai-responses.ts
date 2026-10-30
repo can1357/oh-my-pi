@@ -100,6 +100,7 @@ import {
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
 	disableStrictToolsForScope,
+	encodeResponsesToolName,
 	getJuiceValue,
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
@@ -1224,6 +1225,7 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: options?.serviceTier,
+						toolNamePrefix: model.compat.toolNamePrefix,
 					});
 
 					const localAbortReason = abortTracker.getLocalAbortReason();
@@ -1343,6 +1345,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: options?.serviceTier,
+										toolNamePrefix: model.compat.toolNamePrefix,
 									},
 								);
 								const resumedLocalAbort = abortTracker.getLocalAbortReason();
@@ -1799,6 +1802,7 @@ export function buildParams(
 			policy.reasoning.requiresReasoningContentForToolCalls &&
 			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
+		toolNamePrefix: model.compat.toolNamePrefix,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1890,9 +1894,18 @@ export function buildParams(
 					: context.tools.filter(
 							t =>
 								emittedNames.has(t.customWireName ?? t.name) ||
+								emittedNames.has(encodeResponsesToolName(t.name, model.compat.toolNamePrefix)) ||
 								(t.native?.type === "computer" && emittedComputer),
 						);
-			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			const mappedToolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			// Function tools are declared under their wire names, so a forced choice names the same one.
+			const toolChoice =
+				typeof mappedToolChoice === "object" && mappedToolChoice.type === "function"
+					? {
+							...mappedToolChoice,
+							name: encodeResponsesToolName(mappedToolChoice.name, model.compat.toolNamePrefix),
+						}
+					: mappedToolChoice;
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				if (
 					typeof toolChoice === "object" &&
@@ -2114,7 +2127,7 @@ export function convertTools(
 		}
 		out.push({
 			type: "function",
-			name: tool.name,
+			name: encodeResponsesToolName(tool.name, model.compat.toolNamePrefix),
 			description: tool.description || "",
 			parameters,
 			// `strict: false` and an omitted `strict` are NOT equivalent for every

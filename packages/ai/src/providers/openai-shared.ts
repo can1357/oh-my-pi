@@ -1973,6 +1973,16 @@ function adaptResponsesReplayItemsForModel(
 	return changed ? adapted : input;
 }
 
+/** Wire name of a function tool on a host with a `toolNamePrefix`; unchanged when unset. */
+export function encodeResponsesToolName(name: string, prefix: string | undefined): string {
+	return prefix ? `${prefix}${name}` : name;
+}
+
+/** Caller tool name for a returned call: one leading `prefix` is removed; other names pass through. */
+export function decodeResponsesToolName(name: string, prefix: string | undefined): string {
+	return prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+
 export interface BuildResponsesInputOptions<TApi extends Api> {
 	model: Model<TApi>;
 	context: Context;
@@ -2003,6 +2013,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
+	/** Prefix for rebuilt `function_call` names; see `ResolvedOpenAIResponsesCompat.toolNamePrefix`. */
+	toolNamePrefix?: string;
 }
 
 /**
@@ -2317,6 +2329,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
+				options.toolNamePrefix,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2490,6 +2503,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
+	toolNamePrefix?: string,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2634,7 +2648,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: functionName,
+			name: encodeResponsesToolName(functionName, toolNamePrefix),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -3213,6 +3227,8 @@ export interface ProcessResponsesStreamOptions {
 	 * response omits the `service_tier` echo. Only applied for `provider: "openai"`.
 	 */
 	requestServiceTier?: ServiceTier;
+	/** Prefix removed from returned `function_call` names; see `ResolvedOpenAIResponsesCompat.toolNamePrefix`. */
+	toolNamePrefix?: string;
 }
 
 export function computerCallMetadata(item: ResponseComputerToolCall): ComputerToolCallMetadata {
@@ -3519,7 +3535,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const block: StreamingToolCallBlock = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: item.name,
+					name: decodeResponsesToolName(item.name, options?.toolNamePrefix),
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
@@ -3743,7 +3759,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: item.name,
+					name: decodeResponsesToolName(item.name, options?.toolNamePrefix),
 					arguments: args,
 				};
 				let contentIndex: number;
