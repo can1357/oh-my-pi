@@ -439,6 +439,37 @@ it("eval refuses inactive registry tools outside discovery eligibility", async (
 	expect(session.getToolForEvalBridge(hidden.name)).toBeUndefined();
 });
 
+it.each([
+	["device", "hidden"],
+	["device", "defaultInactive"],
+	["extension MCP", "hidden"],
+	["extension MCP", "defaultInactive"],
+] as const)("eval refuses a %s tool marked %s until explicitly enabled", async (kind, restriction) => {
+	const read = makeFakeTool("read");
+	const loadMode = kind === "device" ? "discoverable" : "essential";
+	const inactive = Object.assign(makeFakeTool(kind === "device" ? "ast_grep" : "mcp__ext_inactive"), {
+		loadMode,
+		[restriction]: true,
+	});
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, inactive].map(tool => [tool.name, tool])),
+			mcpManagerToolNames: [],
+		},
+	);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+	await expect(callSessionTool(inactive.name, {}, { session: toolSession })).rejects.toThrow("disabled or excluded");
+	expect(inactive.executeCalls).toBe(0);
+	await session.setActiveToolsByName(["read", inactive.name]);
+	expect(await callSessionTool(inactive.name, {}, { session: toolSession })).toBe("ok");
+	expect(inactive.executeCalls).toBe(1);
+});
+
 it("eval admits dormant extension MCP tools without enabling them", async () => {
 	const read = makeFakeTool("read");
 	const mcp = makeFakeTool("mcp__ext_query");

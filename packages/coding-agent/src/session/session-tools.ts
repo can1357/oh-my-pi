@@ -11,7 +11,7 @@ import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
-import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
+import type { ExtensionRunner, SourceInfo, ToolDefinition, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
@@ -732,9 +732,10 @@ export class SessionTools {
 	 * Looks up an enabled or activatable tool through the direct-call ACP gate.
 	 *
 	 * Discovery admission is the existing xd:// mountable partition plus manager-
-	 * and extension-owned MCP tools, not the entire registry. Initial tool grants,
-	 * explicit removals, and plan/vibe narrowing still apply; the SDK has already
-	 * filtered unavailable built-ins and restricted-session tools at registration.
+	 * and extension-owned MCP tools, not the entire registry. Hidden/default-
+	 * inactive entries still need explicit activation. Initial tool grants,
+	 * explicit removals, and plan/vibe narrowing also apply; the SDK filters
+	 * unavailable built-ins and restricted-session tools at registration.
 	 * This lookup does not activate or mount anything, so calling from a cell does
 	 * not change the model-visible tool list, descriptions, or prompt cache prefix.
 	 * The shared bridge policy separately refuses checkpoint/rewind.
@@ -754,8 +755,11 @@ export class SessionTools {
 		return alias && this.#isEvalBridgeToolAvailable(alias) ? this.#wrapToolForAcpPermission(alias) : undefined;
 	}
 
-	#isEvalBridgeToolAvailable(tool: AgentTool): boolean {
+	#isEvalBridgeToolAvailable(tool: AgentTool & Pick<ToolDefinition, "defaultInactive">): boolean {
 		if (this.getEnabledToolNames().includes(tool.name)) return true;
+		// Match the SDK's initial activation exclusions, regardless of MCP ownership
+		// or discoverable load mode. Explicit activation above is the only opt-in.
+		if (tool.hidden === true || tool.defaultInactive === true) return false;
 		if (
 			this.#evalBridgeExcludedToolNames.has(tool.name) ||
 			this.#presentationPinnedToolNames !== undefined ||
