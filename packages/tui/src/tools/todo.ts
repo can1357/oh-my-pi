@@ -27,6 +27,31 @@ export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" |
 
 /** Operation names accepted by the todo tool and echoed in successful result details. */
 export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "block" | "unblock" | "append" | "view";
+/**
+ * The text a todo item is about, for display surfaces. Wrapped item forms
+ * (JSON-stringified object items the lenient validation entry produces) are
+ * stored verbatim; every surface that renders a task shows this unwrapped
+ * text instead of the raw JSON. Strictly key-gated: only strings that parse
+ * as JSON objects carrying a task/content/description/text field unwrap;
+ * any other text — including a literal that merely starts with `{` — is
+ * returned unchanged.
+ */
+export function unwrappedTaskText(content: string): string {
+	if (!content.startsWith("{")) return content;
+	try {
+		const parsed: unknown = JSON.parse(content);
+		if (parsed !== null && typeof parsed === "object") {
+			for (const key of ["task", "content", "description", "text"]) {
+				if (typeof (parsed as Record<string, unknown>)[key] === "string") {
+					return (parsed as Record<string, unknown>)[key] as string;
+				}
+			}
+		}
+	} catch {
+		// Not JSON — the text is the content.
+	}
+	return content;
+}
 
 /** A task displayed within a todo phase. */
 export interface TodoItem {
@@ -478,8 +503,8 @@ function checklistItem(task: TodoItem, id: string, matched = false): TspChecklis
 	const status = task.status === "pending" && matched ? "active" : CHECKLIST_STATUS[task.status];
 	const note = task.status === "blocked" && task.blocker ? forDisplay(task.blocker) : undefined;
 	return note === undefined
-		? { id, text: forDisplay(task.content), status }
-		: { id, text: forDisplay(task.content), status, note };
+		? { id, text: forDisplay(unwrappedTaskText(task.content)), status }
+		: { id, text: forDisplay(unwrappedTaskText(task.content)), status, note };
 }
 
 /**
@@ -620,7 +645,7 @@ export const todoToolRenderer = {
 			if (!label) {
 				// Sanitize only for display: a mirrored Cursor snapshot carries
 				// provider text verbatim (ANSI/C0 would rewrite the terminal).
-				label = { text: forDisplay(task.content) };
+				label = { text: forDisplay(unwrappedTaskText(task.content)) };
 				labels.set(task, label);
 			}
 			return label;

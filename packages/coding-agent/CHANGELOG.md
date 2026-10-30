@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- The `todo` tool keeps task content verbatim and makes wrapped item shapes usable end to end: object items (`{task: …}`, `{description: …}`, `{text: …}`) and their JSON-stringified forms (which the validation entry produces) are stored verbatim, displayed as their task text, and addressable by both the literal form and the unwrapped text — ambiguous matches are refused instead of merged, duplicates in unwrapped space are rejected up front, and JSON objects without a known field are rejected instead of silently stringified; flat lists and the `tasks` alias in `list` entries are accepted as one default phase; legacy persisted wrapped content stays matchable by plain text without being rewritten — instead of rendering opaque `{"task":…}` lines that every plain-text `done`/`rm` failed with `Task "…" not found` ([#16279](https://github.com/can1357/oh-my-pi/issues/16279), [#17235](https://github.com/can1357/oh-my-pi/pull/17235) by [@pperezrubio](https://github.com/pperezrubio))
 
 ### Added
 
