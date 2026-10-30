@@ -645,9 +645,10 @@ export interface SkillRediscoverySource {
  * upgrade` installed the new version in a new cache directory and deleted the old one), or the
  * registries now install its plugin elsewhere ({@link isSkillSuperseded}). The plugin-root cache
  * and the discovery file cache still name the old directory, so both are dropped first. A holder
- * that rediscovers its own skills refreshes in place, so its list, its prompt and the process
- * snapshot follow. A fixed list (a subagent given its parent's) keeps every entry whose file still
- * exists; an entry whose file is gone is re-pointed, under the name it already has, at a fresh
+ * that rediscovers its own skills refreshes its runtime list and process snapshot in place;
+ * its prompt catalog catches up through a notice until the next base rebuild. A fixed list
+ * (a subagent given its parent's) keeps every entry whose file still exists; an entry whose file
+ * is gone is re-pointed, under the name it already has, at a fresh
  * discovery's same skill of the same plugin ({@link findStaleSkillStandIn}), or dropped when there
  * is none. The holder stores the result, so the next lookup needs no new pass.
  */

@@ -2458,7 +2458,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
-			refreshSkills: () => session.refreshSkills(),
+			refreshSkills: changedSkillName => session.refreshSkills({ deferSystemPrompt: true, changedSkillName }),
 			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
