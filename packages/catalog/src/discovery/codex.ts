@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
+import { type Effort, THINKING_EFFORTS } from "../effort";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
@@ -303,6 +304,8 @@ interface ParsedCodexModelEntry {
 	priority: number;
 	/** Advertised tier ids; `undefined` when the entry has no `service_tiers` array. */
 	serviceTiers: string[] | undefined;
+	/** `default_reasoning_level` as an effort or `none`; `undefined` when absent or unknown. */
+	vendorDefaultEffort: Effort | "none" | undefined;
 }
 
 function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
@@ -343,6 +346,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		}
 	}
 
+	const defaultReasoningLevel = toNonEmptyString(payload.default_reasoning_level)?.toLowerCase();
 	return {
 		slug,
 		cyberPrograms,
@@ -355,6 +359,8 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 		serviceTiers,
+		vendorDefaultEffort:
+			defaultReasoningLevel === "none" ? "none" : THINKING_EFFORTS.find(effort => effort === defaultReasoningLevel),
 	};
 }
 
@@ -419,6 +425,7 @@ function buildNormalizedCodexModel(
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
 			...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
+			...(parsed.vendorDefaultEffort !== undefined ? { vendorDefaultEffort: parsed.vendorDefaultEffort } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},
 	};
