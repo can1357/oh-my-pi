@@ -376,6 +376,201 @@ fn a_descriptor_limit_with_two_to_spare_still_answers() {
 	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
 }
 
+/// A second locale under `<dir>/<name>`, in `codeset`. `None` on a host
+/// without locale sources.
+#[cfg(target_os = "linux")]
+fn generated_locale(dir: &Path, name: &str, codeset: &str) -> Option<PathBuf> {
+	fs::create_dir_all(dir.join(name)).unwrap();
+	let built = Command::new("localedef").args(["-i", "en_US", "-f", codeset]).arg(dir.join(name)).output();
+	built.is_ok_and(|built| built.status.success()).then(|| dir.to_path_buf())
+}
+
+/// A directory name is not a list element: a working directory holding a
+/// `:` has no spelling inside `LOCPATH`, so nothing may try to give it one.
+///
+/// Measured from a cwd named `with:colon` holding a `locales` symlink: the
+/// reference reports `ISO-8859-1` for `LOCPATH=locales`, for `LOCPATH=.`,
+/// and for the mixed list, and rsync 3.5.1 prints `ünï.txt` in each.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_colon_in_the_working_directory_is_not_a_list_separator() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let Some(utf8) = generated_locale(&dir.path().join("utf8"), SHELL_ONLY_LOCALE, "UTF-8") else { return };
+	let cwd = dir.path().join("with:colon");
+	fs::create_dir_all(&cwd).unwrap();
+	std::os::unix::fs::symlink(&locales, cwd.join("locales")).unwrap();
+	std::os::unix::fs::symlink(locales.join(SHELL_ONLY_LOCALE), cwd.join(SHELL_ONLY_LOCALE)).unwrap();
+	let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+	let child = host.child_env();
+	// The last one puts a UTF-8 locale of the same name second in the list,
+	// so a lookup that loses the relative entry answers `UTF-8` rather than
+	// merely falling back to C.
+	for path in ["locales".to_owned(), ".".to_owned(), format!("locales:{}", utf8.display())] {
+		let env = |key: &str| (key == "LOCPATH").then(|| path.clone());
+		let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+		assert!(
+			matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"),
+			"{path}: {answer:?}"
+		);
+	}
+}
+
+/// A working directory the shell is in but that no longer exists keeps a
+/// parent in the kernel that its vanished pathname does not: the reference
+/// resolves `../locales` from it and this cannot. An answer from somewhere
+/// else is not that answer, so the lookup says so instead of giving one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vanished_working_directory_is_reported_rather_than_guessed() {
+	let dir = tempfile::tempdir().unwrap();
+	if shell_only_locale(dir.path()).is_none() {
+		return;
+	}
+	let cwd = dir.path().join("vanished");
+	fs::create_dir_all(&cwd).unwrap();
+	let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+	let child = host.child_env();
+	fs::remove_dir(&cwd).unwrap();
+	let env = |key: &str| (key == "LOCPATH").then(|| "../locales".to_owned());
+	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+	assert!(matches!(&answer, crate::locale::Codeset::Unasked(_)), "{answer:?}");
+}
+
+/// A utility that does not answer whole, or does not finish, has not
+/// answered. A byte cap bounds what is stored, not what it means.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_locale_utility_that_misbehaves_is_reported() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	let dir = tempfile::tempdir().unwrap();
+	let env = |_: &str| None;
+	let cases: [(&str, &str, &str); 7] = [
+		("plain", "printf 'ISO-8859-1\\n'\n", ""),
+		("status", "printf 'UTF-8\\n'\nexit 7\n", "exited with status 7"),
+		("signal", "printf 'UTF-8\\n'\nkill -9 $$\n", "ended on signal 9"),
+		("diagnostic-first", "printf 'warning: alien\\nUTF-8\\n'\n", "where one codeset was due"),
+		("nul", "printf 'UTF-8\\000junk\\n'\n", "where one codeset was due"),
+		("flood", "dd if=/dev/zero bs=1024 count=4096 2>/dev/null | tr '\\\\0' 'X'\n", "wrote more than"),
+		("closes-and-lingers", "printf 'UTF-8\\n'\nexec 1>&-\nsleep 30\n", "was ended before it finished"),
+	];
+	for (name, body, expected) in cases {
+		let program = dir.path().join(name);
+		fs::write(&program, format!("#!/bin/sh\n{body}")).unwrap();
+		fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+		let answer = crate::locale::codeset_from_utility_for_test(&program, "C.UTF-8", &env);
+		match (&answer, expected) {
+			(crate::locale::Codeset::Loaded(codeset), "") => assert_eq!(codeset, "ISO-8859-1", "{name}"),
+			(crate::locale::Codeset::Unasked(why), _) if !expected.is_empty() => {
+				assert!(why.contains(expected), "{name}: {why}");
+			},
+			_ => panic!("{name}: {answer:?}"),
+		}
+	}
+}
+
+/// With this process's own standard output and error closed, a fresh pipe
+/// takes descriptors 1 and 2, and the spawn's file actions must not open
+/// `/dev/null` over the one the answer is written to.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_answer_pipe_survives_closed_standard_descriptors() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let shell_path = locales.to_str().unwrap().to_owned();
+	let env = move |key: &str| (key == "LOCPATH").then(|| shell_path.clone());
+	// SAFETY: the two descriptors are put back below, before anything else in
+	// this process writes to them; nextest gives this test its own process.
+	let (kept_out, kept_err) = unsafe { (libc::dup(1), libc::dup(2)) };
+	// SAFETY: as above.
+	unsafe {
+		libc::close(1);
+		libc::close(2);
+	}
+	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, None);
+	// SAFETY: as above; both saved descriptors are this test's own.
+	unsafe {
+		libc::dup2(kept_out, 1);
+		libc::dup2(kept_err, 2);
+		libc::close(kept_out);
+		libc::close(kept_err);
+	}
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
+}
+
+/// `newlocale` splits a composite name per category and `setlocale(LC_CTYPE,
+/// "")` does not, so the reference reads one as the C locale (measured:
+/// `ANSI_X3.4-1968`). The answer may not turn on which of the two paths ran.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_composite_locale_name_reads_as_the_c_locale() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let composite = format!("LC_CTYPE={SHELL_ONLY_LOCALE};LC_TIME=C");
+	let shell_path = locales.to_str().unwrap().to_owned();
+	// Once with the shell's search path differing from this process's, which
+	// is the spawning path, and once with neither set, which is not.
+	for path in [Some(shell_path), None] {
+		let env = |key: &str| (key == "LOCPATH").then(|| path.clone()).flatten();
+		let answer = crate::locale::loaded_codeset(&composite, &env, None);
+		assert!(matches!(&answer, crate::locale::Codeset::Unloadable), "{answer:?}");
+	}
+}
+
+/// A long list of relative entries is passed to the child as the shell wrote
+/// it, so nothing it is joined with can push it past what `execve` takes.
+#[cfg(target_os = "linux")]
+#[test]
+fn two_thousand_relative_entries_still_resolve() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let cwd = dir.path().join("a-working-directory-with-a-name-of-its-own");
+	fs::create_dir_all(&cwd).unwrap();
+	std::os::unix::fs::symlink(locales.join(SHELL_ONLY_LOCALE), cwd.join(SHELL_ONLY_LOCALE)).unwrap();
+	let (host, _) = crate::host::Host::for_test("rsync", "", &cwd);
+	let child = host.child_env();
+	let path = vec!["."; 2048].join(":");
+	let env = |key: &str| (key == "LOCPATH").then(|| path.clone());
+	let answer = crate::locale::loaded_codeset(SHELL_ONLY_LOCALE, &env, Some(&child));
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if codeset == "ISO-8859-1"), "{answer:?}");
+}
+
+/// The shell's conversion configuration decides whether a name's codeset is
+/// an alias of the locale's own, and so whether libc loads it at all
+/// (`findlocale.c`, `__gconv_compare_alias`). This asserts against the
+/// reference under the same environment, so it holds whatever that glibc
+/// makes of the alias.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_shells_conversion_configuration_reaches_the_lookup() {
+	let dir = tempfile::tempdir().unwrap();
+	let Some(locales) = shell_only_locale(dir.path()) else { return };
+	let gconv = dir.path().join("gconv");
+	fs::create_dir_all(&gconv).unwrap();
+	fs::write(gconv.join("gconv-modules"), "alias OMP_RSYNC_ALIAS// ISO-8859-1//\n").unwrap();
+	let aliased = format!("{SHELL_ONLY_LOCALE}.OMP_RSYNC_ALIAS");
+	std::os::unix::fs::symlink(locales.join(SHELL_ONLY_LOCALE), locales.join(&aliased)).unwrap();
+	let reference = Command::new("/usr/bin/locale")
+		.arg("charmap")
+		.env_clear()
+		.env("LC_CTYPE", &aliased)
+		.env("LOCPATH", &locales)
+		.env("GCONV_PATH", &gconv)
+		.output();
+	let Ok(reference) = reference else { return };
+	let reference = String::from_utf8_lossy(&reference.stdout).trim().to_owned();
+	let locales = locales.to_str().unwrap().to_owned();
+	let gconv = gconv.to_str().unwrap().to_owned();
+	let env = |key: &str| match key {
+		"LOCPATH" => Some(locales.clone()),
+		"GCONV_PATH" => Some(gconv.clone()),
+		_ => None,
+	};
+	let answer = crate::locale::loaded_codeset(&aliased, &env, None);
+	assert!(matches!(&answer, crate::locale::Codeset::Loaded(codeset) if *codeset == reference), "{answer:?} vs {reference}");
+}
+
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
 #[test]
 fn too_old_protocol_is_a_mismatch() {
