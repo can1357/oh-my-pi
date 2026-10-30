@@ -167,6 +167,13 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
+/**
+ * How long a session being disposed keeps its isolation lease once disposal
+ * has started. Long enough for a shutdown writer to finish, short enough that
+ * a disposal that never finishes cannot hold a workspace for ever.
+ */
+const SESSION_LEASE_DISPOSE_GRACE_MS = 30_000;
+
 import { leaseIsolationWorkspace } from "./task/isolation-lease";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -4486,7 +4493,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// longer a user, and a disposal that stalls must not hold a workspace
 		// and a kernel behind it.
 		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd(), { agentId: resolvedAgentId });
-		beginDisposeCallbacks.add(() => void workspaceLease());
+		let workspaceLeaseTimer: NodeJS.Timeout | undefined;
+		let workspaceLeaseDropped = false;
+		const dropWorkspaceLease = (): void => {
+			if (workspaceLeaseDropped) return;
+			workspaceLeaseDropped = true;
+			clearTimeout(workspaceLeaseTimer);
+			void workspaceLease().catch(error => {
+				logger.warn("isolation workspace lease could not be dropped", { error: String(error) });
+			});
+		};
+		// Held until disposal *finishes*: a shutdown writer still saving into
+		// the workspace is a user of it, and dropping the lease when disposal
+		// merely starts lets the owner delete the directory under that write.
+		disposeCallbacks.add(dropWorkspaceLease);
+		// Bounded from the moment disposal starts, because a disposal that
+		// never finishes would otherwise hold the sandbox — and the kernel
+		// behind it — for the life of the host.
+		beginDisposeCallbacks.add(() => {
+			workspaceLeaseTimer = setTimeout(() => {
+				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
+					id: resolvedAgentId,
+					graceMs: SESSION_LEASE_DISPOSE_GRACE_MS,
+				});
+				dropWorkspaceLease();
+			}, SESSION_LEASE_DISPOSE_GRACE_MS);
+			workspaceLeaseTimer.unref?.();
+		});
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(

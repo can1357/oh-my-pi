@@ -11,6 +11,7 @@ import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowfla
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
+import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
@@ -757,6 +758,31 @@ export async function ensureIsolation(
 }
 
 /**
+ * Wait for a backend stop this teardown had to leave running, then put the
+ * slot back into service: the directory goes, the retiring marker with it, and
+ * the lock — if this teardown had to keep holding it because that marker could
+ * not be written — goes back. A slot refused for ever because one stop was
+ * slow is a leak of its own.
+ */
+async function settleAbandonedStop(
+	stop: Promise<unknown>,
+	teardownBase: string,
+	heldLock: { release: () => void } | undefined,
+): Promise<void> {
+	try {
+		await stop;
+		await fs.rm(teardownBase, { recursive: true, force: true });
+	} catch (error) {
+		logger.warn("abandoned isolation stop did not settle cleanly; leaving the sandbox for reclamation", {
+			mergedDir: teardownBase,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	} finally {
+		heldLock?.release();
+	}
+}
+
+/**
  * Tear down a handle returned by {@link ensureIsolation}.
  *
  * The workspace path is derived from the task id, so the same path is handed
@@ -852,16 +878,33 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 					scheduler.wait(SANDBOX_STOP_MAX_WAIT_MS).then(() => false),
 				]));
 				if (abandoned) {
-					logger.warn("isolation backend stop outran its teardown bound; releasing the sandbox lock", {
+					logger.warn("isolation backend stop outran its teardown bound", {
 						backend: handle.backend,
 						mergedDir: teardownMerged,
 					});
 					// The stop is still running on this exact path and can still
-					// delete it. Saying so is what keeps a materialisation from
-					// taking the slot and handing its successor to that removal;
-					// the marker names this process, so reclamation can retire the
-					// directory once it is gone.
-					await markIsolationRetiring(teardownBase).catch(() => undefined);
+					// delete it, so nothing may take the slot until it settles.
+					// The marker is what says so; when it cannot be written the
+					// lock stays held instead — a slot nobody can take is the
+					// same answer, and releasing it on a failed write is how a
+					// successor's data ends up deleted by that stop.
+					const marked = await markIsolationRetiring(teardownBase).then(
+						() => true,
+						(error: unknown) => {
+							logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
+								mergedDir: teardownMerged,
+								error: error instanceof Error ? error.message : String(error),
+							});
+							return false;
+						},
+					);
+					// The stop is still this teardown's: when it ends, the slot
+					// goes back into service rather than staying refused for the
+					// life of the owner.
+					trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
+						id: path.basename(teardownBase),
+						resource: "isolation",
+					});
 				}
 			} else {
 				await stop;
