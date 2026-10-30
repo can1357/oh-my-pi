@@ -451,6 +451,74 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 }
 
 /**
+ * Every name the sweep would treat as a session, with what stands at it.
+ *
+ * Holding a lease for each session this run collected says nothing about a
+ * session that did not exist when it collected them. `SessionManager.forkFrom`
+ * creates one with a journal that carries the parent's blob references, and
+ * a manager whose session was collected moves to a sibling by design — both
+ * put a live reference to a blob this run has already judged unreferenced,
+ * with no symlink and nothing hostile involved. The same is true of
+ * artifacts: `session-manager.ts:178-200` copies a child's `.jsonl` into the
+ * tree without claiming that child's lease.
+ *
+ * There is no door to hold here. What there is, is a cheap way to notice
+ * that the room changed: take this twice, once when the sessions are read
+ * and once when the candidate set is final, and refuse the whole phase if
+ * anything appeared, vanished or moved. One extra listing, right by
+ * construction rather than by enumerating the writers, and no lock that
+ * would stop a session being created.
+ */
+async function sessionTreeCensus(
+	sessionRoots: string[],
+	agentDir: string,
+): Promise<{ entries?: Map<string, string>; unresolved?: string }> {
+	try {
+		const names = new Set<string>();
+		for (const root of sessionRoots) {
+			for (const file of [
+				...(await collectJsonlFiles(root)),
+				...(await collectCompressedJsonlFiles(root)),
+				...(await collectBackupJsonlFiles(root)),
+			]) {
+				names.add(file);
+			}
+		}
+		for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(agentDir))) names.add(file);
+		for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(agentDir))) names.add(file);
+		const entries = new Map<string, string>();
+		for (const name of [...names].sort()) {
+			const standing = await fs.lstat(name).catch(() => undefined);
+			// `lstat`, so a name that is a link is described as a link, and
+			// size and modification time, so an append to a collected
+			// session counts as a change even though its identity has not.
+			entries.set(
+				name,
+				standing
+					? `${standing.dev}:${standing.ino}:${standing.size}:${standing.mtimeMs}:${standing.isSymbolicLink()}`
+					: "absent",
+			);
+		}
+		return { entries };
+	} catch (error) {
+		return { unresolved: `the sessions tree could not be listed: ${errorMessage(error)}` };
+	}
+}
+
+/** The first way `after` differs from `before`, or undefined when it does not. */
+function censusChange(before: Map<string, string>, after: Map<string, string>): string | undefined {
+	for (const [name, standing] of after) {
+		const was = before.get(name);
+		if (was === undefined) return `${name} appeared while the sweep was deciding`;
+		if (was !== standing) return `${name} changed while the sweep was deciding`;
+	}
+	for (const name of before.keys()) {
+		if (!after.has(name)) return `${name} went while the sweep was deciding`;
+	}
+	return undefined;
+}
+
+/**
  * Blob hashes every session file below these roots refers to, read through
  * descriptors this run holds.
  *
@@ -637,14 +705,19 @@ async function collectRegisteredSessionPaths(registryDir: string): Promise<strin
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const files = new Map<string, string>();
+	// Deduplicated as text and no further. A map keyed by the
+	// symlink-resolving comparison let two markers that name one physical
+	// file through different routes collapse to one entry, and the route
+	// that would have been refused went with the entry that lost — the same
+	// defect as the merge of sources, one level in. Two names become one
+	// only after they are opened and found to be one file.
+	const files = new Set<string>();
 	for (const entry of entries) {
 		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
 		if (!recorded) continue;
-		const sessionFile = path.resolve(recorded);
-		files.set(normalizePathForComparison(sessionFile), sessionFile);
+		files.add(path.resolve(recorded));
 	}
-	return [...files.values()];
+	return [...files];
 }
 
 /**
@@ -661,17 +734,17 @@ async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<str
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const files = new Map<string, string>();
+	// As above: names collapse here only when they are the same text.
+	const files = new Set<string>();
 	for (const entry of entries) {
 		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
 		const lines = text.split("\n");
 		const breadcrumbCwd = lines[0]?.trim();
 		const recordedSessionFile = lines[1]?.trim();
 		if (!breadcrumbCwd || !recordedSessionFile) continue;
-		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
-		files.set(normalizePathForComparison(sessionFile), sessionFile);
+		files.add(path.resolve(breadcrumbCwd, recordedSessionFile));
 	}
-	return [...files.values()];
+	return [...files];
 }
 
 async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
@@ -805,6 +878,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 		exactSessionFiles.push(file);
 	}
 	exactSessionFiles.push(...(await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))));
+	const before = await sessionTreeCensus(defaultRoots, options.agentDir);
 	const referenced = await collectReferencedBlobHashes(defaultRoots, exactSessionFiles, blobDir);
 	// Every session read above is still held. The decision about which blobs
 	// are unreferenced and the deletions that act on it happen inside that
@@ -833,6 +907,21 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 			for (const reason of referenced.unresolved) {
 				result.errors.push(`${reason}; no blob was deleted in this run`);
 			}
+			return result;
+		}
+		// The candidate set is final and nothing has been removed yet, so this
+		// is the moment to ask whether the room changed. A session that did
+		// not exist when the leases were taken cannot be held by one, and
+		// `forkFrom` gives a new session the parent's references while a
+		// manager that finds its own session collected moves to a sibling —
+		// ordinary omp behaviour, no symlink, nothing hostile. Artifacts go
+		// the same way: `session-manager.ts:178-200` copies a child's
+		// transcript into the tree without claiming that child's lease.
+		const after = await sessionTreeCensus(defaultRoots, options.agentDir);
+		const change = before.entries && after.entries ? censusChange(before.entries, after.entries) : undefined;
+		const unlisted = before.unresolved ?? after.unresolved;
+		if (unlisted || change) {
+			result.errors.push(`${unlisted ?? change}; no blob was deleted in this run`);
 			return result;
 		}
 
