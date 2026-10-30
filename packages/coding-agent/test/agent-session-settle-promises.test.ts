@@ -814,4 +814,141 @@ describe("AgentSession settles what it promised", () => {
 		expect(snapshotsAtTerminal[0]).toContain("BATCH_FIRST_ASIDE");
 		expect(snapshotsAtTerminal[0]).toContain("BATCH_SECOND_ASIDE");
 	}, 20_000);
+
+	it("never starts a carried IRC wake once disposal has completed", async () => {
+		const { mock } = await startPooledRunWithStrandedAside();
+		const rebuildEntered = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		let armed = false;
+		const original = AgentSession.prototype.refreshBaseSystemPrompt;
+		const rebuildSpy = spyOn(AgentSession.prototype, "refreshBaseSystemPrompt").mockImplementation(async function (
+			this: AgentSession,
+			commitIf?: () => boolean,
+		) {
+			if (armed) {
+				rebuildEntered.resolve();
+				await releaseRebuild.promise;
+			}
+			return original.call(this, commitIf);
+		});
+		const starts: string[] = [];
+		const offAgent = session?.agent.subscribe(async (event: AgentEvent) => {
+			if (event.type === "agent_start") starts.push("agent_start");
+		});
+		let transition: Promise<void> | undefined;
+		try {
+			armed = true;
+			// The wake joins this yield transition and parks there. The rebuild callback is
+			// host-supplied, so the transition can outlast the whole session.
+			transition = session?.setWorkPoolYieldItems([]);
+			await withTimeout(rebuildEntered.promise, 5_000, "yield rebuild never entered");
+			await session?.deliverIrcMessage({
+				id: "late-pool-carrier",
+				from: "peer",
+				to: "recipient",
+				body: "LATE_POOL_CARRIER",
+				ts: Date.now(),
+			});
+			await withTimeout(session?.dispose({ drainTimeoutMs: 100 }) ?? Promise.resolve(), 5_000, "dispose hung");
+			const callsAtDispose = mock.calls.length;
+
+			releaseRebuild.resolve();
+			await transition;
+			for (let i = 0; i < 5; i++) await setImmediate();
+
+			// A disposed session starts no turn, however long its transition took.
+			expect(mock.calls.length).toBe(callsAtDispose);
+			expect(starts).toHaveLength(0);
+		} finally {
+			releaseRebuild.resolve();
+			await transition?.catch(() => {});
+			offAgent?.();
+			rebuildSpy.mockRestore();
+		}
+	}, 20_000);
+
+	it("waits for the promised continuation to unwind before closing the run at disposal", async () => {
+		const { settles } = await startPooledRunWithStrandedAside();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let atTerminal: { agentStreaming: boolean; sessionStreaming: boolean } | undefined;
+		const unhook = session?.agent.addBeforeModelCallHook(async () => {
+			entered.resolve();
+			await release.promise;
+		});
+		const unsubscribe = session?.subscribe(event => {
+			if (event.type === "agent_end" && event.isTerminal !== false && !atTerminal) {
+				atTerminal = {
+					agentStreaming: session?.agent.state.isStreaming === true,
+					sessionStreaming: session?.isStreaming === true,
+				};
+			}
+		});
+		let disposal: Promise<void> | undefined;
+		try {
+			await session?.setWorkPoolYieldItems([]);
+			await withTimeout(entered.promise, 5_000, "promised continuation never started");
+
+			disposal = session?.dispose();
+			for (let i = 0; i < 5; i++) await setImmediate();
+			// The continuation IS the promised turn: closing the run while it executes publishes an
+			// end that the work still unwinding behind it contradicts.
+			expect(atTerminal).toBeUndefined();
+
+			release.resolve();
+			await disposal;
+			expect(atTerminal).toEqual({ agentStreaming: false, sessionStreaming: false });
+			expect(settles).toEqual([false, true]);
+		} finally {
+			release.resolve();
+			unhook?.();
+			await disposal;
+			unsubscribe?.();
+		}
+	}, 20_000);
+
+	it("keeps the wake half of a split batch counted while its fold emits", async () => {
+		const { settles } = await startPooledRunWithStrandedAside(["BATCH_FOLD"]);
+		await session?.deliverIrcMessage({
+			id: "mixed-wake",
+			from: "peer",
+			to: "recipient",
+			body: "MIXED_WAKE_RECORD",
+			ts: Date.now(),
+		});
+		await session?.waitForIdle();
+
+		const releaseHold = session?.holdIrcWakes();
+		const trace: string[] = [];
+		const wakePresentAtTerminal: boolean[] = [];
+		const unsubscribe = session?.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") {
+				if (event.message.content === "BATCH_FOLD") {
+					trace.push("fold");
+					// Reentry from inside the fold, while the wake half sits in a local array.
+					releaseHold?.();
+				} else if (JSON.stringify(event.message).includes("MIXED_WAKE_RECORD")) {
+					trace.push("wake-record");
+				}
+			}
+			if (event.type === "agent_end" && event.isTerminal !== false) {
+				trace.push("terminal");
+				wakePresentAtTerminal.push(JSON.stringify(session?.messages).includes("MIXED_WAKE_RECORD"));
+			}
+		});
+		try {
+			session?.suppressAutoResumeUntilPrompt();
+			await session?.setWorkPoolYieldItems([]);
+			await session?.waitForIdle();
+		} finally {
+			releaseHold?.();
+			unsubscribe?.();
+		}
+
+		// The wake record is drained from the queue by the same split that produced the fold, so
+		// the run cannot close before it reaches the transcript.
+		expect(trace.indexOf("terminal")).toBeGreaterThan(trace.indexOf("wake-record"));
+		expect(wakePresentAtTerminal).toEqual([true]);
+		expect(settles).toEqual([false, true]);
+	}, 20_000);
 });

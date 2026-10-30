@@ -1531,10 +1531,20 @@ export class AgentSession implements SettingsScope {
 				if (record.role === "custom" && record.customType === "irc:incoming") wake.push(record);
 				else fold.push(record);
 			}
-			this.#recordWithoutTurn(fold);
-			// A wake turn settles the downgraded end itself; a pure fold leaves no turn to do it.
-			if (wake.length > 0) this.#wakeForIrc(wake);
-			else this.#settleOwedAgentEnd();
+			// The split takes the whole batch out of the queue, but only `fold` is accounted by
+			// #recordWithoutTurn. While that fold emits, `wake` sits in this local array: out of the
+			// queue, owned by no carrier, and its subscribers can reach settlement. Count it here
+			// until #wakeForIrc takes it over, or the terminal `agent_end` publishes to a subscriber
+			// whose transcript is missing a record this session accepted.
+			this.#foldingIrcRecords += wake.length;
+			try {
+				this.#recordWithoutTurn(fold);
+				// A wake turn settles the downgraded end itself; a pure fold leaves no turn to do it.
+				if (wake.length > 0) this.#wakeForIrc(wake);
+				else this.#settleOwedAgentEnd();
+			} finally {
+				this.#foldingIrcRecords -= wake.length;
+			}
 			return;
 		}
 		this.#wakeForIrc(records);
@@ -1697,6 +1707,14 @@ export class AgentSession implements SettingsScope {
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
 				// interleave here.
+				// The yield transition this wake joined can outlast the whole session: its rebuild
+				// callback is host-supplied and may be arbitrarily slow, so disposal can complete
+				// while this closure is parked. A disposed session starts no turn, and its records
+				// go with it — requeueing would hand them to a bridge nothing will ever drain.
+				if (this.#isDisposed) {
+					logger.debug("IRC wake turn dropped: session disposed while its yield transition settled");
+					return;
+				}
 				if (this.#workPoolYieldItems.length > 0) {
 					// A pooled turn owns this worker (installed, running, or
 					// dispatch-imminent): park wake-intended records where pooled
@@ -6511,12 +6529,37 @@ export class AgentSession implements SettingsScope {
 		this.#maintenance.cancelSpeculation();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
+		// Disposal owes two different things to the two kinds of holder. Work that is already
+		// running IS the promised continuation: its own `agent_end` keeps the promise, so wait
+		// (bounded) for it to unwind while the agent subscription and the subscribers are both
+		// still attached. Only a record that never started a turn has no continuation coming, and
+		// that is what the forced settle below publishes. The wait costs nothing when nothing is
+		// owed, and `agent.abort()` above has already cancelled the run it waits for.
+		let activeRunAbandoned = false;
+		if (this.#agentEndOwedTerminal && this.isStreaming) {
+			try {
+				await withTimeout(
+					(async () => {
+						await this.agent.waitForIdle();
+						// `waitForIdle` resolves with the loop, but its `agent_end` is dispatched
+						// fire-and-forget: the handler that publishes that end is what this waits for.
+						await this.#drainInFlightEventHandlers();
+					})(),
+					options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
+					"Timed out waiting for the promised continuation to settle during dispose",
+				);
+			} catch (error) {
+				// A run that outlasts this deadline is abandoned, not awaited again below: one
+				// stuck turn must not cost disposal two full drain windows.
+				activeRunAbandoned = true;
+				logger.warn("Promised continuation still running at dispose deadline", { error: String(error) });
+			}
+		}
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
-		// Last moment a published promise can still be kept: a carrier that releases after this
-		// line retries settlement into an empty listener list. Nothing it could do would start a
-		// turn on a disposed session either, so the run is over whoever still holds a record.
+		// Last moment a published promise can still be kept: a holder that releases after this line
+		// retries settlement into an empty listener list.
 		this.#settleOwedAgentEnd({ final: true });
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
@@ -6537,7 +6580,7 @@ export class AgentSession implements SettingsScope {
 		try {
 			await withTimeout(
 				(async () => {
-					await this.agent.waitForIdle();
+					if (!activeRunAbandoned) await this.agent.waitForIdle();
 					await this.#drainInFlightEventHandlers();
 				})(),
 				options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
