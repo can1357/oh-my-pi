@@ -7,15 +7,16 @@
 import { type Component, Markdown } from "../index";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { ansi, md } from "../native/describe";
-import type { NativeChild } from "../native/node";
+import { ansi, md, node, span } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
 import { errorText, noteText, truncationNotice } from "./native-view";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
 import {
-	describeJsonTree,
+	describeJsonValue,
 	formatArgsInline,
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -26,7 +27,8 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { formatExpandHint, truncateToWidth } from "../render/render-utils";
+import { clipCollapsed, flattenLine, formatExpandHint, shortenEmbeddedPaths } from "../render/render-utils";
+import { truncateToWidth, visibleWidth } from "../utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -267,7 +269,7 @@ export function renderMCPResult(
 					expanded,
 					collapsedMaxLines: 4,
 					expandedMaxLines: 12,
-					styleLine: line => truncateToWidth(styleToolOutputLine(line, theme), contentWidth),
+					styleLine: line => clipCollapsed(styleToolOutputLine(line, theme), contentWidth, expanded),
 					showExpandHintWhenUncapped: true,
 				},
 				theme,
@@ -289,8 +291,7 @@ function visibleMcpArgs(args: Record<string, unknown> | undefined): [string, unk
 const MCP_ARGS_SUMMARY_CHARS = 160;
 
 /** Native MCP head: the tool title with a one-line args summary as target. */
-function mcpHead(title: string, args: Record<string, unknown> | undefined): NativeToolHead {
-	const entries = visibleMcpArgs(args);
+function mcpHead(title: string, entries: readonly [string, unknown][]): NativeToolHead {
 	const summary =
 		entries.length > 0
 			? formatArgsInline(Object.fromEntries(entries), MCP_ARGS_SUMMARY_CHARS, { characterBudget: true })
@@ -298,25 +299,49 @@ function mcpHead(title: string, args: Record<string, unknown> | undefined): Nati
 	return { title, target: summary ? plainText(summary) : undefined, targetKind: "text" };
 }
 
-/** Native MCP call view: the head only, inline while pending. */
-export function describeMCPCall(args: Record<string, unknown>, label: string): NativeToolView {
-	return { tool: mcpHead(label, args), inline: true };
+/**
+ * Native counterpart of the ANSI card's Args tree: the complete arguments,
+ * folded under an `Args` section because the head summary clips each value.
+ * The host's `json` viewer, when it draws one, lists the arguments with their
+ * containers folded to one-line previews.
+ */
+function mcpArgsSection(entries: readonly [string, unknown][], json: boolean): NativeNode | undefined {
+	if (entries.length === 0) return undefined;
+	return node(
+		"section",
+		{ head: [span("Args", "muted")], collapsible: true, collapsed: true },
+		[describeJsonValue(Object.fromEntries(entries), { native: json })],
+		"args",
+	);
+}
+
+/** Native MCP call view: the head plus the folded args, inline while pending. */
+export function describeMCPCall(
+	args: Record<string, unknown>,
+	label: string,
+	options?: RenderResultOptions,
+): NativeToolView {
+	const entries = visibleMcpArgs(args);
+	const section = mcpArgsSection(entries, options?.json === true);
+	return { tool: mcpHead(label, entries), body: section ? [section] : undefined, inline: true };
 }
 
 const mcpResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /**
- * Native MCP result view: JSON output as a JSON tree, Markdown when the
- * preference is on, otherwise the raw text as tool output. The head's args
- * summary stands in for the ANSI card's Args tree.
+ * Native MCP result view: JSON output as the host's `json` viewer (when it
+ * draws one) or a JSON tree, Markdown when the preference is on, otherwise
+ * the raw text as tool output; the folded Args section follows, so the
+ * collapsed preview still leads with the output.
  */
 export function describeMCPResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: MCPToolDetails; isError?: boolean },
-	_options: RenderResultOptions,
+	options: RenderResultOptions,
 	args?: Record<string, unknown>,
 ): NativeToolView | undefined {
+	const json = options.json === true;
 	// Callers allocate a fresh args object per streamed delta, so identity is a sound dep.
-	return mcpResultMemo.get(result, [renderMarkdownResults, args], () => {
+	return mcpResultMemo.get(result, [renderMarkdownResults, args, json], () => {
 		const textContent = (result.content ?? [])
 			.filter(block => block.type === "text")
 			.map(block => block.text ?? "")
@@ -338,13 +363,16 @@ export function describeMCPResult(
 		}
 		if (!output) body.push(noteText("(no output)"));
 		else if (isError) body.push(errorText(output));
-		else if (isJson) body.push(describeJsonTree(parsed));
+		else if (isJson) body.push(describeJsonValue(parsed, { native: json }));
 		else if (renderMarkdownResults) body.push(md(output));
 		else body.push(ansi(output));
 		const warning = truncationNotice(result.details?.meta);
 		if (warning) body.push(warning);
+		const entries = visibleMcpArgs(args);
+		const section = mcpArgsSection(entries, json);
+		if (section) body.push(section);
 		return {
-			tool: mcpHead(title, args),
+			tool: mcpHead(title, entries),
 			tone: isError ? "error" : undefined,
 			body,
 			preview: { lines: 4 },
@@ -388,6 +416,45 @@ export interface MCPResourceContent {
 /** Supported MCP result content blocks retained in display metadata. */
 export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
 
+/** Server-reported progress of an in-flight MCP request. */
+export interface MCPProgress {
+	progress: number;
+	total?: number;
+	message?: string;
+}
+
+/**
+ * Read MCP progress fields from an untrusted record: `progress` must be a
+ * finite number; `total` is kept only when finite and `message` only when a
+ * string. Shared by the transports, the Eval bridge, and the status renderer.
+ */
+export function parseMCPProgress(value: unknown): MCPProgress | undefined {
+	if (!isRecord(value) || typeof value.progress !== "number" || !Number.isFinite(value.progress)) return undefined;
+	const progress: MCPProgress = { progress: value.progress };
+	if (typeof value.total === "number" && Number.isFinite(value.total)) progress.total = value.total;
+	if (typeof value.message === "string") progress.message = value.message;
+	return progress;
+}
+
+/**
+ * One-line display text for MCP progress, at most `maxWidth` cells: the
+ * message, with `progress/total` when the server reports a total. The bare
+ * progress value appears only when there is no message: without a total it is
+ * an opaque counter, not a percentage. Home paths in the message show as `~`,
+ * and a long message is cut before the count, so the count stays visible.
+ * Every progress display (tool card and both Eval status renderers) uses it.
+ */
+export function formatMCPProgress(progress: MCPProgress, maxWidth = 200): string {
+	const message =
+		progress.message === undefined ? "" : shortenEmbeddedPaths(flattenLine(sanitizeText(progress.message)));
+	const amount = progress.total === undefined ? `${progress.progress}` : `${progress.progress}/${progress.total}`;
+	if (!message) return truncateToWidth(amount, maxWidth);
+	if (progress.total === undefined) return truncateToWidth(message, maxWidth);
+	const suffix = ` (${amount})`;
+	const messageWidth = maxWidth - visibleWidth(suffix);
+	return messageWidth > 0 ? `${truncateToWidth(message, messageWidth)}${suffix}` : truncateToWidth(amount, maxWidth);
+}
+
 /** MCP result details shared by renderers and programmatic tool consumers. */
 export interface MCPToolDetails {
 	/** Server name */
@@ -406,6 +473,8 @@ export interface MCPToolDetails {
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
 	providerName?: string;
+	/** Latest progress of a running call; present only on partial updates. */
+	progress?: MCPProgress;
 	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
 	meta?: OutputMeta;
 }

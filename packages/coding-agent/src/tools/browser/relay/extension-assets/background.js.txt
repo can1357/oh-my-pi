@@ -1,3 +1,6 @@
+// ../coding-agent/src/tools/browser/relay/protocol.ts
+var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
@@ -18,6 +21,8 @@ var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
 var RECONNECT_MAX_MS = 1e4;
+var REMOVE_TAB_ATTEMPTS = 3;
+var REMOVE_TAB_RETRY_MS = 500;
 var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
@@ -32,6 +37,20 @@ async function ensureInstanceId() {
   instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
   await chrome.storage.local.set({ [key]: instanceId });
   return instanceId;
+}
+var browserSession = null;
+function ensureBrowserSession() {
+  browserSession ??= (async () => {
+    const key = "relayBrowserSession";
+    const stored = await chrome.storage.session.get({ [key]: "" });
+    const existing = stored[key];
+    if (typeof existing === "string" && existing.length > 0)
+      return existing;
+    const created = crypto.randomUUID();
+    await chrome.storage.session.set({ [key]: created });
+    return created;
+  })();
+  return browserSession;
 }
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
@@ -117,6 +136,22 @@ function post(msg) {
   if (ws?.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify(msg));
 }
+async function removeTab(tabId) {
+  for (let attempt = 1;; attempt++) {
+    try {
+      await chrome.tabs.remove(tabId);
+      return;
+    } catch (error) {
+      if (/No tab with id/.test(String(error)))
+        return;
+      if (attempt >= REMOVE_TAB_ATTEMPTS)
+        throw error;
+      const pause = Promise.withResolvers();
+      setTimeout(pause.resolve, REMOVE_TAB_RETRY_MS);
+      await pause.promise;
+    }
+  }
+}
 async function setBadge(connected) {
   try {
     await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
@@ -136,14 +171,17 @@ async function buildHello() {
   return {
     t: "hello",
     instanceId: await ensureInstanceId(),
+    browserSession: await ensureBrowserSession(),
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
+    ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+    reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
 }
-async function runRpc(msg) {
+async function runRpc(msg, origin) {
   switch (msg.op) {
     case "attach":
       await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
@@ -164,10 +202,12 @@ async function runRpc(msg) {
       const snap = snapshot(tab);
       if (!snap)
         throw new Error("created tab has no id");
+      if (origin.readyState !== WebSocket.OPEN)
+        removeTab(snap.tabId).catch(() => {});
       return { tab: snap };
     }
     case "removeTab":
-      await chrome.tabs.remove(msg.tabId);
+      await removeTab(msg.tabId);
       return {};
     case "activateTab": {
       const tab = await chrome.tabs.get(msg.tabId);
@@ -182,7 +222,7 @@ async function runRpc(msg) {
       return {};
   }
 }
-function handleRelayMessage(raw) {
+function handleRelayMessage(socket, raw) {
   let msg;
   try {
     msg = JSON.parse(raw);
@@ -191,8 +231,16 @@ function handleRelayMessage(raw) {
   }
   if (msg.t === "pong")
     return;
-  runRpc(msg).then((result) => post({ t: "rpcResult", id: msg.id, ok: true, result })).catch((err) => {
-    post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+  if (msg.t === "reload") {
+    chrome.runtime.reload();
+    return;
+  }
+  const answer = (reply) => {
+    if (socket.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(reply));
+  };
+  runRpc(msg, socket).then((result) => answer({ t: "rpcResult", id: msg.id, ok: true, result })).catch((err) => {
+    answer({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
   });
 }
 function scheduleReconnect() {
@@ -216,7 +264,7 @@ async function connect() {
   };
   socket.onmessage = (event) => {
     if (typeof event.data === "string")
-      handleRelayMessage(event.data);
+      handleRelayMessage(socket, event.data);
   };
   socket.onclose = () => {
     if (ws !== socket)

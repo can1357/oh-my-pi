@@ -119,7 +119,7 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(
-				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
+				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.cwd },
 				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 0.8 },
 			);
 			if (!result || result.stored === 0) {
@@ -166,6 +166,14 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
 			}
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
+			try {
+				await this.session.refreshSkills?.();
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				throw new Error(
+					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
+				);
+			}
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
 				details: { skill: params.skill.name },

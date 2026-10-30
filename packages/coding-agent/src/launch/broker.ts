@@ -1,8 +1,9 @@
 import * as fs from "node:fs/promises";
+// node:net only serves the TCP readiness probe for user daemons (`connectPort`).
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -49,6 +50,12 @@ const LOG_READ_BYTES = 2 * 1024 * 1024;
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
+/**
+ * How often a broker checks that its Unix socket still exists. Something that
+ * deletes the runtime dir leaves the broker holding the scope lease while no
+ * client can reach it, so the broker gives the scope up instead.
+ */
+const ENDPOINT_CHECK_MS = 5_000;
 /**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
  * are always shown in full; older history is truncated so the response stays
@@ -325,20 +332,14 @@ class DaemonLog {
 }
 
 /** Whether a broker is accepting connections on the scope endpoint right now. */
-function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
-	const { promise, resolve } = Promise.withResolvers<boolean>();
-	const socket = net.createConnection({ path: endpoint });
-	let settled = false;
-	const finish = (connected: boolean): void => {
-		if (settled) return;
-		settled = true;
-		socket.destroy();
-		resolve(connected);
-	};
-	socket.once("connect", () => finish(true));
-	socket.once("error", () => finish(false));
-	socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, () => finish(false));
-	return promise;
+async function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
+	try {
+		const connection = await IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: LEASE_PROBE_TIMEOUT_MS });
+		connection.destroy();
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -427,6 +428,8 @@ class DaemonBroker {
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
+	readonly #endpointCheckMs: number;
+	#endpointTimer: NodeJS.Timeout | undefined;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -437,13 +440,15 @@ class DaemonBroker {
 	 * profile lock) or keeps running untracked.
 	 */
 	readonly #startingNames = new Set<string>();
-	readonly #clients = new Set<net.Socket>();
-	readonly #ownerSockets = new Map<string, { socket: net.Socket; subscriptionId: string | undefined }>();
+	readonly #clients = new Set<IpcConnection>();
+	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #finished = Promise.withResolvers<void>();
-	readonly #sockets = new Set<net.Socket>();
-	#server: net.Server | undefined;
+	readonly #sockets = new Set<IpcConnection>();
+	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
+	readonly #inFlight = new Map<string, { socket: IpcConnection; controller: AbortController }>();
+	#server: IpcServer | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
@@ -453,26 +458,25 @@ class DaemonBroker {
 		token: string,
 		idleGraceMs: number,
 		restartBackoffBaseMs: number,
+		endpointCheckMs: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
-		this.#endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		this.#endpoint = daemonBrokerEndpoint(runtimeDir);
 		this.#token = token;
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
+		this.#endpointCheckMs = endpointCheckMs;
 	}
 
 	async run(onListening?: () => void): Promise<void> {
 		await this.#recoverRecords();
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
-		server.once("listening", resolve);
-		server.once("error", reject);
-		server.listen(this.#endpoint);
-		await listening;
-		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
+		this.#server = await IpcServer.listen(
+			this.#endpoint,
+			{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
+			socket => this.#accept(socket),
+		);
+		if (process.platform !== "win32") this.#watchEndpoint();
 		this.#scheduleIdleShutdown();
 		onListening?.();
 		await this.#finished.promise;
@@ -483,6 +487,8 @@ class DaemonBroker {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
+		clearInterval(this.#endpointTimer);
+		this.#endpointTimer = undefined;
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
 			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
@@ -498,32 +504,16 @@ class DaemonBroker {
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
-		if (this.#server) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			this.#server.close(() => resolve());
-			await promise;
-		}
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
+		await this.#server?.close();
 		this.#finished.resolve();
 	}
 
-	#accept(socket: net.Socket): void {
+	#accept(socket: IpcConnection): void {
 		this.#sockets.add(socket);
 		let authenticated = false;
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", chunk => {
-			buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-			if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
-				socket.destroy(new Error("Daemon broker request exceeds size limit"));
-				return;
-			}
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				if (!line) continue;
+		// Oversized requests (> MAX_REQUEST_BYTES) close the connection natively.
+		socket.start(
+			line => {
 				void this.#handleLine(socket, line, () => {
 					if (authenticated) return;
 					authenticated = true;
@@ -531,23 +521,26 @@ class DaemonBroker {
 					clearTimeout(this.#idleTimer);
 					this.#idleTimer = undefined;
 				});
-			}
-		});
-		socket.on("error", () => {
-			// Socket closure performs client accounting.
-		});
-		socket.on("close", () => {
-			this.#sockets.delete(socket);
-			if (!authenticated) return;
-			this.#clients.delete(socket);
-			this.#scheduleIdleShutdown();
-			for (const [owner, registration] of this.#ownerSockets) {
-				if (registration.socket === socket) this.#ownerSockets.delete(owner);
-			}
-		});
+			},
+			() => {
+				this.#sockets.delete(socket);
+				if (!authenticated) return;
+				this.#clients.delete(socket);
+				this.#scheduleIdleShutdown();
+				for (const [owner, registration] of this.#ownerSockets) {
+					if (registration.socket === socket) this.#ownerSockets.delete(owner);
+				}
+				// Nobody can read these answers any more; stop polling for them.
+				for (const [requestId, inFlight] of this.#inFlight) {
+					if (inFlight.socket !== socket) continue;
+					this.#inFlight.delete(requestId);
+					inFlight.controller.abort();
+				}
+			},
+		);
 	}
 
-	async #handleLine(socket: net.Socket, line: string, onAuthenticated: () => void): Promise<void> {
+	async #handleLine(socket: IpcConnection, line: string, onAuthenticated: () => void): Promise<void> {
 		let id = "unknown";
 		try {
 			const decoded: unknown = JSON.parse(line);
@@ -616,7 +609,7 @@ class DaemonBroker {
 					});
 					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
-						socket.write(`${JSON.stringify(completion)}\n`);
+						socket.send(JSON.stringify(completion));
 					}
 				}
 				for (const owner of detachedOwners) {
@@ -630,21 +623,29 @@ class DaemonBroker {
 					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
-			const result = await this.#dispatch(request.operation);
-			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
+			const abortable = request.operation.op === "wait" || request.operation.op === "logs";
+			const controller = abortable ? new AbortController() : undefined;
+			if (controller) this.#inFlight.set(id, { socket, controller });
+			let result: DaemonRpcResult;
+			try {
+				result = await this.#dispatch(request.operation, socket, controller?.signal);
+			} finally {
+				if (controller && this.#inFlight.get(id)?.controller === controller) this.#inFlight.delete(id);
+			}
+			socket.send(JSON.stringify({ id, ok: true, result }));
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
+			socket.send(JSON.stringify({ id, ok: false, error: message }));
 		}
 	}
 
-	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
+	async #dispatch(operation: DaemonOperation, socket: IpcConnection, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
 			case "start":
-				return this.#start(operation.spec, operation.owner, operation.replace);
+				return this.#start(operation.spec, operation.owner, operation.replace, operation.awaitReady);
 			case "list": {
 				await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
 				return {
@@ -653,9 +654,16 @@ class DaemonBroker {
 				};
 			}
 			case "logs":
-				return this.#logs(operation);
+				return this.#logs(operation, signal);
 			case "wait":
-				return this.#wait(operation);
+				return this.#wait(operation, signal);
+			case "cancel": {
+				const inFlight = this.#inFlight.get(operation.requestId);
+				if (!inFlight || inFlight.socket !== socket) return { op: "cancel", cancelled: false };
+				this.#inFlight.delete(operation.requestId);
+				inFlight.controller.abort();
+				return { op: "cancel", cancelled: true };
+			}
 			case "send":
 				return this.#send(operation);
 			case "stop": {
@@ -679,7 +687,7 @@ class DaemonBroker {
 		}
 	}
 
-	async #start(spec: DaemonSpec, owner?: string, replace = false): Promise<DaemonRpcResult> {
+	async #start(spec: DaemonSpec, owner?: string, replace = false, awaitReady = true): Promise<DaemonRpcResult> {
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -758,7 +766,7 @@ class DaemonBroker {
 		}
 		await this.#launch(record);
 		let readyTimedOut = false;
-		if (spec.ready && !terminalState(record.snapshot.state)) {
+		if (spec.ready && awaitReady && !terminalState(record.snapshot.state)) {
 			// Wake on the sticky readyAt marker or any terminal state, not the live
 			// state: a fast process flips starting→ready→exited within one poll
 			// interval, so sampling `state === "ready"` never observes readiness even
@@ -1046,8 +1054,8 @@ class DaemonBroker {
 		pending.set(completion.completionId, completion);
 		this.#pendingCompletions.set(completion.owner, pending);
 		const registration = this.#ownerSockets.get(completion.owner);
-		if (!registration || registration.socket.destroyed) return;
-		registration.socket.write(`${JSON.stringify(completion)}\n`);
+		if (!registration || registration.socket.closed) return;
+		registration.socket.send(JSON.stringify(completion));
 	}
 
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
@@ -1128,7 +1136,7 @@ class DaemonBroker {
 		this.#scheduleIdleShutdown();
 	}
 
-	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>): Promise<DaemonRpcResult> {
+	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
 		await this.#refreshDetached(record);
 		const cursor = operation.cursor ?? record.snapshot.outputBytes;
@@ -1138,7 +1146,9 @@ class DaemonBroker {
 				record,
 				() => record.snapshot.outputBytes > cursor || terminalState(record.snapshot.state),
 				operation.timeoutMs,
+				signal,
 			);
+			if (signal?.aborted) throw new Error(`Daemon ${operation.name} logs request cancelled`);
 			timedOut = !changed;
 		}
 		const lines = Math.max(1, Math.min(1_000, Math.floor(operation.lines)));
@@ -1172,7 +1182,7 @@ class DaemonBroker {
 		};
 	}
 
-	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>): Promise<DaemonRpcResult> {
+	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
 		// A wait observes exactly one launch generation. Automatic or explicit
 		// relaunches reuse the managed record, so polling the record without this
@@ -1213,7 +1223,8 @@ class DaemonBroker {
 			// blocks for the full timeout; success is judged by readyObserved below.
 			return readyObserved() || terminalState(record.snapshot.state);
 		};
-		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs, signal));
+		if (signal?.aborted) throw new Error(`Daemon ${operation.name} wait cancelled`);
 		if (generationEnded()) {
 			const exit = record.snapshot.exitCode === undefined ? "" : ` with exit code ${record.snapshot.exitCode}`;
 			throw new Error(
@@ -1320,9 +1331,15 @@ class DaemonBroker {
 		return { op: "mode", daemon: record.snapshot };
 	}
 
-	async #waitUntil(record: ManagedDaemon, condition: () => boolean, timeoutMs: number): Promise<boolean> {
+	async #waitUntil(
+		record: ManagedDaemon,
+		condition: () => boolean,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const deadline = Date.now() + Math.max(0, timeoutMs);
 		while (Date.now() < deadline) {
+			if (signal?.aborted) return condition();
 			await this.#refreshDetached(record);
 			if (condition()) return true;
 			if (this.#shuttingDown && terminalState(record.snapshot.state)) return condition();
@@ -1539,11 +1556,41 @@ class DaemonBroker {
 			})();
 		}, this.#idleGraceMs);
 	}
+
+	/**
+	 * Give up the scope once the socket file is gone. The native lease outlives a
+	 * deleted runtime dir, so a broker that kept running would hold the scope
+	 * while every new broker exits on the held lease and every new client fails
+	 * with `connect ENOENT`. Shutting down releases the lease, and the next client
+	 * spawns a broker that rebuilds the scope.
+	 */
+	#watchEndpoint(): void {
+		this.#endpointTimer = setInterval(() => {
+			void fs
+				.stat(this.#endpoint)
+				.then(
+					() => undefined,
+					error => {
+						if (!isEnoent(error) || this.#shuttingDown) return;
+						logger.warn("Daemon broker socket was deleted; releasing the scope", { endpoint: this.#endpoint });
+						return this.shutdown();
+					},
+				)
+				.catch(error => {
+					logger.warn("Daemon broker shutdown after socket loss failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}, this.#endpointCheckMs);
+		this.#endpointTimer.unref();
+	}
 }
 
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
+	/** How often the broker checks that its socket file still exists. */
+	endpointCheckMs?: number;
 	/**
 	 * Called once the broker accepts connections. An embedding host connects its
 	 * clients after this; a client that connects earlier finds no endpoint and
@@ -1569,14 +1616,14 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+	const endpoint = daemonBrokerEndpoint(runtimeDir);
 	// Hold the lease for the whole broker lifetime: it is a native lock the OS
 	// releases on exit, so keeping `lease` referenced keeps the scope owned.
 	const lease = await acquireBrokerLease(runtimeDir, endpoint);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
 	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
-	// dir back to its project (and derive the Windows pipe name) offline.
+	// dir back to its project offline.
 	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
 		logger.warn("Failed to record daemon scope metadata", {
 			error: error instanceof Error ? error.message : String(error),
@@ -1591,7 +1638,14 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	});
 	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
 	if (!token) throw new Error("Daemon broker token is empty");
-	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
+	const broker = new DaemonBroker(
+		projectDir,
+		runtimeDir,
+		token,
+		idleGraceMs,
+		restartBackoffBaseMs,
+		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
+	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
 		await broker.run(options.onListening);

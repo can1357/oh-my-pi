@@ -8,41 +8,10 @@ if "__omp_prelude_loaded__" not in globals():
     from urllib.parse import unquote
 
 
-    # __omp_display is injected by runner.py before the prelude executes; it
-    # mirrors IPython's display() semantics with the same MIME bundle output.
-    _omp_display = __omp_display  # type: ignore[name-defined]
-
-    _PRESENTABLE_REPRS = (
-        "_repr_mimebundle_",
-        "_repr_html_",
-        "_repr_json_",
-        "_repr_markdown_",
-        "_repr_png_",
-        "_repr_jpeg_",
-        "_repr_svg_",
-        "_repr_latex_",
-    )
-
-    def display(value):
-        """Render a value. Falls back to a JSON+text/plain bundle for plain dict/list/tuple."""
-        if isinstance(value, dict) and value.get("type") == "image":
-            _omp_display(value)
-            return
-        if any(hasattr(value, attr) for attr in _PRESENTABLE_REPRS):
-            _omp_display(value)
-            return
-        if isinstance(value, (dict, list, tuple)):
-            try:
-                bundle = {"application/json": value, "text/plain": repr(value)}
-                _omp_display(bundle, raw=True)
-                return
-            except Exception:
-                pass
-        _omp_display(value)
-
-    def _emit_status(op: str, **data):
-        """Emit structured status event for TUI rendering."""
-        _omp_display({"application/x-omp-status": {"op": op, **data}}, raw=True)
+    # __omp_emit_status / __omp_emit_image are injected by runner.py before the
+    # prelude executes; they write `status` / `image` frames for the current cell.
+    _emit_status = __omp_emit_status  # type: ignore[name-defined]
+    _emit_image = __omp_emit_image  # type: ignore[name-defined]
 
     def env(key: str | None = None, value: str | None = None):
         """Get/set environment variables."""
@@ -162,7 +131,15 @@ if "__omp_prelude_loaded__" not in globals():
             p = _artifact_file(path)
             if p is None:
                 # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-                return _read_through_tool(f"{path}:raw", offset, limit)
+                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
+                details = located.get("details") if isinstance(located, dict) else None
+                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
+                if not isinstance(file_path, str):
+                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+                    return _read_through_tool(f"{path}:raw", offset, limit)
+                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+                p = Path(file_path)
         elif _should_delegate_read(path):
             return _read_through_tool(path, offset, limit)
         else:
@@ -503,21 +480,15 @@ if "__omp_prelude_loaded__" not in globals():
         images = value.get("images")
         if not isinstance(images, list) or not images:
             return value
-        displayed = 0
+        shown = 0
         for image in images:
-            if not isinstance(image, dict):
-                continue
-            data = image.get("data")
-            mime_type = image.get("mimeType")
-            if not isinstance(data, str) or not isinstance(mime_type, str):
-                continue
-            _omp_display({"application/x-omp-image": image}, raw=True)
-            displayed += 1
-        if displayed == 0:
+            if isinstance(image, dict) and isinstance(image.get("data"), str) and _emit_image(image):
+                shown += 1
+        if shown == 0:
             return value
         surfaced = {key: item for key, item in value.items() if key != "images"}
-        suffix = "" if displayed == 1 else "s"
-        surfaced["images"] = f"({displayed} image{suffix} displayed)"
+        suffix = "" if shown == 1 else "s"
+        surfaced["images"] = f"({shown} image{suffix} displayed)"
         return surfaced
 
     async def _omp_prelude(name: str, parameters):
@@ -888,12 +859,17 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(questions, dict):
             raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
 
-    async def judge(state, questions):
-        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score)."""
+    async def judge(state, questions, *, images=None):
+        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score).
+
+        ``images`` is a list of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
+        """
         _check_questions(questions)
-        result = await asyncio.to_thread(
-            _bridge_call, "__judge__", {"state": state, "questions": questions}
-        )
+        args = {"state": state, "questions": questions}
+        if images is not None:
+            args["images"] = images
+        result = await asyncio.to_thread(_bridge_call, "__judge__", args)
         if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
             raise RuntimeError("judge() did not return answers")
         return result["answers"]
@@ -990,6 +966,7 @@ if "__omp_prelude_loaded__" not in globals():
         states,
         questions,
         *,
+        images=None,
         concurrency=None,
         retries=None,
         min_ok=None,
@@ -1000,6 +977,9 @@ if "__omp_prelude_loaded__" not in globals():
         ``states`` is ``{key: state}`` or a list (keys are indices). ``intent`` is an
         optional nonempty progress/job label. Item failures land in ``JudgmentItem.error``;
         only a run that dies wholesale raises from ``drain()``.
+
+        ``images`` optionally maps state keys to lists of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
         """
         _check_questions(questions)
         if intent is not None and (
@@ -1012,6 +992,16 @@ if "__omp_prelude_loaded__" not in globals():
             items = [{"key": index, "state": state} for index, state in enumerate(states)]
         else:
             raise TypeError("judge_batch(states, questions) expects states as a dict or list")
+        if images is not None:
+            if not isinstance(images, dict):
+                raise TypeError("judge_batch() images must be a dict keyed by input key")
+            item_keys = {item["key"] for item in items}
+            for key in images:
+                if key not in item_keys:
+                    raise ValueError(f"images contains unknown input key {json.dumps(key)}")
+            for item in items:
+                if item["key"] in images:
+                    item["images"] = images[item["key"]]
         args = {"op": "create", "items": items, "questions": questions}
         if concurrency is not None:
             args["concurrency"] = int(concurrency)

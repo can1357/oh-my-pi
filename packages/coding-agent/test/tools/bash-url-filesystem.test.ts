@@ -62,6 +62,16 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(await fs.readlink(path.join(localRoot, "link"))).toBe("local://source.txt");
 	});
 
+	it("links a host path to the file a backed URL aliases", async () => {
+		const { text, isError } = await run(
+			"printf 'body\\n' > local://source.txt && ln -s local://source.txt host-link && cat host-link",
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain("body");
+		expect(await fs.readlink(path.join(tempDir, "host-link"))).toBe(path.join(localRoot, "source.txt"));
+	});
+
 	it("runs in a URL working directory with relative paths inside it", async () => {
 		await fs.mkdir(path.join(localRoot, "work"), { recursive: true });
 		await fs.writeFile(path.join(localRoot, "work", "in.txt"), "inside\n");
@@ -74,9 +84,100 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(await fs.readFile(path.join(localRoot, "work", "rel.txt"), "utf-8")).toBe("rel\n");
 	});
 
+	it("hands an external program the files that backed URL arguments alias", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		await fs.mkdir(path.join(localRoot, "index"), { recursive: true });
+
+		const { text, isError } = await run(
+			`'${process.execPath}' '${script}' local://data.txt --index=local://index https://example.com/a.txt 'local://'`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain(path.join(localRoot, "data.txt"));
+		expect(text).toContain(`--index=${path.join(localRoot, "index")}`);
+		expect(text).toContain("https://example.com/a.txt");
+		// A bare scheme root is search-pattern text far more often than a directory.
+		expect(text.split("\n")).toContain("local://");
+	});
+
+	it("runs a skill's script by URL but refuses the read-only skill directory as a working directory", async () => {
+		const skillDir = path.join(tempDir, "skills", "demo");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: demo\n---\n");
+		await fs.writeFile(path.join(skillDir, "tool.js"), "console.log('tool-ran');\n");
+		session = {
+			...session,
+			skills: [{ name: "demo", baseDir: skillDir, filePath: path.join(skillDir, "SKILL.md") }],
+		} as unknown as ToolSession;
+
+		const ran = await run(`'${process.execPath}' skill://demo/tool.js`);
+		expect(ran.isError).toBeUndefined();
+		expect(ran.text).toContain("tool-ran");
+
+		// The child could write anywhere under its working directory; skill:// refuses mutation.
+		const refused = await run(`'${process.execPath}' tool.js`, "skill://demo");
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("read-only working directory");
+	});
+
+	it("fails the command when a URL argument names nothing the provider knows", async () => {
+		const { text, isError } = await run(`'${process.execPath}' -e "console.log('ran')" skill://nope/tool.js`);
+
+		expect(isError).toBe(true);
+		expect(text).not.toContain("ran\n");
+		// Unix maps the provider's ENOENT to the native errno (its message is the
+		// OS's); other platforms keep the provider message. Both name the URL.
+		expect(text).toContain("cannot resolve skill://nope/tool.js");
+	});
+
+	it("starts an external program in the directory a URL working directory aliases", async () => {
+		const script = path.join(tempDir, "cwd.js");
+		await fs.writeFile(script, "console.log(process.cwd());\nconsole.log(process.env.PWD);\n");
+		await fs.mkdir(path.join(localRoot, "work"), { recursive: true });
+
+		const { text, isError } = await run(`'${process.execPath}' '${script}'`, "local://work");
+
+		const work = path.join(localRoot, "work");
+		expect(isError).toBeUndefined();
+		// `PWD` must agree with `getcwd()`: a program reading the variable
+		// directly cannot open the URL spelling.
+		expect(text).toContain(`${work}\n${work}`);
+	});
+
 	it("fails a redirection into a read-only scheme", async () => {
 		const { isError } = await run("printf 'x' > omp://README.md");
 
 		expect(isError).toBe(true);
+	});
+});
+
+describe("bash replies through out://", () => {
+	it("carries each closed redirect as a reply, live and in the final result, without touching the output", async () => {
+		const frames: unknown[] = [];
+		const result = await new BashTool({ ...session, tuiTranscript: true }).execute(
+			"call",
+			{ command: "printf '**first**\\n' > out://; echo between; echo second >> out://" },
+			undefined,
+			update => frames.push(update.details),
+		);
+
+		expect(result.content.find(c => c.type === "text")?.text).toBe("between\n");
+		expect(result.details?.replies).toEqual(["**first**\n", "second\n"]);
+		// The first reply reaches the card while the command still runs.
+		expect(frames).toContainEqual({ replies: ["**first**\n"] });
+	});
+
+	it("drops an oversize reply instead of showing a truncated one, and refuses reads", async () => {
+		const big = await new BashTool({ ...session, tuiTranscript: true }).execute("call", {
+			command: "head -c 70000 /dev/zero | tr '\\0' a > out://; echo status=$?",
+		});
+		expect(big.content.find(c => c.type === "text")?.text).toContain("File too large");
+		expect(big.details?.replies).toBeUndefined();
+
+		const read = await run("cat out://; echo status=$?");
+		expect(read.text).toContain("status=1");
 	});
 });

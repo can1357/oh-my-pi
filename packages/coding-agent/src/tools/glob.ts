@@ -23,7 +23,9 @@ import {
 	resolveExplicitFindPatterns,
 	resolveSearchBase,
 	resolveSearchResultPath,
+	searchPathTier,
 } from "./path-utils";
+import { searchApprovalCacheTargets } from "./search-approval-targets";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -69,6 +71,8 @@ export interface GlobOperationsOptions {
 	hidden: boolean;
 	/** Honour gitignore files. Resolved from the caller's `gitignore`, defaulting to true. */
 	gitignore: boolean;
+	/** Restrict matches to this entry type, including symlinks to that type. */
+	fileType?: natives.FileType;
 	/** Aborts when the caller cancels or when the tool's scan deadline expires.
 	 * Backends are expected to stop on it; the tool does not wait for one that
 	 * does not, but it still stops reporting at the deadline. */
@@ -107,6 +111,7 @@ interface GlobTarget {
 	searchPath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	directoryOnly?: boolean;
 }
 
 interface NativePreparedTarget {
@@ -116,7 +121,28 @@ interface NativePreparedTarget {
 
 export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly name = "glob";
-	readonly approval = "read" as const;
+	readonly approval = searchPathTier;
+	/**
+	 * `always-ask-cached` keys: the folders and files this glob searches, so a
+	 * folder grant recorded by a `read` (or by a grep) covers a search inside it
+	 * and a search rooted at one file shares that file's read grant. Roots report
+	 * the walkable base `parseFindPattern` finds — no glob is expanded — and each
+	 * costs a single stat; see {@link searchApprovalCacheTargets}.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const a = args as { path?: string | string[] } | null | undefined;
+		return searchApprovalCacheTargets(
+			toPathList(a?.path),
+			this.session.cwd,
+			entry => parseFindPattern(entry).basePath,
+			entry => {
+				const { globPattern } = parseFindPattern(entry);
+				// A bare pattern recurses (`*.ts` matches at any depth); only a one-segment pattern
+				// under an explicit base (`dir/*.ts`) stays inside the folder's own entries.
+				return globPattern === "" || globPattern.includes("**");
+			},
+		);
+	};
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
@@ -198,7 +224,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const internalRouter = InternalUrlRouter.instance();
 			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
 			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal }),
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
 				tier: resolveToolTier(this, params),
 			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
@@ -233,6 +259,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						searchPath: target.basePath,
 						globPattern: target.globPattern,
 						hasGlob: target.hasGlob,
+						directoryOnly: target.directoryOnly,
 					}))
 				: [
 						(() => {
@@ -241,6 +268,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd),
 								globPattern: parsed.globPattern,
 								hasGlob: parsed.hasGlob,
+								directoryOnly: parsed.directoryOnly,
 							};
 						})(),
 					];
@@ -407,6 +435,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							if (stat.timedOut) return [] as string[];
 							if (stat.value.isFile()) return [formatScopePath(target.searchPath)];
 						}
+						const fileType = target.directoryOnly ? natives.FileType.Dir : undefined;
 						const results = await runCustom(
 							Promise.resolve(
 								customOps.glob(target.globPattern, target.searchPath, {
@@ -414,12 +443,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 									limit: effectiveLimit,
 									hidden: includeHidden,
 									gitignore: useGitignore,
+									fileType,
 									signal: combinedSignal,
 								}),
 							),
 						);
 						if (results.timedOut) return [] as string[];
-						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
 					}),
 				);
 				const seen = new Set<string>();
@@ -545,6 +575,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						{
 							pattern: target.globPattern,
 							path: target.searchPath,
+							fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
 							hidden: includeHidden,
 							maxResults: effectiveLimit,
 							sortByMtime: true,
@@ -556,6 +587,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// native auto-recursion so `dir/*` does not silently match
 							// `dir/sub/nested.ts`.
 							recursive: false,
+							followLinks: target.searchPath.startsWith("skill://"),
 							signal: combinedSignal,
 							timeoutMs,
 							filesystem: urlFilesystem.shellFilesystem(),

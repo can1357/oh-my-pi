@@ -5,13 +5,16 @@
  * here keeps the two byte-for-byte identical.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type Component } from "../tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
+import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
+import type { OutputArtifactError } from "../tools/streaming-output";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
@@ -58,24 +61,38 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	const rows: TranscriptStatusRow[] = [];
 	for (const job of jobs) {
 		const jobId = job.jobId ?? "unknown";
-		const typeLabel = job.type ? `[${job.type}]` : "[job]";
+		const type = job.type ?? "job";
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		rows.push({
 			parts: [
 				{ text: `${theme.status.done} Background job completed`, color: "success" },
-				{ text: typeLabel, color: "dim" },
+				{ text: `[${type}]`, color: "dim" },
 				{ text: jobId, color: "accent" },
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
 			],
+			native: {
+				tone: "success",
+				message: [span("Background job completed"), ...facts([type, jobId, duration])],
+			},
 		});
-		if (job.meta?.artifactError) {
-			rows.push({ parts: [{ text: formatArtifactErrorNotice(job.meta.artifactError), color: "warning" }] });
-		}
+		if (job.meta?.artifactError) rows.push(artifactErrorRow(job.meta.artifactError));
 	}
-	if (details?.meta?.artifactError) {
-		rows.push({ parts: [{ text: formatArtifactErrorNotice(details.meta.artifactError), color: "warning" }] });
-	}
+	if (details?.meta?.artifactError) rows.push(artifactErrorRow(details.meta.artifactError));
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
+}
+
+/** The warning row under a background job whose output artifact could not be saved. */
+function artifactErrorRow(error: OutputArtifactError): TranscriptStatusRow {
+	const notice = formatArtifactErrorNotice(error);
+	return { parts: [{ text: notice, color: "warning" }], native: { tone: "warning", message: [span(notice)] } };
+}
+
+/**
+ * Native notice spans for a row's trailing facts (kind, id, duration): each
+ * after a dim ` · `, absent ones skipped.
+ */
+function facts(values: readonly (string | undefined)[]): TspSpan[] {
+	return values.flatMap(value => (value ? [span(" · ", "dim"), span(value, "dim")] : []));
 }
 
 /**
@@ -88,10 +105,15 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 	const rows: TranscriptStatusRow[] = [];
 	const daemons = details?.daemons ?? [];
 	if (daemons.length === 0 && typeof message.content === "string") {
-		rows.push({ parts: [{ text: `${theme.status.done} ${message.content}`, color: "dim" }] });
+		rows.push({
+			parts: [{ text: `${theme.status.done} ${message.content}`, color: "dim" }],
+			native: { tone: "success", message: [span(message.content)] },
+		});
 	}
 	for (const daemon of daemons) {
 		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
+		const label = failed ? "Supervised process failed" : "Supervised process completed";
+		const exit = daemon.exitCode !== undefined ? `exit ${daemon.exitCode}` : undefined;
 		const duration =
 			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
 				? formatDuration(daemon.exitedAt - daemon.startedAt)
@@ -99,12 +121,16 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 		rows.push({
 			parts: [
 				failed
-					? { text: `${theme.status.error} Supervised process failed`, color: "error" }
-					: { text: `${theme.status.done} Supervised process completed`, color: "success" },
+					? { text: `${theme.status.error} ${label}`, color: "error" }
+					: { text: `${theme.status.done} ${label}`, color: "success" },
 				{ text: daemon.name, color: "accent" },
-				daemon.exitCode !== undefined ? { text: `(exit ${daemon.exitCode})`, color: "dim" } : undefined,
+				exit ? { text: `(${exit})`, color: "dim" } : undefined,
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
 			],
+			native: {
+				tone: failed ? "error" : "success",
+				message: [span(label), span(" "), span(daemon.name, "mono"), ...facts([exit, duration])],
+			},
 		});
 	}
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
@@ -160,25 +186,30 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 export function buildFileMentionBlock(files: FileMentionMessage["files"], indent: number): TranscriptBlock {
 	const rows: TranscriptStatusRow[] = [];
 	for (const file of files) {
-		let suffix: string;
+		let detail: string;
 		if (file.skippedReason === "tooLarge" || file.skippedReason === "binary") {
 			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
-			suffix = file.skippedReason === "binary" ? `(skipped: binary, ${size})` : `(skipped: ${size})`;
+			detail = file.skippedReason === "binary" ? `skipped: binary, ${size}` : `skipped: ${size}`;
 		} else {
-			suffix = file.image
-				? "(image)"
+			detail = file.image
+				? "image"
 				: file.lineCount === undefined
-					? "(unknown lines)"
-					: `(${file.lineCount} lines)`;
+					? "unknown lines"
+					: formatCount("line", file.lineCount);
 		}
 		rows.push({
 			parts: [
-				{ text: theme.tree.last, color: "dim", rowsOnly: true },
+				{ text: theme.tree.last, color: "dim" },
 				{ text: "Read", color: "muted" },
 				{ text: file.path, color: "accent" },
-				{ text: suffix, color: "dim" },
+				{ text: `(${detail})`, color: "dim" },
 			],
 			indent,
+			native: {
+				tone: "info",
+				icon: "read",
+				message: [span("Read"), span(" "), span(file.path, "path"), ...facts([detail])],
+			},
 		});
 	}
 	return new TranscriptStatusBlock(rows);
@@ -207,11 +238,14 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
 export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage): {
 	beforeTools: AssistantAgentMessage;
 	afterToolCalls: ReadonlyMap<string, AssistantAgentMessage>;
+	/** Index in `message.content` of each after-tool segment's first block, by tool-call id. */
+	contentOffsets: ReadonlyMap<string, number>;
 	hasToolCalls: boolean;
 	lastToolCallId?: string;
 } {
 	const beforeTools: AssistantAgentMessage["content"] = [];
 	const afterToolCalls = new Map<string, AssistantAgentMessage>();
+	const contentOffsets = new Map<string, number>();
 	let pendingAfterTool: AssistantAgentMessage["content"] = [];
 	let lastToolCallId: string | undefined;
 	let sawToolCall = false;
@@ -230,11 +264,13 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 		pendingAfterTool = [];
 	};
 
-	for (const content of message.content) {
+	for (let index = 0; index < message.content.length; index++) {
+		const content = message.content[index]!;
 		if (content.type === "toolCall") {
 			flushPendingAfterTool();
 			sawToolCall = true;
 			lastToolCallId = content.id;
+			contentOffsets.set(content.id, index + 1);
 			continue;
 		}
 		if (sawToolCall) {
@@ -246,10 +282,16 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 	flushPendingAfterTool();
 
 	if (!sawToolCall) {
-		return { beforeTools: message, afterToolCalls, hasToolCalls: false };
+		return { beforeTools: message, afterToolCalls, contentOffsets, hasToolCalls: false };
 	}
 
-	return { beforeTools: displaySegment(beforeTools), afterToolCalls, hasToolCalls: true, lastToolCallId };
+	return {
+		beforeTools: displaySegment(beforeTools),
+		afterToolCalls,
+		contentOffsets,
+		hasToolCalls: true,
+		lastToolCallId,
+	};
 }
 
 /**

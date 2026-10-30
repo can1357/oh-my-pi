@@ -686,6 +686,59 @@ describe("AsyncJobManager", () => {
 		}
 	});
 
+	test("keeps a consumed result suppressed while its delivery stays parked past full retention", async () => {
+		// Regression (#15625): an eval cell consumed results via handle.wait()
+		// while their async-result entries sat parked on the busy owner's yield
+		// queue for longer than the retention window. Retention eviction cleared
+		// the suppression marker, so every consumed result was re-injected once
+		// the tool call returned.
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async () => {
+				await gate.promise; // parked async-result entry (receipt pending)
+			});
+
+			const jobId = manager.register("task", "parked", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(120_000);
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.resolve();
+			await scheduler.yield();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("still evicts an unconsumed row on retention while its delivery hangs", async () => {
+		// A receipt that never settles (owner session gone) must not pin an
+		// unsuppressed row forever: only a consumed result's parked delivery
+		// defers retention eviction.
+		vi.useFakeTimers();
+		try {
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", () => new Promise<void>(() => {}));
+
+			const jobId = manager.register("task", "hung", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			vi.advanceTimersByTime(60_000);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("cancelAll does not clear retention timers for already completed jobs", async () => {
 		let completedJobId = "";
 		const completedDelivered = Promise.withResolvers<void>();

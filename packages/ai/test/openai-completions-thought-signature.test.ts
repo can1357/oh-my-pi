@@ -24,7 +24,7 @@ const userMessage: Message = {
 
 type SignatureShape =
 	| { type: "tool"; namespace: "google" | "vertex" }
-	| { type: "message"; field: "thinking_signature" | "thought_signature" };
+	| { type: "message"; field: "thinking_signature" | "thought_signature" | "reasoning_signature" };
 
 function sseResponse(delta: Record<string, unknown>, finishReason: "stop" | "tool_calls"): Response {
 	const chunks = [
@@ -89,13 +89,6 @@ async function expectThoughtSignatureRoundTrip(signature: SignatureShape): Promi
 		{ apiKey: "test-key", fetch: fetchMock },
 	).result();
 	const toolCall = findToolCall([assistant]);
-	const capturedSignature =
-		signature.type === "tool"
-			? JSON.stringify({ perCall: { [signature.namespace]: { thought_signature: "opaque-signature" } } })
-			: JSON.stringify({ message: { [signature.field]: "opaque-signature" } });
-
-	expect(toolCall.thoughtSignature).toBe(capturedSignature);
-
 	const toolResult: Message = {
 		role: "toolResult",
 		toolCallId: toolCall.id,
@@ -104,9 +97,10 @@ async function expectThoughtSignatureRoundTrip(signature: SignatureShape): Promi
 		isError: false,
 		timestamp: 2,
 	};
+	const restoredMessages: Message[] = JSON.parse(JSON.stringify([userMessage, assistant, toolResult]));
 	await streamOpenAICompletions(
 		model,
-		{ messages: [userMessage, assistant, toolResult] },
+		{ messages: restoredMessages },
 		{ apiKey: "test-key", fetch: fetchMock },
 	).result();
 
@@ -136,6 +130,10 @@ async function expectThoughtSignatureRoundTrip(signature: SignatureShape): Promi
 		});
 	} else {
 		expect(Reflect.get(replayedAssistant, signature.field)).toBe("opaque-signature");
+		if (signature.field === "reasoning_signature") {
+			expect(replayedAssistant).not.toHaveProperty("thinking_signature");
+			expect(replayedAssistant).not.toHaveProperty("thought_signature");
+		}
 	}
 }
 
@@ -154,6 +152,10 @@ describe("OpenAI-compatible Gemini thought signatures", () => {
 
 	it("round-trips a message-level thought_signature alias", async () => {
 		await expectThoughtSignatureRoundTrip({ type: "message", field: "thought_signature" });
+	});
+
+	it("replays a signature-only reasoning_signature after restoring tool-call history", async () => {
+		await expectThoughtSignatureRoundTrip({ type: "message", field: "reasoning_signature" });
 	});
 
 	it("preserves both extra_content and a message-level signature together", async () => {

@@ -84,6 +84,12 @@ export interface TerminalMultiplexerModule<Id extends string = string> {
 	 */
 	readonly honorsSynchronizedOutput?: boolean;
 	/**
+	 * Tracks DEC 2004 per pane and forwards paste markers only while it is set,
+	 * yet may leave DECRQM 2004 unanswered, so bracketed paste is reasserted
+	 * without waiting for a DECRPM confirmation.
+	 */
+	readonly gatesBracketedPaste?: boolean;
+	/**
 	 * The session does not reveal whether its client renders graphics while
 	 * outer-terminal identity variables leak in, so images and Kitty
 	 * placeholders stay off unless the user forces them.

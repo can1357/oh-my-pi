@@ -56,6 +56,7 @@ import {
 	ModelBrowser,
 	type ModelBrowserItem,
 	modelSearchText,
+	providerMark,
 	thinkingDotToken,
 	type RoleAssignments,
 	resolveRoleAssignments,
@@ -313,14 +314,6 @@ const MODEL_KIND_LABELS: Record<"all" | ModelKind, string> = {
 	rerank: "Rerank",
 	video: "Video",
 };
-
-/** A provider mark's initials: `amazon-bedrock` → `AB`, `anthropic` → `An`. */
-function providerInitials(providerId: string): string {
-	const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
-	if (words.length >= 2) return `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase();
-	const word = words[0] ?? providerId;
-	return `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
-}
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
@@ -1335,6 +1328,7 @@ export class ModelHubComponent implements Component {
 	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
 		if (!model.reasoning) return [];
+		if (model.thinking?.unverified) return [ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(model)];
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
 
@@ -3052,7 +3046,8 @@ export class ModelHubComponent implements Component {
 				this.#browser,
 			);
 		}
-		return node("col", { gap: "sm", grow: 1 }, children, "body");
+		// Zero basis: the body takes the space left of the sidebar instead of sizing to its widest line.
+		return node("col", { gap: "sm", grow: 1, basis: 0, min: { w: 0 } }, children, "body");
 	}
 
 	#describeStatus(): NativeNode {
@@ -3375,13 +3370,7 @@ export class ModelHubComponent implements Component {
 				...props,
 				tabs: this.#pickerKindTabs(),
 				tab: this.#modelKindTab,
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: view.order,
-				...(view.hits ? { hits: view.hits } : {}),
-				selected: this.#browser.pickerSelected,
-				...(current ? { current } : {}),
-				total: this.#browser.baseCount,
+				...this.#browser.pickerRows(catalogue, view, this.#currentSelector),
 				state,
 				...(state === "error" && this.#configError ? { message: this.#configError } : {}),
 				empty:
@@ -3458,7 +3447,7 @@ export class ModelHubComponent implements Component {
 					break;
 				case "provider": {
 					const providerId = entry.providerId ?? entry.label;
-					const mark = { text: providerInitials(providerId), seed: providerId };
+					const mark = providerMark(providerId);
 					if (entry.locked) {
 						const envVars = providerEntry(providerId)?.envVars ?? [];
 						scopes.push({

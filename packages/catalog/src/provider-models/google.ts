@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { isExcludedModel } from "../compat/behavior";
 import { reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
 import { providerEntry } from "../compat/providers";
@@ -32,6 +33,8 @@ export interface GoogleAntigravityAccount {
 	 * When any account lacks one, no model records per-account access.
 	 */
 	accountKey?: string;
+	/** Cloud Code Assist project of the credential, sent with roster discovery like the native client. */
+	projectId?: string;
 }
 
 export interface GoogleAntigravityModelManagerConfig {
@@ -112,6 +115,7 @@ export function googleAntigravityModelManagerOptions(
 								result: await fetchAntigravityDiscoveryModels({
 									token: account.accessToken,
 									endpoint: config?.endpoint,
+									projectId: account.projectId,
 									fetcher,
 								}),
 							})),
@@ -127,14 +131,27 @@ export function googleAntigravityModelManagerOptions(
 								});
 								continue;
 							}
-							catalogs.push({ accountKey, models: result.models });
+							// Caches written under older rules fail the compiled-rules hash in
+							// the model cache, so filtering fresh rosters covers every source.
+							catalogs.push({
+								accountKey,
+								models: result.models.filter(model => !isExcludedModel("google-antigravity", model.id)),
+							});
 						}
 						if (catalogs.length === 0) return null;
 						const tagAccess = catalogs.every(catalog => catalog.accountKey !== undefined);
 						return unionAccountCatalogs(
 							catalogs.map(({ accountKey, models }) =>
 								tagAccess && accountKey !== undefined
-									? models.map(model => ({ ...model, accountAccess: { [accountKey]: {} } }))
+									? models.map(model => ({
+											...model,
+											accountAccess: {
+												[accountKey]:
+													model.antigravityWireProfiles === undefined
+														? {}
+														: { antigravityWireProfiles: model.antigravityWireProfiles },
+											},
+										}))
 									: models,
 							),
 						);
@@ -161,6 +178,7 @@ export function googleGeminiCliModelManagerOptions(
 						}
 						const result = await fetchAntigravityDiscoveryModels({
 							token,
+							projectId: config?.projectId,
 							fetcher,
 							collapseTable,
 						});

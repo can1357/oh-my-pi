@@ -49,8 +49,9 @@ export interface InitializeExtensionsOptions {
 	) => Promise<T>;
 	/**
 	 * How the built-ins an extension runs through `sendUserInput` reach the host's client: the
-	 * {@link SlashCommandHost} the host's own typed input passes them (RPC). Omitted (print mode,
-	 * subagents), a built-in's output only returns to the extension.
+	 * {@link SlashCommandHost} the host's own typed input passes them (RPC; print mode passes the
+	 * headless host with its MCP hooks). Omitted (subagents), a built-in's output only returns to the
+	 * extension.
 	 */
 	slashCommandHost?: SlashCommandHost;
 }

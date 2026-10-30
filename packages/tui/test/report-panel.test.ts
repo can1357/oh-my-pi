@@ -196,3 +196,24 @@ describe("ReportPanel in text mode", () => {
 		expect(closed).toBe(1);
 	});
 });
+
+describe("ReportPanel natively", () => {
+	it("describes the report as the scrolled reading body, then Close, which closes it like Esc", () => {
+		let closed = 0;
+		const panel = new ReportPanel({
+			title: "Report",
+			body: new Text("body", 0, 0),
+			closeKey: "Esc",
+			onClose: () => closed++,
+		});
+		expect(panel.nativeOverlay).toMatchObject({ role: "omp.overlay.report", size: "lg", head: "Report" });
+		type Described = { key?: string; p?: { role?: string }; c?: Described[]; scroll?: unknown };
+		const root = panel.describe() as Described;
+		expect(root.c?.[0]).toMatchObject({ key: "body", p: { role: "omp.report.body" } });
+		expect(root.c?.at(-1)?.p?.role).toBe("omp.actions");
+		panel.handleInput("\x1b[6~");
+		expect((panel.describe() as Described).c?.[0]?.scroll).toEqual({ by: "page-down", n: 1 });
+		panel.handleNativeEvent({ type: "action", key: "actions/close", act: "close", mods: [] });
+		expect(closed).toBe(1);
+	});
+});

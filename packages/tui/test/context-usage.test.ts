@@ -7,17 +7,24 @@
  */
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
+import {
+	compactionContextTokens,
+	DEFAULT_COMPACTION_SETTINGS,
+	shouldCompact,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
-	type ContextBreakdown,
+	type NonMessageTokenSource,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
-	renderContextUsage,
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
@@ -90,7 +97,7 @@ describe("estimateToolSchemaTokens", () => {
 		expect(reads).toBe(2);
 	});
 
-	it("separates array, tokenizer, and source-revision cache keys", () => {
+	it("separates array, tokenizer, source-revision, and prune-mode cache keys", () => {
 		let reads = 0;
 		const tool = {
 			name: "dynamic",
@@ -101,73 +108,100 @@ describe("estimateToolSchemaTokens", () => {
 			parameters: {},
 		};
 		const tools = [tool];
-		estimateToolSchemaTokens(tools, tokenizer, 1);
-		estimateToolSchemaTokens(tools, tokenizer, 1);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 1 });
 		expect(reads).toBe(1);
 
-		estimateToolSchemaTokens(tools, tokenizer, 2);
+		estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(2);
-		estimateToolSchemaTokens([...tools], tokenizer, 2);
+		estimateToolSchemaTokens([...tools], tokenizer, { sourceRevision: 2 });
 		expect(reads).toBe(3);
-		estimateToolSchemaTokens(tools, new Tokenizer(), 2);
+		estimateToolSchemaTokens(tools, new Tokenizer(), { sourceRevision: 2 });
 		expect(reads).toBe(4);
+		const full = estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2 });
+		expect(estimateToolSchemaTokens(tools, tokenizer, { sourceRevision: 2, pruneDescriptions: true })).toBeLessThan(
+			full,
+		);
 	});
 });
 
-/**
- * Contract: the /context panel surfaces estimated snapcompact wire savings —
- * applied swaps show "saves" figures, inactive states say why.
- */
-describe("renderContextUsage snapcompact section", () => {
-	const themeStub = {
-		fg: (_color: string, text: string) => text,
-		bold: (text: string) => text,
-	} as never;
-
-	function breakdownWith(snapcompact: ContextBreakdown["snapcompact"]): ContextBreakdown {
-		return {
-			model: { id: "test-model", name: "Test Model", contextWindow: 200000 } as never,
-			contextWindow: 200000,
-			categories: [],
-			usedTokens: 27929,
-			autoCompactBufferTokens: 0,
-			freeTokens: 172071,
-			snapcompact,
-		};
-	}
-
-	it("renders savings, skip reasons, and the wire total", () => {
-		const output = renderContextUsage(
-			breakdownWith({
-				visionCapable: true,
-				systemPrompt: {
-					applied: true,
-					scope: "all",
-					textTokens: 9768,
-					frames: 2,
-					imageTokens: 6600,
-					savedTokens: 3168,
-				},
-				toolResults: { total: 3, swapped: 0, textTokens: 0, frames: 0, imageTokens: 0, savedTokens: 0 },
-				savedTokens: 3168,
+describe("pruned tool description accounting", () => {
+	// With the catalog inlined into the system prompt, normalizeTools ships each
+	// tool as its name plus the description-stripped schema. Counting the full
+	// specs again double-counts every description (issue #17329).
+	const tools = [
+		{
+			name: "grep",
+			description: `Search files by regex. ${"Supports globs, context lines, and multiline patterns. ".repeat(20)}`,
+			parameters: type({
+				"pattern /** regular expression to search for */": "string",
+				"path? /** file or directory to search */": "string",
 			}),
-			themeStub,
-		);
-		expect(output).toContain("Snapcompact (estimated wire savings)");
-		expect(output).toContain("System prompt (all): saves ~3.2K (9.8K text → 2 frames ≈ 6.6K)");
-		expect(output).toContain("Tool results: none imaged (3 in history)");
-		// 27929 logical − 3168 saved ≈ 25K on the wire.
-		expect(output).toContain("Next request: ~25K tokens on the wire");
-	});
+			examples: [{ caption: "Find TODOs", call: { pattern: "TODO", path: "src" } }],
+		},
+	];
+	const prunedWireTokens = tokenizer.countTokens(
+		(normalizeTools(tools as never, { injectIntent: false, pruneDescriptions: true }) ?? []).flatMap(tool =>
+			[tool.name, tool.description, JSON.stringify(tool.parameters)].filter(part => part !== ""),
+		),
+	);
 
-	it("reports text-only models as inactive", () => {
-		const output = renderContextUsage(breakdownWith({ visionCapable: false, savedTokens: 0 }), themeStub);
-		expect(output).toContain("Snapcompact: inactive (model has no image input)");
-	});
+	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
+		const systemPrompt = ["You are an assistant."];
+		let prune = true;
+		const agent = { state: { tools }, prunesToolDescriptions: () => prune };
+		const session: NonMessageTokenSource = { systemPrompt, agent };
+		const pruned = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(pruned).toBe(prunedWireTokens);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + pruned);
 
-	it("omits the section entirely when no snapcompact setting is on", () => {
-		const output = renderContextUsage(breakdownWith(undefined), themeStub);
-		expect(output).not.toContain("Snapcompact");
+		// A model or dialect switch flips pruning on the live agent without replacing the roster.
+		prune = false;
+		const full = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
+		expect(full).toBe(estimateToolSchemaTokens(tools as never, tokenizer));
+		expect(full).toBeGreaterThan(pruned);
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + full);
+	});
+});
+
+describe("deferred tool schema accounting", () => {
+	it("does not let Cursor's server-side MCP catalog force compaction below provider usage", () => {
+		const spec: ModelSpec<"anthropic-messages"> = {
+			id: "claude-opus-5-5",
+			name: "Claude Opus",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8192,
+		};
+		const directModel = buildModel(spec);
+		const cursorModel = buildModel({ ...spec, api: "cursor-agent", provider: "cursor" });
+		const tools = Array.from({ length: 200 }, (_, index) => ({
+			name: `mcp__service__tool_${index}`,
+			description: `Search records ${"search account records with detailed query filters and output metadata ".repeat(110)}`,
+			parameters: type({ query: "string" }),
+		}));
+		const systemPrompt = ["You are an assistant."];
+		const session: NonMessageTokenSource & { model: Model } = {
+			model: directModel,
+			systemPrompt,
+			agent: { state: { tools } },
+		};
+		const direct = computeNonMessageTokens(session, tokenizer);
+		expect(shouldCompact(compactionContextTokens(9000, direct), 100_000, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
+
+		session.model = cursorModel;
+		const cursor = computeNonMessageTokens(session, tokenizer);
+		expect(cursor).toBe(tokenizer.countTokens(systemPrompt));
+		expect(computeNonMessageBreakdown(session, tokenizer).toolsTokens).toBe(0);
+		expect(shouldCompact(compactionContextTokens(9000, cursor), 100_000, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+
+		session.model = directModel;
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(direct);
 	});
 });
 

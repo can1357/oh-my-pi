@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -11,8 +11,10 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { continuesConversation } from "./conversation-position";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/background-tan-message";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
@@ -36,15 +38,26 @@ import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
-import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import {
+	isSettledJobFrame,
+	parksAsBackground,
+	settleWithJobFrame,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+	toolRenderName,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
+import { span } from "@oh-my-pi/pi-tui/native/describe";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
+import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
 import {
 	materializeImageReferenceLinks,
 	materializeImageReferenceLinksSync,
@@ -219,13 +232,32 @@ function imageLinksForMessage(
 }
 
 export class UiHelpers {
+	/**
+	 * Tail of the transcript-replay chain. Replays swap `ctx.chatContainer` and the
+	 * live component maps for their whole duration, so two overlapping replays would
+	 * capture each other's staged state as "visible" and commit interleaved trees.
+	 */
+	#replayTail: Promise<void> = Promise.resolve();
+	/** Bumped by every replay request; a queued or in-flight replay is stale once it moves on. */
+	#replayGeneration = 0;
+	/** Requested replays that have not settled yet. */
+	#replaysInFlight = 0;
+	/** `initialChatRendered` to restore when the latest replay ends without committing. */
+	#chatRenderedBeforeReplay = false;
+	/** Bumped by {@link restartTranscriptReplay}; a replay pass that saw it move rebuilds again. */
+	#textRendererSetVersion = 0;
+	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
+	#textRendererSetChangedDuringReplay = false;
+
 	constructor(private ctx: InteractiveModeContext) {}
 
 	/**
 	 * Show a status message in the chat.
 	 *
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
-	 * we update the previous status line instead of appending new ones to avoid log spam.
+	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
+	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
+	 * nothing to a native terminal, so its expired toast would never show again.
 	 */
 	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
@@ -237,9 +269,12 @@ export class UiHelpers {
 		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, notice);
-			this.ctx.ui.requestRender();
-			return;
+			if (this.ctx.lastStatus.message !== message) {
+				this.ctx.lastStatus.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			this.ctx.chatContainer.removeChild(last);
 		}
 
 		const status = new StatusNotice(message, notice);
@@ -564,11 +599,11 @@ export class UiHelpers {
 			todoSnapshot = null;
 			previous.seal();
 		};
-		// Detached task calls persist their initial `async.state === "running"`
+		// Background job calls persist their initial `async.state === "running"`
 		// result, but the job keeps streaming progress afterwards. Parked here
 		// (not finalized) so replayed and live frames still route to the card;
 		// the ids are handed back to the controller after the loop (#10447).
-		const backgroundTaskCallIds = new Set<string>();
+		const backgroundCallIds = new Set<string>();
 		const messages = sessionContext.messages;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
@@ -610,12 +645,14 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
-				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
+				const appendAssistantSegment = (toolCallId: string) => {
+					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
 					const component = createAssistantMessageComponent(
 						this.ctx,
 						segment,
 						getAssistantMessageLinkTargets(this.ctx),
+						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
 				};
@@ -627,7 +664,7 @@ export class UiHelpers {
 					}
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
 					if (options.preservedLiveToolCallIds?.has(content.id)) {
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 					const tool = this.ctx.viewSession.getToolByName(content.name);
@@ -672,7 +709,7 @@ export class UiHelpers {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
 							}
 						}
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 
@@ -692,18 +729,15 @@ export class UiHelpers {
 								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
 							})
 						: content.arguments;
-					const component = new ToolExecutionComponent(
-						renderToolName,
-						renderArgs,
-						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							showImages: cfgTerminalShowImages.get(settings),
-						},
+					const component = createToolCallBlock(this.ctx, {
+						name: renderToolName,
+						args: renderArgs,
 						tool,
-						this.ctx.ui,
-						this.ctx.viewSession.sessionManager.getCwd(),
-						content.id,
-					);
+						id: content.id,
+						cwd: this.ctx.viewSession.sessionManager.getCwd(),
+					});
+					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
+					if (!partialJson && component instanceof ReplyWriteComponent) component.setArgsComplete();
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 
@@ -716,7 +750,7 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.set(content.id, component);
 					}
-					appendAssistantSegment(afterToolSegment);
+					appendAssistantSegment(content.id);
 				}
 				// Dangling toolCalls (no result on the resolved path — failed or
 				// retried turns, results on sibling branches) were stripped by the
@@ -754,8 +788,11 @@ export class UiHelpers {
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
+					const mediaPath = readMediaPath(message.details);
+					if (mediaPath && images.length === 0)
+						assistantComponent?.setToolResultImages(message.toolCallId, [], mediaPath);
 					if (images.length > 0 && assistantComponent) {
-						assistantComponent.setToolResultImages(message.toolCallId, images);
+						assistantComponent.setToolResultImages(message.toolCallId, images, mediaPath);
 						const hasText = message.content.some(c => c.type === "text");
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingReadComponent) {
@@ -793,21 +830,29 @@ export class UiHelpers {
 				// Match tool results to pending tool components
 				const component = this.ctx.pendingTools.get(message.toolCallId);
 				if (component) {
-					const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)
-						?.async;
-					const isBackgroundTask =
-						message.toolName === "task" &&
-						asyncDetails?.state === "running" &&
-						(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
-							runningAsyncJobs.some(job => job.id === asyncDetails.jobId));
-					// A detached task's persisted result is only its "still running"
-					// snapshot. Keep the card partial, parked, and in `pendingTools` so
-					// the snapshot replay and later live progress frames land on it
-					// instead of hitting the no-pending-component early return (#10447).
-					component.updateResult(message, isBackgroundTask, message.toolCallId);
-					if (isBackgroundTask) {
+					const jobId = (message.details as { async?: { jobId?: string } } | undefined)?.async?.jobId;
+					const frame = activeToolExecutionUpdates.find(
+						event => event.toolCallId === message.toolCallId,
+					)?.partialResult;
+					const isBackground =
+						parksAsBackground(message.toolName, message.details) &&
+						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
+					const settled = isBackground && isSettledJobFrame(frame?.details);
+					// A background job call's persisted result is only its "still running"
+					// snapshot; the job's latest frame supersedes it. Until that frame
+					// settles, keep the card partial, parked, and in `pendingTools` so
+					// later live progress frames land on it instead of hitting the
+					// no-pending-component early return (#10447).
+					if (settled) {
+						settleWithJobFrame(component, frame, message.toolCallId);
+					} else if (frame && isBackground) {
+						component.updateResult(frame, true, message.toolCallId);
+					} else {
+						component.updateResult(message, isBackground, message.toolCallId);
+					}
+					if (isBackground && !settled) {
 						component.parkAsBackground();
-						backgroundTaskCallIds.add(message.toolCallId);
+						backgroundCallIds.add(message.toolCallId);
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
@@ -828,6 +873,9 @@ export class UiHelpers {
 							todoSnapshot = component;
 						}
 					}
+				}
+				for (const reply of toolResultReplies(message.details)) {
+					this.ctx.chatContainer.addChild(createAssistantMessageComponent(this.ctx, replyDisplayMessage(reply)));
 				}
 			} else {
 				readGroup?.seal();
@@ -882,17 +930,17 @@ export class UiHelpers {
 		if (this.ctx.viewSession.isStreaming) {
 			this.ctx.eventController?.inheritTurnStart(turnStartedAt);
 		}
-		// Re-register parked background task cards with the controller: focus
-		// attach resets its `#backgroundTaskCallIds` before replaying, and unlike
+		// Re-register parked background cards with the controller: focus
+		// attach resets its `#backgroundCallIds` before replaying, and unlike
 		// the todo/turn handoffs this must run whether or not the session streams
-		// — a detached task keeps running while the main session sits idle
+		// — a background job keeps running while the main session sits idle
 		// (#10447). Membership is re-checked against `pendingTools`.
-		if (backgroundTaskCallIds.size > 0) {
-			this.ctx.eventController?.markBackgroundTaskCalls(backgroundTaskCallIds);
+		if (backgroundCallIds.size > 0) {
+			this.ctx.eventController?.markBackgroundCalls(backgroundCallIds);
 		}
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
-		// during the replay — with `keepDanglingToolCalls` these are exactly the
+		// during the replay — with `keepInFlightToolCalls` these are exactly the
 		// turn's in-flight calls (assistant turn persisted at message_end, tool
 		// still executing). While the viewed session streams, keep them tracked so
 		// the live event stream routes `tool_execution_update`/`_end` into the
@@ -912,10 +960,10 @@ export class UiHelpers {
 			}
 		} else {
 			for (const [toolCallId, component] of this.ctx.pendingTools) {
-				// A parked background task keeps running even while the main session
+				// A parked background job keeps running even while the main session
 				// is idle, so leave its card pending — sealing and clearing it would
 				// drop the replayed snapshot and every later job frame (#10447).
-				if (backgroundTaskCallIds.has(toolCallId)) {
+				if (backgroundCallIds.has(toolCallId)) {
 					component.setArgsComplete(toolCallId);
 					continue;
 				}
@@ -1004,11 +1052,52 @@ export class UiHelpers {
 		return true;
 	}
 
-	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+	/**
+	 * Rebuild the transcript from the view session. Calls run one at a time; a call
+	 * superseded by a newer one before or during its replay rolls back without
+	 * committing or clearing terminal history, so only the latest request paints.
+	 */
+	renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+		const generation = ++this.#replayGeneration;
+		// Close the display gate at request time, not when the queued replay starts:
+		// a display message persisted in between must reach the chat only through
+		// the replay, never also live (issue #1955).
+		if (this.#replaysInFlight++ === 0) this.#chatRenderedBeforeReplay = this.ctx.initialChatRendered;
+		this.ctx.initialChatRendered = false;
+		const run = this.#replayTail
+			.then(() => this.#renderInitialMessages(options, generation))
+			.catch((error: unknown) => {
+				// A replay that throws before its rollback (building the transcript context)
+				// must not leave live display closed until some later replay.
+				if (generation === this.#replayGeneration) this.ctx.initialChatRendered = this.#chatRenderedBeforeReplay;
+				throw error;
+			})
+			.finally(() => {
+				this.#replaysInFlight--;
+			});
+		this.#replayTail = run.catch(() => {});
+		return run;
+	}
+
+	/**
+	 * Make a transcript replay still in flight rebuild its components with the current extension
+	 * text renderers and link schemes before it commits. Components take both when built, so a
+	 * change while a replay yields would otherwise stay on the committed transcript. Returns
+	 * whether a replay was in flight; the caller then leaves the redraw to it.
+	 */
+	restartTranscriptReplay(): boolean {
+		if (this.#replaysInFlight === 0) return false;
+		this.#textRendererSetVersion++;
+		this.#textRendererSetChangedDuringReplay = true;
+		return true;
+	}
+
+	async #renderInitialMessages(options: RenderInitialMessagesOptions, generation: number): Promise<void> {
+		if (generation !== this.#replayGeneration) return;
 		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
 		let context = this.ctx.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+			keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
 		});
 		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 
@@ -1025,19 +1114,18 @@ export class UiHelpers {
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
 		const previousServedModelTracker = this.ctx.servedModelTracker;
-		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
 		const renderOptions = {
 			updateFooter: true,
 		};
 		let committed = false;
 		let replayAttempts = 0;
-		this.ctx.initialChatRendered = false;
 		try {
 			// Resolve before replacing live component maps: streaming events may arrive during filesystem I/O.
 			await refreshAssistantMessageLinkTargets(
 				this.ctx,
 				context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
 			);
+			if (generation !== this.#replayGeneration) return;
 
 			this.ctx.chatContainer = stagedChatContainer;
 			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
@@ -1049,6 +1137,7 @@ export class UiHelpers {
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
 			while (true) {
+				const passRendererSetVersion = this.#textRendererSetVersion;
 				if (this.ctx.viewSession.isStreaming) {
 					// Live events mutate the same component maps; keep their replay atomic so
 					// a delta cannot land halfway through rebuilding its pending tool block.
@@ -1056,7 +1145,9 @@ export class UiHelpers {
 				} else {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
-				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
+				if (generation !== this.#replayGeneration) return;
+				const entriesChanged = this.ctx.viewSession.sessionManager.getEntries().length !== replayEntryCount;
+				if (!entriesChanged && passRendererSetVersion === this.#textRendererSetVersion) {
 					break;
 				}
 				replayAttempts++;
@@ -1071,19 +1162,20 @@ export class UiHelpers {
 					});
 					break;
 				}
-				// An extension persisted a display message while the transcript replay
-				// yielded. The display callback stayed gated by initialChatRendered;
-				// discard the stale partial tree and replay the current session once
-				// more instead of letting a reentrant synchronous rebuild interleave.
+				// An extension persisted a display message, or the extension text renderer set
+				// changed, while the transcript replay yielded. The display callback stayed gated by
+				// initialChatRendered; discard the stale partial tree and replay the current session
+				// once more instead of letting a reentrant synchronous rebuild interleave.
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-					keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+					keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
 				});
 				replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 				await refreshAssistantMessageLinkTargets(
 					this.ctx,
 					context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
 				);
+				if (generation !== this.#replayGeneration) return;
 				stagedChatContainer.disposeChildren();
 				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 				this.ctx.pendingTools.clear();
@@ -1121,7 +1213,11 @@ export class UiHelpers {
 				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 				this.ctx.showStatus(`Session compacted ${times}`);
 			}
-			if (options.clearTerminalHistory) {
+			// Rows of the previous transcript already in native scrollback were drawn with the old
+			// text renderer set; retire them as the direct renderer-change rebuild does.
+			const staleRendererRows = this.#textRendererSetChangedDuringReplay && this.#chatRenderedBeforeReplay;
+			this.#textRendererSetChangedDuringReplay = false;
+			if (options.clearTerminalHistory || staleRendererRows) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
 				this.ctx.ui.requestRender();
@@ -1137,7 +1233,9 @@ export class UiHelpers {
 				this.ctx.servedModelTracker = previousServedModelTracker;
 				stagedChatContainer.disposeChildren();
 			}
-			this.ctx.initialChatRendered = committed ? true : chatWasAlreadyRendered;
+			// A superseded replay leaves the gate closed for the newer one still queued.
+			if (committed) this.#chatRenderedBeforeReplay = true;
+			this.ctx.initialChatRendered = generation === this.#replayGeneration && this.#chatRenderedBeforeReplay;
 		}
 	}
 
@@ -1148,30 +1246,37 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
-		this.ctx.present([new Spacer(1), text]);
+		this.ctx.present(TranscriptNotice.line("error", errorMessage));
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
-		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
-		const content = [new Spacer(1), text];
-		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(content) : content);
+		const notice = TranscriptNotice.line("warning", warningMessage);
+		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(notice) : notice);
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		const title = "Update Available";
 		const prefix = `New version ${newVersion} is available. Run: `;
 		const command = "omp update";
-		block.addChild(
-			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
-				() =>
-					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
-			),
+		const native = noticeRow(
+			"info",
+			[
+				span("Update available", "strong"),
+				span(` · New version ${newVersion} is available. Run `),
+				span(command, "code"),
+			],
+			{ icon: "download" },
 		);
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		this.ctx.present(block);
+		this.ctx.present(
+			new TranscriptNotice(native, [
+				new DynamicBorder(text => theme.fg("warning", text)),
+				new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
+					() =>
+						`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
+				),
+				new DynamicBorder(text => theme.fg("warning", text)),
+			]),
+		);
 	}
 
 	updatePendingMessagesDisplay(): void {
@@ -1181,6 +1286,7 @@ export class UiHelpers {
 		const steeringMessages = [...queuedMessages.steering];
 		const followUpMessages = [...queuedMessages.followUp];
 		if (!this.ctx.focusedAgentId) {
+			if (this.ctx.yieldCompaction) followUpMessages.push(this.ctx.yieldCompaction.text);
 			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 				if (entry.mode === "steer") steeringMessages.push(entry.text);
 				else followUpMessages.push(entry.text);
@@ -1225,7 +1331,11 @@ export class UiHelpers {
 		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 	}
 
-	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
+	/** Deliver one compaction-queued message; `onQueued` receives what it pushes onto the session queues. */
+	async #deliverQueuedMessage(
+		message: CompactionQueuedMessage,
+		onQueued: (queued: readonly AgentMessage[]) => void,
+	): Promise<void> {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
 			input: message.images ? { images: message.images } : undefined,
@@ -1238,6 +1348,7 @@ export class UiHelpers {
 			const forwarded = await this.ctx.session.prompt(builtin, {
 				streamingBehavior: message.mode,
 				images: message.images,
+				onPromptQueued: onQueued,
 			});
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1247,11 +1358,13 @@ export class UiHelpers {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
+				onPromptQueued: onQueued,
 			})
 		) {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
+			// No `streamingBehavior`: this prompt never queues (a busy session rejects it).
 			const forwarded = await this.ctx.session.prompt(message.text);
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1260,8 +1373,8 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, { onPromptQueued: onQueued })
+					: this.ctx.session.steer(message.text, message.images, { onPromptQueued: onQueued }),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1289,29 +1402,64 @@ export class UiHelpers {
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.ctx.compactionQueuedMessages.length === 0) {
+		// Follow-ups queued behind a yield compaction wait for it, not for a pass that lands first.
+		if (this.ctx.yieldCompaction) return;
+		const origin = this.ctx.compactionQueueOrigin;
+		this.ctx.compactionQueueOrigin = undefined;
+		if (this.ctx.compactionQueuedMessages.length === 0) return;
+		// Held behind the queued compaction that just ran: a switch or tree move while it summarized
+		// means they belong to a conversation that is no longer live, so they go back to the editor.
+		if (origin && !continuesConversation(this.ctx.sessionManager, origin)) {
+			this.ctx.restoreCompactionQueueToEditor();
 			return;
 		}
 
 		const queuedMessages = [...(this.ctx.compactionQueuedMessages as CompactionQueuedMessage[])];
 		this.ctx.compactionQueuedMessages = [] as CompactionQueuedMessage[];
 		this.ctx.updatePendingMessagesDisplay();
+		// On failure the batch goes back to the compaction queue, so the messages this flush pushed
+		// onto the session queues must leave them. Only those: what other sources queue (an
+		// extension's message, input sent through other paths), before, during or after the flush,
+		// stays queued.
+		const deliveredByFlush: AgentMessage[] = [];
+		const onDelivered = (queued: readonly AgentMessage[]) => {
+			deliveredByFlush.push(...queued);
+		};
+		let restored = false;
+		// The fire-and-forget first prompt belongs to the session once admitted (queued, or its turn
+		// started): a restore then leaves it out of the batch, and keeps its queued messages, instead
+		// of sending it again on the next flush — unless the prompt itself fails.
+		let firstPrompt: CompactionQueuedMessage | undefined;
+		/** Set once the first prompt is admitted: the messages it queued, or none if its turn started. */
+		let firstAdmitted: readonly AgentMessage[] | undefined;
+		let firstQueued: readonly AgentMessage[] = [];
+		let firstFailed = false;
+		let firstLeftOut = false;
 
-		const restoreQueue = (error: unknown) => {
-			this.ctx.session.clearQueue();
-			this.ctx.compactionQueuedMessages = queuedMessages;
+		const reportFailure = (count: number, error: unknown) => {
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
+				`Failed to send queued message${count > 1 ? "s" : ""}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
 		};
 
+		const restoreQueue = (error: unknown) => {
+			// A `rest` delivery and the fire-and-forget first prompt can both fail; restore once.
+			if (restored) return;
+			restored = true;
+			firstLeftOut = firstAdmitted !== undefined && !firstFailed;
+			this.ctx.session.dropQueuedMessages(firstLeftOut ? deliveredByFlush : [...deliveredByFlush, ...firstQueued]);
+			const batch = firstLeftOut ? queuedMessages.filter(message => message !== firstPrompt) : queuedMessages;
+			this.ctx.compactionQueuedMessages = batch;
+			reportFailure(batch.length, error);
+		};
+
 		try {
 			if (options?.willRetry) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				return;
@@ -1326,56 +1474,111 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				return;
 			}
 
 			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
+			const first = queuedMessages[firstPromptIndex];
+			firstPrompt = first;
 			const rest = queuedMessages.slice(firstPromptIndex + 1);
 
 			for (const message of preCommands) {
 				// preCommands are all slash commands; #deliverQueuedMessage handles
 				// that branch (no local-submission marking needed since slash
 				// commands don't generate a matching user message_start).
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
 			}
 
+			const onFirstQueued = (queued: readonly AgentMessage[]) => {
+				firstQueued = queued;
+			};
+			const onFirstAdmitted = () => {
+				firstAdmitted = firstQueued;
+				// Admitted after the batch was already restored with it: the session must not send
+				// it as well. Take a queued prompt back out (the batch keeps it); a prompt whose turn
+				// already started leaves the batch instead.
+				if (!restored || firstLeftOut) return;
+				if (firstAdmitted.length > 0) {
+					this.ctx.session.dropQueuedMessages(firstAdmitted);
+				} else {
+					firstLeftOut = true;
+					this.ctx.compactionQueuedMessages = this.ctx.compactionQueuedMessages.filter(m => m !== first);
+					this.ctx.updatePendingMessagesDisplay();
+				}
+			};
+			/** Put the first prompt back into the batch, after the slash commands that preceded it. */
+			const putFirstBack = () => {
+				firstLeftOut = false;
+				const current = this.ctx.compactionQueuedMessages;
+				let at = 0;
+				for (let i = 0; i < current.length; i++) if (preCommands.includes(current[i])) at = i + 1;
+				this.ctx.compactionQueuedMessages = [...current.slice(0, at), first, ...current.slice(at)];
+			};
+			const onFirstFailed = (error: unknown) => {
+				firstFailed = true;
+				if (!firstLeftOut) {
+					restoreQueue(error);
+					return;
+				}
+				// A restore left the admitted first prompt out of the batch, but it failed after all.
+				putFirstBack();
+				reportFailure(1, error);
+			};
+			// A skill prompt the session dropped before sending it (usage preflight, cost cap, an
+			// interrupt) resolves `false` even after admission, and nothing hands a custom prompt
+			// back to the editor: the session does not own it after all, so a restore keeps it in
+			// the batch, or puts it back if one already left it out.
+			const onFirstDropped = () => {
+				firstAdmitted = undefined;
+				if (!firstLeftOut) return;
+				putFirstBack();
+				this.ctx.updatePendingMessagesDisplay();
+			};
+
 			// First prompt is fire-and-forget — its rejection is funneled through
-			// `restoreQueue` rather than rethrown. Plain prompts use primitive
+			// `onFirstFailed` rather than rethrown. Plain prompts use primitive
 			// recordLocalSubmission and dispose manually in the catch. Skill prompts
 			// are rebuilt as user-attributed custom messages so queued `/skill:` text
 			// is not sent as a literal prompt after compaction.
 			let promptPromise: Promise<unknown>;
-			if (isKnownSkillCommand(this.ctx, firstPrompt.text)) {
-				const built = await buildSkillCommandPrompt(
-					this.ctx,
-					firstPrompt.text,
-					firstPrompt.mode,
-					firstPrompt.images,
-				);
+			if (isKnownSkillCommand(this.ctx, first.text)) {
+				const built = await buildSkillCommandPrompt(this.ctx, first.text, first.mode, first.images);
 				promptPromise = built
-					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
+					? this.ctx.session
+							.promptCustomMessage(built.message, {
+								...built.options,
+								onPromptQueued: onFirstQueued,
+								onPromptAdmitted: onFirstAdmitted,
+							})
+							.then(sent => {
+								if (sent === false) onFirstDropped();
+							}, onFirstFailed)
 					: Promise.resolve();
 			} else {
-				const disposeFirstPrompt = this.ctx.recordLocalSubmission(
-					firstPrompt.text,
-					firstPrompt.images?.length ?? 0,
-				);
+				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
 				promptPromise = this.ctx.session
-					.prompt(firstPrompt.text, {
-						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
-						images: firstPrompt.images,
+					.prompt(first.text, {
+						streamingBehavior: first.mode === "followUp" ? "followUp" : "steer",
+						images: first.images,
+						onPromptQueued: onFirstQueued,
+						onPromptAdmitted: onFirstAdmitted,
 					})
 					.catch((error: unknown) => {
 						disposeFirstPrompt();
-						restoreQueue(error);
+						onFirstFailed(error);
 					});
 			}
 
 			for (const message of rest) {
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
+				// The first prompt failed while the rest was still being delivered: the whole batch is
+				// back in the compaction queue, so take back what was delivered since and stop.
+				if (restored) {
+					this.ctx.session.dropQueuedMessages(deliveredByFlush);
+					return;
+				}
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			// The dispatch above bypasses `getUserInput`, so nothing would schedule

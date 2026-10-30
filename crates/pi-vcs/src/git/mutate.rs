@@ -186,9 +186,19 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git reset", err))
 	}
 
-	/// Create a commit and return its object id.
+	/// Create a commit and return its object id. With `commit.gpgSign` enabled
+	/// the object is written by `git commit-tree -S` so Git runs the
+	/// configured signer; a signer failure leaves HEAD unchanged.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
 		let repo = self.gix()?;
+		// Git rejects a malformed value before doing any work; reading it as
+		// `false` would silently write unsigned commits.
+		let sign = repo
+			.config_snapshot()
+			.try_boolean("commit.gpgSign")
+			.transpose()
+			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
+			.unwrap_or(false);
 		run_commit_hook(self, "pre-commit", &[])?;
 		let mut head = repo
 			.head()
@@ -260,10 +270,14 @@ impl GitRepo {
 		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()])?;
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
-		let commit = repo
-			.new_commit_as(committer, author, message, tree, parents)
-			.map_err(|err| Error::backend("git commit", err))?;
-		let id = commit.id;
+		let id = if sign {
+			sign_commit(self, &message, tree, &parents, author, committer)?
+		} else {
+			repo
+				.new_commit_as(committer, author, message, tree, parents)
+				.map_err(|err| Error::backend("git commit", err))?
+				.id
+		};
 		let expected = old_commit
 			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
 				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
@@ -441,6 +455,27 @@ impl GitRepo {
 			};
 			restore_index_paths(self.root(), &repo, &source_index, &options.files)?;
 		}
+		Ok(())
+	}
+
+	/// Write the checkout's uncommitted changes to tracked files as a stash
+	/// commit, leaving the working tree, the index, and the stash list as they
+	/// are. `None` when nothing is uncommitted. Git cannot record unmerged
+	/// entries, so this fails mid-conflict.
+	pub fn stash_create(&self) -> Result<Option<String>> {
+		let create = ["stash", "create"].map(str::to_owned);
+		let created = super::cli::run_sync(self.root(), &create, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&create)?;
+		let id = created.stdout.trim();
+		Ok((!id.is_empty()).then(|| id.to_owned()))
+	}
+
+	/// Point `reference` at `id`, recording `message` on its reflog.
+	pub fn record_ref(&self, reference: &str, id: &str, message: &str) -> Result<()> {
+		let update =
+			["update-ref", "--create-reflog", "-m", message, reference, id].map(str::to_owned);
+		super::cli::run_sync(self.root(), &update, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&update)?;
 		Ok(())
 	}
 
@@ -706,31 +741,7 @@ impl GitRepo {
 		};
 
 		for relative in dirty_tracked.iter().chain(&untracked).chain(&staged) {
-			let relative = relative.to_path_lossy();
-			let src = self.root().join(&relative);
-			let dst = path.join(&relative);
-			match fs::symlink_metadata(&src) {
-				Ok(meta) if meta.file_type().is_symlink() => {
-					remove_existing(&dst)?;
-					if let Some(parent) = dst.parent() {
-						fs::create_dir_all(parent)?;
-					}
-					copy_symlink(&src, &dst)?;
-				},
-				Ok(meta) if meta.is_file() => {
-					remove_existing(&dst)?;
-					if let Some(parent) = dst.parent() {
-						fs::create_dir_all(parent)?;
-					}
-					fs::copy(&src, &dst)?;
-				},
-				Ok(_) => {},
-				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-					remove_existing(&dst)?;
-					prune_empty_parents(path, dst.parent(), &BTreeSet::new())?;
-				},
-				Err(err) => return Err(err.into()),
-			}
+			copy_worktree_path(self.root(), path, relative.as_bstr())?;
 		}
 		let Some(mut index) = source_index else {
 			return Ok(());
@@ -772,11 +783,29 @@ impl GitRepo {
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
 		fs::copy(&source_index, admin.join("index"))?;
 
-		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
+		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
+		// Backends may clone entire subtrees atomically. Apply the same
+		// nonrelocatable-directory policy to every backend's disposable copy,
+		// independently of Git's ignore rules.
+		let excluded = prune_nonrelocatable_clone_dirs(path)?;
 		let linked = Self::require(path)?;
 		let linked_repo = linked.gix()?;
 		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
 		if keep_changes {
+			// Environment artifacts are never portable, but tracked edits
+			// beneath an excluded directory still belong to the user.
+			if !excluded.is_empty() {
+				for entry in current.entries() {
+					let relative = entry.path(&current);
+					if relative
+						.to_path_lossy()
+						.ancestors()
+						.any(|parent| excluded.contains(parent))
+					{
+						copy_worktree_path(self.root(), path, relative)?;
+					}
+				}
+			}
 			// The clone already mirrors the source's live tree and the copied
 			// index carries its staged state. Only the stat cache is stale
 			// (new inodes); refresh it for entries the source reports clean so
@@ -796,7 +825,6 @@ impl GitRepo {
 			.into_iter()
 			.partition(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some());
 		let mut delete = removed;
-		delete.extend(untracked);
 		delete.extend(
 			dirty_tracked
 				.iter()
@@ -805,6 +833,16 @@ impl GitRepo {
 		);
 
 		let mut write = write_paths;
+		if !excluded.is_empty() {
+			write.extend(target.entries().iter().filter_map(|entry| {
+				let relative = entry.path(&target);
+				relative
+					.to_path_lossy()
+					.ancestors()
+					.any(|parent| excluded.contains(parent))
+					.then(|| relative.to_owned())
+			}));
+		}
 		write.extend(
 			dirty_tracked
 				.iter()
@@ -877,7 +915,12 @@ impl GitRepo {
 		}
 		target
 			.write(INDEX_WRITE)
-			.map_err(|err| Error::backend("git worktree add", err))
+			.map_err(|err| Error::backend("git worktree add", err))?;
+		// The source can ignore paths that the target does not, and vice
+		// versa. Only now are the target's ignore files and index in place.
+		// Clean this fresh clone through the existing repository-safe walk;
+		// keep target-ignored caches and never enter nested repositories.
+		linked.clean(&CleanOptions::default())
 	}
 
 	/// Resolve the executable hook `name` as git's `find_hook` does: under
@@ -966,9 +1009,61 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	Err(Error::Cli {
 		command:   format!("git commit ({name} hook)"),
 		exit_code: output.status.code().unwrap_or(1),
-		stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-		stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
+		stdout:    String::from_utf8_lossy_owned(output.stdout),
+		stderr:    String::from_utf8_lossy_owned(output.stderr),
 	})
+}
+
+/// Write a signed commit object through `git commit-tree -S`, which runs the
+/// signer configured by `gpg.format`/`gpg.program`/`user.signingKey`.
+/// gitoxide cannot sign, so this is the one commit path that leaves the
+/// process; HEAD is still updated in-process by the caller.
+fn sign_commit(
+	repository: &GitRepo,
+	message: &str,
+	tree: gix::hash::ObjectId,
+	parents: &[gix::hash::ObjectId],
+	author: gix::actor::SignatureRef<'_>,
+	committer: gix::actor::SignatureRef<'_>,
+) -> Result<gix::hash::ObjectId> {
+	let mut args = vec![
+		// The repository was opened with `Trust::Full`; without this override
+		// git's ownership check rejects checkouts owned by another user
+		// (host-mounted repositories in containers) that commit fine unsigned.
+		"-c".to_owned(),
+		"safe.directory=*".to_owned(),
+		"commit-tree".to_owned(),
+		"-S".to_owned(),
+		tree.to_hex().to_string(),
+	];
+	for parent in parents {
+		args.push("-p".to_owned());
+		args.push(parent.to_hex().to_string());
+	}
+	// Raw `<seconds> <offset>` dates need the `@` marker: without it git falls
+	// back to its approximate-date parser, which rejects timestamps under
+	// nine digits.
+	let author_date = format!("@{}", author.time);
+	let committer_date = format!("@{}", committer.time);
+	let env: [(&str, &OsStr); 6] = [
+		("GIT_AUTHOR_NAME", &author.name.to_os_str_lossy()),
+		("GIT_AUTHOR_EMAIL", &author.email.to_os_str_lossy()),
+		("GIT_AUTHOR_DATE", author_date.as_ref()),
+		("GIT_COMMITTER_NAME", &committer.name.to_os_str_lossy()),
+		("GIT_COMMITTER_EMAIL", &committer.email.to_os_str_lossy()),
+		("GIT_COMMITTER_DATE", committer_date.as_ref()),
+	];
+	// The message travels over stdin so it reaches git byte-for-byte, with no
+	// file path to re-encode.
+	let output = super::cli::run_sync_write(
+		repository.root(),
+		&args,
+		super::cli::COMMAND_TIMEOUT,
+		&super::cli::SyncWrite { stdin: message.as_bytes(), env: &env },
+	)?
+	.into_checked(&args)?;
+	gix::hash::ObjectId::from_hex(output.stdout.trim().as_bytes())
+		.map_err(|err| Error::backend("git commit-tree", err))
 }
 
 /// Mirrors git's `find_hook`: any failure to stat the hook (missing, or
@@ -1740,6 +1835,73 @@ fn collect_clone_reconciliation_paths(
 	Ok((dirty_tracked, untracked))
 }
 
+/// Drop source-bound environments from a fresh clone, never following
+/// symlinks or walking Git metadata. Return the removed directory paths so
+/// target-tracked entries can be checked out even when both indexes agree.
+fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
+	let mut excluded = BTreeSet::new();
+	let mut pending = vec![root.to_path_buf()];
+	while let Some(dir) = pending.pop() {
+		let marked = dir.join("pyvenv.cfg").is_file() || dir.join("CMakeCache.txt").is_file();
+		if marked && dir != root {
+			remove_existing(&dir)?;
+			excluded.insert(
+				dir.strip_prefix(root)
+					.expect("cloned directory is under root")
+					.to_path_buf(),
+			);
+			continue;
+		}
+		for entry in fs::read_dir(&dir)? {
+			let entry = entry?;
+			if entry.file_name() == ".git" {
+				continue;
+			}
+			if marked {
+				remove_existing(&entry.path())?;
+			} else if entry.file_type()?.is_dir() {
+				pending.push(entry.path());
+			}
+		}
+		if marked {
+			excluded.insert(PathBuf::new());
+		}
+	}
+	Ok(excluded)
+}
+
+/// Carry one live source path without following symlinks, including a
+/// deletion. Used both by ordinary-checkout seeding and by tracked files
+/// restored after clone exclusions.
+fn copy_worktree_path(source: &Path, target: &Path, relative: &gix::bstr::BStr) -> Result<()> {
+	let relative = relative.to_path_lossy();
+	let src = source.join(&relative);
+	let dst = target.join(&relative);
+	match fs::symlink_metadata(&src) {
+		Ok(meta) if meta.file_type().is_symlink() => {
+			remove_existing(&dst)?;
+			if let Some(parent) = dst.parent() {
+				fs::create_dir_all(parent)?;
+			}
+			copy_symlink(&src, &dst)?;
+		},
+		Ok(meta) if meta.is_file() => {
+			remove_existing(&dst)?;
+			if let Some(parent) = dst.parent() {
+				fs::create_dir_all(parent)?;
+			}
+			fs::copy(&src, &dst)?;
+		},
+		Ok(_) => {},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+			remove_existing(&dst)?;
+			prune_empty_parents(target, dst.parent(), &BTreeSet::new())?;
+		},
+		Err(err) => return Err(err.into()),
+	}
+	Ok(())
+}
+
 fn git_metadata_path(path: &Path) -> Cow<'_, str> {
 	let display = path.to_string_lossy();
 	if cfg!(windows) {
@@ -2015,6 +2177,86 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn commit_respects_configured_signing_and_refuses_failed_signatures() {
+		let (temp, _) = fixture();
+		// A pre-1973 author date: git rejects a bare `<seconds> <offset>` under
+		// nine digits, so the amend below proves the raw date reaches the
+		// signed commit intact.
+		git(temp.path(), &["commit", "-q", "--amend", "--no-edit", "--date=@86400 +0130"]);
+		let key = temp.path().join("signing-key");
+		let output = Command::new("ssh-keygen")
+			.args(["-q", "-t", "ed25519", "-N", "", "-f"])
+			.arg(&key)
+			.output()
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		let signers = temp.path().join("allowed-signers");
+		fs::write(
+			&signers,
+			format!("test@example.com {}\n", fs::read_to_string(key.with_extension("pub")).unwrap()),
+		)
+		.unwrap();
+		git(temp.path(), &["config", "gpg.format", "ssh"]);
+		git(temp.path(), &["config", "user.signingkey", key.to_str().unwrap()]);
+		git(temp.path(), &["config", "gpg.ssh.allowedSignersFile", signers.to_str().unwrap()]);
+		git(temp.path(), &["config", "commit.gpgsign", "true"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		let identity = |rev: &str| {
+			git(temp.path(), &["log", "-1", "--date=raw", "--format=%an|%ae|%ad|%cn|%ce", rev])
+		};
+
+		fs::write(temp.path().join("a"), "amended\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		let amended = repo
+			.commit_create("signed amend", &CommitOptions { amend: true, ..Default::default() })
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), amended);
+		git(temp.path(), &["verify-commit", "HEAD"]);
+		assert_eq!(identity("HEAD"), "Test|test@example.com|86400 +0130|Test|test@example.com");
+		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), "1");
+
+		let message = "subject ünïcode\n\nbody line\n";
+		fs::write(temp.path().join("b"), "signed\n").unwrap();
+		repo.stage_files(&["b".into()]).unwrap();
+		let signed = repo
+			.commit_create(message, &CommitOptions::default())
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+		git(temp.path(), &["verify-commit", "HEAD"]);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD^"]), amended);
+		let raw = git(temp.path(), &["cat-file", "commit", "HEAD"]);
+		assert!(raw.ends_with(&format!("\n\n{}", message.trim_end())), "{raw}");
+
+		git(temp.path(), &["config", "user.signingkey", "/no-such-signing-key"]);
+		fs::write(temp.path().join("a"), "must not commit\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		let error = repo
+			.commit_create("failed signer", &CommitOptions::default())
+			.unwrap_err();
+		assert!(matches!(error, Error::Cli { .. }), "{error:?}");
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+
+		// Git refuses a malformed boolean; committing unsigned instead would
+		// silently drop the signature the user asked for.
+		git(temp.path(), &["config", "commit.gpgsign", "sometimes"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(
+			repo
+				.commit_create("malformed config", &CommitOptions::default())
+				.is_err()
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+
+		git(temp.path(), &["config", "commit.gpgsign", "false"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		repo
+			.commit_create("unsigned by choice", &CommitOptions::default())
+			.unwrap();
+		assert!(!git(temp.path(), &["cat-file", "-p", "HEAD"]).contains("\ngpgsig "));
 	}
 
 	/// Staged entries record the file's stat so later status calls can skip

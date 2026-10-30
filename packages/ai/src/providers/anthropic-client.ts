@@ -278,7 +278,7 @@ export class AnthropicHttpClient {
 					continue;
 				}
 				if (error instanceof AIError.AnthropicConnectionTimeoutError) throw error;
-				throw new AIError.AnthropicConnectionError(error);
+				throw new AIError.AnthropicConnectionError(error, url);
 			}
 
 			if (response.ok) return response;

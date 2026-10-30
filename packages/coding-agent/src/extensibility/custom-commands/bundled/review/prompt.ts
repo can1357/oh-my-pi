@@ -1,8 +1,8 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import annotationsTemplate from "./prompts/annotations.md" with { type: "text" };
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
-import type { CodeReviewAnnotation, ReviewDiffFile } from "@oh-my-pi/pi-tui/overlays/annotation-types";
-import { getRecommendedReviewAgentCount, getReviewDiffPreview } from "./diff";
+import type { CodeReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import { getRecommendedReviewAgentCount, getReviewDiffPreview, type ReviewDiffSnapshot } from "./diff";
 import type { ResolvedReviewTarget } from "./target";
 
 const LARGE_DIFF_CHARACTER_LIMIT = 50_000;
@@ -21,6 +21,8 @@ type RenderedAnnotation = CodeReviewAnnotation & {
 
 interface ReviewPromptFile {
 	path: string;
+	diffIndex: number;
+	diffUrl?: string;
 	linesAdded: number;
 	linesRemoved: number;
 	ext: string;
@@ -40,9 +42,16 @@ function formatLineLabel(annotation: Extract<CodeReviewAnnotation, { scope: "lin
 	return "hunk";
 }
 
-function renderReviewPromptFile(file: ReviewDiffFile, previewLines: number): ReviewPromptFile {
+function renderReviewPromptFile(
+	file: ReviewDiffSnapshot["files"][number],
+	previewLines: number,
+	prDiffUrl?: string,
+	prDiffQuery = "",
+): ReviewPromptFile {
 	return {
 		path: file.path,
+		diffIndex: file.diffIndex,
+		diffUrl: prDiffUrl ? `${prDiffUrl}/${file.diffIndex}${prDiffQuery}` : undefined,
 		linesAdded: file.linesAdded,
 		linesRemoved: file.linesRemoved,
 		ext: file.path.match(/\.([^.]+)$/)?.[1] ?? "",
@@ -110,7 +119,10 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 	assertReviewablePatchSize(target);
 	const skipDiff = exceedsInlineDiffLimit(target);
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
-	const files = target.snapshot.files.map(file => renderReviewPromptFile(file, linesPerFile));
+	const prDiffQuery = target.prDiffQuery ?? "";
+	const files = target.snapshot.files.map(file =>
+		renderReviewPromptFile(file, linesPerFile, target.prDiffUrl, prDiffQuery),
+	);
 	const agentCount = getRecommendedReviewAgentCount(target.snapshot);
 	return prompt.render(reviewRequestTemplate, {
 		mode: target.mode,
@@ -126,6 +138,8 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
 		suppliedPatch: target.kind === "patch",
+		prDiffUrl: target.prDiffUrl,
+		prDiffQuery,
 		additionalInstructions: additionalInstructions?.trim(),
 	});
 }

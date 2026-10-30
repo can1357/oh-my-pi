@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -7,6 +7,7 @@ import { formatOutputPaneLines } from "../render/output-pane";
 import {
 	capPreviewLines,
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	formatDuration,
 	formatToolWorkingDirectory,
 	previewWindowRows,
 	replaceTabs,
@@ -62,10 +63,14 @@ export interface BashToolDetails {
 	requestedTimeoutSeconds?: number;
 	timeoutDisabled?: boolean;
 	wallTimeMs?: number;
+	/** False when no wall-time footer was emitted; absent on older results. */
+	wallTimeNoticeEmitted?: boolean;
 	/** Exit code of a command that ran to completion but failed (non-zero). */
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -75,8 +80,9 @@ export interface BashToolDetails {
 		timedOut: boolean;
 		pid?: number;
 	};
+	/** Background job behind the call; `cancelled`: killed (`proc://<id>/kill`) before it finished. */
 	async?: {
-		state: "running" | "completed" | "failed";
+		state: "running" | "completed" | "failed" | "cancelled";
 		jobId: string;
 		type: "bash";
 	};
@@ -170,28 +176,10 @@ function extractPartialBashEnv(partialJson: string | undefined): Readonly<Record
 	const objectStart = envStart === -1 ? -1 : partialJson.indexOf("{", envStart);
 	if (objectStart !== -1) {
 		// Scan only the env object: stop at its closing brace (outside strings)
-		// so the keys that follow it are not read as env assignments.
-		let objectEnd = partialJson.length;
-		let depth = 0;
-		for (let i = objectStart + 1; i < partialJson.length; i++) {
-			const ch = partialJson.charCodeAt(i);
-			if (ch === 0x22) {
-				// Skip the string body, honoring escapes; an unterminated string runs to the end.
-				for (i++; i < partialJson.length; i++) {
-					const inner = partialJson.charCodeAt(i);
-					if (inner === 0x5c) i++;
-					else if (inner === 0x22) break;
-				}
-			} else if (ch === 0x7b || ch === 0x5b) {
-				depth++;
-			} else if (ch === 0x7d || ch === 0x5d) {
-				if (depth === 0) {
-					objectEnd = i;
-					break;
-				}
-				depth--;
-			}
-		}
+		// so the keys that follow it are not read as env assignments. An
+		// unclosed object (still streaming) runs to the end.
+		const end = jsonContainerEnd(partialJson, objectStart);
+		const objectEnd = end === -1 ? partialJson.length : end - 1;
 		const envBody = partialJson.slice(objectStart + 1, objectEnd);
 		const matcher = /"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/gu;
 		for (const match of envBody.matchAll(matcher)) {
@@ -207,6 +195,9 @@ function extractPartialBashEnv(partialJson: string | undefined): Readonly<Record
 function formatWallTimeSeconds(wallTimeMs: number): string {
 	return (wallTimeMs / 1000).toFixed(2);
 }
+
+/** Minimum duration for a model-facing wall-time notice; shorter runs keep timing only in details. */
+export const WALL_TIME_NOTICE_MIN_MS = 1000;
 
 /** Formats the model-facing command duration notice. */
 export function formatWallTimeNotice(wallTimeMs: number): string {
@@ -318,7 +309,7 @@ function stripBashNotices(
 			? strippedOutput
 			: stripTrailingNotice(strippedOutput, formatExitCodeNotice(details.exitCode));
 	const withoutWall =
-		details?.wallTimeMs === undefined
+		details?.wallTimeMs === undefined || details.wallTimeNoticeEmitted === false
 			? withoutExit
 			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputArtifactNotice(withoutWall);
@@ -426,9 +417,9 @@ function shellRunState(
 	cancelled: boolean,
 ): RunState {
 	if (cancelled) return "cancelled";
+	if (details?.async?.state === "running") return "background";
 	if (isPartial) return "running";
 	if (details?.timedOut === true) return "timed-out";
-	if (details?.async?.state === "running") return "background";
 	if (isError || (details?.exitCode !== undefined && details.exitCode !== 0)) return "failed";
 	return "done";
 }
@@ -464,9 +455,14 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 								},
 								uiTheme,
 							);
+				const elapsedMs = options.executionStarted ? options.elapsedMs : undefined;
 				return {
 					header,
 					phase: options.spinnerFrame !== undefined ? "running" : "pending",
+					footerMeta:
+						elapsedMs === undefined || elapsedMs < 1000
+							? undefined
+							: uiTheme.fg("dim", `elapsed ${formatDuration(Math.floor(elapsedMs / 1000) * 1000)}`),
 					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
 				};
 			});
@@ -522,6 +518,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedIsPartial: boolean | undefined;
 			let cachedPreviewWindow: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
+			let cachedElapsedSecond: number | undefined;
 			const dropSnapshot = () => {
 				cachedSnapshot = undefined;
 				cachedWidth = undefined;
@@ -530,6 +527,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				cachedRawOutput = undefined;
 				cachedIsPartial = undefined;
 				cachedPreviewWindow = undefined;
+				cachedElapsedSecond = undefined;
 			};
 
 			return framedToolCard(
@@ -547,6 +545,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
+					// A running command shows its live elapsed time in the bottom
+					// border; key the cache on whole seconds so it advances once a
+					// second instead of rebuilding every spinner frame.
+					const liveElapsedMs = isPartial && details?.wallTimeMs === undefined ? options.elapsedMs : undefined;
+					const elapsedSecond = liveElapsedMs === undefined ? undefined : Math.floor(liveElapsedMs / 1000);
 
 					if (
 						cachedSnapshot !== undefined &&
@@ -555,7 +558,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedExpanded === expanded &&
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
-						cachedPreviewWindow === previewWindow
+						cachedPreviewWindow === previewWindow &&
+						cachedElapsedSecond === elapsedSecond
 					) {
 						return cachedSnapshot;
 					}
@@ -570,13 +574,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						rawOutputArtifact.artifactId,
 						isError,
 					);
-					const timeoutLine =
-						statsParts.length > 0
-							? uiTheme.fg(
-									"dim",
-									`${uiTheme.format.bracketLeft}${statsParts.join(" | ")}${uiTheme.format.bracketRight}`,
-								)
-							: undefined;
+					if (elapsedSecond !== undefined && elapsedSecond > 0) {
+						statsParts.unshift(`elapsed ${formatDuration(elapsedSecond * 1000)}`);
+					}
+					const footerMeta =
+						statsParts.length > 0 ? uiTheme.fg("dim", statsParts.join(uiTheme.sep.dot)) : undefined;
 					let warningLine: string | undefined;
 					if (details?.meta?.artifactError || (details?.meta?.truncation && !showingFullOutput)) {
 						warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
@@ -604,12 +606,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
-					if (timeoutLine) outputLines.push(timeoutLine);
 					if (warningLine) outputLines.push(warningLine);
 
 					const snapshot: ToolCardSnapshot = {
 						header,
 						phase: isPartial ? "partial" : isError ? (isTimeout ? "warning" : "error") : "success",
+						footerMeta,
 						sections: [
 							{
 								// Viewport-sized tail window in every state — streaming and final
@@ -630,6 +632,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedRawOutput = rawOutput;
 					cachedIsPartial = isPartial;
 					cachedPreviewWindow = previewWindow;
+					cachedElapsedSecond = elapsedSecond;
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
@@ -677,13 +680,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const command = formatBashCommandText(toBashRenderArgs(args, config));
 			const previewLines = renderContext?.previewLines ?? BASH_DEFAULT_PREVIEW_LINES;
 			const state = shellRunState(details, isError, isPartial, options.cancelled === true);
-			// Settled: the measured wall time wins. A background job outlives the call: its run time is unknown here.
-			const elapsedMs =
-				state === "background"
+			// Live (a running call, or a parked job still streaming): the call's clock. Settled: the
+			// measured wall time wins. A frozen background snapshot's run time is unknown here.
+			const elapsedMs = isPartial
+				? options.elapsedMs
+				: state === "background"
 					? undefined
-					: isPartial
-						? options.elapsedMs
-						: (details?.wallTimeMs ?? options.elapsedMs);
+					: (details?.wallTimeMs ?? options.elapsedMs);
 			const meta = details?.meta;
 			const box = runBox(
 				[
@@ -708,6 +711,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 		},
 		mergeCallAndResult: true,
 		inline: true,
+		// The live elapsed footer reads `options.elapsedMs` at render time; a
+		// once-a-second repaint keeps it moving for a quiet running command.
+		tickElapsed: true,
 	} satisfies ToolRenderer<TArgs, BashToolDetails>;
 }
 

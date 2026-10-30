@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import {
@@ -759,6 +760,41 @@ describe("OpenAI responses history payload", () => {
 		expect(containsEncryptedReasoning(warm.input)).toBe(true);
 		expect(containsEncryptedReasoning(closed.input)).toBe(false);
 		expect(containsAssistantOutputText(closed.input, "generic assistant that should be rebuilt")).toBe(true);
+	});
+
+	it("reports the replay decision each request makes through openAIResponsesReplaysNativeHistory", async () => {
+		const observed: Array<{ step: string; reported: boolean; replayed: boolean }> = [];
+		for (const model of [
+			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
+			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+		]) {
+			const context = resumedEncryptedReasoningContext(model);
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const observe = async (step: string, state: Map<string, ProviderSessionState> | undefined) => {
+				const reported = openAIResponsesReplaysNativeHistory(model, state);
+				const payload = (await captureResponsesPayload(model, context, state)) as { input?: unknown[] };
+				observed.push({
+					step: `${model.provider} ${step}`,
+					reported,
+					replayed: containsEncryptedReasoning(payload.input),
+				});
+			};
+			await observe("without session state", undefined);
+			await observe("first request", providerSessionState);
+			markResponsesProviderSessionStateWarmed(providerSessionState);
+			await observe("warmed", providerSessionState);
+			for (const state of providerSessionState.values()) state.close();
+			await observe("closed", providerSessionState);
+		}
+
+		for (const { step, reported, replayed } of observed)
+			expect({ step, reported }).toEqual({ step, reported: replayed });
+		// Only the connection-bound host starts cold; every host is cold after a close.
+		expect(observed.filter(o => !o.replayed).map(o => o.step)).toEqual([
+			"github-copilot first request",
+			"github-copilot closed",
+			"xai-oauth closed",
+		]);
 	});
 
 	it("keeps a closed provider session state cold when a request started before the close succeeds", async () => {

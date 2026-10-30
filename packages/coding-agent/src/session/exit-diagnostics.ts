@@ -98,14 +98,36 @@ function readSessionExit(entry: SessionEntry): SessionExitData | undefined {
 	};
 }
 
+/** Why an interrupted-turn abort record ends a turn its process never finished. */
+export const INTERRUPTED_TURN_ERROR = "Previous OMP process exited before completing the turn.";
+
+/** How exit recovery reads a branch whose last process may have died without recording its exit. */
+export interface InterruptedTurnOptions {
+	/**
+	 * The branch's writer is gone even without a `session_exit` after its tail (a
+	 * crash, SIGKILL or power loss records none): `omp --restore` says so.
+	 */
+	assumeExit?: boolean;
+}
+
+/** A turn its process left unfinished: the branch's last message and when the process ended. */
+interface UnfinishedTurn {
+	tail: AgentMessage;
+	previousAssistant: AssistantMessage | undefined;
+	recordedAt: string;
+}
+
 /**
- * createInterruptedTurnAbortMessage returns a terminal assistant record when
- * the latest persisted process exit follows a non-terminal conversation tail.
+ * The turn a branch's last process left unfinished: a non-terminal message tail
+ * (a prompt or tool results the model never answered, tool calls without results)
+ * followed by a process exit, recorded or (with `assumeExit`) assumed. A recorded
+ * normal exit with nothing pending, a terminal assistant tail, and tool results that
+ * close an aborted or failed turn leave nothing unfinished.
  */
-export function createInterruptedTurnAbortMessage(
+function findUnfinishedTurn(
 	entries: readonly SessionEntry[],
-	fallbackModel?: AssistantModelMetadata,
-): AssistantMessage | undefined {
+	options?: InterruptedTurnOptions,
+): UnfinishedTurn | undefined {
 	let exitIndex = -1;
 	let exit: SessionExitData | undefined;
 	for (let index = entries.length - 1; index >= 0; index--) {
@@ -115,7 +137,6 @@ export function createInterruptedTurnAbortMessage(
 		exit = candidate;
 		break;
 	}
-	if (!exit || (exit.kind === "normal" && !exit.pendingToolCalls?.length)) return undefined;
 
 	let tailIndex = -1;
 	let tail: AgentMessage | undefined;
@@ -126,7 +147,13 @@ export function createInterruptedTurnAbortMessage(
 		tail = entry.message;
 		break;
 	}
-	if (!tail || tailIndex > exitIndex) return undefined;
+	if (!tail) return undefined;
+	if (!exit || tailIndex > exitIndex) {
+		if (!options?.assumeExit) return undefined;
+		exit = { reason: "restore", kind: "process_exit", recordedAt: new Date().toISOString() };
+	} else if (exit.kind === "normal" && !exit.pendingToolCalls?.length) {
+		return undefined;
+	}
 	if (tail.role === "assistant" && !tail.content.some(isToolCallContent)) return undefined;
 
 	let previousAssistant: AssistantMessage | undefined;
@@ -142,10 +169,51 @@ export function createInterruptedTurnAbortMessage(
 	) {
 		return undefined;
 	}
-	const model = previousAssistant ?? fallbackModel;
+	return { tail, previousAssistant, recordedAt: exit.recordedAt };
+}
+
+/** Whether `message` is the record exit recovery closed an unfinished turn with. */
+export function isInterruptedTurnAbort(message: AgentMessage): boolean {
+	return (
+		message.role === "assistant" &&
+		message.stopReason === "aborted" &&
+		message.errorMessage === INTERRUPTED_TURN_ERROR
+	);
+}
+
+/**
+ * Whether `omp --restore` has a turn to go on with on this branch: one its last
+ * process left unfinished ({@link findUnfinishedTurn}, the exit assumed), or one exit
+ * recovery already closed that nothing followed, not even a normal exit.
+ */
+export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		const exit = readSessionExit(entry);
+		if (exit?.kind === "normal") return false;
+		if (entry.type !== "message") continue;
+		if (isInterruptedTurnAbort(entry.message)) return true;
+		break;
+	}
+	return findUnfinishedTurn(entries, { assumeExit: true }) !== undefined;
+}
+
+/**
+ * createInterruptedTurnAbortMessage returns a terminal assistant record when
+ * the latest persisted process exit follows a non-terminal conversation tail
+ * ({@link findUnfinishedTurn}; with `assumeExit`, also when no exit was recorded).
+ */
+export function createInterruptedTurnAbortMessage(
+	entries: readonly SessionEntry[],
+	fallbackModel?: AssistantModelMetadata,
+	options?: InterruptedTurnOptions,
+): AssistantMessage | undefined {
+	const turn = findUnfinishedTurn(entries, options);
+	if (!turn) return undefined;
+	const model = turn.previousAssistant ?? fallbackModel;
 	if (!model) return undefined;
 
-	const recordedAt = Date.parse(exit.recordedAt);
+	const recordedAt = Date.parse(turn.recordedAt);
 	return {
 		role: "assistant",
 		content: [],
@@ -161,7 +229,7 @@ export function createInterruptedTurnAbortMessage(
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "aborted",
-		errorMessage: "Previous OMP process exited before completing the turn.",
+		errorMessage: INTERRUPTED_TURN_ERROR,
 		timestamp: Number.isFinite(recordedAt) ? recordedAt : Date.now(),
 	};
 }

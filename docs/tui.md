@@ -19,19 +19,46 @@ The runtime has two layers:
 
 If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RPC can expose `hasUI === true` for protocol-backed dialogs while still not supporting `custom()`; `hasUI` alone does not guarantee a component can be mounted.
 
+## Project-local TUI debug tool
+
+`.omp/tools/tui.ts` provides the repository's `tui` debug tool. `start` accepts
+either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
+separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
+macOS/Linux use Bun's PTY.
+The debug connection uses a Windows named pipe or a POSIX Unix socket.
+On Windows, `start` and `resize` use the native `normalizePtyDimensions(cols, rows)`
+helper, which returns integer dimensions clamped to 20–400 columns and 5–200 rows.
+The PTY, emulated screen, and reported size use the same effective dimensions.
+
+`screen`, `send`, `resize`, and `stop` also work for programs without an
+`OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
+require an omp/pi-tui host.
+
+`send` accepts literal text and `\e`, `\r`, `\n`, `\t`, and `\xNN` escapes.
+On Windows, each payload must contain complete, valid UTF-8; invalid or truncated
+sequences are rejected before any input is written. Arbitrary non-UTF-8 bytes
+(such as `\x9b` 8-bit CSI) are not supported by the Windows PTY string API.
+Use the UTF-8-compatible `\e[` CSI sequence instead. macOS/Linux preserve raw bytes.
+
+Install the tool's dependencies with `bun install --cwd .omp/tools`.
+Native PTY API changes require rebuilding the addon with
+`bun --cwd=packages/natives run build` before running the tool.
+Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`. CI runs
+them on Linux only; the Windows-specific cases run only on a local Windows host.
+
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
 `packages/tui/src/tui.ts` defines:
 
 ```ts
 export interface Component {
-  render(width: number): readonly string[];
-  handleInput?(data: string): void;
-  wantsKeyRelease?: boolean;
-  invalidate?(): void;
-  releaseRenderCaches?(): void;
-  setIgnoreTight?(ignore: boolean): any;
-  dispose?(): void;
+	render(width: number): readonly string[];
+	handleInput?(data: string): void;
+	wantsKeyRelease?: boolean;
+	invalidate?(): void;
+	releaseRenderCaches?(): void;
+	setIgnoreTight?(ignore: boolean): any;
+	dispose?(): void;
 }
 ```
 
@@ -43,8 +70,8 @@ Render results are component-owned and immutable to callers. An unchanged compon
 
 ```ts
 export interface Focusable {
-  focused: boolean;
-  setUseTerminalCursor?(useTerminalCursor: boolean): void;
+	focused: boolean;
+	setUseTerminalCursor?(useTerminalCursor: boolean): void;
 }
 ```
 
@@ -83,8 +110,8 @@ Extension UI factories receive a `KeybindingsManager` (interactive mode; an in-m
 
 ```ts
 if (keybindings.matches(data, "app.interrupt")) {
-  done(undefined);
-  return;
+	done(undefined);
+	return;
 }
 ```
 
@@ -188,89 +215,81 @@ Example cancellation pattern:
 
 ```ts
 const loader = new CancellableLoader(
-  tui,
-  text => theme.fg("accent", text),
-  text => theme.fg("muted", text),
-  "Working...",
+	tui,
+	text => theme.fg("accent", text),
+	text => theme.fg("muted", text),
+	"Working...",
 );
 loader.onAbort = () => done(undefined);
 void doWork(loader.signal).then(result => {
-  if (!loader.aborted) done(result);
+	if (!loader.aborted) done(result);
 });
 return loader;
 ```
+
+## Pause status
+
+The `/pause` screen shows the same local turn-and-job state in ANSI and TSP: draining turns and running jobs count, while parked or finished turns do not. When both counts reach zero, it hides the rows and signals readiness. These counts cover OMP-tracked work only, not device-wide idleness.
 
 ## Realistic custom component example (extension command)
 
 ```ts
 import type { Component } from "@oh-my-pi/pi-tui";
-import {
-  SelectList,
-  matchesKey,
-  replaceTabs,
-  truncateToWidth,
-} from "@oh-my-pi/pi-tui";
-import {
-  getSelectListTheme,
-  type ExtensionAPI,
-} from "@oh-my-pi/pi-coding-agent";
+import { SelectList, matchesKey, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { getSelectListTheme, type ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 class Picker implements Component {
-  list: SelectList;
-  keybindings: any;
-  done: (value: string | undefined) => void;
+	list: SelectList;
+	keybindings: any;
+	done: (value: string | undefined) => void;
 
-  constructor(
-    items: Array<{ value: string; label: string }>,
-    keybindings: any,
-    done: (value: string | undefined) => void,
-  ) {
-    this.list = new SelectList(items, 8, getSelectListTheme());
-    this.keybindings = keybindings;
-    this.done = done;
-    this.list.onSelect = (item) => this.done(item.value);
-    this.list.onCancel = () => this.done(undefined);
-  }
+	constructor(
+		items: Array<{ value: string; label: string }>,
+		keybindings: any,
+		done: (value: string | undefined) => void,
+	) {
+		this.list = new SelectList(items, 8, getSelectListTheme());
+		this.keybindings = keybindings;
+		this.done = done;
+		this.list.onSelect = item => this.done(item.value);
+		this.list.onCancel = () => this.done(undefined);
+	}
 
-  handleInput(data: string): void {
-    if (this.keybindings.matches(data, "app.interrupt")) {
-      this.done(undefined);
-      return;
-    }
-    this.list.handleInput(data);
-  }
+	handleInput(data: string): void {
+		if (this.keybindings.matches(data, "app.interrupt")) {
+			this.done(undefined);
+			return;
+		}
+		this.list.handleInput(data);
+	}
 
-  render(width: number): readonly string[] {
-    return this.list
-      .render(width)
-      .map((line) => truncateToWidth(replaceTabs(line), width));
-  }
+	render(width: number): readonly string[] {
+		return this.list.render(width).map(line => truncateToWidth(replaceTabs(line), width));
+	}
 
-  invalidate(): void {
-    this.list.invalidate();
-  }
+	invalidate(): void {
+		this.list.invalidate();
+	}
 }
 
 export default function extension(pi: ExtensionAPI): void {
-  pi.registerCommand("pick-model", {
-    description: "Pick a model profile",
-    handler: async (_args, ctx) => {
-      if (!ctx.hasUI) return;
+	pi.registerCommand("pick-model", {
+		description: "Pick a model profile",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) return;
 
-      const selected = await ctx.ui.custom<string | undefined>(
-        (tui, theme, keybindings, done) => {
-          const items = [
-            { value: "fast", label: theme.fg("accent", "Fast") },
-            { value: "balanced", label: "Balanced" },
-            { value: "quality", label: "Quality" },
-          ];
-          return new Picker(items, keybindings, done);
-        },
-      );
+			const selected = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+				const items = [
+					{ value: "fast", label: theme.fg("accent", "Fast") },
+					{ value: "balanced", label: "Balanced" },
+					{ value: "quality", label: "Quality" },
+				];
+				return new Picker(items, keybindings, done);
+			});
 
-      if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
-    },
-  });
+			if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
+		},
+	});
 }
 ```
 

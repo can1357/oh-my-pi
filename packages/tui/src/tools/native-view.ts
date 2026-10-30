@@ -4,10 +4,10 @@
  * semantic nodes/spans only, with ANSI-free, sanitized text.
  */
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
+import { tryFileUri } from "../render/hyperlink";
 import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
@@ -23,9 +23,9 @@ export function displayPath(filePath: string): string {
 	return shortenPath(filePath);
 }
 
-/** `file://` link for a head's path target, when the path is absolute. */
+/** Configured file link for a head's path target, when the path is absolute. */
 export function fileHref(filePath: string | undefined): string | undefined {
-	return filePath && path.isAbsolute(filePath) ? pathToFileURL(filePath).href : undefined;
+	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */
@@ -213,7 +213,7 @@ export interface RunFootInput {
 	readonly state: RunState;
 	/** Exit code of a `failed` run; a non-zero code names the state `exit N`. */
 	readonly exitCode?: number;
-	/** Milliseconds run so far (`running`) or in total; the time is omitted when undefined. */
+	/** Milliseconds run so far (`running`, a live `background` job) or in total; omitted when undefined. */
 	readonly elapsedMs?: number;
 	/** Quiet facts (job id, service state, artifact), muted and ` · `-joined. */
 	readonly facts?: readonly string[];
@@ -247,7 +247,7 @@ export function runFoot(input: RunFootInput): NativeNode {
 			? undefined
 			: node(
 					"elapsed",
-					input.state === "running"
+					input.state === "running" || input.state === "background"
 						? { role: "omp.run.time", age: ms, format: "short" }
 						: { role: "omp.run.time", age: ms, stopped: ms, format: "short" },
 					undefined,

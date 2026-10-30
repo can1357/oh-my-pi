@@ -553,6 +553,8 @@ export async function parseSessionFile(
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
+	const callsById = new Map<string, ToolCallStats>();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
@@ -567,7 +569,13 @@ export async function parseSessionFile(
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
+			if (!link) return;
+			toolResults.push(link);
+			const call = callsById.get(link.toolCallId);
+			if (call && call.resultChars === undefined) {
+				call.resultChars = link.resultChars;
+				call.isError = link.isError;
+			}
 			return;
 		}
 		if (isModelUsage(entry)) {
@@ -578,7 +586,10 @@ export async function parseSessionFile(
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
+				toolCalls.push(call);
+				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
+			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
 			const parentId = entry.parentId;
 			const msg = entry.message;
@@ -672,12 +683,33 @@ export async function listSessionFolders(): Promise<string[]> {
 }
 
 /**
- * List all session files in a folder.
+ * Name prefix of the scratch directories `omp gc --compress` creates beside
+ * the files it copies on APFS. Their `.jsonl` files are transient copies of
+ * transcripts, never transcripts of their own; a killed run can leave one
+ * behind until the next `omp gc --compress --apply` removes it.
+ */
+export const COMPRESS_SCRATCH_PREFIX = ".omp-gc-compress-";
+
+/** Whether `relativePath` (from any ancestor directory) lies inside a compress scratch directory. */
+export function isCompressScratchPath(relativePath: string): boolean {
+	return relativePath.split(/[\\/]/).some(part => part.startsWith(COMPRESS_SCRATCH_PREFIX));
+}
+
+/**
+ * List all session files in a folder, excluding copies inside
+ * `omp gc --compress` scratch directories.
  */
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return entries
+			.filter(
+				e =>
+					e.isFile() &&
+					e.name.endsWith(".jsonl") &&
+					!isCompressScratchPath(path.relative(folderPath, e.parentPath)),
+			)
+			.map(e => path.join(e.parentPath, e.name));
 	} catch {
 		return [];
 	}

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { embeddedAddonFiles } from "../scripts/embed-native";
+import packageJson from "../package.json" with { type: "json" };
 import { type EmbeddedAddon, extractEmbeddedAddons } from "../native/loader-state.js";
 
 describe("native addon embedding", () => {
@@ -80,6 +81,66 @@ describe("native addon embedding", () => {
 				path.join(cacheDir, "pi_natives.win32-arm64.node"),
 			]);
 			expect(await Bun.file(path.join(cacheDir, "pi_natives.win32-arm64.node")).text()).toBe(addon);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.arch !== "x64")("extracts only the selected addon until the loader tries a fallback", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-first-run-"));
+		const nativeDir = path.join(root, "native");
+		const manifestDir = path.join(import.meta.dir, "../native");
+		const tag = `${process.platform}-${process.arch}`;
+		try {
+			for (const variant of ["modern", "baseline"]) {
+				await Bun.write(
+					path.join(nativeDir, `pi_natives.${tag}-${variant}.node`),
+					`fake ${variant} PI_NATIVES_VERSION_STAMP:${packageJson.version}\0`,
+				);
+			}
+			const embedded = await embeddedAddonFiles({
+				platform: process.platform,
+				arch: process.arch,
+				nativeDir,
+				version: packageJson.version,
+			});
+			const files: Record<string, string | Uint8Array> = {};
+			for (const file in embedded) files[path.join(manifestDir, path.basename(file))] = embedded[file];
+
+			const entry = path.join(root, "entry.ts");
+			await Bun.write(
+				entry,
+				`import { loadNative } from ${JSON.stringify(path.join(manifestDir, "loader-state.js"))};\ntry { loadNative(); } catch {}\n`,
+			);
+			const binary = path.join(root, process.platform === "win32" ? "probe.exe" : "probe");
+			const build = await Bun.build({
+				entrypoints: [entry],
+				root: path.resolve(import.meta.dir, "../../.."),
+				target: "bun",
+				format: "esm",
+				files,
+				compile: { outfile: binary, autoloadBunfig: false, autoloadDotenv: false },
+			});
+			expect(build.success).toBe(true);
+
+			for (const variant of ["baseline", "modern"]) {
+				const cache = path.join(root, variant);
+				const child = Bun.spawn([binary], {
+					env: { ...process.env, PI_NATIVES_DIR: cache, PI_NATIVE_VARIANT: variant },
+					stdout: "ignore",
+					stderr: "ignore",
+				});
+				expect(await child.exited).toBe(0);
+				const extracted = (await fs.readdir(path.join(cache, packageJson.version)))
+					.filter(filename => filename.endsWith(".node"))
+					.sort();
+				expect(extracted).toEqual(
+					(variant === "modern"
+						? [`pi_natives.${tag}-modern.node`, `pi_natives.${tag}-baseline.node`]
+						: [`pi_natives.${tag}-baseline.node`]
+					).sort(),
+				);
+			}
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

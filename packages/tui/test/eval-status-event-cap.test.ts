@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import { getThemeByName, type Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	type EvalStatusEvent,
@@ -58,6 +59,43 @@ describe("eval status event log", () => {
 		expect(log.statusEvents!.filter(event => event.committed === true).map(event => event.call)).toEqual([49_000]);
 	});
 
+	it("replaces one MCP call's progress in place rather than accumulating heartbeats", () => {
+		const log: StatusEventLog = {};
+		recordStatusEvent(log, { op: "mcp_progress", id: "call-1", tool: "mcp__search", progress: 1 });
+		recordStatusEvent(log, { op: "read", chars: 10 });
+		recordStatusEvent(log, {
+			op: "mcp_progress",
+			id: "call-1",
+			tool: "mcp__search",
+			progress: 2,
+			message: "fetching",
+		});
+
+		expect(log.statusEvents).toEqual([
+			{ op: "mcp_progress", id: "call-1", tool: "mcp__search", progress: 2, message: "fetching" },
+			{ op: "read", chars: 10 },
+		]);
+		expect(log.statusEventsElided).toBeUndefined();
+	});
+
+	it("evicts old MCP snapshots under the cap while protecting agent, batch, and committed todo snapshots", () => {
+		const log: StatusEventLog = {};
+		const protectedEvents: EvalStatusEvent[] = [
+			{ op: "agent", id: "Scout", status: "running" },
+			{ op: "judge_batch", id: "batch", done: 1, total: 2 },
+			{ op: "todo", committed: true },
+		];
+		for (const event of protectedEvents) recordStatusEvent(log, event);
+		for (let i = 0; i < MAX_STATUS_EVENTS * 3; i++) {
+			recordStatusEvent(log, { op: "mcp_progress", id: `call-${i}`, tool: "mcp__search", progress: i });
+		}
+
+		expect(log.statusEvents).toHaveLength(MAX_STATUS_EVENTS);
+		expect(log.statusEventsElided).toBe(MAX_STATUS_EVENTS * 2 + protectedEvents.length);
+		for (const event of protectedEvents) expect(log.statusEvents).toContainEqual(event);
+		expect(log.statusEvents!.at(-1)?.id).toBe(`call-${MAX_STATUS_EVENTS * 3 - 1}`);
+	});
+
 	function renderCell(statusEvents: EvalStatusEvent[], statusEventsElided: number): string {
 		const details: EvalToolDetails = {
 			language: "js",
@@ -102,5 +140,44 @@ describe("eval status event log", () => {
 		const rendered = renderCell([{ op: "agent", id: "Scout", status: "completed" }], 5000);
 
 		expect(rendered).toContain("… 5000 earlier");
+	});
+
+	it("shows the MCP tool and its progress text, with home paths shortened and no internal call id, in either renderer", () => {
+		const event: EvalStatusEvent = {
+			op: "mcp_progress",
+			id: "internal-call-id",
+			tool: "mcp__search",
+			progress: 2,
+			total: 4,
+			message: `Fetching rows from ${os.homedir()}/private/data`,
+		};
+		const rendered = renderCell([event], 0);
+		expect(rendered).toContain("mcp__search");
+		expect(rendered).toContain("Fetching rows from ~/private/data (2/4)");
+		expect(rendered).not.toContain(os.homedir());
+		expect(rendered).not.toContain("internal-call-id");
+
+		const view = evalToolRenderer.describeResult(
+			{
+				content: [],
+				details: {
+					cells: [
+						{
+							index: 0,
+							code: "await tool.mcp__search({})",
+							output: "",
+							status: "running",
+							statusEvents: [event],
+						},
+					],
+				},
+			},
+			{ expanded: false, isPartial: true },
+		);
+		const native = JSON.stringify(view.body);
+		expect(native).toContain("mcp__search");
+		expect(native).toContain("Fetching rows from ~/private/data (2/4)");
+		expect(native).not.toContain(os.homedir());
+		expect(native).not.toContain("internal-call-id");
 	});
 });

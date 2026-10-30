@@ -8,9 +8,12 @@
  * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { tryFileUri } from "../render/hyperlink";
+import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
-import type { NativeNode } from "./node";
+import { imageLinksEnabled, transcriptImageLink } from "../prompt/image-references";
+import type { NativeChild, NativeNode } from "./node";
 
 export interface NativeBlob {
 	readonly id: string;
@@ -91,15 +94,63 @@ export function base64ImageNode(
 	);
 }
 
-/** `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload changes. */
-export class NativeImageCache {
-	#entries = new Map<string, { data: string; node: NativeNode }>();
+/**
+ * Props that make an `image` node open the file at `filePath` (as a `file://` URL, the TSP
+ * open-target form): a click zooms the image in the terminal, and the file opens from its
+ * context menu. Always uses a local file URL because the open action runs locally,
+ * even when remote file handlers are configured. Empty without a file.
+ */
+export function openableImageProps(filePath: string | undefined): Pick<TspProps<"image">, "href" | "actions"> {
+	const href = filePath ? tryFileUri(filePath, { local: true }) : undefined;
+	return href ? { href, actions: { menu: ["open"] } } : {};
+}
 
-	get(key: string, data: string, mimeType: string): NativeNode {
+/**
+ * `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload
+ * or the link policy changes. Each opens its file (`sourcePath`, else a blob copy).
+ */
+export class NativeImageCache {
+	#entries = new Map<string, { data: string; linked: boolean; node: NativeNode }>();
+
+	get(key: string, data: string, mimeType: string, sourcePath?: string): NativeNode {
+		const linked = imageLinksEnabled();
 		const cached = this.#entries.get(key);
-		if (cached?.data === data) return cached.node;
-		const image = base64ImageNode(data, mimeType, { alt: mimeType }, key);
-		this.#entries.set(key, { data, node: image });
+		if (cached?.data === data && cached.linked === linked) return cached.node;
+		const open = openableImageProps(transcriptImageLink({ data, mimeType }, sourcePath));
+		const image = base64ImageNode(data, mimeType, { alt: mimeType, ...open }, key);
+		this.#entries.set(key, { data, linked, node: image });
 		return image;
 	}
+}
+
+/** The disk file a tool result's image was read from (`read` details `mediaPath`), when it has one. */
+export function readMediaPath(details: unknown): string | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const mediaPath = (details as { mediaPath?: unknown }).mediaPath;
+	return typeof mediaPath === "string" && mediaPath.length > 0 ? mediaPath : undefined;
+}
+
+/**
+ * A `media` node the host loads by path, capped at the inline image preview
+ * height. Callers check `cx.supports("media")` first.
+ */
+export function nativeMediaNode(path: string, key: string): NativeNode {
+	const maxRows = resolveImageOptions().maxHeightCells;
+	return node("media", { path, max: maxRows && maxRows > 0 ? { h: `${maxRows}lines` } : undefined }, undefined, key);
+}
+
+/** Blob ids of the `image` nodes and paths of the `media` nodes under `children` (described nodes only). */
+export function shownMedia(children: readonly NativeChild[] | undefined): { blobs: Set<string>; paths: Set<string> } {
+	const shown = { blobs: new Set<string>(), paths: new Set<string>() };
+	const visit = (list: readonly NativeChild[] | undefined): void => {
+		for (const child of list ?? []) {
+			if (!("k" in child)) continue;
+			const p = child.p as { blob?: unknown; path?: unknown } | undefined;
+			if (child.k === "image" && typeof p?.blob === "string") shown.blobs.add(p.blob);
+			else if (child.k === "media" && typeof p?.path === "string") shown.paths.add(p.path);
+			visit(child.c);
+		}
+	};
+	visit(children);
+	return shown;
 }

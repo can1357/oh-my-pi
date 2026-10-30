@@ -8,7 +8,7 @@
 use std::{
 	cell::RefCell,
 	collections::{HashMap, HashSet},
-	sync::OnceLock,
+	sync::LazyLock,
 };
 
 use napi::{JsString, Result};
@@ -30,19 +30,15 @@ use crate::{
 /// 255;255;255m`, 42 bytes — which the 47 usable bytes cover.
 pub type Color = InlineStr<48>;
 
-static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static SCOPE_MATCHERS: OnceLock<ScopeMatchers> = OnceLock::new();
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
+	syntect::dumps::from_uncompressed_data(include_bytes!(env!("OMP_SYNTAX_SET")))
+		.expect("bundled syntax set should match the syntect build")
+});
+static SCOPE_MATCHERS: LazyLock<ScopeMatchers> = LazyLock::new(ScopeMatchers::new);
 
 // Thread-local cache for scope -> color index lookups
 thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
-}
-
-fn get_syntax_set() -> &'static SyntaxSet {
-	SYNTAX_SET.get_or_init(|| {
-		syntect::dumps::from_uncompressed_data(include_bytes!(env!("OMP_SYNTAX_SET")))
-			.expect("bundled syntax set should match the syntect build")
-	})
 }
 
 /// Pre-compiled scope patterns for fast matching.
@@ -139,10 +135,6 @@ impl ScopeMatchers {
 	}
 }
 
-fn get_scope_matchers() -> &'static ScopeMatchers {
-	SCOPE_MATCHERS.get_or_init(ScopeMatchers::new)
-}
-
 /// Theme colors for syntax highlighting.
 /// Each color is an ANSI escape sequence (e.g., "\x1b[38;2;255;0;0m").
 #[derive(Debug)]
@@ -204,7 +196,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["cs", "csharp"], "C#"),
 	(&["php"], "PHP"),
 	(&["sh", "bash", "zsh", "shell"], "Bash"),
-	(&["ps1", "powershell"], "PowerShell"),
+	(&["ps1", "powershell", "pwsh"], "PowerShell"),
 	(&["html", "htm", "vue", "svelte"], "HTML"),
 	(&["astro"], "Astro"),
 	(&["css"], "CSS"),
@@ -252,7 +244,7 @@ fn find_alias(lang: &str) -> Option<&'static str> {
 /// Compute the color index for a single scope (uncached).
 #[inline]
 fn compute_scope_color(s: Scope) -> usize {
-	let m = get_scope_matchers();
+	let m = &*SCOPE_MATCHERS;
 
 	// Comment (index 0)
 	if m.comment.is_prefix_of(s) {
@@ -418,7 +410,7 @@ fn highlight_code_impl(code: &str, lang: Option<&str>, colors: &HighlightColors)
 	let Some(lang) = lang else {
 		return code.to_owned();
 	};
-	let ss = get_syntax_set();
+	let ss = &*SYNTAX_SET;
 	let Some(syntax) = find_syntax(ss, lang) else {
 		return code.to_owned();
 	};
@@ -618,8 +610,8 @@ const x = 1;
 #[napi]
 pub fn warm_highlighter() -> task::Promise<()> {
 	task::blocking("highlight.warm", (), move |_| {
-		let ss = get_syntax_set();
-		let _ = get_scope_matchers();
+		let ss = &*SYNTAX_SET;
+		LazyLock::force(&SCOPE_MATCHERS);
 		let warm = |&(lang, code): &(&str, &str)| {
 			let Some(syntax) = find_syntax(ss, lang) else {
 				return;
@@ -661,7 +653,7 @@ impl HighlightStream {
 		let lang = lang.map(js::utf8).transpose()?;
 		let state = lang
 			.as_deref()
-			.and_then(|l| find_syntax(get_syntax_set(), l))
+			.and_then(|l| find_syntax(&SYNTAX_SET, l))
 			.map(|syntax| (ParseState::new(syntax), ScopeStack::new()));
 		Ok(Self { state, colors })
 	}
@@ -682,7 +674,7 @@ impl HighlightStream {
 		let mut result = String::with_capacity(chunk.len() * 2);
 		highlight_into(
 			&chunk,
-			get_syntax_set(),
+			&SYNTAX_SET,
 			parse_state,
 			scope_stack,
 			&palette(&self.colors),
@@ -700,12 +692,13 @@ pub fn supports_language(lang: JsString) -> Result<bool> {
 }
 
 fn supports_language_impl(lang: &str) -> bool {
-	find_syntax(get_syntax_set(), lang).is_some()
+	find_syntax(&SYNTAX_SET, lang).is_some()
 }
+
 /// Get list of supported languages.
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
-	let ss = get_syntax_set();
+	let ss = &*SYNTAX_SET;
 	let mut seen = HashSet::new();
 	ss.syntaxes()
 		.iter()
@@ -796,7 +789,7 @@ mod tests {
 	/// first-render stall.
 	#[test]
 	fn warm_snippet_languages_resolve() {
-		let ss = get_syntax_set();
+		let ss = &*SYNTAX_SET;
 		for (lang, _) in WARM_SNIPPETS {
 			assert!(find_syntax(ss, lang).is_some(), "warm snippet language {lang} has no syntax");
 		}
@@ -809,7 +802,7 @@ mod tests {
 	/// Ruby Haml).
 	#[test]
 	fn every_alias_resolves_to_its_target() {
-		let ss = get_syntax_set();
+		let ss = &*SYNTAX_SET;
 		let wrong: Vec<_> = LANG_ALIASES
 			.iter()
 			.flat_map(|(aliases, target)| aliases.iter().map(move |alias| (*alias, *target)))
@@ -832,7 +825,7 @@ mod tests {
 	/// failed line renders unhighlighted.
 	#[test]
 	fn vendored_grammars_parse() {
-		let ss = get_syntax_set();
+		let ss = &*SYNTAX_SET;
 		for (lang, code) in [
 			("toml", "[a.b]\nk = \"v\" # c\n"),
 			("dockerfile", "FROM rust:1 AS build\nRUN cargo build\n"),
@@ -876,7 +869,7 @@ mod tests {
 		let code = "def f():\n\t\"\"\"doc\n\tstring\"\"\"\n\treturn 1\n";
 		let whole = highlight_code_impl(code, Some("python"), &colors);
 
-		let ss = get_syntax_set();
+		let ss = &*SYNTAX_SET;
 		let syntax = find_syntax(ss, "python").unwrap();
 		let mut parse_state = ParseState::new(syntax);
 		let mut scope_stack = ScopeStack::new();
@@ -886,6 +879,39 @@ mod tests {
 			highlight_into(chunk, ss, &mut parse_state, &mut scope_stack, &pal, &mut chunked);
 		}
 		assert_eq!(chunked, whole);
+	}
+
+	/// Regression (#15008): `pwsh` fences resolve to PowerShell and keep their
+	/// colors across lines: a command continued after `|` is not painted as a
+	/// string, text after a `{0:N2}` placeholder stays string, and a
+	/// C#-looking here-string body still parses (an unresolved embedded
+	/// grammar fails the line, which renders uncolored).
+	#[test]
+	fn highlights_multiline_pwsh_fences() {
+		let code = "Get-ChildItem |\n  Where-Object { $_.Length -gt 1 }\n\"{0:N2} total\" -f \
+		            $x\nAdd-Type @'\nusing System;\n'@\nWrite-Host \"done\" # tail\n";
+		let out = highlight_code_impl(code, Some("pwsh"), &test_colors());
+		let lines: Vec<&str> = out.lines().collect();
+		assert!(
+			!lines[1].contains("<s>Where-Object"),
+			"piped command painted as string: {}",
+			lines[1]
+		);
+		assert!(
+			lines[2].contains("<s>") && lines[2].contains("total"),
+			"format string lost color: {}",
+			lines[2]
+		);
+		assert!(
+			lines[4].contains("<s>using System;"),
+			"here-string body lost string color: {}",
+			lines[4]
+		);
+		assert!(
+			lines[6].contains("<s>done") && lines[6].contains("<c>"),
+			"trailing line lost colors: {}",
+			lines[6]
+		);
 	}
 
 	#[test]

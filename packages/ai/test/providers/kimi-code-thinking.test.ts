@@ -354,7 +354,7 @@ describe("Kimi K3 thinking transport", () => {
 	for (const disableReasoning of [false, true]) {
 		it(`honors forced tool use on bundled and discovered K3 transports with reasoning ${disableReasoning ? "disabled" : "enabled"}`, async () => {
 			vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
-			const ids = ["k3", "k3-256k"];
+			const ids = ["k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed"];
 			const fetchDynamicModels = kimiCodeModelManagerOptions({
 				apiKey: "test-key",
 				fetch: async () =>
@@ -362,7 +362,7 @@ describe("Kimi K3 thinking transport", () => {
 						data: ids.map(id => ({
 							id,
 							display_name: id,
-							context_length: id === "k3" ? 1_048_576 : 262_144,
+							context_length: id === "k3-256k" ? 262_144 : 1_048_576,
 							supports_reasoning: true,
 							supports_thinking_type: "only",
 							think_efforts: {
@@ -508,7 +508,13 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 	it("preserves forced tool choice for the reviewed Kimi Code aliases", async () => {
 		// The catalog bakes each alias's reviewed identity and wire policy.
-		for (const id of ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]) {
+		for (const id of [
+			"k3.1-pro",
+			"k3.1-pro-highspeed",
+			"k3",
+			"kimi-for-coding",
+			"kimi-for-coding-highspeed",
+		] as const) {
 			const model = getBundledModel<"openai-completions">("kimi-code", id);
 			let payload: MessageCreateParamsStreaming | undefined;
 			const stream = streamOpenAIAnthropicShim(

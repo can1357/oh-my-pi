@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
+import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
+import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { bashToolRenderer, formatExitCodeNotice, formatWallTimeNotice } from "../src/tools/bash";
@@ -128,6 +131,25 @@ describe("bash native run box", () => {
 		expect(foot(nodes(view.body)[0])).toMatchObject({ state: "Running", time: { age: 2500, stopped: undefined } });
 	});
 
+	it("keeps a parked background job's card in background with a live clock while its output streams", () => {
+		const view = bashToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "Benchmark 1\nBenchmark 2" }],
+				details: { async: { state: "running", jobId: "bg_2", type: "bash" } },
+			},
+			{ expanded: false, isPartial: true, executionStarted: true, elapsedMs: 61_000 },
+			{ command: "hyperfine bench" },
+		);
+		const box = nodes(view.body)[0];
+		expect(String(props(collect(box?.c, "ansi")[0]).text)).toBe("Benchmark 1\nBenchmark 2");
+		expect(foot(box)).toMatchObject({ state: "In background", time: { age: 61_000, stopped: undefined } });
+		expect(
+			foot(box)
+				?.facts?.map(s => s.t)
+				.join(""),
+		).toBe("Job bg_2");
+	});
+
 	it("maps exit, timeout, spawn failure and background jobs to the foot state and box tone", () => {
 		const settle = (text: string, details: Record<string, unknown>, isError: boolean) => {
 			const view = bashToolRenderer.describeResult(
@@ -210,6 +232,170 @@ describe("bash native run box", () => {
 		} finally {
 			tool.dispose();
 		}
+	});
+});
+
+describe("read image results", () => {
+	const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+	const readImage = () => {
+		const tool = new ToolExecutionComponent("read", { path: "logo.png" }, { showImages: true }, undefined, ui);
+		tool.updateResult(
+			{
+				content: [
+					{ type: "text", text: "Read image" },
+					{ type: "image", data: PNG, mimeType: "image/png" } as { type: string; text?: string },
+				],
+				details: { resolvedPath: "/repo/logo.png", mediaPath: "/repo/logo.png" },
+			},
+			false,
+		);
+		return tool;
+	};
+
+	it("show the file by path as a media node when the host supports media", () => {
+		const tool = readImage();
+		try {
+			const described = tool.describe(cx(["tool", "ansi", "code", "image", "media"]));
+			const media = collect(described.c, "media");
+			expect(media).toHaveLength(1);
+			expect(props(media[0]).path).toBe("/repo/logo.png");
+			expect(collect(described.c, "image")).toHaveLength(0);
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	it("upload the image blob without media support", () => {
+		const tool = readImage();
+		try {
+			const described = tool.describe(cx(["tool", "ansi", "code", "image"]));
+			expect(collect(described.c, "media")).toHaveLength(0);
+			expect(collect(described.c, "image")).toHaveLength(1);
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	it("show a whole PDF read as a media node by path", () => {
+		const tool = new ToolExecutionComponent("read", { path: "spec.pdf" }, { showImages: true }, undefined, ui);
+		tool.updateResult(
+			{
+				content: [{ type: "text", text: "# Spec\n\nConverted text" }],
+				details: { mediaPath: "/repo/spec.pdf", contentType: "text/markdown" },
+			},
+			false,
+		);
+		try {
+			const media = collect(tool.describe(cx(["tool", "ansi", "code", "image", "media"])).c, "media");
+			expect(media.map(n => props(n).path)).toEqual(["/repo/spec.pdf"]);
+			const plain = tool.describe(cx(["tool", "ansi", "code", "image"]));
+			expect(collect(plain.c, "media")).toHaveLength(0);
+			expect(collect(plain.c, "image")).toHaveLength(0);
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	describe("in a read group", () => {
+		const image: ImageContent = { type: "image", data: PNG, mimeType: "image/png" };
+		const withMedia = cx(["tool", "ansi", "code", "image", "media"]);
+		const withoutMedia = cx(["tool", "ansi", "code", "image"]);
+		const turn = (paths: Record<string, string>): AssistantMessage => ({
+			role: "assistant",
+			content: Object.entries(paths).map(([id, path]) => ({
+				type: "toolCall",
+				id,
+				name: "read",
+				arguments: { path },
+			})),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1,
+		});
+
+		describe("house.obj, house.mtl, brick.png", () => {
+			// As the session wires it: each result with an image or a `mediaPath`; the .mtl has neither.
+			const assistant = () => {
+				const component = new AssistantMessageComponent(
+					turn({ obj: "house.obj", mtl: "house.mtl", png: "brick.png" }),
+				);
+				component.setToolResultImages("obj", [], "/repo/house.obj");
+				component.setToolResultImages("png", [image], "/repo/brick.png");
+				return component;
+			};
+
+			it("show the model and the texture as media nodes, nothing for the sidecar", () => {
+				const message = assistant().describe(withMedia);
+				expect(collect(message.c, "media").map(n => props(n).path)).toEqual(["/repo/house.obj", "/repo/brick.png"]);
+				expect(collect(message.c, "image")).toHaveLength(0);
+			});
+
+			it("upload only the texture's blob without media support", () => {
+				const message = assistant().describe(withoutMedia);
+				expect(collect(message.c, "media")).toHaveLength(0);
+				expect(collect(message.c, "image")).toHaveLength(1);
+			});
+		});
+
+		describe("one SVG read as `:img` and as source", () => {
+			const svg = "/repo/crates/icons/svg/logo.svg";
+			const assistant = () => {
+				const component = new AssistantMessageComponent(
+					turn({ img: "crates/icons/svg/logo.svg:img", src: "crates/icons/svg/logo.svg" }),
+				);
+				component.setToolResultImages("img", [image], svg);
+				component.setToolResultImages("src", [], svg);
+				return component;
+			};
+			const group = () => {
+				const component = new ReadToolGroupComponent();
+				component.updateArgs({ path: "crates/icons/svg/logo.svg:img" }, "img");
+				component.updateArgs({ path: "crates/icons/svg/logo.svg" }, "src");
+				component.updateResult(
+					{
+						content: [{ type: "text", text: "Read image" }, image],
+						details: { resolvedPath: svg, mediaPath: svg },
+					},
+					false,
+					"img",
+				);
+				component.updateResult(
+					{ content: [{ type: "text", text: "<svg/>" }], details: { mediaPath: svg } },
+					false,
+					"src",
+				);
+				return component;
+			};
+
+			it("show the file once and plain rows for both reads", () => {
+				const message = assistant().describe(withMedia);
+				const media = collect(message.c, "media");
+				expect(media).toHaveLength(1);
+				expect(props(media[0]).path).toBe(svg);
+				expect(media[0]?.key).toBe("rimg");
+				expect(collect(message.c, "image")).toHaveLength(0);
+				const rows = group().describe(withMedia);
+				expect(collect(rows.c, "media")).toHaveLength(0);
+				expect(collect(rows.c, "image")).toHaveLength(0);
+			});
+
+			it("upload one blob image without media support", () => {
+				const message = assistant().describe(withoutMedia);
+				expect(collect(message.c, "media")).toHaveLength(0);
+				expect(collect(message.c, "image")).toHaveLength(1);
+				expect(collect(group().describe(withoutMedia).c, "image")).toHaveLength(0);
+			});
+		});
 	});
 });
 
@@ -349,32 +535,131 @@ describe("eval native run boxes", () => {
 		expect(foot(last)).toMatchObject({ state: "Failed", time: { stopped: 800 } });
 	});
 
-	it("renders console.table values without losing surrounding output", () => {
-		const table = [
-			"┌─────────┬────┬─────┐",
-			"│ (index) │ a  │  b  │",
-			"├─────────┼────┼─────┤",
-			"│    0    │ 1  │ 'x' │",
-			"│    1    │ 22 │     │",
-			"└─────────┴────┴─────┘",
-		].join("\n");
+	it("keeps a nested tool read's preview off its status line and bounds it in a code well when expanded", () => {
+		const source = Array.from({ length: 15 }, (_, i) => (i === 0 ? "import {" : `\tname${i},`)).join("\n");
+		const statusEntries = (expanded: boolean) => {
+			const [box] = nodes(
+				evalToolRenderer.describeResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							cells: [
+								cell({
+									language: "js",
+									code: "await tool.read({ path: 'src/rollup.ts:1:raw' })",
+									statusEvents: [
+										{ op: "read", path: "src/rollup.ts:1:raw", chars: 2082, preview: source },
+										{ op: "log", message: "first\nsecond" },
+									],
+								}),
+							],
+						},
+					},
+					{ expanded, isPartial: false },
+				).body,
+			);
+			return nodes(nodes(box?.c).find(child => role(child) === "omp.run.status")?.c);
+		};
+
+		const folded = statusEntries(false);
+		expect(folded.map(entry => entry.k)).toEqual(["text", "text"]);
+		expect(spansText(folded[0])).toBe("read path=src/rollup.ts:1:raw chars=2082");
+		expect(spansText(folded[1])).toBe("log message=first second");
+		expect(collect(folded, "code")).toHaveLength(0);
+
+		const [read, log] = statusEntries(true);
+		expect(read?.k).toBe("col");
+		expect(role(read)).toBe("omp.tool.eval.status.event");
+		const [line, preview] = nodes(read?.c);
+		expect(spansText(line)).toBe("read path=src/rollup.ts:1:raw chars=2082");
+		expect(preview?.k).toBe("code");
+		expect(props(preview)).toMatchObject({
+			role: "omp.tool.eval.status.preview",
+			path: "src/rollup.ts",
+			wrap: false,
+			preview: { lines: 3 },
+		});
+		const shown = String(props(preview).text).split("\n");
+		expect(shown).toHaveLength(10);
+		expect(shown[0]).toBe("import {");
+		expect(shown[1]).not.toContain("\t");
+		expect(spansText(log)).toBe("log message=first second");
+	});
+
+	it("shows a table view in place of its printed text, numeric columns aligned to the end", () => {
+		const dfText = "   name  n\n0  a     1\n1  bb   22";
 		const view = evalToolRenderer.describeResult(
 			{
 				content: [{ type: "text", text: "" }],
 				details: {
-					cells: [cell({ code: "console.table(rows)", language: "js", output: `before\n${table}\nafter` })],
+					cells: [
+						cell({
+							code: "print('rows:'); print(df); print('done')",
+							output: `rows:\n${dfText}\ndone\n`,
+							views: [
+								{
+									text: dfText,
+									view: {
+										kind: "table",
+										columns: [{ head: "" }, { head: "name" }, { head: "n", numeric: true }],
+										rows: [
+											["0", "a", "1"],
+											["1", "bb", "22"],
+										],
+									},
+								},
+							],
+						}),
+					],
 				},
 			},
 			done,
 		);
-		expect(collect(view.body, "ansi").map(output => props(output).text)).toEqual(["before", "after"]);
-		const tableNode = collect(view.body, "table")[0];
+		const [box] = nodes(view.body);
+		const outputs = nodes(box?.c).filter(child => child.k === "ansi" || child.k === "table");
+		expect(outputs.map(child => child.k)).toEqual(["ansi", "table", "ansi"]);
+		expect(props(outputs[0]).text).toBe("rows:");
+		expect(props(outputs[2]).text).toBe("done");
+		const tableNode = outputs[1];
 		if (tableNode?.k !== "table") throw new Error("Expected a native table");
-		expect(tableNode.p?.cols.map(col => col.head)).toEqual(["", "a", "b"]);
-		expect(tableNode.p?.rows.map(row => Object.values(row.cells))).toEqual([
-			["0", "1", "'x'"],
-			["1", "22", ""],
+		expect(tableNode.p?.cols.map(col => [col.head, col.align])).toEqual([
+			["", undefined],
+			["name", undefined],
+			["n", "end"],
 		]);
+		expect(tableNode.p?.rows.map(row => Object.values(row.cells))).toEqual([
+			["0", "a", "1"],
+			["1", "bb", "22"],
+		]);
+	});
+
+	it("shows a json view in place of its printed text: the host's json viewer when it has one, else a tree", () => {
+		const printed = "{'alpha': 1, 'beta': [1, 2, 3], 'i': 'kept'}";
+		const value = { alpha: 1, beta: [1, 2, 3], i: "kept" };
+		const describeBox = (options: RenderResultOptions) => {
+			const view = evalToolRenderer.describeResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						cells: [cell({ output: `${printed}\n`, views: [{ text: printed, view: { kind: "json", value } }] })],
+					},
+				},
+				options,
+			);
+			return nodes(view.body)[0];
+		};
+
+		const native = describeBox({ ...done, json: true });
+		expect(collect(native?.c, "ansi")).toHaveLength(0);
+		expect(collect(native?.c, "tree")).toHaveLength(0);
+		const [viewer] = collect(native?.c, "json");
+		// The value itself, `i` included (a cell's data, not call metadata); top-level entries listed, containers folded.
+		expect(props(viewer)).toEqual({ value });
+
+		const fallback = describeBox(done);
+		expect(collect(fallback?.c, "ansi")).toHaveLength(0);
+		expect(collect(fallback?.c, "json")).toHaveLength(0);
+		expect(collect(fallback?.c, "tree")).toHaveLength(1);
 	});
 });
 

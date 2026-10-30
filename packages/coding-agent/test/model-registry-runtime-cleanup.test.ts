@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
@@ -31,6 +31,7 @@ describe("ModelRegistry runtime source cleanup", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		clearCustomApis();
 		authStorage.close();
 	});
@@ -56,6 +57,38 @@ describe("ModelRegistry runtime source cleanup", () => {
 		expect(registry.find("runtime-provider", "runtime-model")).toBeUndefined();
 		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(false);
 		expect(getCustomApi("custom-runtime-cleanup-api")).toBeUndefined();
+	});
+
+	test("clearing several sources removes each one's providers and rebuilds the catalog once", () => {
+		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		const sources = ["ext://batch-a", "ext://batch-b", "ext://batch-c"];
+		sources.forEach((source, index) => {
+			registry.registerProvider(
+				`batch-provider-${index}`,
+				{
+					baseUrl: "https://batch.example.com/v1",
+					apiKey: "BATCH_KEY",
+					api: "openai-responses",
+					models: [baseModel],
+				},
+				source,
+			);
+		});
+		registry.registerProvider(
+			"kept-provider",
+			{ baseUrl: "https://kept.example.com/v1", apiKey: "KEPT_KEY", api: "openai-responses", models: [baseModel] },
+			"ext://kept",
+		);
+
+		const clearConfig = vi.spyOn(registry.authStorage.keys, "clearConfig");
+		registry.clearSourceRegistrations(sources);
+
+		// Every catalog rebuild clears the config-sourced keys first.
+		expect(clearConfig).toHaveBeenCalledTimes(1);
+		for (let index = 0; index < sources.length; index++) {
+			expect(registry.find(`batch-provider-${index}`, "runtime-model")).toBeUndefined();
+		}
+		expect(registry.find("kept-provider", "runtime-model")).toBeDefined();
 	});
 
 	test("extension rebinding preserves unrelated credential-scoped cached models", async () => {

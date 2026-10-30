@@ -23,6 +23,8 @@ import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { CostGate } from "../../src/session/cost-gate";
+import { rejectionOf } from "../helpers/rejection";
 
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -241,6 +243,20 @@ describe("runEvalCompletion", () => {
 			return `${model.provider}/${model.id}`;
 		});
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
+	});
+
+	it("counts each completion against the session's cost cap and refuses at it", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.cost.total = 1.2;
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const session = { ...makeSession(), costGate } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		expect(costGate.spent).toBe(1.2);
+		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
+		expect(String(refused)).toContain("Cost cap reached");
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("prefers the session active model for the default tier, falling back to @default", async () => {
@@ -1021,6 +1037,55 @@ describe("completion() through eval runtimes", () => {
 			plain: "hello from smol",
 			structured: { ok: true, n: 3 },
 		});
+	});
+
+	it("waits for a completion started in an earlier JavaScript cell", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-cells-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-completion-cells:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "hello from the next cell" }));
+
+		const started = await executeJs(
+			'var handles = [completion("hi", { model: "smol" })]; print("started");',
+			options,
+		);
+		expect(started.exitCode).toBe(0);
+		expect(started.output.trim()).toBe("started");
+
+		const result = await executeJs("print((await wait(handles))[0]);", options);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("hello from the next cell");
+	});
+
+	it("times out waiting on a running completion started in an earlier JavaScript cell", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-cells-timeout-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-completion-cells-timeout:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		// The model call stays running until afterEach releases (aborts) the handle.
+		vi.spyOn(ai, "completeSimple").mockImplementation((_model, _context, opts) => {
+			const { promise, reject } = Promise.withResolvers<AssistantMessage>();
+			opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+			return promise;
+		});
+
+		const started = await executeJs('var handles = [completion("hi", { model: "smol" })];', options);
+		expect(started.exitCode).toBe(0);
+
+		// Real clock: the timeout is enforced by the host `__wait__` bridge across the worker boundary.
+		const result = await executeJs(
+			"try { await wait(handles, { timeout: 0.05 }); } catch (error) { print(error.name); }",
+			options,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("TimeoutError");
 	});
 
 	it("exposes plain and structured completion() in the Python runtime", async () => {

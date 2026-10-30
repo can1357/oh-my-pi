@@ -294,7 +294,7 @@ describe("renderYieldSchema", () => {
 
 	async function renderSubagentPrompt(outputSchema: unknown): Promise<string> {
 		const templateSource = await fs.readFile(templatePath, "utf-8");
-		return prompt.render(templateSource, { agent: "test-agent", outputSchema });
+		return prompt.render(templateSource, { agent: "test-agent", structured: true, outputSchema });
 	}
 
 	test("wraps a JTD properties schema inside data so the model matches the yield call shape", async () => {

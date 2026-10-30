@@ -7,15 +7,19 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type BuiltSkillPromptMessage,
-	buildSkillPromptMessage,
 	parseSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
+	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../../session/messages";
 
-export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+export type RpcSkillCommandSession = Pick<
+	AgentSession,
+	"buildUserSkillPrompt" | "renderUserSkillPrompt" | "promptCustomMessage" | "skills" | "skillsSettings"
+> &
+	SkillRediscoverySource;
 
 export interface RpcSkillInvocation extends SkillPromptInput {
 	skill: Skill;
@@ -63,7 +67,7 @@ export async function runRpcSkillCommand(
 	options: RpcSkillCommandOptions = {},
 ): Promise<boolean> {
 	const { streamingBehavior = "steer", prebuilt, onPromptAdmitted, images, tag } = options;
-	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
+	const built = prebuilt ?? (await session.buildUserSkillPrompt(invocation.skill, invocation));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,

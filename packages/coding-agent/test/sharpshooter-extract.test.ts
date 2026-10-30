@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildSharpshooterEnvelope,
+	flushSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
@@ -39,10 +40,15 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
-function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
+function extractionDependencies(
+	cwd: string,
+	messages: AgentMessage[],
+	sessionId = "session-extract",
+	overrides: Record<string, unknown> = {},
+) {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
-	const settings = Settings.isolated({ "sharpshooter.model": `${model.provider}/${model.id}` });
+	const settings = Settings.isolated({ "sharpshooter.model": `${model.provider}/${model.id}`, ...overrides });
 	const modelRegistry = {
 		getAll: () => [model],
 		getAvailable: () => [model],
@@ -55,13 +61,6 @@ function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId
 		sessionManager: { getCwd: () => cwd },
 	} as unknown as AgentSession;
 	return { modelRegistry, session, settings };
-}
-
-async function waitFor(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
-	for (let attempt = 0; attempt < 200; attempt++) {
-		if (await predicate()) return;
-	}
-	if (!(await predicate())) throw new Error(message);
 }
 
 afterEach(() => {
@@ -115,7 +114,11 @@ describe("maybeStartSharpshooterExtraction", () => {
 			message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
 		]);
 		const pending = Promise.withResolvers<AssistantMessage>();
-		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pending.promise);
+		const called = Promise.withResolvers<void>();
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			called.resolve();
+			return pending.promise;
+		});
 
 		maybeStartSharpshooterExtraction({
 			agentDir: path.join(os.tmpdir(), "sharpshooter-in-flight-agent"),
@@ -123,7 +126,7 @@ describe("maybeStartSharpshooterExtraction", () => {
 			session: deps.session,
 			settings: deps.settings,
 		});
-		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		await called.promise;
 		maybeStartSharpshooterExtraction({
 			agentDir: path.join(os.tmpdir(), "sharpshooter-in-flight-agent"),
 			modelRegistry: deps.modelRegistry,
@@ -133,9 +136,36 @@ describe("maybeStartSharpshooterExtraction", () => {
 
 		expect(completion).toHaveBeenCalledTimes(1);
 		pending.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
-		await pending.promise;
-		await Promise.resolve();
-		await Promise.resolve();
+		await flushSharpshooterExtraction(deps.session);
+	});
+
+	it("gates short prompts on sharpshooter.minPromptLength, counting user-perceived characters", async () => {
+		const cwd = path.join(os.tmpdir(), "sharpshooter-min-length-project");
+		const agentDir = path.join(os.tmpdir(), "sharpshooter-min-length-agent");
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistantResponse([{ type: "text", text: "No tool call." }]));
+
+		// Await the session's in-flight extraction (none when the gate drops the prompt) before counting calls.
+		const extractionStarts = async (text: string, overrides: Record<string, unknown> = {}): Promise<boolean> => {
+			completion.mockClear();
+			const deps = extractionDependencies(
+				cwd,
+				[message("user", [{ type: "text", text }])],
+				`session-${text}`,
+				overrides,
+			);
+			maybeStartSharpshooterExtraction({ agentDir, ...deps });
+			await flushSharpshooterExtraction(deps.session);
+			return completion.mock.calls.length === 1;
+		};
+
+		expect(await extractionStarts("用方案二")).toBe(false);
+		expect(await extractionStarts("用方案二", { "sharpshooter.minPromptLength": 4 })).toBe(true);
+		// Values below the floor of 2 still drop one-character acks.
+		expect(await extractionStarts("好", { "sharpshooter.minPromptLength": 0 })).toBe(false);
+		// "👍" is one character even though its UTF-16 length is 2.
+		expect(await extractionStarts("👍", { "sharpshooter.minPromptLength": 2 })).toBe(false);
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {
@@ -181,7 +211,7 @@ describe("maybeStartSharpshooterExtraction", () => {
 				session: deps.session,
 				settings: deps.settings,
 			});
-			await waitFor(async () => (await listSharpshooterDeltas(agentDir, cwd)).length === 1, "delta was not queued");
+			await flushSharpshooterExtraction(deps.session);
 
 			const groups = await listSharpshooterDeltas(agentDir, cwd);
 			expect(groups).toHaveLength(1);
@@ -223,9 +253,8 @@ describe("maybeStartSharpshooterExtraction", () => {
 					settings: deps.settings,
 				}),
 			).not.toThrow();
-			await waitFor(() => completion.mock.calls.length === 1, "completion was not called");
-			await Promise.resolve();
-			await Promise.resolve();
+			await flushSharpshooterExtraction(deps.session);
+			expect(completion).toHaveBeenCalledTimes(1);
 
 			expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
 		} finally {

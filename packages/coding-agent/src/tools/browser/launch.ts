@@ -15,12 +15,14 @@ import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
 	Browser,
 	CDPSession,
+	Connection,
 	ConnectOptions,
 	Device,
 	JSHandle,
 	NetworkConditions,
 	Page,
 	default as Puppeteer,
+	TimeoutError,
 	Target,
 } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
@@ -39,6 +41,7 @@ import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withDownload } from "../../downloads/activity";
+import { probeCdpResponse } from "./attach";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -77,17 +80,23 @@ function isMicrosoftEdgeExecutable(executablePath: string | undefined): boolean 
 	if (!executablePath) return false;
 	const normalizedPath = executablePath.replaceAll("\\", "/").toLowerCase();
 	const executableName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
-	return (
-		executableName === "msedge.exe" ||
-		executableName === "microsoft edge" ||
-		executableName.startsWith("microsoft-edge")
-	);
+	// Windows ships every channel as msedge.exe; macOS bundles use "Microsoft Edge[ Beta|Dev|Canary]",
+	// Linux packages "microsoft-edge[-stable|-beta|-dev]".
+	return executableName === "msedge.exe" || /^microsoft[ -]edge(?:$|[ -])/.test(executableName);
 }
 
-function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[] {
+/**
+ * Puppeteer default args to pass as `ignoreDefaultArgs` so Chromium does not run in
+ * automation mode. Used by the browser tool and the sign-in browser, where Google
+ * rejects automation-controlled browsers as insecure.
+ */
+export function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[] {
 	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
 	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
 }
+
+/** Launch arg that keeps `navigator.webdriver` false; pair with {@link stealthIgnoreDefaultArgs}. */
+export const DISABLE_AUTOMATION_CONTROLLED_ARG = "--disable-blink-features=AutomationControlled";
 
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
@@ -102,12 +111,32 @@ const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
 let puppeteerCwdFailed = false;
 let puppeteerCwdFailure: unknown;
 let jsHandleConstructor: typeof JSHandle | undefined;
+let timeoutErrorConstructor: typeof TimeoutError | undefined;
 let knownDevices: Readonly<Record<string, Device>> | undefined;
 let predefinedNetworkConditions: Readonly<Record<string, NetworkConditions>> | undefined;
 
 /** Identify handles using the lazily loaded Puppeteer instance without triggering an early import. */
 export function isPuppeteerHandle(value: unknown): value is JSHandle {
 	return jsHandleConstructor !== undefined && value instanceof jsHandleConstructor;
+}
+
+/**
+ * Recognize Puppeteer's `TimeoutError` by class identity: release builds minify class names,
+ * so its `name` reads like `Og` there and never equals "TimeoutError".
+ */
+export function isPuppeteerTimeout(error: unknown): boolean {
+	return timeoutErrorConstructor !== undefined && error instanceof timeoutErrorConstructor;
+}
+
+/**
+ * Build Puppeteer's `TimeoutError` for a deadline omp enforces in place of one of Puppeteer's waits.
+ * Its `name` stays "TimeoutError" in release builds: back/forward/reload pass this error to the agent's cell as is.
+ */
+export function puppeteerTimeoutError(message: string): Error {
+	if (!timeoutErrorConstructor) throw new Error("Puppeteer is not loaded");
+	const error = new timeoutErrorConstructor(message);
+	error.name = "TimeoutError";
+	return error;
 }
 async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
 	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
@@ -133,6 +162,7 @@ async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppe
 			const module = await import("puppeteer-core");
 			loaded = module.default;
 			jsHandleConstructor = module.JSHandle;
+			timeoutErrorConstructor = module.TimeoutError;
 			knownDevices = module.KnownDevices;
 			predefinedNetworkConditions = module.PredefinedNetworkConditions;
 		} catch (error) {
@@ -200,11 +230,51 @@ export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: Con
 	} catch (error) {
 		// The WebSocket transports can reject with ErrorEvent rather than Error.
 		// Its message includes the actual debugger endpoint and handshake failure.
-		if (!(error instanceof Error) && isRecord(error) && typeof error.message === "string") {
-			throw new Error(error.message, { cause: error });
+		const failure =
+			!(error instanceof Error) && isRecord(error) && typeof error.message === "string"
+				? new Error(error.message, { cause: error })
+				: toError(error);
+		// Bun's `ws` shim (1.4.4+) rejects a refused upgrade with only "Unexpected server response: <status>";
+		// name the debugger endpoint the way Bun's native WebSocket error does.
+		if (failure.message.startsWith("Unexpected server response: ")) {
+			const endpoint =
+				options.browserWSEndpoint ??
+				(options.browserURL && (await debuggerEndpointOf(options.browserURL))) ??
+				options.browserURL;
+			if (endpoint)
+				throw new Error(`WebSocket connection to '${endpoint}' failed: ${failure.message}`, { cause: failure });
 		}
-		throw toError(error);
+		throw failure;
 	}
+}
+
+/** The `webSocketDebuggerUrl` a CDP HTTP endpoint advertises, or undefined when it does not answer with one. */
+async function debuggerEndpointOf(browserURL: string): Promise<string | undefined> {
+	const response = await probeCdpResponse(`${browserURL.replace(/\/+$/, "")}/json/version`, { timeoutMs: 1500 });
+	if (response?.status !== 200) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(response.body);
+		return isRecord(parsed) && typeof parsed.webSocketDebuggerUrl === "string"
+			? parsed.webSocketDebuggerUrl
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The connection's root session, which answers browser-level `Target.*` commands. The omp relay serves
+ * those but exposes no attachable browser target, so `browser.target().createCDPSession()` fails there.
+ */
+export function browserConnection(browser: Browser): Connection {
+	// Puppeteer's CDP browser keeps its connection behind an internal getter.
+	const connection = "_connection" in browser ? browser._connection : undefined;
+	if (!isCdpConnection(connection)) throw new ToolError("Puppeteer browser exposes no CDP connection");
+	return connection;
+}
+
+function isCdpConnection(value: unknown): value is Connection {
+	return isRecord(value) && typeof value.send === "function" && typeof value.createSession === "function";
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */
@@ -257,7 +327,57 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 		if (sysChrome) return sysChrome;
 	}
 
-	chromiumExecutablePromise ??= (async () => {
+	chromiumExecutablePromise ??= ensureManagedChromium().catch(async err => {
+		// Cache a successful fallback too: the open preflight and the actual
+		// launch both resolve the executable. Otherwise an unavailable download
+		// is retried inside the open deadline immediately after preflight.
+		if (preferManagedChromium) {
+			const sysChrome = await resolveSystemChromium();
+			if (sysChrome) {
+				logger.warn(
+					"Chrome for Testing unavailable; falling back to the system Chrome bundle. On macOS this can let the " +
+						"headless browser daemon capture your link clicks (#8673). Set PUPPETEER_EXECUTABLE_PATH to a " +
+						"dedicated Chromium to avoid this.",
+					{ path: sysChrome, error: (err as Error).message },
+				);
+				return sysChrome;
+			}
+		}
+		chromiumExecutablePromise = undefined;
+		throw new ToolError(
+			`Failed to install Chromium for puppeteer: ${(err as Error).message}. ` +
+				"Set PUPPETEER_EXECUTABLE_PATH to use an existing Chrome/Chromium binary, or install one manually.",
+		);
+	});
+
+	return await chromiumExecutablePromise;
+}
+
+/**
+ * Resolve the executable for interactive sign-in windows. Microsoft Edge needs
+ * Puppeteer's `--enable-automation` to launch (see {@link stealthIgnoreDefaultArgs}),
+ * and Google sign-in rejects automation-controlled browsers, so an Edge
+ * resolution is replaced with Chrome for Testing.
+ *
+ * Throws when Edge is the only local browser and Chrome for Testing cannot be installed.
+ */
+export async function ensureSignInChromiumExecutable(): Promise<string | undefined> {
+	const executablePath = await ensureChromiumExecutable();
+	if (!isMicrosoftEdgeExecutable(executablePath)) return executablePath;
+	try {
+		return await ensureManagedChromium();
+	} catch (err) {
+		throw new Error(
+			`Browser sign-in cannot use Microsoft Edge and Chrome for Testing is unavailable: ${(err as Error).message}. ` +
+				"Set PUPPETEER_EXECUTABLE_PATH to a Chrome or Chromium binary.",
+		);
+	}
+}
+
+let managedChromiumPromise: Promise<string | undefined> | undefined;
+/** Chrome for Testing under ~/.omp/puppeteer, downloaded on first use; undefined when platform detection fails. */
+function ensureManagedChromium(): Promise<string | undefined> {
+	managedChromiumPromise ??= (async () => {
 		const browsers = await loadBrowsers();
 		const platform = browsers.detectBrowserPlatform();
 		if (!platform) {
@@ -299,30 +419,11 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			}),
 		);
 		return executablePath;
-	})().catch(async err => {
-		// Cache a successful fallback too: the open preflight and the actual
-		// launch both resolve the executable. Otherwise an unavailable download
-		// is retried inside the open deadline immediately after preflight.
-		if (preferManagedChromium) {
-			const sysChrome = await resolveSystemChromium();
-			if (sysChrome) {
-				logger.warn(
-					"Chrome for Testing unavailable; falling back to the system Chrome bundle. On macOS this can let the " +
-						"headless browser daemon capture your link clicks (#8673). Set PUPPETEER_EXECUTABLE_PATH to a " +
-						"dedicated Chromium to avoid this.",
-					{ path: sysChrome, error: (err as Error).message },
-				);
-				return sysChrome;
-			}
-		}
-		chromiumExecutablePromise = undefined;
-		throw new ToolError(
-			`Failed to install Chromium for puppeteer: ${(err as Error).message}. ` +
-				"Set PUPPETEER_EXECUTABLE_PATH to use an existing Chrome/Chromium binary, or install one manually.",
-		);
+	})().catch(err => {
+		managedChromiumPromise = undefined;
+		throw err;
 	});
-
-	return await chromiumExecutablePromise;
+	return managedChromiumPromise;
 }
 
 let resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found
@@ -506,7 +607,7 @@ export function buildHeadlessLaunchArgs(
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
-		"--disable-blink-features=AutomationControlled",
+		DISABLE_AUTOMATION_CONTROLLED_ARG,
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
@@ -619,6 +720,28 @@ async function writeOwnedProfilePreferences(file: string): Promise<void> {
 	} catch (error) {
 		await fs.promises.rm(staged, { force: true });
 		throw error;
+	}
+}
+
+/**
+ * Discard Chromium's session-restore state in a persistent profile OMP owns.
+ * When the first window of a new Chromium process opens, it reopens every page
+ * recorded in `Default/Sessions`, however the previous process exited. On the
+ * project-shared browser that resurrects whatever was open when its
+ * predecessor stopped or was killed, and no omp process owns those pages:
+ * target ownership dies with the browser instance, so neither idle-close nor
+ * the orphan reaper ever closes them. Call this before a Chromium process
+ * starts on the profile. Best-effort: a failure is logged and never blocks the
+ * launch.
+ */
+export async function discardOwnedProfileSessions(userDataDir: string): Promise<void> {
+	try {
+		await removeWithRetries(path.join(userDataDir, "Default", "Sessions"));
+	} catch (error) {
+		logger.warn("Could not discard browser profile session state", {
+			userDataDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
 	}
 }
 
@@ -1105,10 +1228,6 @@ export function systemChromiumCandidatesForTest(
 
 export async function chromiumExecutableProbeForTest(executablePath: string): Promise<boolean> {
 	return isChromiumExecutable(executablePath);
-}
-
-export function stealthIgnoreDefaultArgsForTest(executablePath: string | undefined): string[] {
-	return stealthIgnoreDefaultArgs(executablePath);
 }
 
 export function targetSupportsUserAgentOverrideForTest(target: Target): boolean {

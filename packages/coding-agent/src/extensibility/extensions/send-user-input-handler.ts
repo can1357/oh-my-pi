@@ -53,9 +53,13 @@ export function listUserInputBuiltinCommands(): UserInputBuiltinCommand[] {
 
 /**
  * Hooks for a host with no client to report to (print mode, subagents, an SDK embedder that passes none):
- * a built-in's output only returns to the extension, and plugin reload refreshes the session alone.
+ * a built-in's output only returns to the extension, and plugin reload refreshes the session alone. A host
+ * that keeps a live MCP manager (print mode) passes its `/mcp` hooks, as its own typed built-ins get them.
  */
-function headlessSlashCommandHost(session: AgentSession): SlashCommandHost {
+export function headlessSlashCommandHost(
+	session: AgentSession,
+	mcp?: Pick<SlashCommandHost, "mcpManager" | "reconnectMcpServer">,
+): SlashCommandHost {
 	return {
 		output: () => {},
 		// Nothing to re-advertise to; `refreshSkillsAndCommands()` still fires `subscribeCommandMetadataChanged`.
@@ -65,6 +69,7 @@ function headlessSlashCommandHost(session: AgentSession): SlashCommandHost {
 			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 			await session.refreshSkillsAndCommands();
 		},
+		...mcp,
 	};
 }
 

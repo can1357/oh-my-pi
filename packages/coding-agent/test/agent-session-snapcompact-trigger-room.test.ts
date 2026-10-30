@@ -8,7 +8,9 @@ import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -99,9 +101,9 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 		return { session, notices };
 	}
 
-	/** What the frame cap charges per frame of `model`'s shape: its own price, at least the ceiling. */
+	/** What the frame cap charges per frame of `model`'s shape. */
 	function framePrice(model: Model): number {
-		return Math.max(snapcompact.FRAME_TOKEN_ESTIMATE, snapcompact.resolveShape(model).frameTokenEstimate);
+		return snapcompact.plannedFrameTokens(snapcompact.resolveShape(model));
 	}
 
 	/** Tokens the session's tokenizer charges for the committed archive's frames. */
@@ -219,7 +221,31 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 		expect(frames).toBeGreaterThan(0);
 		expect(frames * framePrice(model)).toBeLessThanOrEqual(SHARE * 60_000);
 		// The window alone would allow the full payload cap.
-		expect(frames).toBeLessThan(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(model)));
+		expect(frames).toBeLessThan(
+			snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(model), snapcompact.frameDataBytesBudget(model)),
+		);
+	});
+
+	it("lets a large trigger plan past 3 MB of frames on the official endpoint, but not through a proxy", async () => {
+		const official = opus(1_000_000);
+		const proxied = {
+			...buildModel({ ...toModelSpec(official), baseUrl: "https://anthropic-proxy.example" }),
+			maxTokens: 64_000,
+		};
+		const settings = { "compaction.thresholdTokens": 600_000 };
+		const officialFrames = await requestedFrames(official, settings);
+		const proxiedFrames = await requestedFrames(proxied, settings);
+
+		const shape = snapcompact.resolveShape(official);
+		expect(proxiedFrames).toBe(
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET),
+		);
+		expect(officialFrames).toBeGreaterThan(proxiedFrames);
+		// The trigger, not the 12 MB frame share, decides the official count.
+		expect(officialFrames).toBeLessThan(
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(official)),
+		);
+		expect(officialFrames * framePrice(official)).toBeLessThanOrEqual(SHARE * 600_000);
 	});
 
 	it("sizes from the active model's compaction.modelThresholds entry", async () => {
@@ -301,9 +327,10 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 			spy.mockRestore();
 			return maxFrames;
 		};
-		const plain = await frames("sig");
+		// Both signatures outweigh keepRecentTokens, so the same turns stay kept.
+		const plain = await frames("x".repeat(40_000));
 		expect(plain).toBeGreaterThan(1);
-		// ~40k tokens of signature text, which the trigger never counts.
+		// ~30k more tokens of signature text, which the trigger never counts.
 		expect(await frames("x".repeat(160_000))).toBe(plain);
 	});
 
@@ -327,6 +354,58 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 		expect(onHaiku).toBeGreaterThan(0);
 		expect(onHaiku * framePrice(haiku)).toBeLessThanOrEqual(SHARE * 40_000);
 		expect(onOpus).toBeGreaterThan(onHaiku);
+	});
+
+	it("divides the room by a billing-verified frame price and keeps the ceiling for an unverified one", async () => {
+		const openai = (id: string): Model => {
+			const bundled = getBundledModel("openai", id);
+			if (!bundled) throw new Error(`Expected bundled openai/${id}`);
+			return { ...bundled, contextWindow: 1_000_000, maxTokens: 64_000 };
+		};
+		// gpt-5.5's rule is billing-verified, gpt-5.4's is not; both bill a 1568px frame alike.
+		const verified = openai("gpt-5.5");
+		const unverified = openai("gpt-5.4");
+		const price = snapcompact.resolveShape(verified).frameTokenEstimate;
+		expect(snapcompact.resolveShape(unverified).frameTokenEstimate).toBe(price);
+		expect(price).toBe(2882);
+
+		// Room for 15 frames at 2,882 but not at 3,000, so a near-miss divisor fails too.
+		const thresholdTokens = 102_000;
+		const plan = async (model: Model): Promise<{ frames: number; room: number }> => {
+			const { session } = createSession(model, { "compaction.thresholdTokens": thresholdTokens });
+			const spy = vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => ({
+				summary: "stub",
+				shortSummary: "stub",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: { readFiles: [], modifiedFiles: [] },
+				preserveData: { snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 } },
+			}));
+			await session.compact(undefined, { mode: "snapcompact" });
+			const frames = spy.mock.calls[0]?.[1]?.maxFrames ?? 0;
+			spy.mockRestore();
+			// The stub committed an empty archive: the rest is the system prompt, tools and kept turns.
+			const summary = session.messages.find(message => message.role === "compactionSummary");
+			if (!summary) throw new Error("Expected a compaction summary message");
+			const archiveText =
+				Math.ceil((2 * snapcompact.geometry(snapcompact.resolveShape(model)).capacity * 1.15) / 4) + 2000;
+			const fixedTokens = storedContextTokens(session) - session.agent.tokenizer.countMessage(summary) + archiveText;
+			return {
+				frames,
+				room: Math.min(SHARE * (thresholdTokens - fixedTokens), TARGET * thresholdTokens - fixedTokens),
+			};
+		};
+		const atPrice = await plan(verified);
+		const atCeiling = await plan(unverified);
+		expect(atPrice.frames).toBe(Math.floor(atPrice.room / price));
+		expect(atCeiling.frames).toBe(Math.floor(atCeiling.room / snapcompact.FRAME_TOKEN_ESTIMATE));
+		expect(atPrice.frames).toBeGreaterThan(atCeiling.frames);
+		expect(atPrice.frames).toBeLessThan(
+			snapcompact.maxFramesForDataBudget(
+				snapcompact.resolveShape(verified),
+				snapcompact.frameDataBytesBudget(verified),
+			),
+		);
 	});
 
 	it("still commits a manual compaction that leaves no room under the trigger", async () => {

@@ -13,6 +13,21 @@ describe("splitSvgFences", () => {
 		expect(hasSvgFence(markdown)).toBe(true);
 	});
 
+	it("lifts CRLF svg fences without dropping the source line endings", () => {
+		const markdown = "Intro\r\n```svg\r\n<svg/>\r\n```\r\nOutro";
+		expect(hasSvgFence(markdown)).toBe(true);
+		expect(splitSvgFences(markdown)).toEqual([
+			{ kind: "markdown", text: "Intro\r\n" },
+			{ kind: "svg", source: "<svg/>\r\n", closed: true },
+			{ kind: "markdown", text: "Outro" },
+		]);
+	});
+
+	it("lifts CR-only svg fences as closed figures", () => {
+		const markdown = "```svg\r<svg/>\r```";
+		expect(splitSvgFences(markdown)).toEqual([{ kind: "svg", source: "<svg/>\r", closed: true }]);
+	});
+
 	it("leaves svg fences nested in another fence or indented as code as prose", () => {
 		const nested = "````markdown\n```svg\n<svg/>\n```\n````";
 		const indented = "    ```svg\n    <svg/>\n    ```";

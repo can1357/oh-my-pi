@@ -6,6 +6,7 @@
  * exposes one option-driven core plus thin dispatchers that pin the option set
  * for each target.
  */
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { dereferenceJsonSchema } from "./dereference";
@@ -541,7 +542,10 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		if (typeof result.type === "string") dropForeignTypeKeywords(result, result.type);
 	}
 	if (constValue !== undefined) {
-		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
+		// Copy before pushing: `result.enum` may alias the caller's array (the
+		// keyword copy above reuses the input's value for non-schema keywords),
+		// and pushing into it would mutate the caller's schema in place.
+		const existingEnum = Array.isArray(result.enum) ? [...result.enum] : [];
 		pushEnumValue(existingEnum, constValue);
 		result.enum = existingEnum;
 		if (!result.type) {
@@ -1661,8 +1665,15 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
 /**
  * OpenAI Responses rejects `oneOf` in tool schemas even when strict mode is
  * disabled, and rejects every schema node with `type: "object"` unless it has
- * a `properties` member. Normalize only schema-valued positions so literal
- * payloads under `enum`, `const`, `default`, and `examples` remain unchanged.
+ * a `properties` member. Codex opts into repairing arrays without `items` with
+ * explicit open `items: true`, including the default open tail after
+ * `prefixItems`, which makes strict adaptation fall back to non-strict.
+ * The repair is off by default: other Responses routes include grammar
+ * backends that cannot compile boolean subschemas. If `unevaluatedItems`
+ * appears in any schema position, repair is disabled for the whole tool:
+ * references and composition can carry evaluated-item effects across subtrees.
+ * Normalize only schema-valued positions so literal payloads under `enum`,
+ * `const`, `default`, and `examples` remain unchanged.
  *
  * Identity-preserving: returns the input reference unchanged when no rewrite
  * occurred so callers can dedupe via reference equality (and the strict-mode
@@ -1670,15 +1681,47 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * concatenated (the wire payload accepts a single union; preserving both
  * would not survive).
  */
-export function sanitizeSchemaForOpenAIResponses(schema: JsonObject): JsonObject {
-	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap()) as JsonObject;
+export function sanitizeSchemaForOpenAIResponses(
+	schema: JsonObject,
+	options?: { repairArrayItems?: boolean },
+): JsonObject {
+	const repairArrayItems = options?.repairArrayItems === true && !containsUnevaluatedItems(schema);
+	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), repairArrayItems) as JsonObject;
+}
+
+function containsUnevaluatedItems(value: unknown, epoch: number = epochNext()): boolean {
+	if (Array.isArray(value)) {
+		if (!once(value, epoch)) return false;
+		for (const entry of value) {
+			if (containsUnevaluatedItems(entry, epoch)) return true;
+		}
+		return false;
+	}
+	if (!isJsonObject(value) || !once(value, epoch)) return false;
+	if (Object.hasOwn(value, "unevaluatedItems")) return true;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
+			for (const name in child) {
+				if (Object.hasOwn(child, name) && containsUnevaluatedItems(child[name], epoch)) return true;
+			}
+		} else if (
+			(OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) ||
+			OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key)
+		) {
+			if (containsUnevaluatedItems(child, epoch)) return true;
+		}
+	}
+	return false;
 }
 
 /**
  * Alias for {@link sanitizeSchemaForOpenAIResponses} matching the
  * `normalizeSchemaFor*` dispatcher naming used elsewhere in this module.
  */
-export const normalizeSchemaForOpenAIResponses: (schema: JsonObject) => JsonObject = sanitizeSchemaForOpenAIResponses;
+export const normalizeSchemaForOpenAIResponses: typeof sanitizeSchemaForOpenAIResponses =
+	sanitizeSchemaForOpenAIResponses;
 const OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS = new Set(["=", "!", "<=", "<!"]);
 const OPENAI_RESPONSES_PATTERN_PROPERTIES_FALLBACK = ".*";
 
@@ -1697,7 +1740,11 @@ function hasOpenAIUnsupportedRegexLookaround(pattern: string): boolean {
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonObject, unknown>): unknown {
+function normalizeOpenAIResponsesSchemaNode(
+	value: unknown,
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown {
 	if (!isJsonObject(value)) return value;
 
 	// `{}` (empty JSON Schema) ≡ `true` (JSON Schema draft 2020-12 §4.3.1).
@@ -1745,21 +1792,27 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 		const child = value[key];
 		let next: unknown = child;
 		if (key === "patternProperties" && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, true);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, true, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, false);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, false, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-			next = normalizeOpenAIResponsesSchemaArray(child, cache);
+			next = normalizeOpenAIResponsesSchemaArray(child, cache, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaNode(child, cache);
+			next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		}
 
 		if (next !== child) changed = true;
-		output[key] = next;
+		// Match cloneJsonTree's hardened copy: JSON keys must not invoke the
+		// legacy __proto__ setter on the accumulator.
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 
 	if (Array.isArray(value.oneOf)) {
-		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache);
+		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache, repairArrayItems);
 		const existingAnyOf = output.anyOf;
 		output.anyOf = Array.isArray(existingAnyOf)
 			? [...existingAnyOf, ...(rewrittenOneOf as unknown[])]
@@ -1771,6 +1824,20 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 	// properties requirement.
 	if (declaresObjectType(value.type) && !Object.hasOwn(value, "properties")) {
 		output.properties = {};
+		changed = true;
+	}
+
+	// An omitted `items` permits any element, including the tail after
+	// `prefixItems`; make that default explicit without changing the tuple.
+	// Strict sanitization also infers arrays from typeless `prefixItems`.
+	if (
+		repairArrayItems &&
+		(value.type === "array" ||
+			(Array.isArray(value.type) && value.type.includes("array")) ||
+			(value.type === undefined && Array.isArray(value.prefixItems))) &&
+		value.items === undefined
+	) {
+		output.items = true;
 		changed = true;
 	}
 
@@ -1792,10 +1859,14 @@ function declaresObjectType(type: unknown): boolean {
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaArray(value: unknown[], cache: WeakMap<JsonObject, unknown>): unknown[] {
+function normalizeOpenAIResponsesSchemaArray(
+	value: unknown[],
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown[] {
 	let changed = false;
 	const output = value.map(item => {
-		const next = normalizeOpenAIResponsesSchemaNode(item, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(item, cache, repairArrayItems);
 		if (next !== item) changed = true;
 		return next;
 	});
@@ -1806,20 +1877,25 @@ function normalizeOpenAIResponsesSchemaMap(
 	schemaMap: JsonObject,
 	cache: WeakMap<JsonObject, unknown>,
 	stripUnsupportedRegexKeys: boolean,
+	repairArrayItems: boolean,
 ): JsonObject {
 	let changed = false;
 	const output: JsonObject = {};
 	for (const key in schemaMap) {
 		if (!Object.hasOwn(schemaMap, key)) continue;
 		const child = schemaMap[key];
-		const next = normalizeOpenAIResponsesSchemaNode(child, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		if (next !== child) changed = true;
 		if (stripUnsupportedRegexKeys && hasOpenAIUnsupportedRegexLookaround(key)) {
 			changed = true;
 			appendOpenAIResponsesFallbackPatternProperty(output, next);
 			continue;
 		}
-		output[key] = next;
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 	return changed ? output : schemaMap;
 }
@@ -2494,19 +2570,15 @@ export function tryEnforceStrictSchema(schema: Record<string, unknown>): {
 }
 
 /**
- * Resolve a JSON-pointer-style `$ref` against the root schema. Mirrors the
- * OpenAI SDK's `resolve_ref` helper: only local refs starting with `#/` are
- * supported, and each segment must dereference to a dictionary.
- * Cite: openai-python/src/openai/lib/_pydantic.py:118-129
+ * Resolve a URI-fragment JSON Pointer against the root schema. Each segment
+ * must dereference to a dictionary, as in the OpenAI SDK's `resolve_ref` helper.
  */
 function resolveStrictRef(root: Record<string, unknown>, ref: string): Record<string, unknown> | undefined {
-	if (!ref.startsWith("#/")) return undefined;
-	const segments = ref.slice(2).split("/");
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined || pointer.length === 0) return undefined;
 	let cursor: unknown = root;
-	for (const raw of segments) {
+	for (const segment of pointer) {
 		if (!isJsonObject(cursor)) return undefined;
-		// JSON Pointer unescape: ~1 → "/", ~0 → "~" (must run in that order).
-		const segment = raw.replace(/~1/g, "/").replace(/~0/g, "~");
 		cursor = cursor[segment];
 	}
 	return isJsonObject(cursor) ? cursor : undefined;

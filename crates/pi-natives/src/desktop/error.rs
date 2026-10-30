@@ -7,6 +7,7 @@ pub enum ErrorCode {
 	InputFailed,
 	InputBusy,
 	Cancelled,
+	UserIntervened,
 	BackgroundUnavailable,
 	WindowNotFound,
 	InvalidTarget,
@@ -32,6 +33,7 @@ impl ErrorCode {
 			Self::InputFailed => "InputFailed",
 			Self::InputBusy => "InputBusy",
 			Self::Cancelled => "Cancelled",
+			Self::UserIntervened => "UserIntervened",
 			Self::BackgroundUnavailable => "BackgroundUnavailable",
 			Self::WindowNotFound => "WindowNotFound",
 			Self::InvalidTarget => "InvalidTarget",
@@ -78,6 +80,11 @@ impl DesktopError {
 		Self::new(ErrorCode::InputBusy, message)
 	}
 
+	#[cfg(target_os = "macos")]
+	pub(crate) fn user_intervened(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::UserIntervened, message)
+	}
+
 	pub(crate) fn cancelled(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Cancelled, message)
 	}
@@ -119,7 +126,6 @@ impl DesktopError {
 		Self::new(ErrorCode::AxUnconfirmed, message)
 	}
 
-	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	pub(crate) fn unsupported(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Unsupported, message)
 	}

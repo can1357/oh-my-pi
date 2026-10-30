@@ -143,6 +143,26 @@ describe("PolyphonicRecallEngine", () => {
 		}
 	});
 
+	it("does not let a query stopword match a stopword fact subject", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			insertWorking(beam, "m-junk", "That is approximately one CSS pixel at the default zoom level");
+			const timestamp = new Date().toISOString();
+			// Shape the regex extractor stores for "That is ..." sentences.
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES ('cf_that', 'That', 'related_to', 'approximately one CSS pixel', 0.9, 2, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["m-junk"])],
+			);
+
+			expect(engine.factVoice("the checklist that Alice owns").map(result => result.memoryId)).toEqual(["m1"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
 	it("filters vector and temporal voices to beam-session or global memories", () => {
 		const beam = makeBeam();
 		try {

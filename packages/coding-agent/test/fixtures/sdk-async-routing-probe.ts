@@ -76,6 +76,8 @@ registry.getAvailable = () => [model];
 const settings = Settings.isolated({
 	"async.enabled": true,
 	"task.batch": true,
+	// The correction reaches the parent through a wake-turn re-`yield`.
+	"task.structured": true,
 	"task.maxConcurrency": 1,
 	"task.agentIdleTtlMs": 0,
 	"task.completionProbe": false,

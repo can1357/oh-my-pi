@@ -83,7 +83,10 @@ describe("PluginManager.doctor version drift", () => {
 
 		// Targeted repair: bare `bun install` (no global `--force` that would
 		// re-extract sibling plugins).
-		expect(spawnSpy).toHaveBeenCalledWith(["bun", "install"], expect.objectContaining({ cwd: pluginsDir }));
+		expect(spawnSpy).toHaveBeenCalledWith(
+			[process.execPath, "install"],
+			expect.objectContaining({ cwd: pluginsDir }),
+		);
 		expect(checks.find(c => c.name === `plugin:${name}:version`)).toEqual({
 			name: `plugin:${name}:version`,
 			status: "ok",

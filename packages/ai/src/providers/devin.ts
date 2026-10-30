@@ -1,4 +1,5 @@
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip } from "node:zlib";
 
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
@@ -21,7 +22,6 @@ import {
 	GetUserJwtResponseSchema,
 	type ImageData,
 	ImageDataSchema,
-	type Metadata,
 	MetadataSchema,
 	type ModelAssignment,
 	PromptCacheOptionsSchema,
@@ -29,7 +29,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -54,6 +54,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import {
 	CONNECT_COMPRESSED_FLAG,
@@ -61,7 +62,12 @@ import {
 	ConnectFrameDecoder,
 	frameConnectMessage,
 } from "./connect-frame";
-import { isResponsesFamilyApi, responsesCallComponent, transformMessages } from "./transform-messages";
+import {
+	isResponsesFamilyApi,
+	normalizeToolCallId,
+	responsesCallComponent,
+	transformMessages,
+} from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
@@ -78,6 +84,9 @@ export interface DevinOptions extends StreamOptions {
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
+
+/** Off the event loop: a synchronous gzip stalls the TUI on a multi-MB transcript. */
+const gzipAsync = promisify(gzip);
 
 /**
  * Cascade forwards replayed tool-call ids to the backend serving the chat model;
@@ -234,7 +243,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
-				apiKey: auth.apiKey,
+				apiKey: options?.apiKey,
 				userJwt: auth.userJwt,
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				// Foreign ids (cross-model calls and their results alike): Responses
@@ -244,9 +253,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					context.messages,
 					model,
 					(id, _target, source) =>
-						(isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id)
-							.replace(/[^a-zA-Z0-9_-]/g, "_")
-							.slice(0, DEVIN_TOOL_CALL_ID_MAX_LENGTH),
+						normalizeToolCallId(
+							isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id,
+							DEVIN_TOOL_CALL_ID_MAX_LENGTH,
+						),
 					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
 				),
 			};
@@ -262,21 +272,25 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const replacementRequest = await options?.onPayload?.(request, model);
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			const gz = gzipSync(reqBytes);
+			// A small request goes out plain and without `connect-content-encoding`,
+			// so no server sees an encoding it never has to decode.
+			const compress = reqBytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
+			const chatBody = compress ? await gzipAsync(reqBytes) : reqBytes;
+			const compressedBytes = compress ? chatBody.byteLength : undefined;
 			logger.debug("devin: sending chat request", {
 				model: model.id,
 				tools: context.tools?.length ?? 0,
 				requestBytes: reqBytes.byteLength,
-				compressedBytes: gz.byteLength,
+				compressedBytes,
 			});
-			const frame = frameConnectMessage(gz, CONNECT_COMPRESSED_FLAG);
+			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
 
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",
 					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
+					...(compress ? { "connect-content-encoding": "gzip" } : {}),
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
@@ -330,7 +344,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 								...(trailerError.detail ? { detail: trailerError.detail } : {}),
 								rawTrailer: trailerError.raw,
 								requestBytes: reqBytes.byteLength,
-								compressedBytes: gz.byteLength,
+								compressedBytes,
 								tools: context.tools?.length ?? 0,
 								messages: context.messages.length,
 								hadOutput: firstTokenTime !== undefined,
@@ -375,7 +389,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 										model: model.id,
 										historyBytes,
 										requestBytes: reqBytes.byteLength,
-										compressedBytes: gz.byteLength,
+										compressedBytes,
 									});
 								}
 							}
@@ -542,7 +556,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 /** Per-turn wire state shared by `AssignModel` and `GetChatMessage`. */
 interface DevinTurn {
-	apiKey: string;
+	apiKey: string | undefined;
 	userJwt: string;
 	/** Cascade thread id; assignment and chat must agree on it or the JWT is rejected. */
 	cascadeId: string;
@@ -550,18 +564,13 @@ interface DevinTurn {
 	messages: Message[];
 }
 
-interface DevinAuthAttempt {
-	response: Response;
-	payload: Uint8Array;
-}
-
-async function requestDevinAuth(
-	metadata: Metadata,
+async function fetchDevinAuthMetadata(
+	apiKey: string | undefined,
 	baseUrl: string,
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
-): Promise<DevinAuthAttempt> {
-	const request = create(GetUserJwtRequestSchema, { metadata });
+): Promise<{ userJwt: string; baseUrl?: string }> {
+	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
 		headers: {
@@ -572,29 +581,9 @@ async function requestDevinAuth(
 		body: toBinary(GetUserJwtRequestSchema, request),
 		signal,
 	});
-	return { response, payload: new Uint8Array(await response.arrayBuffer()) };
-}
-
-async function fetchDevinAuthMetadata(
-	apiKey: string | undefined,
-	baseUrl: string,
-	fetchImpl: NonNullable<StreamOptions["fetch"]>,
-	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; apiKey: string; baseUrl?: string }> {
-	const sessionMetadata = create(MetadataSchema, devinCliMetadata(apiKey));
-	let wireApiKey = sessionMetadata.apiKey;
-	let attempt = await requestDevinAuth(sessionMetadata, baseUrl, fetchImpl, signal);
-
-	if (attempt.response.status === 401) {
-		const apiKeyMetadata = create(MetadataSchema, devinWireMetadata(apiKey));
-		if (apiKeyMetadata.apiKey && apiKeyMetadata.apiKey !== sessionMetadata.apiKey) {
-			attempt = await requestDevinAuth(apiKeyMetadata, baseUrl, fetchImpl, signal);
-			wireApiKey = apiKeyMetadata.apiKey;
-		}
-	}
-
-	if (!attempt.response.ok) throw createDevinHttpError("auth", attempt.response, attempt.payload);
-	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, attempt.payload);
+	const payload = new Uint8Array(await response.arrayBuffer());
+	if (!response.ok) throw createDevinHttpError("auth", response, payload);
+	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, payload);
 	if (!decoded?.userJwt) {
 		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
 			provider: "devin",
@@ -602,11 +591,7 @@ async function fetchDevinAuthMetadata(
 		});
 	}
 	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return {
-		userJwt: decoded.userJwt,
-		apiKey: wireApiKey,
-		...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined),
-	};
+	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
 }
 
 /**
@@ -623,7 +608,7 @@ async function assignDevinModel(
 	signal: AbortSignal | undefined,
 ): Promise<ModelAssignment> {
 	const request = create(AssignModelRequestSchema, {
-		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey)),
+		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey)),
 		modelRouterUid: model.requestModelId ?? model.id,
 		cascadeId: turn.cascadeId,
 		chatMessagePrompt: buildRouterPrompt(turn.messages),
@@ -701,7 +686,7 @@ function buildDevinChatRequest(
 		});
 	});
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey, turn.userJwt)),
+		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
 		chatModelUid,

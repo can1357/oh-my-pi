@@ -126,21 +126,14 @@ import {
 } from "../storage-state";
 import { assertTabPressArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
+import { readFilePayloads } from "../upload-files";
 import {
-	installWebMcpPageHook,
-	uninstallWebMcpPageHook,
-	WEBMCP_BRIDGE_KEY,
-	WebMcpController,
 	type WebMcpEventsOptions,
 	type WebMcpEventsResult,
-	type WebMcpHookInvokeEnvelope,
-	type WebMcpHookSnapshot,
 	type WebMcpInvokeOptions,
 	type WebMcpInvokeResult,
 	type WebMcpListOptions,
 	type WebMcpListResult,
-	webMcpInvokeInPage,
-	webMcpSnapshotInPage,
 } from "../webmcp";
 import { keyDownStep, keyUpStep, pressSteps, type TernInputStep, type TernModifier, ternKey, typeSteps } from "./keys";
 import { TernNetworkLog, type TernRequestEntry } from "./network-log";
@@ -243,6 +236,7 @@ const NAVIGATION_IDLE_MS = 500;
 const KIT_CALL =
 	"async function (method, args) { const kit = globalThis.__ompTernKit; if (!kit) return { missing: true }; return { value: await kit[method](...args) }; }";
 const HANDLE_ATTRIBUTE = "data-omp-tern-handle";
+const NO_TERN_WEBMCP = "WKWebView has no native WebMCP; open the tab with `app.tern: false` to use Chromium";
 
 /** The tab-helper name for errors: `tab.pdf()`. */
 function helper(name: string): string {
@@ -397,11 +391,10 @@ export class TernTab implements InProcessRunTab {
 	#pointer: { x: number; y: number } | undefined;
 	readonly #buttons = new Set<"left" | "right" | "middle">();
 	readonly #mods: TernModifier[] = [];
-	// Screenshots, snapshots, recording, WebMCP.
+	// Screenshots, snapshots, recording.
 	readonly #screenshotHistory = new Map<string, ScreenshotHistory>();
 	readonly #ariaBaselines = new Map<string, AriaSnapshotBaseline>();
 	readonly #recording = new RecordingController();
-	#webmcp: WebMcpController | undefined;
 
 	constructor(opts: {
 		client: TernSocketClient;
@@ -881,12 +874,6 @@ export class TernTab implements InProcessRunTab {
 		return [
 			{
 				source: ternCaptureScript({ routes: this.#network.rules(), emulation: this.#pageEmulation }),
-				world: "page",
-				frames: "all",
-				at: "start",
-			},
-			{
-				source: `(${installWebMcpPageHook.toString()})(${JSON.stringify(WEBMCP_BRIDGE_KEY)});`,
 				world: "page",
 				frames: "all",
 				at: "start",
@@ -1538,16 +1525,7 @@ export class TernTab implements InProcessRunTab {
 			// No chooser asked for the preset: disarm it before dropping the files instead.
 			await this.#op("files", { paths: null });
 		}
-		const files = [];
-		for (const file of absolute) {
-			const handle = Bun.file(file);
-			files.push({
-				name: path.basename(file),
-				type: handle.type || "application/octet-stream",
-				data: Buffer.from(await fs.promises.readFile(file)).toString("base64"),
-			});
-		}
-		await this.#kit("setFiles", [spec, files]);
+		await this.#kit("setFiles", [spec, await readFilePayloads(absolute)]);
 	}
 
 	// ─── Queries ──────────────────────────────────────────────────────────
@@ -1561,13 +1539,13 @@ export class TernTab implements InProcessRunTab {
 		return await this.#kit<T | null>("read", [this.#spec(selector), prop, arg], frame);
 	}
 
-	/** The element's rendered text, or null. */
-	async text(selector: string | TernSelector, frame: FramePath = null): Promise<string | null> {
+	/** The element's rendered text (the page `<body>` without a selector), or null. */
+	async text(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
 		return await this.#read<string>(selector, "text", undefined, frame);
 	}
 
-	/** The element's inner HTML, or null. */
-	async html(selector: string | TernSelector, frame: FramePath = null): Promise<string | null> {
+	/** The element's inner HTML (the page `<body>` without a selector), or null. */
+	async html(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
 		return await this.#read<string>(selector, "html", undefined, frame);
 	}
 
@@ -2691,60 +2669,23 @@ export class TernTab implements InProcessRunTab {
 		return requireReactHookResult(envelope as ReactPageEnvelope<ReactSuspenseBoundary[]>);
 	}
 
-	#webMcp(): WebMcpController {
-		this.#webmcp ??= new WebMcpController(
-			{
-				frames: async () => [
-					{
-						id: "main",
-						snapshot: async () =>
-							(await this.#eval(
-								webMcpSnapshotInPage.toString(),
-								[WEBMCP_BRIDGE_KEY],
-								"page",
-								null,
-							)) as WebMcpHookSnapshot,
-						invoke: async (name, params) =>
-							(await this.#eval(
-								webMcpInvokeInPage.toString(),
-								[WEBMCP_BRIDGE_KEY, name, params],
-								"page",
-								null,
-							)) as WebMcpHookInvokeEnvelope,
-					},
-				],
-				nativeTools: () => [],
-				dispose: async () => {
-					await this.#eval(uninstallWebMcpPageHook.toString(), [WEBMCP_BRIDGE_KEY], "page", null).catch(
-						() => undefined,
-					);
-				},
-			},
-			{
-				nativeSupported: false,
-				unavailableReason: "No page-side WebMCP tool registrations were observed in the main frame.",
-			},
-		);
-		return this.#webmcp;
+	/** Page-provided WebMCP tools: Chromium only. */
+	async webmcpList(_options: WebMcpListOptions = {}): Promise<WebMcpListResult> {
+		throw unsupported("webmcpList", NO_TERN_WEBMCP);
 	}
 
-	/** Page-provided WebMCP tools (main frame). */
-	async webmcpList(options: WebMcpListOptions = {}): Promise<WebMcpListResult> {
-		return await this.#webMcp().list(options);
-	}
-
-	/** Invoke one page-provided WebMCP tool. */
+	/** Invoke one page-provided WebMCP tool: Chromium only. */
 	async webmcpInvoke(
-		name: string,
-		params: Record<string, unknown>,
-		options: WebMcpInvokeOptions = {},
+		_name: string,
+		_params: Record<string, unknown>,
+		_options: WebMcpInvokeOptions = {},
 	): Promise<WebMcpInvokeResult> {
-		return await this.#webMcp().invoke(name, params, options);
+		throw unsupported("webmcpInvoke", NO_TERN_WEBMCP);
 	}
 
-	/** WebMCP catalog changes. */
-	async webmcpEvents(options: WebMcpEventsOptions = {}): Promise<WebMcpEventsResult> {
-		return await this.#webMcp().events(options);
+	/** WebMCP catalog changes: Chromium only. */
+	async webmcpEvents(_options: WebMcpEventsOptions = {}): Promise<WebMcpEventsResult> {
+		throw unsupported("webmcpEvents", NO_TERN_WEBMCP);
 	}
 
 	// ─── Recording ────────────────────────────────────────────────────────
@@ -3104,13 +3045,13 @@ export class TernFrame {
 		await this.#tab.pressIn(key, options, this.#path);
 	}
 
-	/** Element text. */
-	async text(selector: string): Promise<string> {
+	/** Element text; the frame's `<body>` without a selector. */
+	async text(selector = "body"): Promise<string> {
 		return (await this.#tab.text(selector, this.#path)) ?? "";
 	}
 
-	/** Element inner HTML. */
-	async html(selector: string): Promise<string> {
+	/** Element inner HTML; the frame's `<body>` without a selector. */
+	async html(selector = "body"): Promise<string> {
 		return (await this.#tab.html(selector, this.#path)) ?? "";
 	}
 

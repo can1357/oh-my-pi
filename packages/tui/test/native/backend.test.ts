@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { type LogEvent, registerLogSink } from "@oh-my-pi/pi-utils/logger";
 import { card, md, node } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { nativeComponentId } from "@oh-my-pi/pi-tui/native/reconcile";
@@ -71,6 +72,35 @@ describe("native backend", () => {
 		h.stall(1);
 		expect(h.frames.length).toBe(sent + 1);
 		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
+	});
+
+	it("warns once for a stall that spans several credit resets, then logs how long it lasted when acks return", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const logged: LogEvent[] = [];
+		const unregister = registerLogSink(event => {
+			if (event.message.startsWith("TSP: terminal")) logged.push(event);
+		});
+		try {
+			let text = "";
+			const stalls = 4;
+			for (let stall = 0; stall < stalls; stall++) {
+				for (let frame = 0; frame < 2; frame++) {
+					text += ` ${stall}.${frame}`;
+					stream.current = md(text, { stream: true });
+					await h.render();
+				}
+				h.stall(5000);
+			}
+			h.terminal.ackAll();
+			h.flush();
+		} finally {
+			unregister();
+		}
+		expect(logged.map(event => event.level)).toEqual(["warn", "debug"]);
+		expect(logged[0]?.message).toContain("stopped acknowledging");
+		expect(logged[1]?.context).toMatchObject({ stalledMs: 20_000, resets: 4 });
 	});
 
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {
@@ -251,5 +281,38 @@ describe("native backend", () => {
 		});
 		expect(sent[1]!.body).toEqual({ id: surface, keep: true });
 		expect(h.terminal.rowBytes.slice(rows)).not.toContain("probe rows");
+	});
+
+	it("fills a narrow pane with centered lg and own-md sheets, follows resizes, and leaves anchored and option-sized sheets", async () => {
+		const sheet = (role: string, nativeOverlay?: Component["nativeOverlay"]): Component =>
+			Object.assign(new Probe(md(role)), nativeOverlay ? { nativeOverlay } : {});
+		harness = await TspHarness.start(
+			tui => {
+				tui.showOverlay(sheet("lg", { role: "lg", size: "lg" }));
+				tui.showOverlay(sheet("own-md", { role: "own-md", size: "md", anchor: "center" }));
+				tui.showOverlay(sheet("top-md", { role: "top-md", size: "md", anchor: "top" }));
+				// No sheet of its own: `md` comes from the overlay options, as for a generic dialog.
+				tui.showOverlay(sheet("dialog"), { width: "50%" });
+			},
+			{ cols: 99 },
+		);
+		const h = harness;
+		const sizes = (): Record<string, unknown> =>
+			Object.fromEntries(
+				h
+					.findAll(n => n.k === "overlay")
+					.map(n => [n.p?.role ?? "dialog", n.p && "size" in n.p ? n.p.size : undefined]),
+			);
+		const narrow = { lg: "full", "own-md": "full", "top-md": "md", dialog: "md" };
+		expect(sizes()).toEqual(narrow);
+
+		h.event({ ev: "resize", cols: 100 });
+		await h.render();
+		expect(sizes()).toEqual({ lg: "lg", "own-md": "md", "top-md": "md", dialog: "md" });
+
+		h.event({ ev: "resize", cols: 99 });
+		await h.render();
+		expect(sizes()).toEqual(narrow);
+		expect(h.errors).toEqual([]);
 	});
 });

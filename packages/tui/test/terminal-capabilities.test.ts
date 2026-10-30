@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	detectStyledUnderlineSupport,
@@ -20,6 +18,7 @@ import {
 	isInsideTerminalMultiplexer,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { withFakeTmux } from "./helpers/fake-tmux";
 
 describe("hasTerminalMultiplexerSession", () => {
 	it("recognizes Herdr session identity while ignoring client-only settings", () => {
@@ -160,55 +159,157 @@ describe("detectTerminalId", () => {
 	});
 });
 
-describe("tmux client terminal resolution", () => {
-	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
-		const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tmux-client-"));
-		try {
-			const tmux = path.join(binDir, "tmux");
-			await Bun.write(
-				tmux,
-				`#!/bin/sh
-[ "$1" = "display-message" ] && [ "$2" = "-p" ] && [ "$3" = '#{client_termtype}' ] || exit 64
-printf "%s\\n" "WezTerm 20260905-175422-0f4b5596"
-`,
-			);
-			await fs.chmod(tmux, 0o755);
-			const env = subprocessEnv({
-				PI_TEST_RUNTIME: undefined,
-				BUN_ENV: undefined,
-				NODE_ENV: undefined,
-				TERM: "tmux-256color",
-				TERM_PROGRAM: "tmux",
-				TERM_PROGRAM_VERSION: "3.6b",
-				COLORTERM: "truecolor",
-				TMUX: "/tmp/tmux-1000/default,4242,0",
-				SSH_CONNECTION: "client 1 server 22",
-				PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
-			});
-			const proc = Bun.spawn({
-				cmd: [
-					process.execPath,
-					"--eval",
-					`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
-console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyProtocol }));`,
-				],
-				env,
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-				proc.exited,
-			]);
+describe("iTerm2 over SSH", () => {
+	// Env as reported in #12419: an iTerm2 session reached over SSH keeps only
+	// LC_TERMINAL/LC_TERMINAL_VERSION — ITERM_SESSION_ID and TERM_PROGRAM are
+	// stripped by the hop, so detection landed on the true-color profile and
+	// every image degraded to the `[Image: image/webp]` text fallback.
+	const sshEnv = {
+		TERM: "xterm-256color",
+		COLORTERM: "truecolor",
+		LC_TERMINAL: "iTerm2",
+		LC_TERMINAL_VERSION: "3.6.11",
+		SSH_CONNECTION: "client 1 server 22",
+	};
 
-			expect(stderr).toBe("");
-			expect(exitCode).toBe(0);
-			expect(stdout).toBe('{"id":"wezterm","notifyProtocol":"\\u001b]9;"}\n');
-		} finally {
-			await fs.rm(binDir, { force: true, recursive: true });
-		}
+	it("detects iTerm2 from the forwarded LC_TERMINAL and keeps the inline image protocol", () => {
+		const id = detectTerminalId(sshEnv);
+		expect(id).toBe("iterm2");
+		// The observable payoff: OSC 1337 inline images instead of the text
+		// fallback, plus OSC 8 hyperlinks and OSC 9 notifications.
+		expect(resolveImageProtocol(id, sshEnv, true)).toBe(ImageProtocol.Iterm2);
+		expect(shouldEnableHyperlinksByDefault(sshEnv, id)).toBe(true);
+		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
 	});
+
+	it("keeps the flat underline until LC_TERMINAL_VERSION proves iTerm2 3.5 or newer", () => {
+		// The colon-form underline needs iTerm2 >= 3.5; over SSH the version
+		// arrives as LC_TERMINAL_VERSION, so an old or unknown version must keep
+		// the flat underline the terminal can actually render.
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.6.11" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.4.0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", {})).toBe(false);
+	});
+
+	it("does not claim iTerm2 inside a multiplexer, where the OSC 1337 payload has no passthrough", () => {
+		// iTerm2's image encoder is the only one that does not wrap its payload
+		// in a tmux passthrough envelope, so a forwarded LC_TERMINAL must not
+		// re-enable the protocol inside a pane: the sequence would be swallowed
+		// by the multiplexer instead of reaching the outer terminal.
+		const env = { ...sshEnv, TMUX: "/tmp/tmux-1000/default,4242,0", TERM: "tmux-256color" };
+		const id = detectTerminalId(env);
+		expect(id).not.toBe("iterm2");
+		expect(resolveImageProtocol(id, env, true)).not.toBe(ImageProtocol.Iterm2);
+	});
+
+	it("resolves the process-wide terminal id and image protocol from the forwarded LC_TERMINAL", async () => {
+		const env = subprocessEnv({
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+			// TERM_PROGRAM/TERM_PROGRAM_VERSION are stripped by the SSH hop too,
+			// so they must not leak in from the runner's own terminal.
+			TERM_PROGRAM: "",
+			TERM_PROGRAM_VERSION: undefined,
+			LC_TERMINAL: "iTerm2",
+			LC_TERMINAL_VERSION: "3.6.11",
+			SSH_CONNECTION: "client 1 server 22",
+		});
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(stdout)).toMatchObject({ id: "iterm2", imageProtocol: ImageProtocol.Iterm2 });
+	});
+});
+
+describe("tmux client terminal resolution", () => {
+	const CLIENT_QUERY = "display-message -p #{client_termtype}\t#{client_termname}";
+	// Kitty graphics inside tmux also require pane passthrough; these tests
+	// exercise identity resolution, so the fake tmux forwards it.
+	const PASSTHROUGH_QUERY = "show-options -Apqv allow-passthrough";
+
+	async function resolveInsideFakeTmux(clientReport: string, replyDelayMs?: number): Promise<string> {
+		return withFakeTmux(
+			{ [CLIENT_QUERY]: clientReport, [PASSTHROUGH_QUERY]: "on" },
+			async binDir => {
+				const proc = Bun.spawn({
+					cmd: [
+						process.execPath,
+						"--eval",
+						`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyProtocol, imageProtocol: TERMINAL.imageProtocol }));`,
+					],
+					env: subprocessEnv({
+						PI_TEST_RUNTIME: undefined,
+						BUN_ENV: undefined,
+						NODE_ENV: undefined,
+						TERM: "tmux-256color",
+						TERM_PROGRAM: "tmux",
+						TERM_PROGRAM_VERSION: "3.6b",
+						COLORTERM: "truecolor",
+						TMUX: "/tmp/tmux-1000/default,4242,0",
+						TMUX_PANE: undefined,
+						SSH_CONNECTION: "client 1 server 22",
+						PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
+					}),
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+					proc.exited,
+				]);
+
+				expect(stderr).toBe("");
+				expect(exitCode).toBe(0);
+				return stdout;
+			},
+			{ replyDelayMs },
+		);
+	}
+
+	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
+		const stdout = await resolveInsideFakeTmux("WezTerm 20260905-175422-0f4b5596\ttmux-256color");
+		expect(JSON.parse(stdout)).toMatchObject({ id: "wezterm", notifyProtocol: "\u001b]9;" });
+	});
+
+	it.skipIf(process.platform === "win32")("keeps the client profile when the probe is slower than 500ms", async () => {
+		// A loaded machine can push one `tmux display-message` round trip past
+		// 500ms (fork/exec of the tmux client alone can exceed it on a saturated
+		// box), and a lost race is indistinguishable from "not tmux": the session
+		// then silently falls back to the true-color profile for its whole life.
+		const stdout = await resolveInsideFakeTmux("WezTerm 20260905-175422-0f4b5596\ttmux-256color", 600);
+		expect(JSON.parse(stdout)).toMatchObject({ id: "wezterm", notifyProtocol: "\u001b]9;" });
+	});
+
+	// The pane TERM no longer implies Kitty, so a Kitty client must be named by
+	// tmux. Its terminal-type reply can name something else entirely (a nested
+	// tmux answers `tmux 3.4`, and tmux < 3.4 records nothing); the client's
+	// TERM still identifies the emulator. Report captured from tmux 3.4.
+	it.skipIf(process.platform === "win32")(
+		"falls back to the client's TERM when the terminal type is unknown",
+		async () => {
+			const stdout = await resolveInsideFakeTmux("tmux 3.4\txterm-kitty");
+			expect(JSON.parse(stdout)).toMatchObject({ id: "kitty", imageProtocol: ImageProtocol.Kitty });
+		},
+	);
 });
 
 describe("synchronizedOutputUserOverride", () => {
@@ -435,6 +536,8 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 		"ITERM_SESSION_ID",
 		"VSCODE_PID",
 		"ALACRITTY_WINDOW_ID",
+		"LC_TERMINAL",
+		"LC_TERMINAL_VERSION",
 	]) {
 		delete env[key];
 	}
@@ -504,6 +607,46 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 	});
 });
 
+describe("tmux image protocol selection", () => {
+	it("probes unknown tmux clients instead of sending Kitty graphics", () => {
+		const env = {
+			TMUX: "/tmp/tmux/default,1,0",
+			TERM_PROGRAM: "tmux",
+			TERM: "tmux-256color",
+			COLORTERM: "truecolor",
+		};
+		const id = detectTerminalId(env);
+		expect(resolveImageProtocol(id, env, true)).toBeNull();
+		expect(resolveImageProtocol("base", { ...env, TERM: "screen-256color" }, true)).toBeNull();
+		expect(resolveImageProtocol("base", { TERM: "tmux-256color" }, true)).toBeNull();
+	});
+
+	// tmux 3.3+ drops `\x1bPtmux;` envelopes unless `allow-passthrough` is on,
+	// so a Kitty client identity alone must not select Kitty graphics.
+	for (const [name, socket, passthrough, expected] of [
+		["keeps a known Kitty client when tmux forwards passthrough", "5101", "on", ImageProtocol.Kitty],
+		["drops a known Kitty client when tmux blocks passthrough", "5102", "off", null],
+		["keeps a known Kitty client on tmux without the passthrough option", "5103", "", ImageProtocol.Kitty],
+	] as const) {
+		it.skipIf(process.platform === "win32")(name, async () => {
+			const replies = { "show-options -Apqv -t %7 allow-passthrough": passthrough };
+			await withFakeTmux(replies, async binDir => {
+				const env = {
+					PATH: `${binDir}:${Bun.env.PATH ?? ""}`,
+					TMUX: `/tmp/tmux-1000/default,${socket},0`,
+					TMUX_PANE: "%7",
+					TERM: "tmux-256color",
+				};
+				expect(resolveImageProtocol("ghostty", env, true)).toBe(expected);
+			});
+		});
+	}
+
+	it("keeps the GNU screen Kitty fallback", () => {
+		expect(resolveImageProtocol("base", { TERM: "screen-256color" }, true)).toBe(ImageProtocol.Kitty);
+	});
+});
+
 describe("Herdr image protocol mask", () => {
 	it("rejects a leaked Ghostty protocol when Herdr owns the pane grid", () => {
 		const env = {
@@ -540,12 +683,11 @@ describe("Paseo embedder carve-out", () => {
 		expect(isPaseoEmbedder({ PASEO_TERMINAL_ID: "term-1" })).toBe(true);
 	});
 
-	it("drops the multiplexer-restored Kitty fallback inside Paseo", () => {
-		// Regression (getpaseo/paseo#3850): tmux inside a Paseo pane resolves to
-		// base (null static protocol) and TERM=tmux-* would restore Kitty via
-		// the fallback — the embedder carve-out must win over the fallback.
-		expect(resolveImageProtocol("base", { TERM: "tmux-256color", PASEO_TERMINAL_ID: "term-1" }, true)).toBeNull();
-		expect(resolveImageProtocol("base", { TERM: "tmux-256color" }, true)).toBe(ImageProtocol.Kitty);
+	it("drops the GNU screen Kitty fallback inside Paseo", () => {
+		// Paseo's xterm.js pane cannot draw Kitty graphics even when a multiplexer
+		// restores that protocol through its TERM fallback.
+		expect(resolveImageProtocol("base", { TERM: "screen-256color", PASEO_TERMINAL_ID: "term-1" }, true)).toBeNull();
+		expect(resolveImageProtocol("base", { TERM: "screen-256color" }, true)).toBe(ImageProtocol.Kitty);
 	});
 
 	it("drops Kitty graphics when Paseo hosts the terminal", async () => {

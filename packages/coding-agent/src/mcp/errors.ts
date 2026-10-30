@@ -78,6 +78,22 @@ export class MCPTransportError extends Error {
 	}
 }
 
+/** Prevent replay once a request may have reached the server. */
+export function nonRetryableMCPTransportError(error: MCPTransportError): MCPTransportError {
+	if (!error.retryable) return error;
+	return new MCPTransportError({
+		transport: error.transport,
+		stage: error.stage,
+		failure: error.failure,
+		message: error.message,
+		retryable: false,
+		code: error.code,
+		data: error.data,
+		traceId: error.traceId,
+		cause: error,
+	});
+}
+
 function errorCode(error: unknown): string | number | undefined {
 	if (!isRecord(error)) return undefined;
 	if (typeof error.code === "string" || typeof error.code === "number") return error.code;
@@ -85,16 +101,21 @@ function errorCode(error: unknown): string | number | undefined {
 }
 
 function sanitizeDiagnosticText(value: string, maxChars: number): string {
-	return value
-		.replace(FETCH_VERBOSE_ADVICE, "")
-		.replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]")
-		.replace(/([?&](?:access[-_]?token|api[-_]?key|key|token|secret|password)=)[^&#\s]+/gi, "$1[redacted]")
-		.replace(
-			/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
-			"$1[redacted]",
-		)
-		.slice(0, maxChars)
-		.trim();
+	return (
+		value
+			.replace(FETCH_VERBOSE_ADVICE, "")
+			// A credential is token68 and never contains `"`; `Bearer name="…"` is a
+			// WWW-Authenticate challenge whose params (resource_metadata, scope, error)
+			// drive OAuth discovery, so leave it intact.
+			.replace(/\b(Bearer|Basic)\s+(?![\w.~+/-]+\s*=\s*")[^\s,;]+/gi, "$1 [redacted]")
+			.replace(/([?&](?:access[-_]?token|api[-_]?key|key|token|secret|password)=)[^&#\s]+/gi, "$1[redacted]")
+			.replace(
+				/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
+				"$1[redacted]",
+			)
+			.slice(0, maxChars)
+			.trim()
+	);
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {
@@ -241,6 +262,16 @@ export function normalizeMCPTransportError(
 }
 
 function nextStep(error: MCPTransportError): string {
+	// Every connection-class failure is retryable before dispatch, so a non-retryable one was lost after sending.
+	if (
+		!error.retryable &&
+		(error.failure === "connect" ||
+			error.failure === "eof" ||
+			error.failure === "reset" ||
+			error.failure === "closed")
+	) {
+		return "The connection was lost after the request was sent, so it may already have run; check its effect before retrying.";
+	}
 	switch (error.failure) {
 		case "connect":
 			return "Check that the MCP server is running and reachable, then retry.";

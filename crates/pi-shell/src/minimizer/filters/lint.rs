@@ -1,6 +1,6 @@
 //! Type-checker and linter output filters.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::NumBuffer};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -458,10 +458,10 @@ fn is_js_frame_noise(program: &str, trimmed: &str) -> bool {
 	}
 }
 
-/// True when `trimmed` is a biome/oxlint `│`-bar code-frame gutter row: a run
-/// of ASCII digits, optional spaces, then the box-drawing bar `│` (`3 │
-/// interface`, `12 │ items.forEach(...)`). The bar makes this form unambiguous,
-/// so it is stripped unconditionally — no genuine summary line matches it.
+/// True when `trimmed` is a code-frame gutter row: a run of ASCII digits,
+/// optional spaces, then a `│` (biome/oxlint) or `|` (ruff) bar (`3 │
+/// interface`, `14 | assert skill.read()`). The bar makes this form
+/// unambiguous: no genuine summary or location line matches it.
 fn is_gutter_bar_line(trimmed: &str) -> bool {
 	let mut rest = trimmed;
 	let digits = rest
@@ -471,7 +471,7 @@ fn is_gutter_bar_line(trimmed: &str) -> bool {
 		return false;
 	}
 	rest = rest[digits..].trim_start_matches(' ');
-	rest.starts_with('│')
+	rest.starts_with('│') || rest.starts_with('|')
 }
 
 /// True when `trimmed` begins with a tsc-pretty BARE line-number gutter: a run
@@ -521,9 +521,9 @@ pub fn group_diagnostics(input: &str) -> String {
 
 	let mut out = String::new();
 	let diag_count: usize = files.iter().map(|(_, entries)| entries.len()).sum();
-	out.push_str(&diag_count.to_string());
+	out.push_str(diag_count.format_into(&mut NumBuffer::new()));
 	out.push_str(" diagnostics in ");
-	out.push_str(&files.len().to_string());
+	out.push_str(files.len().format_into(&mut NumBuffer::new()));
 	out.push_str(" files\n");
 
 	let code_summary = format_code_summary(&code_counts);
@@ -536,7 +536,7 @@ pub fn group_diagnostics(input: &str) -> String {
 	for (file, entries) in files {
 		out.push_str(&file);
 		out.push_str(" (");
-		out.push_str(&entries.len().to_string());
+		out.push_str(entries.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" diagnostics)\n");
 		for entry in entries.iter().take(12) {
 			out.push_str("  ");
@@ -545,7 +545,7 @@ pub fn group_diagnostics(input: &str) -> String {
 		}
 		if entries.len() > 12 {
 			out.push_str("  […");
-			out.push_str(&(entries.len() - 12).to_string());
+			out.push_str((entries.len() - 12).format_into(&mut NumBuffer::new()));
 			out.push_str(" diagnostics elided…]\n");
 		}
 	}
@@ -556,13 +556,17 @@ pub fn group_diagnostics(input: &str) -> String {
 	}
 	if ungrouped.len() > 40 {
 		out.push_str("[…");
-		out.push_str(&(ungrouped.len() - 40).to_string());
+		out.push_str((ungrouped.len() - 40).format_into(&mut NumBuffer::new()));
 		out.push_str(" ungrouped lines elided…]\n");
 	}
 	out
 }
 
 fn split_diagnostic(line: &str) -> Option<(&str, &str)> {
+	// Frame rows quote source (`14 | assert skill.read()`); never a location.
+	if is_gutter_bar_line(line.trim_start()) {
+		return None;
+	}
 	if let Some((file, rest)) = split_tsc_diagnostic(line) {
 		return Some((file, rest));
 	}
@@ -581,7 +585,7 @@ fn split_tsc_diagnostic(line: &str) -> Option<(&str, &str)> {
 	if !looks_like_path(file)
 		|| !loc
 			.split(',')
-			.all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+			.all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 	{
 		return None;
 	}
@@ -953,6 +957,22 @@ mod tests {
 		let mypy = "lib/b.py:4: error: no attr [attr-defined]\n";
 		let out = condense_lint_output("mypy", mypy, 1);
 		assert!(out.contains("attr-defined") || out.contains("b.py"), "got: {out}");
+	}
+
+	#[test]
+	fn ruff_full_source_frame_rows_are_not_diagnostics() {
+		// `ruff check --output-format full` renders `N | source` frame rows. Call
+		// expressions in them (`skill.read()`, `widget.fetch(1)`) must not be
+		// parsed as tsc `file(line,col)` locations and counted as files.
+		let ruff = "F821 Undefined name `skill`\n  --> a.py:14:8\n   |\n13 | # padding line\n14 | \
+		            assert skill.read() == \"x\"\n   |        ^^^^^\n15 | assert skill.read() == \
+		            \"x\"\n   |\n\nF821 Undefined name `widget`\n  --> b.py:14:8\n   |\n14 | assert \
+		            widget.fetch(1) == \"x\"\n   |        ^^^^^^\n15 | assert widget.fetch(1) == \
+		            \"x\"\n   |\n\nFound 2 errors.\n";
+		let out = condense_lint_output("ruff", ruff, 1);
+		assert!(!out.contains("diagnostics)"), "frame rows grouped as files: {out}");
+		assert!(out.contains("--> a.py:14:8") && out.contains("--> b.py:14:8"), "got: {out}");
+		assert!(out.contains("Found 2 errors."), "got: {out}");
 	}
 
 	// -----------------------------------------------------------------

@@ -596,25 +596,99 @@ function getLexicalBindingNames(node: BabelPublishableDecl): string[] {
 	return names;
 }
 
-function renderGlobalVariableDeclaration(code: string, node: BabelVariableDeclaration): string {
-	const statements: string[] = [];
+/** `var` declaration nested in top-level control flow, with the simple catch parameters enclosing it. */
+type NestedVarDeclaration = {
+	node: BabelVariableDeclaration;
+	parentType: string;
+	catchParams: ReadonlySet<string>;
+};
+
+function collectNestedVarDeclarations(
+	value: unknown,
+	targets: NestedVarDeclaration[],
+	parentType = "Program",
+	catchParams: ReadonlySet<string> = new Set(),
+): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectNestedVarDeclarations(item, targets, parentType, catchParams);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	if (
+		typeof node.type !== "string" ||
+		isExecutionBoundary(node.type) ||
+		node.type.startsWith("Class") ||
+		node.type === "StaticBlock"
+	)
+		return;
+	if (node.type === "VariableDeclaration") {
+		if (node.kind === "var") {
+			targets.push({ node: node as BabelVariableDeclaration, parentType, catchParams });
+		}
+		return;
+	}
+	if (node.type === "CatchClause") {
+		// Annex B lets `var e = v` redeclare a simple catch parameter `e`; the initializer
+		// assigns the catch binding while the function-scoped `e` stays undefined.
+		const param = node.param as BabelBindingPattern | null | undefined;
+		const bodyCatchParams =
+			param?.type === "Identifier" && typeof param.name === "string"
+				? new Set([...catchParams, param.name])
+				: catchParams;
+		collectNestedVarDeclarations(node.body, targets, node.type, bodyCatchParams);
+		return;
+	}
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectNestedVarDeclarations(node[key], targets, node.type, catchParams);
+	}
+}
+
+function renderNestedVarDeclaration(code: string, { node, parentType, catchParams }: NestedVarDeclaration): string {
+	if (parentType === "ForInStatement" || parentType === "ForOfStatement") {
+		const id = node.declarations?.[0]?.id;
+		return id ? code.slice(id.start, id.end) : "";
+	}
+	const inForInit = parentType === "ForStatement";
+	const statements = renderGlobalVariableDeclaration(code, node, { inForInit, catchParams });
+	if (inForInit) return statements;
+	if (!statements) return ";";
+	return (node.declarations?.filter(declaration => declaration.init).length ?? 0) > 1
+		? `{ ${statements} }`
+		: statements;
+}
+
+/**
+ * Renders a `var` declaration as assignments that publish its bindings on the worker global.
+ * Names in `catchParams` assign the enclosing catch binding instead, matching Annex B semantics.
+ */
+function renderGlobalVariableDeclaration(
+	code: string,
+	node: BabelVariableDeclaration,
+	options: { inForInit?: boolean; catchParams?: ReadonlySet<string> } = {},
+): string {
+	const assignments: string[] = [];
 	for (const declaration of node.declarations ?? []) {
 		if (!declaration.init) continue;
 		const target = code.slice(declaration.id.start, declaration.id.end);
 		const value = code.slice(declaration.init.start, declaration.init.end);
-		if (declaration.id.type === "Identifier" && typeof declaration.id.name === "string") {
-			statements.push(`this[${JSON.stringify(declaration.id.name)}] = (${value});`);
+		const name = declaration.id.type === "Identifier" ? declaration.id.name : undefined;
+		if (typeof name === "string" && !options.catchParams?.has(name)) {
+			assignments.push(`this[${JSON.stringify(name)}] = (${value})`);
 		} else {
-			statements.push(`(${target} = (${value}));`);
+			assignments.push(`(${target} = (${value}))`);
 		}
 	}
-	return statements.join("\n");
+	return options.inForInit ? assignments.join(", ") : assignments.map(assignment => `${assignment};`).join("\n");
 }
 
 function globalizeTopLevelDeclarations(
 	code: string,
 	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
 	targets: ReadonlyArray<{ node: BabelPublishableDecl }>,
+	nestedVars: readonly NestedVarDeclaration[],
 	bindingNames: readonly string[],
 ): string {
 	const prelude = bindingNames.map(
@@ -641,6 +715,13 @@ function globalizeTopLevelDeclarations(
 			start: node.start,
 			end: node.end,
 			replacement: `this[${JSON.stringify(node.id.name)}] = (${segment});`,
+		});
+	}
+	for (const nested of nestedVars) {
+		edits.push({
+			start: nested.node.start,
+			end: nested.node.end,
+			replacement: renderNestedVarDeclaration(code, nested),
 		});
 	}
 
@@ -916,8 +997,8 @@ function instrumentBindingAssignments(
  * preserve hoisting. Bare references — including references captured by persisted functions —
  * then resolve the same retained global binding that later cells update.
  *
- * Nested declarations (inside functions, blocks, classes) are left alone — they're
- * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
+ * `var` inside top-level control flow belongs to the cell's function scope and is
+ * published too; function-local variables and block-scoped `let`/`const` stay local.
  */
 async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: boolean } = {}): Promise<string> {
 	const publishGlobals = options.publishGlobals === true;
@@ -943,11 +1024,24 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			if (decl.id) targets.push({ node: decl, demote: false });
 		}
 	}
-	if (targets.length === 0) return code;
-
-	const bindingNames = publishGlobals ? [...new Set(targets.flatMap(({ node }) => getLexicalBindingNames(node)))] : [];
+	const nestedVars: NestedVarDeclaration[] = [];
 	if (publishGlobals) {
-		const globalized = globalizeTopLevelDeclarations(code, ast, targets, bindingNames);
+		for (const node of ast.program.body) {
+			if (
+				node.type !== "VariableDeclaration" &&
+				node.type !== "FunctionDeclaration" &&
+				node.type !== "ClassDeclaration"
+			)
+				collectNestedVarDeclarations(node, nestedVars);
+		}
+	}
+	if (targets.length === 0 && nestedVars.length === 0) return code;
+
+	const bindingNames = publishGlobals
+		? [...new Set([...targets, ...nestedVars].flatMap(({ node }) => getLexicalBindingNames(node)))]
+		: [];
+	if (publishGlobals) {
+		const globalized = globalizeTopLevelDeclarations(code, ast, targets, nestedVars, bindingNames);
 		const globalizedAst = await parseProgram(globalized);
 		return globalizedAst ? instrumentBindingAssignments(globalized, globalizedAst, bindingNames) : globalized;
 	}

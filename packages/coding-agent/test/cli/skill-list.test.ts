@@ -95,9 +95,41 @@ describe("runSkillsCommand", () => {
 			await removeWithRetries(directory);
 		}
 	});
+
+	test("expands a tilde custom directory against the home directory", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-tilde-${Snowflake.next()}-`));
+		// `os.homedir()` is stubbed to `tempHome` above, so `~/example-skills`
+		// names this fixture directory.
+		const skillsRoot = path.join(tempHome, "example-skills");
+		await fs.mkdir(path.join(skillsRoot, "demo"), { recursive: true });
+		await Bun.write(
+			path.join(skillsRoot, "demo", "SKILL.md"),
+			"---\nname: demo\ndescription: Home-relative demo.\n---\n\n# Demo\n",
+		);
+
+		try {
+			const result = await runSkillsCommand({
+				cwd: directory,
+				skillsSettings: { customDirectories: ["~/example-skills"] },
+			});
+			// The listing must agree with the loader: a tilde entry resolves
+			// against the home directory, not against the inspected directory.
+			expect(result.skills.map(skill => skill.name)).toEqual(["demo"]);
+			expect(result.skills[0]?.filePath).toBe(path.join(skillsRoot, "demo", "SKILL.md"));
+		} finally {
+			await removeWithRetries(directory);
+		}
+	});
 });
 
 describe("handleSkillList", () => {
+	// `handleSkillList` reads the inspected directory's config through
+	// `Settings.init({ cwd })`, which returns an already-initialized singleton
+	// unchanged; start from none so the fixture's `.omp/config.yml` is read.
+	beforeEach(() => {
+		resetSettingsForTest();
+	});
+
 	afterEach(() => {
 		resetSettingsForTest();
 		// `Settings.init()` opens `<agentDir>/agent.db`; release it so the temp
