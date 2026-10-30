@@ -121,7 +121,7 @@ export type AgentSessionEvent =
 	// is open, so a surface tracking a call knows when that call's own wait
 	// ends — which is not when the last dialog settles, and not something the
 	// oldest dialog's words can be read to mean.
-	| ({ type: "user_wait_start"; toolCalls?: string[] } & Omit<UserWaitFrame, "toolCallId">)
+	| { type: "user_wait_start"; prompt: string; kind?: BlockedKind; toolCalls?: string[] }
 	| { type: "user_wait_end" };
 
 /** What one dialog waiting on a person asks, and how a surface that reports run state classifies it. */
@@ -136,6 +136,12 @@ export interface UserWaitFrame {
 	 * write, an extension's own question), which owns no call and so retires none.
 	 */
 	toolCallId?: string;
+	/**
+	 * True when {@link toolCallId} was not named by this call but taken from the `ui` the call was
+	 * handed: its holder keeps that `ui`, and the id with it, after the call is over. Such an id
+	 * counts only while the agent is still running that call.
+	 */
+	toolCallIdCaptured?: boolean;
 }
 
 /**

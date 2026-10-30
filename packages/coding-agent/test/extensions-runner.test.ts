@@ -214,8 +214,66 @@ describe("ExtensionRunner", () => {
 		await runner.createContext().ui.select("Unrelated?", ["yes"]);
 
 		expect(frames).toEqual([
-			{ prompt: "Proceed?", kind: "question", toolCallId: "call-1" },
+			{ prompt: "Proceed?", kind: "question", toolCallId: "call-1", toolCallIdCaptured: true },
 			{ prompt: "Unrelated?", kind: "question" },
+		]);
+	});
+
+	it("marks a call's ui id as captured, so a holder keeping the ui past the call claims nothing", async () => {
+		// The `ui` handed to a call keeps that call's id for as long as anyone
+		// holds it, which outlasts the call. The frame marks such an id as
+		// captured so the session can weigh it against the call still running,
+		// while an id the call itself declares is taken at its word.
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const frames: UserWaitFrame[] = [];
+		runner.setUserWaitTracker((dialog, frame) => {
+			frames.push(frame);
+			return dialog();
+		});
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+			undefined,
+			{ select: async () => "yes", notify: () => {} } as unknown as ExtensionUIContext,
+		);
+
+		const ui = runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui;
+		await ui.select("From the call's own ui", ["yes"]);
+		await ui.select("Declared by the call", ["yes"], { toolCallId: "call-2" });
+
+		expect(frames).toEqual([
+			{ prompt: "From the call's own ui", kind: "question", toolCallId: "call-1", toolCallIdCaptured: true },
+			{ prompt: "Declared by the call", kind: "question", toolCallId: "call-2" },
 		]);
 	});
 

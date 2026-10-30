@@ -3579,7 +3579,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
 		const trackUserWait: UserWaitTracker = (dialog, frame) =>
 			hasSession
-				? session.waitForUser(dialog, frame.prompt, { kind: frame.kind, toolCallId: frame.toolCallId })
+				? session.waitForUser(dialog, frame.prompt, {
+						kind: frame.kind,
+						toolCallId: frame.toolCallId,
+						toolCallIdCaptured: frame.toolCallIdCaptured,
+					})
 				: dialog();
 		extensionRunner.setUserWaitTracker(trackUserWait);
 
@@ -3969,6 +3973,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
+			// Cursor resolves calls through its own channel, not the agent loop, so
+			// the bridge binds each execution to this session's agent itself.
+			getExecutionOwner: () => session.agent,
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			persistTodoPhases: phases => sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases }),

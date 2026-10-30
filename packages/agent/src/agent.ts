@@ -2028,6 +2028,10 @@ export class Agent {
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,
+			// Whose executions these are: work started inside one of this agent's
+			// tool calls is attributable to it and to no other agent sharing the
+			// process (see `runInToolCall`).
+			owner: this,
 		};
 
 		let partial: AgentMessage | null = null;

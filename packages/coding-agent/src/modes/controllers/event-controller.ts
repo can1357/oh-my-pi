@@ -2324,7 +2324,9 @@ export class EventController {
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
 		this.#waitingToolCalls.delete(event.toolCallId);
-		this.#answeredBeforeStart.delete(event.toolCallId);
+		// The answer this call's dialog already received outlives the call's end:
+		// a start can arrive after it on a view fed out of order, and must not
+		// record a prompt for it. The marker is dropped with the turn.
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
 			// An open dialog outranks the remaining records here too.
 			setRunStatus(this.#reportedStatus());

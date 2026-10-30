@@ -3662,10 +3662,11 @@ async function executeToolCalls(
 						// nothing may await or call host code after this final check.
 						if (abortBeforeToolExecution()) return;
 						executionStarted = true;
-						// Bind the call to the async context of its own execution: work it
-						// starts (a dialog it raises) is attributable to this call without
-						// being handed the id.
-						rawResult = await runInToolCall(toolCall.id, () =>
+						// Bind this execution to the async context: work it starts (a dialog
+						// it raises) is attributable to this call, under this agent, while
+						// this run of it lasts. A loop with no owner binds nothing: there is
+						// no one to attribute the work to.
+						rawResult = await runInToolCall(config.owner, toolCall.id, () =>
 							tool.execute(
 								toolCall.id,
 								executionArgs,

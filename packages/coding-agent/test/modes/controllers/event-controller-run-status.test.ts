@@ -480,6 +480,30 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
+	it("records no prompt for a start that arrives after its call already ended", async () => {
+		// A view fed out of order can see the end before the start. The answer
+		// the call's dialog received outlives that end, so the late start still
+		// records nothing — the alternative is a run reported `blocked` on a
+		// call that has finished, with no card left to answer.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({
+			type: "user_wait_start",
+			prompt: "Allow tool: bash",
+			kind: "permission",
+			toolCalls: ["bash-1"],
+		});
+		await controller.handleEvent({ type: "user_wait_end" });
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo one" }));
+
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
+
 	it("keeps the permission kind and names the approval still waiting when an overlapping one ends", async () => {
 		// Two approvals overlap. The session publishes the oldest open dialog as
 		// its wait, with that dialog's own words and kind, and republishes the

@@ -353,6 +353,42 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(frames).toEqual([[startedCallId!]]);
 	});
 
+	it("claims no dialog raised inside another agent's call of the same id", async () => {
+		// Two sessions can legitimately be executing a call of the same id at
+		// once. A dialog raised inside one agent's execution is that agent's; the
+		// other session's call is still waiting and must stay so.
+		const target = createSession([
+			{ content: [{ type: "toolCall", name: "question", arguments: {} }], stopReason: "toolUse" },
+			{ content: ["done"] },
+		]);
+		const other = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: target.model!, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: createMockModel({ responses: [{ content: ["done"] }] }).stream,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const foreign = Promise.withResolvers<void>();
+		const running = target.prompt("ask me");
+		try {
+			await asked.promise;
+			// Raised from inside the first session's execution, but asked of the
+			// second session, which is executing nothing.
+			const foreignWait = other.waitForUser(() => foreign.promise, "another session's dialog");
+			expect(other.activeUserWait()?.toolCalls).toBeUndefined();
+			foreign.resolve();
+			await foreignWait;
+		} finally {
+			answered.resolve("yes");
+			await running;
+			await other.dispose();
+		}
+	});
+
 	it("delivers the newer snapshot last when a listener opens a dialog inside a frame", async () => {
 		// A listener that opens its own dialog while handling a frame would
 		// otherwise have the newer snapshot delivered inside the older one, and

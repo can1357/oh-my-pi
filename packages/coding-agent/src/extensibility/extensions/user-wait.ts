@@ -64,14 +64,19 @@ type Method = (...args: unknown[]) => unknown;
  * call declares otherwise through {@link declaredKind} — an approval a host without an approval
  * dialog raises as a `select` is one such: `askDialog` carries its questions, and the dialogs whose
  * first argument is their title carry that. A dialog that fits none of these (a custom component)
- * keeps the generic label. Every frame carries the call the dialog was raised for, when the caller
- * declared one.
+ * keeps the generic label. Every frame carries the call the dialog was raised for: the one the call
+ * itself declared, else the call this `ui` was handed to. The second is marked captured, because a
+ * holder keeps such a `ui` after its call is over and the session must weigh it accordingly.
  */
 function describeDialog(method: string, args: readonly unknown[], ownerToolCallId?: string): UserWaitFrame {
 	const generic = genericDialogLabel(method);
 	const declared = declaredKind(args);
-	const toolCallId = declaredToolCallId(args) ?? ownerToolCallId;
-	const call = toolCallId === undefined ? {} : { toolCallId };
+	const declaredCall = declaredToolCallId(args);
+	const toolCallId = declaredCall ?? ownerToolCallId;
+	const call =
+		toolCallId === undefined
+			? {}
+			: { toolCallId, ...(declaredCall === undefined ? { toolCallIdCaptured: true } : {}) };
 	if (method === "approve") {
 		const prompt = args[0];
 		const compact = isRecord(prompt) ? prompt.compact : undefined;

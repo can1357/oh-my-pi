@@ -658,6 +658,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * capture, cost estimator, agent identity).
 	 */
 	telemetry?: AgentTelemetryConfig;
+	/**
+	 * Whose executions this loop's tool calls are. Work a tool starts is bound to the call and to
+	 * this owner for the length of that one execution ({@link runInToolCall}), so a host can tell
+	 * which of several agents sharing a process is executing a call id — two of them can hold the
+	 * same id at once. Without an owner nothing is bound and no work is attributed.
+	 */
+	owner?: object;
 }
 
 /**

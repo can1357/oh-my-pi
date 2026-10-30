@@ -2,21 +2,86 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "./types";
 
-const executingToolCall = new AsyncLocalStorage<string>();
-
-/**
- * Run a tool call's execution with its id on the async context, so work the tool starts — however
- * deep, and across awaits — can be attributed to the call it belongs to without the tool passing
- * the id down by hand. Work started outside any `execute` (a host's own background handler, a
- * dialog raised by the surface) sees nothing.
- */
-export function runInToolCall<T>(toolCallId: string, run: () => T): T {
-	return executingToolCall.run(toolCallId, run);
+/** One run of one tool call: whose it is, which call, and whether that run has finished. */
+interface ToolExecutionScope {
+	/** The agent running it, or undefined for an executor bound to no agent (a standalone bridge). */
+	readonly owner: object | undefined;
+	readonly toolCallId: string;
+	finished: boolean;
 }
 
-/** The tool call whose execution the current async context belongs to, or undefined outside one. */
-export function executingToolCallId(): string | undefined {
-	return executingToolCall.getStore();
+const executingToolCall = new AsyncLocalStorage<ToolExecutionScope>();
+/** Stands in for an execution bound to no agent, which answers to whoever asks. */
+const UNOWNED_EXECUTIONS = {};
+/** Live runs per owner, counted: a retry re-runs the same call id, and a call can be re-entered. */
+const liveExecutions = new WeakMap<object, Map<string, number>>();
+
+/**
+ * Run one execution of a tool call with the call and its owner on the async context, so work the
+ * tool starts — however deep, and across awaits — is attributable to the call it belongs to
+ * without the tool passing the id down by hand. Work started outside any `execute` (a host's own
+ * background handler, a dialog raised by the surface) sees nothing, and work that outlives the
+ * execution sees a scope marked finished rather than a live call.
+ *
+ * Identity is per execution, not per id: an interrupted call that `retry` runs again is a new
+ * execution of the same id, and the earlier one being over says nothing about this one. An
+ * executor that belongs to no agent (a bridge built on its own) binds an unowned execution, which
+ * answers to whoever asks; a loop that names its owner answers only to that owner, so two agents
+ * holding the same call id at once are never confused for each other.
+ */
+export function runInToolCall<T>(toolCallId: string, run: () => Promise<T>): Promise<T>;
+export function runInToolCall<T>(owner: object | undefined, toolCallId: string, run: () => Promise<T>): Promise<T>;
+export async function runInToolCall<T>(
+	ownerOrToolCallId: object | string | undefined,
+	toolCallIdOrRun: string | (() => Promise<T>),
+	maybeRun?: () => Promise<T>,
+): Promise<T> {
+	// An executor with no agent of its own names only the call.
+	const unowned = typeof toolCallIdOrRun === "function";
+	const owner = unowned ? undefined : (ownerOrToolCallId as object | undefined);
+	const toolCallId = unowned ? (ownerOrToolCallId as string) : (toolCallIdOrRun as string);
+	const run = unowned ? toolCallIdOrRun : maybeRun!;
+	const scope: ToolExecutionScope = { owner, toolCallId, finished: false };
+	const key = owner ?? UNOWNED_EXECUTIONS;
+	let live = liveExecutions.get(key);
+	if (!live) {
+		live = new Map();
+		liveExecutions.set(key, live);
+	}
+	live.set(toolCallId, (live.get(toolCallId) ?? 0) + 1);
+	try {
+		return await executingToolCall.run(scope, run);
+	} finally {
+		scope.finished = true;
+		const remaining = (live.get(toolCallId) ?? 1) - 1;
+		if (remaining > 0) live.set(toolCallId, remaining);
+		else live.delete(toolCallId);
+	}
+}
+
+/**
+ * The tool call whose execution the current async context belongs to, or undefined: outside any
+ * execution, inside one that has finished, or — when `owner` is given — inside one belonging to
+ * another agent sharing this process. Asking without an owner reports whatever is executing here,
+ * which is what an observer wants and what a caller with no agent of its own has.
+ */
+export function executingToolCallId(owner?: object): string | undefined {
+	const scope = executingToolCall.getStore();
+	if (!scope || scope.finished) return undefined;
+	if (owner !== undefined && scope.owner !== undefined && scope.owner !== owner) return undefined;
+	return scope.toolCallId;
+}
+
+/**
+ * Whether `toolCallId` is being executed right now for `owner`, or by an executor bound to no
+ * agent. For a caller holding an id it did not receive from the call itself: a `ui` handed to a
+ * call keeps that id after the call is over, and the id alone cannot say whether it is still live.
+ */
+export function isExecutingToolCall(owner: object, toolCallId: string): boolean {
+	return (
+		(liveExecutions.get(owner)?.get(toolCallId) ?? 0) > 0 ||
+		(liveExecutions.get(UNOWNED_EXECUTIONS)?.get(toolCallId) ?? 0) > 0
+	);
 }
 
 /**

@@ -39,6 +39,7 @@ import {
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	executingToolCallId,
+	isExecutingToolCall,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -1254,12 +1255,6 @@ export class AgentSession implements SettingsScope {
 	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
-	/**
-	 * Tool calls this session has finished, from the `tool_execution_end` it emits: a dialog opened
-	 * on the async context of a finished call — work it left running behind it — belongs to nobody
-	 * still waiting, so it names no call.
-	 */
-	#endedToolCalls = new Set<string>();
 	/** True while a `user_wait_start` frame is being delivered, so a dialog a listener opens
 	 *  republishes after the frame in flight rather than inside it — a later listener must never
 	 *  see an older snapshot last. */
@@ -1420,7 +1415,7 @@ export class AgentSession implements SettingsScope {
 	async waitForUser<T>(
 		dialog: () => Promise<T>,
 		prompt?: string,
-		options?: { kind?: BlockedKind; toolCallId?: string },
+		options?: { kind?: BlockedKind; toolCallId?: string; toolCallIdCaptured?: boolean },
 	): Promise<T> {
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
@@ -1430,7 +1425,7 @@ export class AgentSession implements SettingsScope {
 		this.#openUserWaits.set(waitId, {
 			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
 			...(options?.kind ? { kind: options.kind } : {}),
-			...(this.#owningToolCall(options?.toolCallId) ?? {}),
+			...(this.#owningToolCall(options) ?? {}),
 		});
 		this.#publishOpenUserWait();
 		try {
@@ -1454,21 +1449,32 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * The call a dialog belongs to: the one its opener named, else the call whose execution raised
-	 * it, read from the async context the loop binds around `tool.execute`. A host that opens its
-	 * own approval through the plain `waitForUser` therefore still says which call owes the answer,
-	 * without naming it and without anyone reading its words.
+	 * The call a dialog belongs to. A caller that names the call it is asking about is taken at its
+	 * word. A `ui` handed to a call carries that call's id for as long as the caller holds it, which
+	 * outlasts the call, so such an id (`toolCallIdCaptured`) counts only while this agent is
+	 * running that call. With neither, the call whose execution raised the dialog is read from the
+	 * async context the loop binds around `tool.execute`: a host that opens its own approval through
+	 * the plain `waitForUser` therefore still says which call owes the answer, without naming it and
+	 * without anyone reading its words.
 	 *
-	 * A call whose end this session has already emitted claims nothing: work a tool left running
-	 * behind it keeps that call on its async context, and a dialog it raises later belongs to
-	 * nobody who is still waiting. The call being executed need not have been announced yet — the
-	 * loop buffers `tool_execution_start` while `execute` already runs, which is how a host's own
-	 * approval opens before its call is announced.
+	 * Both are scoped to this session's agent and to one execution. Two agents in a process can hold
+	 * the same call id at once, and an interrupted call that `retry` runs again is a new execution
+	 * of the same id — the earlier one being over says nothing about this one. Work that outlives an
+	 * execution (a timer a tool left running) sees its scope finished and claims no call. The call
+	 * being executed need not have been announced yet: the loop buffers `tool_execution_start` while
+	 * `execute` already runs, which is how a host's own approval opens before its call is announced.
 	 */
-	#owningToolCall(named: string | undefined): { toolCallId: string } | undefined {
-		if (named) return { toolCallId: named };
-		const executing = executingToolCallId();
-		return executing !== undefined && !this.#endedToolCalls.has(executing) ? { toolCallId: executing } : undefined;
+	#owningToolCall(
+		options: { toolCallId?: string; toolCallIdCaptured?: boolean } | undefined,
+	): { toolCallId: string } | undefined {
+		const owner = this.agent;
+		const named = options?.toolCallId;
+		if (named !== undefined) {
+			if (!options?.toolCallIdCaptured) return { toolCallId: named };
+			return isExecutingToolCall(owner, named) ? { toolCallId: named } : undefined;
+		}
+		const executing = executingToolCallId(owner);
+		return executing === undefined ? undefined : { toolCallId: executing };
 	}
 
 	/**
@@ -3827,8 +3833,6 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		// A finished call claims no dialog ({@link #owningToolCall}).
-		if (event.type === "tool_execution_end") this.#endedToolCalls.add(event.toolCallId);
 		// Listener array is copy-on-write (see `subscribe`), so iterating the
 		// current array is safe against (un)subscribes made by a listener.
 		for (const l of this.#eventListeners) {
