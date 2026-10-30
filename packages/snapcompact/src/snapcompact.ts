@@ -2333,6 +2333,40 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 }
 
 /**
+ * What a reader without image input reads for a compaction whose summary is
+ * `summary` and archive `archive`: the archive's kept source ({@link Archive.text})
+ * as plain text in place of its frames, with the summary re-rendered without
+ * the frame legend; `details` restores its file list. An archive persisted
+ * without that source keeps its text edges and counts the imaged middle as
+ * dropped. An archive without frames is returned as is.
+ */
+export function viewWithoutFrames(summary: string, archive: Archive, details?: CompactionDetails): ArchiveView {
+	if (archive.frames.length === 0) return { summary, archive };
+	const framedChars = archive.frames.reduce((sum, frame) => sum + frame.chars, 0);
+	const text = archive.text;
+	const textArchive: Archive = text
+		? { frames: [], totalChars: text.length, truncatedChars: archive.truncatedChars, text, textHead: text }
+		: {
+				frames: [],
+				totalChars: Math.max(0, archive.totalChars - framedChars),
+				truncatedChars: archive.truncatedChars + framedChars,
+				...(archive.textHead ? { textHead: archive.textHead } : {}),
+				...(archive.textTail ? { textTail: archive.textTail } : {}),
+			};
+	const files = details ? formatFileList(details.readFiles, details.modifiedFiles) : "";
+	return {
+		summary: prompt.render(snapcompactSummaryPrompt, {
+			frameCount: 0,
+			truncatedChars: textArchive.truncatedChars,
+			includedPreviousSummary: (text ?? archive.textHead ?? "").startsWith(PREVIOUS_SUMMARY_HEAD),
+			files: files.length > 0 ? files : undefined,
+			includeThinking: summaryIncludesThinking(summary),
+		}),
+		archive: textArchive,
+	};
+}
+
+/**
  * Run a snapcompact compaction over prepared messages. Fully local: serializes
  * the discarded history, appends it to the accumulated archive source text, and
  * re-renders that source into an ordered history layout: plain text at the

@@ -518,6 +518,30 @@ export interface SessionMaintenanceHost {
 	abortHandoff(): void;
 }
 
+/** How a model reads a snapcompact archive: whether it may read reasoning and whether it takes images. */
+interface ArchiveReader {
+	/** Its classifier refuses quoted reasoning ({@link snapcompact.readerIncludesThinking}). */
+	excludeThinking: boolean;
+	/** It takes no image input, so frames would reach it as placeholders. */
+	withoutFrames: boolean;
+	/** Both flags as one value, for caches and scan bookkeeping. */
+	key: `${boolean}:${boolean}`;
+}
+
+function archiveReader(model: Model): ArchiveReader {
+	const excludeThinking = !snapcompact.readerIncludesThinking(model);
+	const withoutFrames = !sendsImageInputOnWire(model);
+	return { excludeThinking, withoutFrames, key: `${excludeThinking}:${withoutFrames}` };
+}
+
+/** The file lists a snapcompact summary renders, when `entry` recorded both. */
+function compactionFileDetails(entry: CompactionEntry): snapcompact.CompactionDetails | undefined {
+	const details = entry.details as Partial<snapcompact.CompactionDetails> | undefined;
+	return Array.isArray(details?.readFiles) && Array.isArray(details?.modifiedFiles)
+		? { readFiles: details.readFiles, modifiedFiles: details.modifiedFiles }
+		: undefined;
+}
+
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
@@ -569,17 +593,20 @@ export class SessionMaintenance {
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	/** Each archive's no-reasoning view, rendered (or failed closed) once per compaction entry. */
 	readonly #withoutThinkingViews = new WeakMap<CompactionEntry, Promise<snapcompact.ArchiveView>>();
-	/** Reader copies of archive summary messages keyed by the original message, so repeated swaps keep one identity. */
+	/** Each archive's text view for readers without image input, keyed by whether reasoning was dropped first. */
+	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<boolean, snapcompact.ArchiveView>>();
+	/** Reader copies of archive summary messages keyed by the original message, then by {@link ArchiveReader.key},
+	 *  so repeated swaps keep one identity. */
 	readonly #readerSummaries = new WeakMap<
 		AgentMessage,
-		{ view: snapcompact.ArchiveView; message: CompactionSummaryMessage }
+		Map<ArchiveReader["key"], { view: snapcompact.ArchiveView; message: CompactionSummaryMessage }>
 	>();
-	/** The original summary message behind each reader copy, restored for readers that keep reasoning. */
-	readonly #originalSummaries = new WeakMap<AgentMessage, AgentMessage>();
-	/** How far each live message list was scanned for summaries to swap, and under which reasoning policy. */
+	/** The original summary message behind each reader copy, restored for readers that read the original. */
+	readonly #originalSummaries = new WeakMap<AgentMessage, CompactionSummaryMessage>();
+	/** How far each live message list was scanned for summaries to swap, and for which kind of reader. */
 	readonly #summaryScans = new WeakMap<
 		readonly AgentMessage[],
-		{ excludeThinking: boolean; length: number; first: AgentMessage | undefined }
+		{ reader: ArchiveReader["key"]; length: number; first: AgentMessage | undefined }
 	>();
 	readonly #host: SessionMaintenanceHost;
 
@@ -4687,11 +4714,17 @@ export class SessionMaintenance {
 	/**
 	 * Show the active model the snapcompact archive it may read, in the agent
 	 * context and in `activeMessages` (a running loop's context).
-	 * `includeThinking` is fixed when an archive is rendered, so one built under
-	 * another model still carries `¶think:` sections and the reasoning legend
-	 * once the session moves to Claude; a model whose classifier refuses quoted
-	 * reasoning (the `classifier-cot-extraction` catalog axis) gets the archive's
-	 * no-reasoning view instead, and any other model the original.
+	 * An archive is rendered for the model that compacted, so it may not suit
+	 * the model reading it now:
+	 * - `includeThinking` is fixed when an archive is rendered, so one built under
+	 *   another model still carries `¶think:` sections and the reasoning legend
+	 *   once the session moves to Claude; a model whose classifier refuses quoted
+	 *   reasoning (the `classifier-cot-extraction` catalog axis) gets the
+	 *   archive's no-reasoning view instead.
+	 * - A model that takes no image input would read every frame as an
+	 *   image-omitted placeholder; it gets the archive's kept source as text in
+	 *   place of the frames ({@link snapcompact.viewWithoutFrames}).
+	 * Any other model gets the original.
 	 *
 	 * Runs on every model change and before every model call; side requests
 	 * read through {@link messagesForModel}.
@@ -4699,14 +4732,14 @@ export class SessionMaintenance {
 	async renderArchiveForModel(activeMessages?: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
-		const excludeThinking = !snapcompact.readerIncludesThinking(model);
+		const reader = archiveReader(model);
 		const lists = activeMessages
 			? [this.#host.agent.state.messages, activeMessages]
 			: [this.#host.agent.state.messages];
 		const scanned = lists.map(list => list.length);
 		const replacements = await this.#summaryReplacements(
 			model,
-			...lists.map(list => list.slice(this.#summaryScanStart(list, excludeThinking))),
+			...lists.map(list => list.slice(this.#summaryScanStart(list, reader))),
 		);
 		if (replacements.size > 0) {
 			// Re-read after the awaits: the agent may have appended messages meanwhile.
@@ -4726,17 +4759,15 @@ export class SessionMaintenance {
 			}
 		}
 		lists.forEach((list, index) => {
-			this.#summaryScans.set(list, { excludeThinking, length: scanned[index]!, first: list[0] });
+			this.#summaryScans.set(list, { reader: reader.key, length: scanned[index]!, first: list[0] });
 		});
 	}
 
 	/** Where a scan of `list` for summaries to swap starts: past the prefix already
-	 *  scanned under the same reasoning policy, unless the list was cleared or refilled. */
-	#summaryScanStart(list: readonly AgentMessage[], excludeThinking: boolean): number {
+	 *  scanned for the same kind of reader, unless the list was cleared or refilled. */
+	#summaryScanStart(list: readonly AgentMessage[], reader: ArchiveReader): number {
 		const scan = this.#summaryScans.get(list);
-		return scan?.excludeThinking === excludeThinking && scan.first === list[0] && scan.length <= list.length
-			? scan.length
-			: 0;
+		return scan?.reader === reader.key && scan.first === list[0] && scan.length <= list.length ? scan.length : 0;
 	}
 
 	/**
@@ -4754,23 +4785,28 @@ export class SessionMaintenance {
 		...lists: (readonly AgentMessage[] | undefined)[]
 	): Promise<Map<AgentMessage, AgentMessage>> {
 		const replacements = new Map<AgentMessage, AgentMessage>();
-		const excludeThinking = !snapcompact.readerIncludesThinking(model);
+		const reader = archiveReader(model);
 		for (const messages of lists) {
 			for (const message of messages ?? []) {
 				if (message.role !== "compactionSummary" || replacements.has(message)) continue;
-				if (!excludeThinking) {
-					const original = this.#originalSummaries.get(message);
-					if (original) replacements.set(message, original);
-				} else if (snapcompact.summaryIncludesThinking(message.summary)) {
-					replacements.set(message, await this.#readerSummary(message, model));
-				}
+				const original = this.#originalSummaries.get(message) ?? message;
+				const wanted =
+					(reader.excludeThinking && snapcompact.summaryIncludesThinking(original.summary)) ||
+					(reader.withoutFrames && (original.images?.length ?? 0) > 0)
+						? await this.#readerSummary(original, model, reader)
+						: original;
+				if (wanted !== message) replacements.set(message, wanted);
 			}
 		}
 		return replacements;
 	}
 
-	/** `message` rebuilt from its archive's no-reasoning view, one copy per original and view. */
-	async #readerSummary(message: CompactionSummaryMessage, model: Model): Promise<CompactionSummaryMessage> {
+	/** `message` rebuilt from the archive view `reader` reads, one copy per original, reader and view. */
+	async #readerSummary(
+		message: CompactionSummaryMessage,
+		model: Model,
+		reader: ArchiveReader,
+	): Promise<CompactionSummaryMessage> {
 		const entry = this.#host.sessionManager
 			.getBranchView()
 			.findLast(
@@ -4780,27 +4816,56 @@ export class SessionMaintenance {
 					new Date(entry.timestamp).getTime() === message.timestamp &&
 					snapcompact.getPreservedArchive(entry.preserveData) !== undefined,
 			);
-		// No archive behind it (e.g. archive text a summarizer folded into a plain
-		// summary): scrub the summary text itself and keep no blocks.
-		const view = entry
-			? await this.#viewWithoutThinking(entry, model)
-			: {
-					summary: snapcompact.textWithoutThinking(message.summary),
-					archive: { frames: [], totalChars: 0, truncatedChars: 0 },
-				};
-		const cached = this.#readerSummaries.get(message);
+		let view: snapcompact.ArchiveView;
+		if (entry) {
+			view = await this.#readerView(entry, model, reader);
+		} else if (reader.excludeThinking && snapcompact.summaryIncludesThinking(message.summary)) {
+			// No archive behind it (e.g. archive text a summarizer folded into a plain
+			// summary): scrub the summary text itself and keep no blocks.
+			view = {
+				summary: snapcompact.textWithoutThinking(message.summary),
+				archive: { frames: [], totalChars: 0, truncatedChars: 0 },
+			};
+		} else {
+			// No archive text to read in place of its images.
+			return message;
+		}
+		let cache = this.#readerSummaries.get(message);
+		if (!cache) {
+			cache = new Map();
+			this.#readerSummaries.set(message, cache);
+		}
+		const cached = cache.get(reader.key);
 		if (cached?.view === view) return cached.message;
 		const blocks = this.#host.sessionManager.snapcompactHistoryBlocks(view.archive);
 		const images = blocks.filter(block => block.type === "image");
-		const reader: CompactionSummaryMessage = {
+		const readerMessage: CompactionSummaryMessage = {
 			...message,
 			summary: view.summary,
 			blocks: blocks.length > 0 ? blocks : undefined,
 			images: images.length > 0 ? images : undefined,
 		};
-		this.#readerSummaries.set(message, { view, message: reader });
-		this.#originalSummaries.set(reader, message);
-		return reader;
+		cache.set(reader.key, { view, message: readerMessage });
+		this.#originalSummaries.set(readerMessage, message);
+		return readerMessage;
+	}
+
+	/** The view of `entry`'s archive `reader` reads: reasoning dropped, then frames read as text, as it needs. */
+	async #readerView(entry: CompactionEntry, model: Model, reader: ArchiveReader): Promise<snapcompact.ArchiveView> {
+		if (!reader.withoutFrames) return await this.#viewWithoutThinking(entry, model);
+		let views = this.#withoutFramesViews.get(entry);
+		if (!views) {
+			views = new Map();
+			this.#withoutFramesViews.set(entry, views);
+		}
+		const cached = views.get(reader.excludeThinking);
+		if (cached) return cached;
+		const base = reader.excludeThinking
+			? await this.#viewWithoutThinking(entry, model)
+			: { summary: entry.summary, archive: snapcompact.getPreservedArchive(entry.preserveData)! };
+		const view = snapcompact.viewWithoutFrames(base.summary, base.archive, compactionFileDetails(entry));
+		views.set(reader.excludeThinking, view);
+		return view;
 	}
 
 	#viewWithoutThinking(entry: CompactionEntry, model: Model): Promise<snapcompact.ArchiveView> {
@@ -4821,17 +4886,9 @@ export class SessionMaintenance {
 	 */
 	async #renderViewWithoutThinking(entry: CompactionEntry, model: Model): Promise<snapcompact.ArchiveView> {
 		const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
-		const details = entry.details as Partial<snapcompact.CompactionDetails> | undefined;
 		// The stored variant, the original when it carries no reasoning, else the
 		// text-only form without frames.
-		const readableView = () =>
-			snapcompact.viewWithoutThinking(
-				entry.summary,
-				archive,
-				Array.isArray(details?.readFiles) && Array.isArray(details?.modifiedFiles)
-					? { readFiles: details.readFiles, modifiedFiles: details.modifiedFiles }
-					: undefined,
-			);
+		const readableView = () => snapcompact.viewWithoutThinking(entry.summary, archive, compactionFileDetails(entry));
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (archive.withoutThinking || !snapcompact.summaryIncludesThinking(entry.summary) || !archiveText) {
 			return readableView();

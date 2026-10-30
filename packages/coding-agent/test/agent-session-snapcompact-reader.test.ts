@@ -1,9 +1,13 @@
 /**
- * A snapcompact archive rendered under a non-Anthropic model keeps its
- * `¶think:` sections and reasoning legend. Claude refuses requests that replay
- * them (`reasoning_extraction`), so whatever brings a Claude model to such an
- * archive (a model switch, a resume, a side request) must send the archive's
- * no-reasoning view, while the original stays intact for other readers.
+ * A snapcompact archive is rendered for the model that compacted, and the
+ * model reading it later may differ:
+ * - The archive keeps its `¶think:` sections and reasoning legend. Claude
+ *   refuses requests that replay them (`reasoning_extraction`), so whatever
+ *   brings a Claude model to such an archive (a model switch, a resume, a side
+ *   request) must send the archive's no-reasoning view.
+ * - A model without image input reads frames as image-omitted placeholders, so
+ *   it must get the archive's kept text in place of the frames.
+ * The original stays intact for other readers.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -15,16 +19,19 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const REASONING = "PRIVATE-REASONING";
 const PLAIN_LEGEND = "`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.";
+const FRAME_LEGEND = "Some middle sections: images, not text.";
+const IMAGE_OMITTED = "[image omitted";
 
 function bundled(provider: GeneratedProvider, modelId: string): Model {
 	const model = getBundledModel(provider, modelId);
@@ -34,6 +41,8 @@ function bundled(provider: GeneratedProvider, modelId: string): Model {
 
 const gpt = bundled("openai", "gpt-5.4");
 const claude = bundled("anthropic", "claude-opus-5-5");
+// Takes no image input.
+const deepseek = bundled("deepseek", "deepseek-v4-flash");
 
 function assistant(model: Model, content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -87,7 +96,17 @@ function latestCompaction(sessionManager: SessionManager): CompactionEntry {
 	return entry;
 }
 
-describe("snapcompact archive read by a Claude model", () => {
+/** A reply marker the archive keeps only on its frames, not in its plain text edges. */
+function imagedReply(archive: snapcompact.Archive): string {
+	for (let i = 0; i < 40; i++) {
+		const marker = `reply ${i}:`;
+		if (archive.textHead?.includes(marker) || archive.textTail?.includes(marker)) continue;
+		if (archive.text?.includes(marker)) return marker;
+	}
+	throw new Error("Expected a reply kept only on frames");
+}
+
+describe("snapcompact archive read by another model", () => {
 	const originalAgentDir = getAgentDir();
 	let tempDir: string;
 	let authStorage: AuthStorage;
@@ -100,6 +119,7 @@ describe("snapcompact archive read by a Claude model", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("deepseek", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -311,5 +331,103 @@ describe("snapcompact archive read by a Claude model", () => {
 		// checks in full; after that only the appended tool turns are visited.
 		expect(checksAtCall[3]).toBe(checksAtCall[2]);
 		expectVariantSent(sessionManager, original, mock.calls[3]?.context);
+	});
+
+	it("sends a model without image input the archive's text in place of its frames, and frames after a switch back", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const marker = imagedReply(archive);
+		const { session, mock } = startSession(sessionManager, gpt);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue.");
+		const textOnly = requestContent(mock.calls[0]?.context.messages);
+		expect(textOnly.images).toEqual([]);
+		expect(textOnly.text).toContain("HISTORY");
+		expect(textOnly.text).toContain(marker);
+		expect(textOnly.text).not.toContain(FRAME_LEGEND);
+		// DeepSeek may read reasoning: the archive keeps it.
+		expect(textOnly.text).toContain(REASONING);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+
+		await session.setModel(gpt);
+		await session.prompt("Continue again.");
+		const vision = requestContent(mock.calls[1]?.context.messages);
+		expect(vision.images).toEqual(archive.frames.map(frame => frame.data));
+		expect(vision.text).toContain(FRAME_LEGEND);
+		expect(vision.text).not.toContain(marker);
+	});
+
+	it("gives a side request to a reader without image input or reasoning the text view without reasoning", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session } = startSession(sessionManager, gpt);
+
+		const { text, images } = requestContent(
+			await session.convertMessagesToLlm(session.messages, undefined, { ...claude, input: ["text"] }),
+		);
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+		expect(text).toContain(PLAIN_LEGEND);
+		expect(text).not.toContain(FRAME_LEGEND);
+		expect(text).not.toContain("¶think:");
+		expect(text).not.toContain(REASONING);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+	});
+
+	it("sends no image placeholders for the archive on a session created under a model without image input", async () => {
+		using sessionDir = TempDir.createSync("@pi-snapcompact-text-reader-");
+		const bodies: string[] = [];
+		const fetchStub = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {
+				bodies.push(String(init?.body ?? ""));
+				const chunk = {
+					id: "gen-1",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: deepseek.id,
+					choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+					usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+				};
+				return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+		const sessionManager = SessionManager.inMemory(sessionDir.path());
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session } = await createAgentSession({
+			cwd: sessionDir.path(),
+			agentDir: sessionDir.path(),
+			sessionManager,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: deepseek,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		sessions.push(session);
+
+		await session.sendUserMessage("Continue.");
+
+		const request = bodies.find(body => body.includes("HISTORY"));
+		expect(request).toBeDefined();
+		expect(request).toContain(marker);
+		expect(request).not.toContain(IMAGE_OMITTED);
 	});
 });
