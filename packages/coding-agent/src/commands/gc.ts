@@ -26,7 +26,8 @@ export default class Gc extends Command {
 			description: "Store idle sessions with filesystem compression in place (APFS, NTFS)",
 		}),
 		restore: Flags.string({
-			description: "Bring an archived session back by id prefix or archive path (runs alone)",
+			description:
+				"Bring an archived session back by id prefix or archive path (runs alone; copies, keeps the archive, frees no space)",
 		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
