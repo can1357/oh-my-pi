@@ -5002,6 +5002,55 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("gives a delivered queued follow-up its own refusal-continuation budget", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		const refusalMessage = "Refusal (cyber): This request triggered cyber-related safeguards.";
+		const refusalResponse = (text: string) => ({
+			content: [text],
+			stopReason: "error" as const,
+			stopDetails: { type: "refusal" as const, category: "cyber", explanation: "declined" },
+			errorMessage: refusalMessage,
+		});
+		// The first task spends its whole budget (cap 1), then a queued follow-up starts a new task.
+		const mock = createMockModel({
+			responses: [
+				refusalResponse("First task partial."),
+				{ content: ["First task done."] },
+				refusalResponse("Follow-up partial."),
+				{ content: ["Follow-up done."] },
+			],
+		});
+		let call = 0;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				call++;
+				if (call === 1) {
+					agent.followUp({ role: "user", content: "Second task.", timestamp: Date.now() });
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.continueClassifierRefusals": true,
+			"retry.maxClassifierRefusalContinuations": 1,
+			"retry.baseDelayMs": 5,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("First task");
+		await session.waitForIdle();
+
+		expect(call).toBe(4);
+		expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "Follow-up done." }]);
+	});
 	it("continues five progressing classifier refusals within the configured continuation cap", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

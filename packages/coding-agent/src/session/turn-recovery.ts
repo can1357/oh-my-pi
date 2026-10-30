@@ -546,6 +546,12 @@ export class TurnRecovery {
 		}
 	}
 
+	/** Restores the classifier-refusal continuation budget for a new user-authored task. */
+	resetClassifierRefusalContinuations(): void {
+		this.#classifierRefusalContinueCount = 0;
+		this.#retryCancelledForPrompt = false;
+	}
+
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;

@@ -8629,10 +8629,20 @@ export class AgentSession implements SettingsScope {
 		const promptText = text.join("\n\n");
 		const preparationImages = images.length > 0 ? images : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
-		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
-		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		const prepared =
+			queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))
+				? this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal)
+				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		if (queue !== "followUp") return prepared;
+		// A delivered follow-up is a new user-authored task: it gets its own refusal-continuation budget.
+		return prepared.then(preparation => ({
+			...preparation,
+			commit: () => {
+				const additional = preparation.commit();
+				if (additional !== undefined) this.#recovery.resetClassifierRefusalContinuations();
+				return additional;
+			},
+		}));
 	};
 
 	/**
