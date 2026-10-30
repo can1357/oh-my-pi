@@ -983,7 +983,7 @@ describe("runGcCommand cold-session archive", () => {
 		const realOpen = fs.open;
 		const cpSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
 			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-			if (!String(target).endsWith(".tmp") || !String(target).includes("0.bash.log")) return handle;
+			if (!String(target).includes(".tmp/") || !String(target).includes("0.bash.log")) return handle;
 			handle.write = (async () => {
 				throw new Error("artifact move failed");
 			}) as typeof handle.write;
@@ -1116,7 +1116,7 @@ describe("runGcCommand cold-session archive", () => {
 		const realOpen = fs.open;
 		const cpSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
 			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-			if (!String(target).endsWith(".tmp")) return handle;
+			if (!String(target).includes(".tmp/")) return handle;
 			handle.write = (async () => {
 				throw new Error("artifact move failed");
 			}) as typeof handle.write;

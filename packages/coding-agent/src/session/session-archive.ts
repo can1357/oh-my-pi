@@ -211,23 +211,55 @@ export async function inflateArchivedBytes(file: string): Promise<Uint8Array> {
  * path nothing holds, so a file that appeared there in the meantime is
  * someone's work. `EEXIST` says so instead of writing over it.
  */
-export async function inflateArchivedTranscript(source: string, destination: string): Promise<number> {
+export async function inflateArchivedTranscript(
+	source: string,
+	destination: string,
+	notes: string[] = [],
+): Promise<number> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const tempPath = sessionStagingPath(destination);
+	const ground = await mintStagingGround(destination);
+	const tempPath = ground.file;
+	let handle: fs.FileHandle | undefined;
+	let staged: Stats | undefined;
 	try {
-		// A killed publication can leave this name linked to the file it wrote,
-		// and opening it for writing would empty that file before anything
-		// looked at it. Dropping the name first leaves the data its own.
-		await fs.rm(tempPath, { force: true });
-		const handle = await fs.open(tempPath, "w");
-		await pipeline(Bun.file(source).stream(), createGunzip(), handle.createWriteStream());
-		const { size } = await fs.stat(tempPath);
+		// Inside a directory this run minted, so the name this publication
+		// reads from is not one anybody else can bind, and the cleanup is
+		// that directory rather than a name a check had to vouch for.
+		handle = await fs.open(tempPath, "wx");
+		staged = await handle.stat();
+		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), handle);
+		const landed = await fs.lstat(tempPath).catch(() => undefined);
+		if (landed?.dev !== staged.dev || landed.ino !== staged.ino) {
+			throw new Error(`${tempPath} was replaced while the transcript was being written`);
+		}
 		await fs.link(tempPath, destination);
-		return size;
+		// What was published, read back through a descriptor: non-blocking
+		// against a FIFO, `fstat` for a regular file, `lstat` against a
+		// symlink onto the very file just written, and then the digest,
+		// which is the only one of the four that is about bytes.
+		const published = await openRegularFile(destination);
+		if (!published) throw new Error(`${destination} is not the transcript this restore wrote`);
+		try {
+			if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) {
+				throw new Error(`${destination} is not the transcript this restore wrote`);
+			}
+			const back = await digestOfHandle(published);
+			if (back.hash !== written.hash || back.size !== written.size) {
+				throw new Error(`${destination} is not the transcript this restore wrote`);
+			}
+		} finally {
+			await published.close().catch(() => undefined);
+		}
+		return written.size;
 	} catch (error) {
 		throw archiveReadError(source, error);
 	} finally {
-		await fs.rm(tempPath, { force: true });
+		try {
+			const note = await removeStagingGround(ground, staged);
+			if (note) notes.push(note);
+		} finally {
+			await handle?.close().catch(() => undefined);
+		}
 	}
 }
 
@@ -476,6 +508,33 @@ export async function digestOfHandle(handle: fs.FileHandle): Promise<CopiedBytes
 		hasher.update(chunk);
 		size += chunk.byteLength;
 	}
+	return { hash: hasher.digest("hex"), size };
+}
+/**
+ * Inflate an archived stream into `destination`, digesting what is written.
+ *
+ * The stream counterpart of {@link copyHandleWithDigest}, for the one place
+ * that inflates rather than copies. The digest is of the bytes this run put
+ * in the file, which is what the published entry is compared against
+ * afterwards — a stage rebound between the write and the publication reads
+ * back as something else.
+ */
+export async function inflateIntoHandleWithDigest(
+	source: ReadableStream<Uint8Array>,
+	destination: fs.FileHandle,
+): Promise<CopiedBytes> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	let size = 0;
+	await pipeline(source as AsyncIterable<Uint8Array>, createGunzip(), async (inflated: NodeJS.ReadableStream) => {
+		for await (const chunk of inflated as AsyncIterable<Uint8Array>) {
+			hasher.update(chunk);
+			for (let written = 0; written < chunk.byteLength;) {
+				const put = await destination.write(chunk, written, chunk.byteLength - written, size + written);
+				written += put.bytesWritten;
+			}
+			size += chunk.byteLength;
+		}
+	});
 	return { hash: hasher.digest("hex"), size };
 }
 
@@ -871,20 +930,19 @@ async function copyEntryDereferenced(
 				`move that path aside and restore again`,
 		);
 	}
-	// A name of this restore's own making, created exclusively and held open
-	// until it is published — so nothing is written over, and the removal
-	// below can tell the file this run made from whatever else may be
-	// wearing its name by then. Named so `omp gc` reclaims it if this run
-	// dies before it gets there.
-	const tempPath = sessionStagingPath(destination);
+	// Staged inside a directory this run mints, so nothing of anyone else's
+	// can wear the name this publication reads from, and the cleanup is the
+	// directory rather than a name a check had to vouch for.
+	const ground = await mintStagingGround(destination);
 	let staged: fs.FileHandle | undefined;
 	let stagedStat: Stats | undefined;
 	try {
-		staged = await fs.open(tempPath, "wx", stat.mode & 0o7777);
+		staged = await fs.open(ground.file, "wx", stat.mode & 0o7777);
 		stagedStat = await staged.stat();
 		const archived = await fs.open(source, "r");
+		let written: CopiedBytes;
 		try {
-			await copyHandleWithDigest(archived, staged);
+			written = await copyHandleWithDigest(archived, staged);
 		} finally {
 			await archived.close().catch(() => undefined);
 		}
@@ -893,10 +951,24 @@ async function copyEntryDereferenced(
 		// this copy was being staged is their work, and a rename would write
 		// over it without anyone asking. `EEXIST` sends this entry down the
 		// "already holds something else" road on the next attempt instead.
-		await fs.link(tempPath, destination);
+		await fs.link(ground.file, destination);
+		// What landed, read back: opened non-blocking so a FIFO cannot hang
+		// this, `fstat`ed and `lstat`ed for a regular file that is not a
+		// link, and then digested against what was written.
+		const published = await openRegularFile(destination);
+		const wrong = (): Error =>
+			new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
+		if (!published) throw wrong();
+		try {
+			if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) throw wrong();
+			const back = await digestOfHandle(published);
+			if (back.hash !== written.hash || back.size !== written.size) throw wrong();
+		} finally {
+			await published.close().catch(() => undefined);
+		}
 	} finally {
 		try {
-			const note = await removeOwnFile(tempPath, stagedStat);
+			const note = await removeStagingGround(ground, stagedStat);
 			if (note) notes.push(note);
 		} finally {
 			await staged?.close().catch(() => undefined);
@@ -922,26 +994,103 @@ async function copyTreeDereferenced(source: string, destination: string, notes: 
 	await assertLiveTreeHoldsArchive(source, destination, archiveRoot);
 }
 
+/** A private directory this run minted, and the staging path inside it. */
+export interface StagingGround {
+	dir: string;
+	file: string;
+}
+
 /**
- * Remove `file` only while it is still the entry `created` describes.
+ * Mint a staging directory of this run's own beside `target`.
  *
- * A path is a name, and a name can be made to point somewhere else between
- * the moment a run creates a file and the moment it cleans up — at which
- * point removing the name throws away somebody else's only copy. The
- * descriptor the caller still holds pins the inode, so this comparison is
- * about the file rather than about the name. Call it before closing that
- * descriptor; it answers with the sentence to report when the path is no
- * longer this run's to remove.
+ * `mkdir` without `recursive`, so `EEXIST` is the kernel saying the name is
+ * taken and another is minted — uniqueness comes from the kernel rather
+ * than from a name this process picked. Mode `0700`, so what is inside is
+ * this run's until it publishes it.
+ *
+ * The directory is what makes the cleanup honest. There is no way to unlink
+ * an inode: `unlinkat` takes a name, so any identity check is taken at one
+ * moment and acted on at another, and a staging path anyone could rebind
+ * between the two is a file somebody else's bytes can end up at. Inside
+ * ground this run minted, the only actor who can arrange that is one who
+ * can already write in a `0700` directory that did not exist a moment ago.
+ *
+ * The name matches {@link SESSION_STAGING_RE}, so the sweep that reclaims
+ * an interrupted run's leftovers recognises it.
  */
-export async function removeOwnFile(file: string, created: Stats | undefined): Promise<string | undefined> {
-	if (!created) return undefined;
-	const standing = await fs.lstat(file).catch(() => undefined);
-	if (!standing) return undefined;
-	if (standing.dev !== created.dev || standing.ino !== created.ino) {
-		return `${file} is no longer the file this run staged there, so it was left alone`;
+export async function mintStagingGround(target: string): Promise<StagingGround> {
+	for (;;) {
+		const dir = sessionStagingPath(target);
+		try {
+			await fs.mkdir(dir, { mode: 0o700 });
+		} catch (error) {
+			if (codeOf(error) === "EEXIST") continue;
+			throw error;
+		}
+		return { dir, file: path.join(dir, path.basename(target)) };
 	}
-	await fs.rm(file, { force: true });
-	return undefined;
+}
+
+/**
+ * Take the staging ground away again, with what this run put there.
+ *
+ * Anything else inside it is reported rather than deleted, and a failure to
+ * look is reported rather than read as an absence: "it was not there" and "I
+ * could not tell" are different answers, and treating the second as the
+ * first is how a foreign file disappears into an empty error list. The
+ * sentence returned is the one for the command to print; nothing here
+ * throws, because this runs on the way out of a failure as often as a
+ * success.
+ */
+export async function removeStagingGround(
+	ground: StagingGround,
+	created: Stats | undefined,
+): Promise<string | undefined> {
+	const notes: string[] = [];
+	const entries = await fs.readdir(ground.dir).catch(error => {
+		if (isEnoent(error)) return undefined;
+		notes.push(`${ground.dir} could not be read, so it was left as it is: ${error}`);
+		return undefined;
+	});
+	if (entries === undefined) return notes[0];
+	for (const name of entries) {
+		const at = path.join(ground.dir, name);
+		const standing = await fs.lstat(at).catch(error => {
+			if (!isEnoent(error)) notes.push(`${at} could not be read, so it was left alone: ${error}`);
+			return undefined;
+		});
+		if (!standing) continue;
+		if (at !== ground.file || !created || standing.dev !== created.dev || standing.ino !== created.ino) {
+			notes.push(`${at} is not what this run staged there, so it was left alone`);
+			continue;
+		}
+		await fs.rm(at).catch((error: unknown) => notes.push(`${at} could not be removed: ${error}`));
+	}
+	if (notes.length === 0) {
+		await fs.rmdir(ground.dir).catch((error: unknown) => {
+			if (!isEnoent(error)) notes.push(`${ground.dir} could not be removed: ${error}`);
+		});
+	}
+	return notes.length > 0 ? notes.join("; ") : undefined;
+}
+/**
+ * Archived paths with no live counterpart, as relative names.
+ *
+ * The question a stale restore record raises: has the live tree caught up
+ * with what the archive holds? Presence, not sameness — a session that
+ * carried on diverges from its archive by design — and only enough of it to
+ * decide whether an unfinished restore is still unfinished.
+ */
+export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessionFile: string): Promise<string[]> {
+	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
+	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	const outstanding: string[] = [];
+	for (const file of await treeFiles(archiveArtifacts)) {
+		if (SESSION_STAGING_RE.test(path.basename(file))) continue;
+		const name = path.relative(archiveArtifacts, file);
+		if (!(await statIfPresent(path.join(liveArtifacts, name)))) outstanding.push(name);
+	}
+	return outstanding.sort();
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */
@@ -1254,14 +1403,21 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				`Close it and run \`${restoreCommand}\` again.`,
 		);
 	if (!leases) throw noOwners();
-	// The record goes down before anything is published and comes up only
-	// when everything is home. Nothing that runs later has to work out from
-	// the live tree whether this finished, which is the question every
-	// earlier version of this got wrong in both directions.
+	// Nothing between taking a lease and releasing it may run outside the
+	// guard. The record's own creation is work like any other: a `mkdir`
+	// that fails or a write that runs out of space left the restore
+	// throwing with the lease still held, and every later attempt then
+	// refused with "a running process owns this session" — the holder being
+	// this one's own leaked handle.
 	const record = restoreRecordPath(archiveFile);
-	await fs.mkdir(path.dirname(record), { recursive: true });
-	await fs.writeFile(record, `${restoreCommand}\n`);
 	try {
+		// The record goes down before anything is published and comes up only
+		// when everything is home. Nothing that runs later has to work out from
+		// the live tree whether this finished, which is the question every
+		// earlier version of this got wrong in both directions.
+		await fs.mkdir(path.dirname(record), { recursive: true });
+		await fs.writeFile(record, `${restoreCommand}\n`);
+		const notes: string[] = [];
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
 			// The transcript is already live. Either another process restored it
@@ -1283,11 +1439,10 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 			}
 			bytes = (await fs.stat(sessionPath)).size;
 		} else {
-			bytes = await inflateArchivedTranscript(archiveFile, sessionPath);
+			bytes = await inflateArchivedTranscript(archiveFile, sessionPath, notes);
 		}
 
 		const notRestored: string[] = [];
-		const notes: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
 		// Neither copy goes. The restore publishes the session into the live
