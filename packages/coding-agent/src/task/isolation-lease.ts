@@ -41,14 +41,18 @@ import {
 } from "./isolation-ownership";
 
 /**
- * Marker a departing user leaves when it had to give up its lease while its
- * own work might still be running — a session whose shutdown handlers outran
- * the grace. Dropping the lease is how a stalled disposal stops holding a
- * kernel for ever; deleting the workspace underneath a handler that is still
- * writing is not, so the owner keeps the directory instead of removing it and
- * reclamation takes it once both processes are gone.
+ * Directory of unfinished-writer records: one file per writer that gave up its
+ * lease while its own work might still be running — a session whose shutdown
+ * handlers outran the grace.
+ *
+ * One file per writer, not one marker: two of them overwrote each other, and a
+ * single record naming the one that had already exited let a destructive path
+ * delete the other's live data. Each names its process, so a crashed writer's
+ * record retires like a crashed holder's lease, and each is cleared by its own
+ * writer when it finishes — a record nobody ever clears is a workspace nobody
+ * ever reclaims.
  */
-export const ISOLATION_UNFINISHED_FILE = ".omp-isolation-unfinished.json";
+export const ISOLATION_UNFINISHED_DIR = ".omp-isolation-unfinished";
 
 /** Directory of lease files inside a sandbox's base dir. */
 export const ISOLATION_LEASE_DIR = ".omp-isolation-leases";
@@ -250,19 +254,55 @@ export async function leaseIsolationWorkspace(
 	};
 }
 
-/** Record that a user of the sandbox `cwd` sits in may still be writing to it. */
-export async function markUnfinishedWriter(cwd: string): Promise<void> {
+/**
+ * Record that this process may still be writing into the sandbox `cwd` sits
+ * in, and return the clear for when it has finished.
+ *
+ * Raises when the record cannot be written. A caller that could not say "I may
+ * still be writing" has not been told it is safe to stop holding its lease,
+ * and treating a failed write as a logged inconvenience is how a shutdown
+ * handler loses the file it was saving.
+ */
+export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<void>> {
 	const found = await findSandboxBase(cwd);
-	if (found === undefined) return;
-	await writeProcessIdentity(path.join(found.baseDir, ISOLATION_UNFINISHED_FILE));
+	if (found === undefined) return async () => {};
+	const record = path.join(found.baseDir, ISOLATION_UNFINISHED_DIR, `${process.pid}-${Snowflake.next()}.json`);
+	await writeProcessIdentity(record);
+	return async () => {
+		await fs.rm(record, { force: true });
+	};
 }
 
-/** Whether a live process said it might still be writing into the sandbox at `baseDir`. */
+/**
+ * Whether a live process said it might still be writing into the sandbox at
+ * `baseDir`. Records of processes that have since gone are cleared on the way
+ * past; a record that cannot be read counts as live, as everywhere else here.
+ */
 export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
-	const holder = await readProcessIdentity(path.join(baseDir, ISOLATION_UNFINISHED_FILE));
-	if (holder === undefined) return false;
-	if (holder === "unreadable") return true;
-	return await isProcessStillLive(holder);
+	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		return true;
+	}
+	let unfinished = false;
+	for (const entry of entries) {
+		const file = path.join(dir, entry);
+		const holder = await readProcessIdentity(file);
+		if (holder === "unreadable") {
+			unfinished = true;
+			continue;
+		}
+		if (holder === undefined) continue;
+		if (await isProcessStillLive(holder)) {
+			unfinished = true;
+			continue;
+		}
+		await fs.rm(file, { force: true }).catch(() => undefined);
+	}
+	return unfinished;
 }
 
 /** Whether the sandbox at `baseDir` was materialised by this process, so its teardown runs here. */
@@ -321,10 +361,22 @@ async function runPendingTeardownIfIdle(baseDir: string): Promise<void> {
 /** One serialised attempt: if nobody holds the sandbox, run what its owner left to do. */
 async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseDir: string): Promise<void> {
 	if (workspace.pendingTeardown === undefined) return;
-	if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return;
-	const pending = workspace.pendingTeardown;
-	workspace.pendingTeardown = undefined;
-	disarmTeardownWatch(workspace);
+	// Taking the registration is done under the sandbox lock, so a watch or a
+	// poll cannot start the teardown beside a caller that is deciding the same
+	// thing under that lock; the teardown itself takes the lock again, so it is
+	// released before running it.
+	const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+	let pending: (() => Promise<void>) | undefined;
+	try {
+		if (workspace.pendingTeardown === undefined) return;
+		if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return;
+		pending = workspace.pendingTeardown;
+		workspace.pendingTeardown = undefined;
+		disarmTeardownWatch(workspace);
+	} finally {
+		lock.release();
+	}
+	if (pending === undefined) return;
 	await pending().catch(error => {
 		logger.warn("deferred isolation teardown failed", { mergedDir, error: String(error) });
 	});
@@ -336,6 +388,31 @@ function disarmTeardownWatch(workspace: LeasedWorkspace): void {
 	workspace.poll = undefined;
 	workspace.watcher?.close();
 	workspace.watcher = undefined;
+}
+
+/**
+ * Register what the owner owes without deciding anything, for a caller that
+ * does not hold the sandbox lock.
+ *
+ * The registration must outlive the caller's own unlocked look at the
+ * sandbox: withdrawing it on "nobody is here" and only then committing the
+ * cleanup is precisely the window a user can be admitted in, and that user
+ * then departs with nothing registered to capture its work. Whoever next takes
+ * the lock — the cleanup itself — withdraws it, or honours it.
+ *
+ * No watch or poll is armed here: until something has decided under the lock
+ * that the sandbox is in use, a timer could start the teardown beside the
+ * caller that is about to run it.
+ */
+export function armTeardown(
+	mergedDir: string,
+	teardown: () => Promise<void>,
+	options: { generation?: string } = {},
+): void {
+	const workspace = workspaces.get(mergedDir);
+	if (!workspace) return;
+	if (options.generation !== undefined && workspace.generation !== options.generation) return;
+	workspace.pendingTeardown ??= teardown;
 }
 
 /**

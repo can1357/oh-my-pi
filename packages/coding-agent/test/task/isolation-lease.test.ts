@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import {
+	armTeardown,
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
 	hasLiveIsolationLease,
 	hasUnfinishedWriter,
+	ISOLATION_UNFINISHED_DIR,
 	ISOLATION_LEASE_DIR,
 	leaseIsolationWorkspace,
 	markUnfinishedWriter,
@@ -156,11 +158,50 @@ describe("isolation workspace leases", () => {
 		expect(finished).toBe(1);
 	});
 
-	it("keeps a workspace whose user may still be writing, and says who said so", async () => {
+	it("keeps one writer's record from speaking for another, and clears each when it finishes", async () => {
+		// Two writers overwrote each other, and the single record left naming
+		// the one that had exited let a destructive path delete the other's
+		// live data.
 		const { baseDir, mergedDir } = await makeSandbox();
 		expect(await hasUnfinishedWriter(baseDir)).toBe(false);
-		await markUnfinishedWriter(path.join(mergedDir, "deep"));
+
+		const first = await markUnfinishedWriter(path.join(mergedDir, "deep"));
+		const second = await markUnfinishedWriter(mergedDir);
 		expect(await hasUnfinishedWriter(baseDir)).toBe(true);
+
+		await second();
+		expect(await hasUnfinishedWriter(baseDir)).toBe(true);
+
+		// A record nobody ever clears is a workspace nobody ever reclaims.
+		await first();
+		expect(await hasUnfinishedWriter(baseDir)).toBe(false);
+	});
+
+	it("retires an unfinished-writer record whose process is gone", async () => {
+		const { baseDir } = await makeSandbox();
+		await Bun.write(
+			path.join(baseDir, ISOLATION_UNFINISHED_DIR, "dead.json"),
+			JSON.stringify({ pid: await deadPid() }),
+		);
+		expect(await hasUnfinishedWriter(baseDir)).toBe(false);
+	});
+
+	it("keeps the owner's registration through an unlocked window", async () => {
+		// `armTeardown` is for a caller that holds no lock: withdrawing the
+		// registration on "nobody is here" and only then committing the cleanup
+		// is the window a user is admitted in.
+		const { baseDir, mergedDir } = await makeSandbox();
+		registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+		let captured = 0;
+		armTeardown(mergedDir, async () => void (captured += 1), { generation: "gen-1" });
+
+		const late = await leaseIsolationWorkspace(path.join(mergedDir, "late"));
+		expect(await deferTeardownWhileLeased(mergedDir, async () => {}, { generation: "gen-1" })).toBe(true);
+		await late();
+
+		// The capture armed before the window is the one that ran, not the
+		// plain cleanup that followed it.
+		expect(captured).toBe(1);
 	});
 
 	it("counts a lease taken by another process, and drops one whose holder is gone", async () => {

@@ -37,7 +37,7 @@ import { generateCommitMessage } from "../utils/commit-message-generator";
 const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { deferTeardownWhileLeased } from "./isolation-lease";
+import { armTeardown } from "./isolation-lease";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -503,9 +503,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// inherited this cwd, a session another process opened in it. The
 			// removal waits for them, and so does a second capture, or
 			// everything they write after this moment is captured by nobody.
-			if (await deferTeardownWhileLeased(handle.mergedDir, captureAndCleanup, { generation: handle.generation })) {
-				return;
-			}
+			// Registered before anything is decided and *not* withdrawn here:
+			// this path holds no lock, so a user admitted between a look and
+			// the cleanup below would otherwise depart with nothing registered
+			// to capture its work. `cleanupIsolation` takes the lock, and
+			// honours or withdraws the registration there.
+			armTeardown(handle.mergedDir, captureAndCleanup, { generation: handle.generation });
 			await cleanupHandle();
 		})();
 		return releasePromise;

@@ -700,6 +700,14 @@ export async function ensureIsolation(
 					`Isolation workspace ${baseDir} is still in use by a live session; refusing to materialise over it.`,
 				);
 			}
+			// A writer that gave up its lease but said it might still be saving
+			// into this directory is as much a user of it as a lease holder:
+			// taking the slot erases what it is writing.
+			if (await hasUnfinishedWriter(baseDir)) {
+				throw new Error(
+					`Isolation workspace ${baseDir} still has an unfinished writer; refusing to materialise over it.`,
+				);
+			}
 			// A teardown that outran its bound left its backend stop running on
 			// this path. Materialising beside it hands the successor to that
 			// stop's removal.

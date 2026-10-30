@@ -4521,7 +4521,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Held until disposal *finishes*: a shutdown writer still saving into
 		// the workspace is a user of it, and dropping the lease when disposal
 		// merely starts lets the owner delete the directory under that write.
-		disposeCallbacks.add(dropWorkspaceLease);
+		let clearUnfinishedWriter: (() => Promise<void>) | undefined;
+		disposeCallbacks.add(() => {
+			// Finished: the record that kept the workspace alive for this writer
+			// goes with it, or the sandbox is never reclaimed.
+			if (clearUnfinishedWriter !== undefined) {
+				void clearUnfinishedWriter().catch(error => {
+					logger.warn("could not clear this session's unfinished-writer record", { error: String(error) });
+				});
+			}
+			dropWorkspaceLease();
+		});
 		// Bounded from the moment disposal starts, because a disposal that
 		// never finishes would otherwise hold the sandbox — and the kernel
 		// behind it — for the life of the host.
@@ -4535,13 +4545,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// kernel; it is not a statement that this session has stopped
 				// writing. Saying so keeps the owner from deleting the directory
 				// under a handler that is still running.
-				void markUnfinishedWriter(sessionManager.getCwd())
-					.catch(error => {
-						logger.warn("could not record an unfinished writer on the workspace", {
-							error: String(error),
-						});
-					})
-					.finally(dropWorkspaceLease);
+				// The lease goes only once the record is on disk. A caller that
+				// could not say "I may still be writing" has not been told it is
+				// safe to stop holding it, so a failed write keeps the lease and
+				// the next attempt tries again.
+				void (async () => {
+					for (let attempt = 0; attempt < 5; attempt += 1) {
+						try {
+							clearUnfinishedWriter = await markUnfinishedWriter(sessionManager.getCwd());
+							dropWorkspaceLease();
+							return;
+						} catch (error) {
+							logger.warn("could not record an unfinished writer; keeping the workspace lease", {
+								attempt,
+								error: String(error),
+							});
+							await scheduler.wait(200);
+						}
+					}
+				})();
 			}, SESSION_LEASE_DISPOSE_GRACE_MS);
 			workspaceLeaseTimer.unref?.();
 		});

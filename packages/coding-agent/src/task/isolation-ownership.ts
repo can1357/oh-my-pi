@@ -11,7 +11,7 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { isEnoent, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import { hasLiveIsolationLease } from "./isolation-lease";
+import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
 /**
  * How long a materialisation, teardown, lease or reclamation waits for the
@@ -307,6 +307,12 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 	}
 	if (await hasLiveIsolationLease(baseDir)) {
 		return { reclaimable: false, reason: "a live session is working in it" };
+	}
+	if (await hasUnfinishedWriter(baseDir)) {
+		// Its lease is gone — that is how a stalled disposal stops holding a
+		// kernel — but it said it might still be saving in here, and deleting
+		// the directory under that write loses the work either way.
+		return { reclaimable: false, reason: "a live writer may still be saving into it" };
 	}
 	return { reclaimable: true, reason: "task-isolation leftover (no live task owns it)" };
 }
