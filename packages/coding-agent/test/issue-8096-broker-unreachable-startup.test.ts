@@ -10,7 +10,7 @@
  * a silent fallback to local credentials.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
+import { AuthBrokerError, allowAuthBrokerForTests } from "@oh-my-pi/pi-ai/auth-broker";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
@@ -46,6 +46,7 @@ describe("describeAuthBrokerStartupError", () => {
 	it("names the configured broker URL when it can be resolved", async () => {
 		const prevUrl = process.env.OMP_AUTH_BROKER_URL;
 		const prevToken = process.env.OMP_AUTH_BROKER_TOKEN;
+		using _broker = allowAuthBrokerForTests("http://127.0.0.1:8765");
 		process.env.OMP_AUTH_BROKER_URL = "http://127.0.0.1:8765";
 		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
 		try {

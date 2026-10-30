@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+import { allowAuthBrokerForTests, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -31,6 +31,7 @@ describe("auth-broker config.yml key resolution", () => {
 		await writeConfig(
 			["auth:", "  broker:", "    url: https://broker.example", "    token: nested-token", ""].join("\n"),
 		);
+		using _broker = allowAuthBrokerForTests("https://broker.example");
 		await withEnv(CLEAR_BROKER_ENV, async () => {
 			const config = await resolveAuthBrokerConfig({ agentDir });
 			expect(config).toEqual({ url: "https://broker.example", token: "nested-token" });
@@ -49,6 +50,9 @@ describe("auth-broker config.yml key resolution", () => {
 				"",
 			].join("\n"),
 		);
+		// Both declared, so only the precedence decides which one resolves.
+		using _flat = allowAuthBrokerForTests("https://flat.example");
+		using _nested = allowAuthBrokerForTests("https://nested.example");
 		await withEnv(CLEAR_BROKER_ENV, async () => {
 			const config = await resolveAuthBrokerConfig({ agentDir });
 			expect(config).toEqual({ url: "https://nested.example", token: "nested-token" });

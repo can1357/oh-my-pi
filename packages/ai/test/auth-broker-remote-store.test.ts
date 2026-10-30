@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
+	allowAuthBrokerForTests,
 	type AuthBrokerServerHandle,
 	discoverAuthStorage,
 	type FetchSnapshotResult,
@@ -46,6 +47,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	let storage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
 	let remote: RemoteAuthCredentialStore | undefined;
+	let brokerDeclaration: Disposable | undefined;
 	const token = "remote-store-bearer";
 
 	beforeEach(async () => {
@@ -64,12 +66,14 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			bearerTokens: [token],
 			disableRefresher: true,
 		});
+		brokerDeclaration = allowAuthBrokerForTests(handle.url);
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		remote?.close();
 		await handle?.close();
+		brokerDeclaration?.[Symbol.dispose]();
 		storage?.close();
 		store?.close();
 		await removeWithRetries(tempDir);

@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { discoverAuthStorage, loadAuthAccountPolicyConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	allowAuthBrokerForTests,
+	discoverAuthStorage,
+	loadAuthAccountPolicyConfig,
+	resolveAuthBrokerConfig,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { writeAuthBrokerSnapshotCache } from "@oh-my-pi/pi-ai/auth-broker/snapshot-cache";
 import type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";
@@ -37,6 +42,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			"auth.broker.url: https://yaml-broker.example/v1\nauth.broker.token: yaml-token\n",
 		);
 
+		using _broker = allowAuthBrokerForTests("https://yaml-broker.example");
 		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
 			await expect(resolveAuthBrokerConfig({ agentDir })).resolves.toEqual({
 				url: "https://yaml-broker.example/v1",
@@ -55,6 +61,9 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			"auth.broker.url: https://yml-broker.example/v1\nauth.broker.token: yml-token\n",
 		);
 
+		// Both declared, so only the precedence decides which one resolves.
+		using _yaml = allowAuthBrokerForTests("https://yaml-broker.example");
+		using _yml = allowAuthBrokerForTests("https://yml-broker.example");
 		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
 			await expect(resolveAuthBrokerConfig({ agentDir })).resolves.toEqual({
 				url: "https://yml-broker.example/v1",
@@ -92,6 +101,8 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 	});
 
 	test("treats an empty or comment-only config.yml as no configuration", async () => {
+		// A declared broker makes the resolver read config.yml at all.
+		using _broker = allowAuthBrokerForTests("https://yaml-broker.example");
 		for (const content of ["", "# nothing configured yet\n"]) {
 			await Bun.write(path.join(agentDir, "config.yml"), content);
 			await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
@@ -309,6 +320,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		};
 		await writeAuthBrokerSnapshotCache({ path: cachePath, token, url, snapshot });
 
+		using _broker = allowAuthBrokerForTests(url);
 		await withEnv(
 			{
 				...SUPPRESS_AUTH_BROKER_ENV,
@@ -335,6 +347,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			OMP_AUTH_BROKER_ACCOUNT_POOL_FILE: poolPath,
 		} as const;
 
+		using _broker = allowAuthBrokerForTests(brokerEnv.OMP_AUTH_BROKER_URL);
 		await withEnv(brokerEnv, async () => {
 			await expect(discoverAuthStorage({ agentDir })).rejects.toThrow(
 				"Unable to read OMP_AUTH_BROKER_ACCOUNT_POOL_FILE",

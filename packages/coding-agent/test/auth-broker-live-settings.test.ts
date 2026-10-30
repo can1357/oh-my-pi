@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
-import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { type AuthBrokerServerHandle, allowAuthBrokerForTests, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -17,13 +17,14 @@ const BROKER_ENV = ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "OMP_AUTH_BR
 interface Broker {
 	handle: AuthBrokerServerHandle;
 	storage: AuthStorage;
+	declaration: Disposable;
 }
 
 async function startBroker(dir: string, apiKey: string): Promise<Broker> {
 	const storage = new AuthStorage(await SqliteAuthCredentialStore.open(path.join(dir, `${apiKey}.db`)));
 	await storage.credentials.set(PROVIDER, { type: "api_key", key: apiKey });
 	const handle = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [TOKEN], disableRefresher: true });
-	return { handle, storage };
+	return { handle, storage, declaration: allowAuthBrokerForTests(handle.url) };
 }
 
 describe("auth broker settings take effect live", () => {
@@ -47,6 +48,7 @@ describe("auth broker settings take effect live", () => {
 		for (const cleanup of cleanups.splice(0)) cleanup();
 		for (const broker of brokers.splice(0)) {
 			await broker.handle.close();
+			broker.declaration[Symbol.dispose]();
 			broker.storage.close();
 		}
 		for (const key of BROKER_ENV) {

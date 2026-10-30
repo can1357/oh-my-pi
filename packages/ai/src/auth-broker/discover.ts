@@ -3,6 +3,9 @@
  * the catalog model generator. Keeps the precedence logic (env → config.yml/config.yaml →
  * token file → local SQLite) in one place so build-time tooling sees the same
  * credentials as the TUI.
+ *
+ * Under the test runtime a broker resolves only when the test declared it through
+ * {@link allowAuthBrokerForTests}.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -12,6 +15,7 @@ import {
 	getAgentDir,
 	getAuthBrokerSnapshotCachePath,
 	getConfigRootDir,
+	isBunTestRuntime,
 	isEnoent,
 	logger,
 	MAIN_CONFIG_FILENAMES,
@@ -55,6 +59,46 @@ export interface DiscoverAuthStorageOptions {
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
 export function getAuthBrokerTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
+}
+
+/** Origins this test process declared through {@link allowAuthBrokerForTests}. */
+const testBrokerOrigins = new Set<string>();
+
+/**
+ * Let this test process connect to an auth broker it set up itself.
+ *
+ * Under the test runtime {@link resolveAuthBrokerConfig} resolves a broker only when its
+ * origin was declared here, and resolves none while nothing is declared. A test inherits
+ * `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN` from the developer's shell, and reads
+ * the developer's own `config.yml` and token file. They name the developer's real broker,
+ * so without this a test that only inherits them reads that broker's credentials, writes
+ * its own fixtures into it and reports usage to it, all with the developer's token. The
+ * declaration lives in this process: a child does not inherit it.
+ *
+ * @param broker URL of the broker; only its origin counts.
+ * @returns a handle that withdraws the declaration when disposed.
+ * @throws outside the test runtime.
+ */
+export function allowAuthBrokerForTests(broker: string | URL): Disposable {
+	if (!isBunTestRuntime()) throw new Error("allowAuthBrokerForTests is test-only");
+	const { origin } = new URL(broker);
+	testBrokerOrigins.add(origin);
+	return {
+		[Symbol.dispose]() {
+			testBrokerOrigins.delete(origin);
+		},
+	};
+}
+
+/** Whether `url` is a broker this test process declared through {@link allowAuthBrokerForTests}. */
+function isDeclaredTestBroker(url: string): boolean {
+	let origin: string;
+	try {
+		origin = new URL(url).origin;
+	} catch {
+		return false;
+	}
+	return testBrokerOrigins.has(origin);
 }
 
 /**
@@ -377,11 +421,15 @@ function resolveSnapshotTtlMs(): number {
  *
  * Returns `null` when no broker URL is configured — callers should fall back to
  * the local SQLite store. Throws when a URL is configured but no token is
- * available, matching the TUI behavior.
+ * available, matching the TUI behavior. Under the test runtime it also returns
+ * `null` for every broker the test did not declare through {@link allowAuthBrokerForTests}.
  */
 export async function resolveAuthBrokerConfig(
 	options: ResolveAuthBrokerConfigOptions = {},
 ): Promise<AuthBrokerClientConfig | null> {
+	// With nothing declared, a test reads none of the developer's broker configuration:
+	// no env, no config.yml `!command`, no token file.
+	if (isBunTestRuntime() && testBrokerOrigins.size === 0) return null;
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
 
@@ -402,6 +450,10 @@ export async function resolveAuthBrokerConfig(
 		}
 	}
 	if (!url) return null;
+	if (isBunTestRuntime() && !isDeclaredTestBroker(url)) {
+		logger.debug("Auth broker ignored: a test process connects only to a broker it declared", { url });
+		return null;
+	}
 
 	const token =
 		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;

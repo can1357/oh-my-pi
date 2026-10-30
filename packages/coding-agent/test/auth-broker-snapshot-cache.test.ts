@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	type AuthBrokerServerHandle,
+	allowAuthBrokerForTests,
 	readAuthBrokerSnapshotCache,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -75,6 +76,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	test("boots from a fresh encrypted cache when the broker is down", async () => {
 		const cachePath = path.join(tempDir, "snapshot.enc");
 		const downUrl = "http://127.0.0.1:1";
+		using _broker = allowAuthBrokerForTests(downUrl);
 		process.env.OMP_AUTH_BROKER_URL = downUrl;
 		process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 		process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
@@ -109,6 +111,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 				bearerTokens: [TOKEN],
 				disableRefresher: true,
 			});
+			using _broker = allowAuthBrokerForTests(handle.url);
 			process.env.OMP_AUTH_BROKER_URL = handle.url;
 			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
@@ -150,6 +153,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		const url = server.url.toString();
 		let storage: AuthStorage | undefined;
 		try {
+			using _broker = allowAuthBrokerForTests(url);
 			process.env.OMP_AUTH_BROKER_URL = url;
 			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;

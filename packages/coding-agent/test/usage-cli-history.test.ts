@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore, type UsageHistoryEntry } from "@oh-my-pi/pi-ai";
-import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { type AuthBrokerServerHandle, allowAuthBrokerForTests, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -25,6 +25,7 @@ function snapshot(provider: string, recordedAt: number, usedFraction: number): U
 let brokerStore: SqliteAuthCredentialStore;
 let localStore: SqliteAuthCredentialStore;
 let handle: AuthBrokerServerHandle;
+let brokerDeclaration: Disposable;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -37,6 +38,7 @@ beforeEach(() => {
 		bearerTokens: ["history-bearer"],
 		disableRefresher: true,
 	});
+	brokerDeclaration = allowAuthBrokerForTests(handle.url);
 	process.env.OMP_AUTH_BROKER_URL = handle.url;
 	process.env.OMP_AUTH_BROKER_TOKEN = "history-bearer";
 	vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
@@ -46,6 +48,7 @@ beforeEach(() => {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await handle.close();
+	brokerDeclaration[Symbol.dispose]();
 	brokerStore.close();
 	for (const key of BROKER_ENV) {
 		if (savedEnv[key] === undefined) delete process.env[key];
