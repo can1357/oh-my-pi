@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { UserWaitFrame } from "../../session/agent-session-events";
+import { UNNAMED_USER_WAIT_PROMPT, type UserWaitFrame } from "../../session/agent-session-events";
+import type { BlockedKind } from "../../utils/run-status";
 import type { ExtensionUIContext } from "./types";
 
 /**
@@ -19,6 +20,35 @@ const DIALOGS: Record<string, true> = {
 	approve: true,
 };
 
+/** The label a dialog that named nothing of its own is published under. */
+function genericDialogLabel(method: string): string {
+	return `an extension ${method} dialog`;
+}
+
+/**
+ * Every prompt that stands in for a dialog which named nothing: the wrapper's method name, and the
+ * session's own placeholder for a caller that passed no prompt. A surface holding a better name for
+ * what waits — the approval record a tool call still being asked about carries — reports that
+ * instead; any other prompt is the dialog's own words and outranks it.
+ */
+export const UNNAMED_DIALOG_PROMPTS: ReadonlySet<string> = new Set([
+	UNNAMED_USER_WAIT_PROMPT,
+	...Object.keys(DIALOGS).map(genericDialogLabel),
+]);
+
+/**
+ * The classification the caller declared on the dialog's options
+ * ({@link ExtensionUIDialogOptions.waitKind}), which outranks what the method name implies: an
+ * approval a host without an approval dialog answers through `select` is still a permission.
+ */
+function declaredKind(args: readonly unknown[]): BlockedKind | undefined {
+	for (const arg of args) {
+		if (!isRecord(arg)) continue;
+		if (arg.waitKind === "permission" || arg.waitKind === "question") return arg.waitKind;
+	}
+	return undefined;
+}
+
 type Method = (...args: unknown[]) => unknown;
 
 /**
@@ -28,12 +58,15 @@ type Method = (...args: unknown[]) => unknown;
  * the per-call approval record a live `tool_execution_start` builds is gone by then.
  *
  * `approve` is the tool-approval dialog, so it is a permission wait carrying the prompt's own
- * compact rendering (the one built for constrained surfaces). The rest ask a question: `askDialog`
- * carries its questions, and the dialogs whose first argument is their title carry that. A dialog
- * that fits none of these (a custom component) keeps the generic label.
+ * compact rendering (the one built for constrained surfaces). The rest ask a question unless the
+ * call declares otherwise through {@link declaredKind} — an approval a host without an approval
+ * dialog raises as a `select` is one such: `askDialog` carries its questions, and the dialogs whose
+ * first argument is their title carry that. A dialog that fits none of these (a custom component)
+ * keeps the generic label.
  */
 function describeDialog(method: string, args: readonly unknown[]): UserWaitFrame {
-	const generic = `an extension ${method} dialog`;
+	const generic = genericDialogLabel(method);
+	const declared = declaredKind(args);
 	if (method === "approve") {
 		const prompt = args[0];
 		const compact = isRecord(prompt) ? prompt.compact : undefined;
@@ -47,10 +80,13 @@ function describeDialog(method: string, args: readonly unknown[]): UserWaitFrame
 			.map(question => (isRecord(question) && typeof question.question === "string" ? question.question : ""))
 			.filter(question => question.length > 0)
 			.join(" ");
-		return { prompt: asked.length > 0 ? asked : generic, kind: "question" };
+		return { prompt: asked.length > 0 ? asked : generic, kind: declared ?? "question" };
 	}
 	const title = args[0];
-	return { prompt: typeof title === "string" && title.length > 0 ? title : generic, kind: "question" };
+	return {
+		prompt: typeof title === "string" && title.length > 0 ? title : generic,
+		kind: declared ?? "question",
+	};
 }
 
 /**

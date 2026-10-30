@@ -216,4 +216,20 @@ describe("trackUserWaits", () => {
 			{ prompt: "an extension custom dialog", kind: "question" },
 		]);
 	});
+
+	it("takes the classification the call declares over the one its method implies", async () => {
+		// A host without an approval dialog raises an approval as a `select`
+		// (RPC, ACP, extension hosts). The call knows it asks to approve an
+		// operation and says so, so the wait it opens is a permission one.
+		const frames: UserWaitFrame[] = [];
+		const context = { select: async () => "Approve" };
+		const ui = trackUserWaits(context as unknown as ExtensionUIContext, (dialog, frame) => {
+			frames.push(frame);
+			return dialog();
+		});
+
+		await ui.select("Allow tool: deploy", ["Approve", "Deny"], { waitKind: "permission" });
+
+		expect(frames).toEqual([{ prompt: "Allow tool: deploy", kind: "permission" }]);
+	});
 });

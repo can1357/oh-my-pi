@@ -874,7 +874,12 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	// The select is this host's approval dialog, so the wait it opens is a permission one; its
+	// method alone would classify it as a question on every surface reporting run state.
+	return approvalAnswerForChoice(
+		choices,
+		await ui.select(full, approvalChoiceLabels(choices), { waitKind: "permission" }),
+	);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

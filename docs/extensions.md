@@ -924,6 +924,13 @@ before and performs no extra syscalls.
 
 `ctx.ui` implements the `ExtensionUIContext` interface. Support differs by mode.
 
+Every dialog that waits for an answer opens a run-state wait the session publishes
+(`user_wait_start`/`user_wait_end`), named by what the call asks. A dialog whose method does not say
+how to classify it — a `select` a host raises in place of an approval dialog, for one — declares it
+with `ExtensionUIDialogOptions.waitKind` (`"permission"` or `"question"`); without it the dialog
+reads as a question, and `approve` always reads as a permission. A dialog given a `timeout` opens no
+wait: it settles on its own, so its time stays the agent's.
+
 ### Interactive mode (`extension-ui-controller.ts`)
 
 Supported:
