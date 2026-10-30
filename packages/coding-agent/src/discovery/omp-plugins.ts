@@ -321,7 +321,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 		for (const [serverName, rawCfg] of Object.entries(servers)) {
 			if (!rawCfg || typeof rawCfg !== "object" || Array.isArray(rawCfg)) continue;
-			const { server: serverCfg, unresolvedEnv } = expandMCPServerEnv(rawCfg, pluginEnv);
+			const { server: serverCfg, unresolvedEnv } = expandMCPServerEnv(rawCfg, { extraEnv: pluginEnv });
 			const cfg = serverCfg as RawMcpServer;
 			if (typeof cfg.command !== "string" && typeof cfg.url !== "string") {
 				warnings.push(`[omp-plugins] Skipping MCP server "${serverName}" in ${mcpPath}: missing command or url`);

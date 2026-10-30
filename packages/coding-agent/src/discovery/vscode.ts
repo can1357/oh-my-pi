@@ -81,8 +81,8 @@ async function loadMCPConfig(
 
 		const raw = config as Record<string, unknown>;
 
-		// Expand environment variables
-		const { server: expanded, unresolvedEnv } = expandMCPServerEnv(raw);
+		// Expand environment variables; VS Code predefined variables stay literal.
+		const { server: expanded, unresolvedEnv } = expandMCPServerEnv(raw, { vscodePredefinedVariables: true });
 
 		const server: MCPServer = {
 			name,

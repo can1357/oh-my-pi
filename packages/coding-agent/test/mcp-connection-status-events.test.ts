@@ -11,6 +11,7 @@ import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/
 import "@oh-my-pi/pi-coding-agent/discovery";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
+const ARGV_ECHO_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "argv-echo-mcp.ts");
 const BUN_EXEC = process.execPath;
 
 describe("MCPManager connection status events", () => {
@@ -103,6 +104,7 @@ describe("MCPManager startup with unset env placeholders", () => {
 	// Names no environment defines, so no test mutates them.
 	const UNSET = "OMP_MCP_STATUS_TEST_UNSET_5B21E4";
 	const OWN_KEY = "OMP_MCP_STATUS_TEST_OWN_KEY_5B21E4";
+	const CMD_KEY = "OMP_MCP_STATUS_TEST_CMD_KEY_5B21E4";
 	const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 	let homeDir: string;
@@ -136,6 +138,7 @@ describe("MCPManager startup with unset env placeholders", () => {
 	it("fails the server naming the variable and field while a sibling from the same file connects", async () => {
 		expect(Bun.env[UNSET]).toBeUndefined();
 		expect(Bun.env[OWN_KEY]).toBeUndefined();
+		expect(Bun.env[CMD_KEY]).toBeUndefined();
 		fs.writeFileSync(
 			path.join(projectDir, ".mcp.json"),
 			JSON.stringify({
@@ -147,12 +150,14 @@ describe("MCPManager startup with unset env placeholders", () => {
 						url: "http://127.0.0.1:9/mcp",
 						headers: { Authorization: `Bearer \${${UNSET}}` },
 					},
-					// Its own env block defines OWN_KEY for the spawned process.
+					// Its own env block defines OWN_KEY and the command-backed
+					// CMD_KEY; the child is spawned without a shell, so both must be
+					// substituted into argv (CMD_KEY only once its command has run).
 					sibling: {
 						type: "stdio",
 						command: BUN_EXEC,
-						args: [FIXTURE_PATH, `--key=\${${OWN_KEY}}`],
-						env: { [OWN_KEY]: "secret" },
+						args: [ARGV_ECHO_FIXTURE_PATH, `--key=\${${OWN_KEY}}`, `--cmd=\${${CMD_KEY}}`],
+						env: { [OWN_KEY]: "secret", [CMD_KEY]: "!echo cmd-secret" },
 					},
 				},
 			}),
@@ -183,6 +188,10 @@ describe("MCPManager startup with unset env placeholders", () => {
 				error: message,
 			});
 			expect(events).toContainEqual({ type: "connected", serverName: "sibling" });
+			// The fixture reports the argv it was spawned with.
+			const instructions = manager.getConnection("sibling")?.instructions;
+			expect(instructions).toBeDefined();
+			expect(JSON.parse(instructions!)).toEqual(["--key=secret", "--cmd=cmd-secret"]);
 		} finally {
 			await manager.disconnectAll();
 		}

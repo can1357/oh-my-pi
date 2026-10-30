@@ -53,7 +53,8 @@ function parseMCPServers(
 	}
 
 	for (const [name, rawConfig] of Object.entries(parsed.mcpServers)) {
-		const { server: config, unresolvedEnv } = expandMCPServerEnv(rawConfig);
+		// Cursor configs use VS Code predefined variables; they stay literal.
+		const { server: config, unresolvedEnv } = expandMCPServerEnv(rawConfig, { vscodePredefinedVariables: true });
 		const serverConfig = config as Record<string, unknown>;
 		items.push({
 			name,

@@ -164,10 +164,10 @@ describe("standalone mcp.json unresolved env placeholders", () => {
 		expect(servers.get("sibling")?.unresolvedEnv).toBeUndefined();
 	});
 
-	test("treats a variable from the server's own env block as resolved in args", async () => {
+	test("substitutes a variable from the server's own env block into command and args", async () => {
 		const servers = await load({
 			ownEnv: {
-				command: "sh",
+				command: envPlaceholder(OWN_KEY),
 				args: ["-c", `run --key ${envPlaceholder(OWN_KEY)}`],
 				env: { [OWN_KEY]: "secret" },
 			},
@@ -178,9 +178,40 @@ describe("standalone mcp.json unresolved env placeholders", () => {
 		});
 
 		expect(servers.get("ownEnv")?.unresolvedEnv).toBeUndefined();
-		// The spawned shell expands it from env, so the literal must survive.
-		expect(servers.get("ownEnv")?.args).toEqual(["-c", `run --key ${envPlaceholder(OWN_KEY)}`]);
+		// Stdio servers spawn without a shell, so a literal would reach the child verbatim.
+		expect(servers.get("ownEnv")?.command).toBe("secret");
+		expect(servers.get("ownEnv")?.args).toEqual(["-c", "run --key secret"]);
 		expect(servers.get("noEnv")?.unresolvedEnv).toEqual([{ variable: OWN_KEY, field: "args[1]" }]);
+	});
+
+	test("prefers the process environment over the server's own env block in args", async () => {
+		const processPath = Bun.env.PATH ?? "";
+		expect(processPath).not.toBe("");
+		const servers = await load({
+			local: { command: "sh", args: [envPlaceholder("PATH")], env: { PATH: "/own/bin" } },
+		});
+
+		expect(servers.get("local")?.args).toEqual([processPath]);
+		expect(servers.get("local")?.env).toEqual({ PATH: "/own/bin" });
+	});
+
+	test("resolves own-env values in args as the child receives them", async () => {
+		const processPath = Bun.env.PATH ?? "";
+		expect(processPath).not.toBe("");
+		const servers = await load({
+			// A bare env-var name is looked up at connect time, as the child's env does.
+			envName: { command: "sh", args: [`--path=${envPlaceholder(OWN_KEY)}`], env: { [OWN_KEY]: "PATH" } },
+			// An empty value is dropped from the child's env, so it counts as unset.
+			empty: { command: "sh", args: [envPlaceholder(OWN_KEY)], env: { [OWN_KEY]: "" } },
+			// A `!command` value only exists once run at connect time: left for the manager, not flagged.
+			command: { command: "sh", args: [envPlaceholder(OWN_KEY)], env: { [OWN_KEY]: "!echo later" } },
+		});
+
+		expect(servers.get("envName")?.args).toEqual([`--path=${processPath}`]);
+		expect(servers.get("envName")?.unresolvedEnv).toBeUndefined();
+		expect(servers.get("empty")?.unresolvedEnv).toEqual([{ variable: OWN_KEY, field: "args[0]" }]);
+		expect(servers.get("command")?.args).toEqual([envPlaceholder(OWN_KEY)]);
+		expect(servers.get("command")?.unresolvedEnv).toBeUndefined();
 	});
 
 	test("uses the default of an unset placeholder with :- without flagging it", async () => {
@@ -200,17 +231,18 @@ describe("standalone mcp.json unresolved env placeholders", () => {
 		expect(remote?.unresolvedEnv).toEqual([{ variable: UNSET, field: "headers.Authorization" }]);
 	});
 
-	test("keeps an unset VS Code predefined variable literal without flagging it", async () => {
+	test("flags an unset VS Code predefined variable outside VS Code/Cursor configs", async () => {
 		expect(Bun.env.workspaceFolder).toBeUndefined();
 		const servers = await load({
-			local: {
-				command: "node",
-				args: [`${envPlaceholder("workspaceFolder")}/server.js`, envPlaceholder(UNSET)],
+			remote: {
+				type: "http",
+				url: "https://remote.example/mcp",
+				headers: { Authorization: `Bearer ${envPlaceholder("workspaceFolder")}` },
 			},
 		});
 
-		const local = servers.get("local");
-		expect(local?.args).toEqual([`${envPlaceholder("workspaceFolder")}/server.js`, envPlaceholder(UNSET)]);
-		expect(local?.unresolvedEnv).toEqual([{ variable: UNSET, field: "args[1]" }]);
+		expect(servers.get("remote")?.unresolvedEnv).toEqual([
+			{ variable: "workspaceFolder", field: "headers.Authorization" },
+		]);
 	});
 });
