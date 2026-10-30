@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
@@ -632,6 +633,56 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await authStorage.keys.get(PROVIDER, "cyber-policy")).not.toBe(first);
 	});
+
+	test.each([
+		{ usageLimit: false, waitForSibling: undefined },
+		{ usageLimit: false, waitForSibling: false },
+		{ usageLimit: true, waitForSibling: undefined },
+		{ usageLimit: true, waitForSibling: false },
+	])(
+		"records blocks with usageLimit=$usageLimit and waitForSibling=$waitForSibling",
+		async ({ usageLimit, waitForSibling }) => {
+			if (!authStorage) throw new Error("test setup failed");
+			registerProvider();
+			const now = Date.now();
+			vi.spyOn(Date, "now").mockReturnValue(now);
+			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			await authStorage.credentials.set(PROVIDER, [
+				{ type: "oauth", access: "blocked-A", refresh: "ref-A", expires: farExpiry() },
+				{ type: "oauth", access: "denied-B", refresh: "ref-B", expires: farExpiry() },
+			]);
+			const rows = authStorage.credentials.list(PROVIDER);
+			authStorage.blocks.upsert({
+				credentialId: rows[0]!.id,
+				providerKey: `${PROVIDER}:oauth`,
+				blockScope: "account-policy",
+				blockedUntilMs: now + 2_000,
+			});
+			const sessionId = "optional-sibling-wait";
+			const key = await authStorage.keys.get(PROVIDER, sessionId);
+			expect(key).toBe("denied-B");
+			const rotation = await authStorage.limits.rotate(PROVIDER, sessionId, {
+				error: usageLimit
+					? usageLimitError()
+					: "This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+				waitForSibling,
+			});
+			if (waitForSibling === false) {
+				expect(waitSpy).not.toHaveBeenCalled();
+				expect(rotation).toEqual({ switched: false });
+			} else {
+				expect(waitSpy).toHaveBeenCalledTimes(1);
+				expect(rotation).toEqual({ switched: true, afterSiblingWait: true });
+			}
+			expect(authStorage.blocks.list([rows[1]!.id])).toContainEqual(
+				expect.objectContaining({
+					credentialId: rows[1]!.id,
+					blockScope: usageLimit ? "" : "account-policy",
+					blockedUntilMs: expect.any(Number),
+				}),
+			);
+		},
+	);
 
 	test("Codex ChatGPT model denial blocks only that model and rotates to a sibling", async () => {
 		if (!store) throw new Error("test setup failed");
