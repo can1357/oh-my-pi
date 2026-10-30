@@ -59,6 +59,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
+import { raceWithSignal } from "../utils/abort";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
@@ -1821,11 +1822,10 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
-	// Opening the socket is this transport's first traffic, and the chokepoint
-	// hold ran before the attestation header and the header build above
-	// awaited. Each websocket retry re-enters this function, so every connect
-	// attempt — and every reconnect after a transport failure — holds here.
-	await holdBeforeDispatch(options?.beforeDispatch, requestSetup.requestSignal);
+	// Opening a socket is this transport's first traffic: each socket
+	// `getOrCreateCodexWebSocketConnection` opens passes the hold immediately
+	// before it, here and after a discarded steer. Reusing an open socket sends
+	// nothing yet, and `response.create` holds again before its own send.
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1833,6 +1833,7 @@ async function openCodexWebSocketTransport(
 		websocketHeaders,
 		model.provider,
 		requestSetup.requestSignal,
+		options?.beforeDispatch,
 	);
 	const timeouts: CodexWebSocketRequestTimeouts = {
 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
@@ -1847,6 +1848,8 @@ async function openCodexWebSocketTransport(
 			chainedBody.previous_response_id ? chainedBody.input : undefined,
 			liveSteers.flatMap(steer => steer.items),
 		);
+		// The server already started the successor from steering it accepted;
+		// reading it puts nothing on the wire, so it passes no hold.
 		if (plan.kind === "attach") {
 			recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
 			requestContext.rawRequestDump.body = chainedBody;
@@ -1878,6 +1881,7 @@ async function openCodexWebSocketTransport(
 				websocketHeaders,
 				model.provider,
 				requestSetup.requestSignal,
+				options?.beforeDispatch,
 			);
 		}
 	}
@@ -2483,8 +2487,13 @@ class CodexStreamProcessor {
 			return;
 		}
 		this.#steerConnection = connection;
-		this.#steerPump = new CodexSteerPump(source, connection, messages =>
-			toSteerInputItems(convertMessages(this.model, { messages: [...messages] })),
+		// Each steer is new input that can start a successor response, so it
+		// passes this request's hold; an attach to that successor sends nothing.
+		this.#steerPump = new CodexSteerPump(
+			source,
+			connection,
+			messages => toSteerInputItems(convertMessages(this.model, { messages: [...messages] })),
+			{ hold: this.options?.beforeDispatch, signal: this.requestSetup.requestSignal },
 		);
 		this.#steerPump.start(responseId);
 	}
@@ -3389,6 +3398,7 @@ export async function prewarmOpenAICodexResponses(
 		| "headers"
 		| "sessionId"
 		| "signal"
+		| "beforeDispatch"
 		| "preferWebsockets"
 		| "providerSessionState"
 		| "responsesLite"
@@ -3446,6 +3456,7 @@ export async function prewarmOpenAICodexResponses(
 		headers,
 		model.provider,
 		options?.signal,
+		options?.beforeDispatch,
 	);
 	state.prewarmed = true;
 }
@@ -3949,12 +3960,20 @@ class CodexWebSocketConnection {
 		}
 	}
 
+	/**
+	 * Open the socket, or join the handshake another caller already started.
+	 * `signal` ends only this caller's part: a cancelled caller opens nothing,
+	 * and one that joined leaves the shared handshake running for its owner.
+	 */
 	async connect(signal?: AbortSignal): Promise<void> {
 		if (this.isOpen()) return;
 		if (this.#connectPromise) {
 			logger.time("codexWs:awaitSharedHandshake");
-			await this.#connectPromise;
+			await raceWithSignal(this.#connectPromise, signal);
 			return;
+		}
+		if (signal?.aborted) {
+			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
@@ -3981,23 +4000,15 @@ class CodexWebSocketConnection {
 			}
 			this.close("aborted");
 		};
-		if (signal) {
-			if (signal.aborted) {
-				onAbort();
-			} else {
-				signal.addEventListener("abort", onAbort, { once: true });
+		signal?.addEventListener("abort", onAbort, { once: true });
+		timeout = setTimeout(() => {
+			this.close("connect-timeout");
+			if (!settled) {
+				settled = true;
+				clearPending();
+				reject(new CodexWebSocketTransportError(`connection timeout`));
 			}
-		}
-		if (!settled) {
-			timeout = setTimeout(() => {
-				this.close("connect-timeout");
-				if (!settled) {
-					settled = true;
-					clearPending();
-					reject(new CodexWebSocketTransportError(`connection timeout`));
-				}
-			}, CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS);
-		}
+		}, CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS);
 
 		socket.onopen = event => {
 			if (!settled) {
@@ -4299,7 +4310,9 @@ class CodexWebSocketConnection {
 
 	/**
 	 * Submit `response.steer` for `previousResponseId`, which must be streaming
-	 * on this socket. Resolves on the server's acknowledgement.
+	 * on this socket. Resolves on the server's acknowledgement. The frame goes
+	 * out at once: a steer is new input, unlike an attach, so its
+	 * {@link CodexSteerPump} has already passed the request's dispatch hold.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
 		const socket = this.#socket;
@@ -4568,6 +4581,12 @@ class CodexWebSocketConnection {
 	}
 }
 
+/**
+ * The session's open socket, or a fresh one. Opening a socket is traffic of
+ * its own, so each one opened here passes `hold`, the caller's dispatch hold,
+ * as the last await before its handshake. Joining a handshake another caller
+ * started, or reusing an open socket, opens nothing and is not held.
+ */
 async function getOrCreateCodexWebSocketConnection(
 	state: CodexWebSocketSessionState,
 	turnState: CodexTurnStateCell,
@@ -4575,54 +4594,67 @@ async function getOrCreateCodexWebSocketConnection(
 	headers: Headers,
 	provider: string,
 	signal?: AbortSignal,
+	hold?: DispatchHold,
 ): Promise<CodexWebSocketConnection> {
 	const proxy = getProxyForUrl(provider, new URL(url));
 	const headerRecord = headersToRecord(headers);
-	// Join an in-flight handshake instead of tearing it down: closing a
-	// CONNECTING socket rejects the concurrent caller (prewarm racing the first
-	// request) with a fatal "websocket closed before open", which would disable
-	// websockets for the entire session.
-	// Bounded re-join: a fresh handshake may have been started by yet another
-	// caller while we awaited the previous one.
-	for (let joinAttempt = 0; joinAttempt < 3; joinAttempt += 1) {
-		const pending = state.connection;
-		if (!pending || pending.isOpen() || !pending.isConnecting()) break;
-		try {
-			await pending.connect(signal);
-		} catch {
-			// The handshake owner surfaces its own failure; re-evaluate below
-			// (state.connection may have been replaced or cleared).
+	for (let round = 0; ; round += 1) {
+		// Join an in-flight handshake instead of tearing it down: closing a
+		// CONNECTING socket rejects the concurrent caller (prewarm racing the first
+		// request) with a fatal "websocket closed before open", which would disable
+		// websockets for the entire session.
+		// Bounded re-join: a fresh handshake may have been started by yet another
+		// caller while we awaited the previous one.
+		for (let joinAttempt = 0; joinAttempt < 3 && !signal?.aborted; joinAttempt += 1) {
+			const pending = state.connection;
+			if (!pending || pending.isOpen() || !pending.isConnecting()) break;
+			try {
+				await pending.connect(signal);
+			} catch {
+				// The handshake owner surfaces its own failure; re-evaluate below
+				// (state.connection may have been replaced or cleared).
+			}
 		}
-	}
-	if (state.connection?.isOpen()) {
-		if (!state.connection.matchesAuth(headerRecord)) {
-			state.connection.close("token-refresh");
-			resetCodexWebSocketAppendState(state);
-		} else if (state.connection.isHealthyForReuse()) {
-			logger.time("codexWs:reuseOpenSocket");
-			return state.connection;
-		} else {
-			// Open in readyState but no inbound traffic recently — likely server-
-			// evicted (issue #1450). Force a fresh handshake instead of writing
-			// `response.create` into a half-open buffer and waiting out the
-			// first-event timeout. Drop append state because the new socket
-			// won't carry the prior `previous_response_id` context.
-			CODEX_DEBUG && logger.debug("[codex] codex websocket reuse rejected by health check", {});
-			state.connection.close("stale-reuse");
-			resetCodexWebSocketAppendState(state);
+		// Cancelled while it waited on another caller's handshake: this caller
+		// fails here rather than open a socket of its own once that one is over.
+		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Request aborted before connect");
+		if (state.connection?.isOpen()) {
+			if (!state.connection.matchesAuth(headerRecord)) {
+				state.connection.close("token-refresh");
+				resetCodexWebSocketAppendState(state);
+			} else if (state.connection.isHealthyForReuse()) {
+				logger.time("codexWs:reuseOpenSocket");
+				return state.connection;
+			} else {
+				// Open in readyState but no inbound traffic recently — likely server-
+				// evicted (issue #1450). Force a fresh handshake instead of writing
+				// `response.create` into a half-open buffer and waiting out the
+				// first-event timeout. Drop append state because the new socket
+				// won't carry the prior `previous_response_id` context.
+				CODEX_DEBUG && logger.debug("[codex] codex websocket reuse rejected by health check", {});
+				state.connection.close("stale-reuse");
+				resetCodexWebSocketAppendState(state);
+			}
 		}
+		// After every wait above, so a pause or a cancellation that landed while
+		// this caller waited on someone else's handshake still stops this one.
+		await holdBeforeDispatch(hold, signal);
+		// Another caller may have opened or started a socket during the hold;
+		// join or reuse it rather than tear it down.
+		const current = state.connection;
+		if (round < 2 && (current?.isOpen() || current?.isConnecting())) continue;
+		state.connection?.close("reconnect");
+		resetCodexWebSocketAppendState(state);
+		logger.time("codexWs:newSocket");
+		state.connection = new CodexWebSocketConnection(url, headerRecord, {
+			onHandshakeHeaders: handshakeHeaders => {
+				updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
+			},
+			proxy,
+		});
+		await state.connection.connect(signal);
+		return state.connection;
 	}
-	state.connection?.close("reconnect");
-	resetCodexWebSocketAppendState(state);
-	logger.time("codexWs:newSocket");
-	state.connection = new CodexWebSocketConnection(url, headerRecord, {
-		onHandshakeHeaders: handshakeHeaders => {
-			updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
-		},
-		proxy,
-	});
-	await state.connection.connect(signal);
-	return state.connection;
 }
 
 async function openCodexSseEventStream(

@@ -9,23 +9,43 @@
  * {@link planSteeredRequest} maps the caller's next request onto whichever of
  * the two the server will do.
  *
+ * Steering is new input, so each submission passes the request's dispatch hold
+ * (`StreamOptions.beforeDispatch`) like a request does: a steer the server
+ * accepts can start a successor response on its own. Reading a successor the
+ * server already started sends nothing and is not held.
+ *
  * @example
  * ```ts ignore
- * const pump = new CodexSteerPump(options.liveSteering, connection, toSteerInput);
+ * const pump = new CodexSteerPump(options.liveSteering, connection, toSteerInput, {
+ * 	hold: options.beforeDispatch,
+ * 	signal: requestSignal,
+ * });
  * pump.start(responseId); // on `response.created`
  * const { accepted } = await pump.finish(); // after the terminal event
  * ```
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { LiveSteering, UserMessage } from "../../types";
+import type { DispatchHold, LiveSteering, UserMessage } from "../../types";
+import { holdBeforeDispatch } from "../../utils/dispatch-hold";
 import type { InputItem } from "./request-transformer";
+
+/** The request a pump steers on behalf of, as its submissions see it. */
+export interface CodexSteerDispatch {
+	/** The request's `StreamOptions.beforeDispatch`, awaited before each submission. */
+	hold?: DispatchHold;
+	/** The request's signal: cancelling it stops the pump, a held submission included. */
+	signal?: AbortSignal;
+}
 
 /** Server acknowledgement of one `response.steer` submission. */
 export type CodexSteerAck = { accepted: true; id: string } | { accepted: false; code?: string; message?: string };
 
 /** Socket surface the pump submits through. */
 export interface CodexSteerSocket {
-	/** Sends `response.steer`; resolves on the matching acknowledgement, rejects when the socket closes first. */
+	/**
+	 * Sends `response.steer` at once; resolves on the matching acknowledgement,
+	 * rejects when the socket closes first. The pump holds before calling it.
+	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck>;
 }
 
@@ -61,6 +81,7 @@ export class CodexSteerPump {
 	readonly #socket: CodexSteerSocket;
 	readonly #toInput: (messages: readonly UserMessage[]) => InputItem[] | undefined;
 	readonly #stop = new AbortController();
+	readonly #dispatch: CodexSteerDispatch;
 	readonly #accepted: CodexAcceptedSteer[] = [];
 	#responseId: string | undefined;
 	#run: Promise<void> | undefined;
@@ -70,10 +91,12 @@ export class CodexSteerPump {
 		source: LiveSteering,
 		socket: CodexSteerSocket,
 		toInput: (messages: readonly UserMessage[]) => InputItem[] | undefined,
+		dispatch: CodexSteerDispatch = {},
 	) {
 		this.#source = source;
 		this.#socket = socket;
 		this.#toInput = toInput;
+		this.#dispatch = dispatch;
 	}
 
 	/** The response this pump steers, once started. */
@@ -96,11 +119,16 @@ export class CodexSteerPump {
 	}
 
 	async #loop(responseId: string): Promise<void> {
-		const signal = this.#stop.signal;
+		const requestSignal = this.#dispatch.signal;
+		const signal = requestSignal ? AbortSignal.any([this.#stop.signal, requestSignal]) : this.#stop.signal;
 		try {
 			while (!signal.aborted) {
 				await this.#source.wait(signal);
 				if (signal.aborted) return;
+				// Held before the claim, the input stays queued with the caller for
+				// as long as a pause lasts; a response that ends meanwhile leaves it
+				// there for the caller's next request.
+				if (!(await this.#passHold(responseId, signal))) return;
 				const claimedAt = performance.now();
 				const claim = await this.#source.claim(signal);
 				if (!claim) {
@@ -111,6 +139,13 @@ export class CodexSteerPump {
 				// delivers it with its next request instead.
 				const input = signal.aborted ? undefined : this.#toInput(claim.messages);
 				if (!input) {
+					claim.reject();
+					return;
+				}
+				const preparedAt = performance.now();
+				// The claim awaited the caller's own preparation, which a pause can
+				// outlast; this hold is the last await before the frame goes out.
+				if (!(await this.#passHold(responseId, signal))) {
 					claim.reject();
 					return;
 				}
@@ -139,7 +174,7 @@ export class CodexSteerPump {
 				logger.debug("Codex steering accepted", {
 					responseId,
 					steerId: ack.id,
-					prepareMs: Math.round(sentAt - claimedAt),
+					prepareMs: Math.round(preparedAt - claimedAt),
 					ackMs: Math.round(performance.now() - sentAt),
 				});
 			}
@@ -148,6 +183,26 @@ export class CodexSteerPump {
 				responseId,
 				error: error instanceof Error ? error.message : String(error),
 			});
+		}
+	}
+
+	/**
+	 * Await the request's dispatch hold. False when the pump stops instead:
+	 * the response ended or the request was cancelled while held, or the hold
+	 * failed, which fails the submission like any other dispatch error.
+	 */
+	async #passHold(responseId: string, signal: AbortSignal): Promise<boolean> {
+		try {
+			await holdBeforeDispatch(this.#dispatch.hold, signal);
+			return true;
+		} catch (error) {
+			if (!signal.aborted) {
+				logger.debug("Codex steering hold failed", {
+					responseId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return false;
 		}
 	}
 }
