@@ -1178,13 +1178,19 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
  * carries on afterwards diverges from it by design — a child renames itself,
  * a tool rewrites its output — so comparing content here reads ordinary
  * living as an interrupted restore and refuses to open a complete session.
- * The only thing a restore would have left undone is an archived path with
- * no live counterpart at all, which is what this looks for.
+ *
+ * But a path existing is not the same as a copy being there. A restore
+ * publishes a file or nothing, so a counterpart of a different kind — a
+ * directory where the archive holds a file — or an empty one where the
+ * archive holds bytes is a restore that refused, not a session that moved
+ * on. Accepting those made a resume that correctly refused once succeed
+ * silently the second time and open a session with an artifact it never
+ * carried home, which is worse than either refusing twice or finishing.
  *
  * Asking before taking any lease is what keeps an ordinary open — a resume,
- * a fork, a render — from needing ownership it has no reason to want. Reading
- * only directory entries is also what keeps it from reading the whole tree
- * on every open of a session with a large retained archive.
+ * a fork, a render — from needing ownership it has no reason to want.
+ * Reading directory entries rather than file contents is what keeps the cost
+ * proportional to how many paths a session has rather than how many bytes.
  */
 async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
@@ -1193,8 +1199,11 @@ async function liveSessionIsComplete(sessionFile: string, archiveFile: string): 
 	try {
 		for (const file of await treeFiles(archiveArtifacts)) {
 			if (SESSION_STAGING_RE.test(path.basename(file))) continue;
-			const live = path.join(liveArtifacts, path.relative(archiveArtifacts, file));
-			if (!(await statIfPresent(live))) return false;
+			const archived = await statIfPresent(file);
+			if (!archived?.isFile()) continue;
+			const live = await statIfPresent(path.join(liveArtifacts, path.relative(archiveArtifacts, file)));
+			if (!live?.isFile()) return false;
+			if (archived.size > 0 && live.size === 0) return false;
 		}
 		return true;
 	} catch {

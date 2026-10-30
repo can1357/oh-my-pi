@@ -1221,11 +1221,15 @@ async function publishArtifactIntoArchive(
 	// number back out to a replacement, and a stat that then matches is
 	// matching a different file. While it is open the inode cannot be reused.
 	//
-	// The window the exclusive create cannot cover — a replacement between it
-	// and the open — is closed by reading the descriptor rather than trusting
-	// it. The read is of the whole file, not a prefix of it: containment
-	// alone accepts a stage truncated before it was opened, and publishing
-	// that writes an empty artifact into the archive and calls it archived.
+	// What the identity cannot see is the file being emptied in place, which
+	// keeps the inode and so passes every name and inode test there is. So
+	// the stage is proved by what it holds, and proved at the moment it is
+	// published rather than once at the start: a size measured earlier is a
+	// claim about a file that has since been read again, and containment
+	// alone is no help, because a stage truncated to nothing reads as the
+	// empty prefix of everything. Hence all three together — the size from a
+	// fresh stat of the descriptor, the bytes, and a second stat proving the
+	// descriptor did not change underneath the read.
 	//
 	// Everything from the staging write on is inside the cleanup, so a copy
 	// that fails part-way or a descriptor that cannot be opened leaves no
@@ -1235,27 +1239,28 @@ async function publishArtifactIntoArchive(
 		await fs.rm(tempPath, { force: true });
 		await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
 		stagedHandle = await fs.open(tempPath, "r");
-		const staged = await stagedHandle.stat();
+		const held = stagedHandle;
+		const staged = await held.stat();
 		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
-		// Equal to the source, not merely contained in it: containment alone
-		// accepts a stage truncated before it was opened, and publishing that
-		// writes an empty artifact into the archive and calls it archived.
-		// Measured against the source as it stands, because a live file that
-		// changed since this run stat'd it is the live file changing, not the
-		// stage being replaced.
-		const sourceNow = await fs.stat(source).catch(() => undefined);
-		if (staged.size !== sourceNow?.size) throw new Error(stagedChanged);
-		if (!(await archivedHandleIsHeldBy(stagedHandle, staged, source))) throw new Error(stagedChanged);
-		const stagedIsOurs = async (): Promise<boolean> => {
+		const stagedIsSource = async (): Promise<boolean> => {
+			const before = await held.stat();
+			// Measured against the source as it stands, because a live file
+			// that changed since this run stat'd it is the live file
+			// changing, not the stage being replaced.
+			const live = await fs.stat(source).catch(() => undefined);
+			if (!live || before.size !== live.size) return false;
+			if (!(await archivedHandleIsHeldBy(held, before, source))) return false;
+			const after = await held.stat();
+			if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
 			const standing = await fs.lstat(tempPath).catch(() => undefined);
-			return standing?.dev === staged.dev && standing.ino === staged.ino;
+			return standing?.dev === before.dev && standing.ino === before.ino;
 		};
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
 		});
 		if (!archived) {
-			if (!(await stagedIsOurs())) throw new Error(stagedChanged);
+			if (!(await stagedIsSource())) throw new Error(stagedChanged);
 			await fs.link(tempPath, destination);
 			state.created.push({ path: destination, dev: staged.dev, ino: staged.ino });
 			return;
@@ -1287,7 +1292,7 @@ async function publishArtifactIntoArchive(
 			// the live side — what a restore leaves behind, since it keeps its
 			// copy — means the longer replaces the shorter, which loses nothing
 			// because the shorter is inside it.
-			if (verified.size === (await fs.stat(tempPath)).size) return;
+			if (verified.size === (await stagedHandle.stat()).size) return;
 			// The content is read first, through the descriptor that was
 			// examined, and the name is settled last — so a file replaced
 			// after the content read is caught by the inode comparison rather
@@ -1301,14 +1306,17 @@ async function publishArtifactIntoArchive(
 			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
 				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
 			}
-			if (!(await stagedIsOurs())) throw new Error(stagedChanged);
+			if (!(await stagedIsSource())) throw new Error(stagedChanged);
 			await fs.rename(tempPath, destination);
 		} finally {
-			await archived.close();
+			await archived.close().catch(() => undefined);
 		}
 		return;
 	} finally {
-		await stagedHandle?.close();
+		// A close that rejects must not take the removal with it: the
+		// descriptor is this run's own, and a staging file left behind is a
+		// file the next run has to refuse.
+		await stagedHandle?.close().catch(() => undefined);
 		await fs.rm(tempPath, { force: true });
 	}
 }

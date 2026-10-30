@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2122,25 +2123,27 @@ test("an archived artifact updated in place is not written over by a superseding
 	await restoreArchivedSession(archiveFile, root);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-AND-MORE");
 
-	// The archived file is rewritten in place while the copy is deciding:
-	// same inode, same length, different content. A name or inode comparison
-	// cannot see that; reading the descriptor again can.
-	const realStat = fs.stat.bind(fs);
+	// The archived file is rewritten in place the moment this run opens it,
+	// while the copy is deciding: same inode, same length, different
+	// content. A name or inode comparison cannot see that; reading the
+	// descriptor again can.
+	const realOpen = fs.open;
 	let touched = false;
-	const stat = spyOn(fs, "stat").mockImplementation((async (target: Parameters<typeof fs.stat>[0]) => {
-		if (!touched && String(target).endsWith(".tmp") && String(target).includes("tool.log")) {
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!touched && String(target) === path.join(archivedArtifacts, "tool.log")) {
 			touched = true;
-			const handle = await fs.open(path.join(archivedArtifacts, "tool.log"), "r+");
-			await handle.write(Buffer.from("XXXXXX"), 0, 6, 0);
-			await handle.close();
+			const writer = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(String(target), "r+");
+			await writer.write(Buffer.from("XXXXXX"), 0, 6, 0);
+			await writer.close();
 		}
-		return await realStat(target);
-	}) as typeof fs.stat);
+		return handle;
+	}) as typeof fs.open);
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		stat.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -2462,4 +2465,105 @@ test("a staging failure leaves no temp behind", async () => {
 		expect(name.endsWith(".tmp")).toBe(false);
 	}
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+});
+for (const [shape, plant] of [
+	["an empty file", async (at: string) => await Bun.write(at, "")],
+	["a directory", async (at: string) => await fs.mkdir(at, { recursive: true })],
+] as const) {
+	test(`a resume that refused over ${shape} refuses again rather than opening the session without it`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
+		await archiveEverything();
+		await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+		// What the restore this resume is finishing would have left: one
+		// artifact carried home, and in the other's place something it
+		// refused to write over. A path is there either way.
+		await fs.mkdir(liveArtifacts, { recursive: true });
+		await plant(path.join(liveArtifacts, "b.log"));
+
+		const resume = async (): Promise<void> => {
+			const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			await manager.close();
+		};
+		await expect(resume()).rejects.toThrow();
+		// The second identical attempt is the one that matters: a user who
+		// retries and is told nothing believes the session came home.
+		await expect(resume()).rejects.toThrow();
+
+		expect(await Bun.file(path.join(archivedArtifacts, "b.log")).text()).toBe("SECOND");
+	});
+}
+
+/** `fs.open`, with the staging descriptor emptied after its `n`th `stat()`. */
+function truncateStagedAfterStat(n: number) {
+	const realOpen = fs.open;
+	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!String(target).endsWith(".tmp")) return handle;
+		let stats = 0;
+		const realStat = handle.stat.bind(handle);
+		handle.stat = (async (...args: unknown[]) => {
+			const result = await (realStat as (...a: unknown[]) => Promise<Stats>)(...args);
+			if (++stats === n) await fs.truncate(String(target), 0);
+			return result;
+		}) as typeof handle.stat;
+		return handle;
+	}) as typeof fs.open);
+}
+
+for (const [when, n] of [
+	["before it is measured", 1],
+	["after it is measured and before it is read", 2],
+] as const) {
+	test(`a stage emptied ${when} is not published as an archived artifact`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+		await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+
+		const open = truncateStagedAfterStat(n);
+		let result: GcResult;
+		try {
+			result = await archiveEverything();
+		} finally {
+			open.mockRestore();
+		}
+
+		// Nothing is empty here by accident: an emptied stage reads as the
+		// prefix of every file there is, so containment alone would publish
+		// it and report it archived.
+		expect(result.archive?.archived).toBe(0);
+		expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).exists()).toBe(false);
+		expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+	});
+}
+
+test("a staging close that fails still leaves no temp behind", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+
+	const realOpen = fs.open;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!String(target).endsWith(".tmp")) return handle;
+		const realClose = handle.close.bind(handle);
+		handle.close = (async () => {
+			await realClose();
+			throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		}) as typeof handle.close;
+		return handle;
+	}) as typeof fs.open);
+	try {
+		await archiveEverything();
+	} finally {
+		open.mockRestore();
+	}
+
+	for (const name of await fs.readdir(archivedArtifacts).catch(() => [])) {
+		expect(name.endsWith(".tmp")).toBe(false);
+	}
 });
