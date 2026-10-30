@@ -17,7 +17,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -178,16 +182,18 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
-	test("keeps a blob only a symlinked transcript references", async () => {
+	test("refuses to reclaim any blob while a session is reachable through a symlink", async () => {
 		const referencedHash = hashFor("referenced");
 		const orphanHash = hashFor("orphan");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
 		const orphan = await writeBlob(root, orphanHash, "orphan");
 		await agePath(referenced);
 		await agePath(orphan);
-		// A transcript kept elsewhere and linked into the sessions tree: the
-		// session storage lists one as a transcript like any other, so the
-		// blob it references is referenced.
+		// A transcript kept elsewhere and linked into the sessions tree.
+		// Reclaiming blobs means proving which files are reachable as
+		// sessions, and that proof is not available through a link, so the
+		// whole phase refuses rather than guessing — including for the
+		// orphan, which this run can no longer show is unreferenced.
 		const elsewhere = path.join(root, "elsewhere");
 		await fs.mkdir(elsewhere, { recursive: true });
 		const offloaded = await writeSession(root, "project", "linked", "complete", {
@@ -199,9 +205,121 @@ describe("runGcCommand blob sweep", () => {
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 
-		expect(result.blobs?.deleted).toBe(1);
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
 		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+	test("reads a compressed transcript by its bytes, whatever its name is", async () => {
+		const innerHash = hashFor("compressed-inner");
+		const inner = await writeBlob(root, innerHash, "inner");
+		const orphan = await writeBlob(root, hashFor("compressed-orphan"), "orphan");
+		await agePath(inner);
+		await agePath(orphan);
+		// A compressed transcript stored under a content-addressed name has
+		// no `.jsonl.gz` suffix to read. Deciding the format from the name
+		// parsed it as plain text, saw none of its references and swept the
+		// blob it owns; the first two bytes say what it is.
+		const externalDir = path.join(root, "external-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		const transcript = path.join(externalDir, hashFor("compressed-transcript"));
+		await Bun.write(
+			transcript,
+			gzipSync(`${JSON.stringify({ type: "message", ref: `blob:sha256:${innerHash}` })}\n`),
+		);
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "session-1"), transcript);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(inner).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("refuses to reclaim when it cannot read back what the kernel opened", async () => {
+		const orphan = await writeBlob(root, hashFor("unknowable-orphan"), "orphan");
+		await agePath(orphan);
+		await writeSession(root, "project", "plain", "complete");
+
+		// Without `/proc/self/fd` this run cannot say which file it holds,
+		// and a sweep that cannot say that has nothing to reclaim on.
+		const realReadlink = fs.readlink;
+		const readlink = spyOn(fs, "readlink").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (String(target).startsWith("/proc/self/fd/")) {
+				throw Object.assign(new Error("ENOSYS: injected"), { code: "ENOSYS" });
+			}
+			return await (realReadlink as (...args: unknown[]) => Promise<string>)(target, ...rest);
+		}) as typeof fs.readlink);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			readlink.mockRestore();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("could not establish how it was reached");
+		expect(await Bun.file(orphan).exists()).toBe(true);
+	});
+	for (const [order, aliasName] of [
+		["before", "a-alias.jsonl"],
+		["after", "z-alias.jsonl"],
+	] as const) {
+		test(`sees an aliased session whichever way it sorts (${order})`, async () => {
+			const referencedHash = hashFor("alias-referenced");
+			const referenced = await writeBlob(root, referencedHash, "referenced");
+			const orphan = await writeBlob(root, hashFor("alias-orphan"), "orphan");
+			await agePath(referenced);
+			await agePath(orphan);
+			const direct = await writeSession(root, "project", "m-direct", "complete", {
+				blobRef: `blob:sha256:${referencedHash}`,
+			});
+			// A second name for the same session, through the blob store.
+			// Collapsing the two names before opening them dropped one of
+			// them — and with it the check that would have refused — and
+			// which one survived depended on the sort order.
+			const hop = path.join(getBlobsDir(root), hashFor("alias-hop"));
+			await fs.symlink(direct, hop);
+			await fs.symlink(hop, path.join(path.dirname(direct), aliasName));
+			const aged = new Date(Date.now() - 86_400_000);
+			await fs.lutimes(hop, aged, aged);
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.deleted).toBe(0);
+			expect(result.blobs?.errors.join("\n")).toContain("reachable as a session through a symlink");
+			expect(await Bun.file(referenced).exists()).toBe(true);
+			expect(await Bun.file(orphan).exists()).toBe(true);
+			expect((await fs.lstat(hop)).isSymbolicLink()).toBe(true);
+		});
+	}
+	test("refuses to reclaim while a running process owns a session", async () => {
+		const orphan = await writeBlob(root, hashFor("owned-orphan"), "orphan");
+		await agePath(orphan);
+		const session = await writeSession(root, "project", "owned", "complete");
+		const header: unknown = JSON.parse((await Bun.file(session).text()).split("\n")[0] ?? "{}");
+		const sessionId =
+			header && typeof header === "object" && "id" in header && typeof header.id === "string" ? header.id : "";
+		expect(sessionId).not.toBe("");
+		// A descriptor freezes the file's identity, not its bytes: omp's own
+		// writer truncates in place to roll back a failed append and
+		// rewrites the title slot through `r+`, so an ordinary concurrent
+		// session can change what this run already read. The lease is what
+		// says somebody is writing.
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			lease?.release();
+		}
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.errors.join("\n")).toContain("owned by a running process");
+		expect(await Bun.file(orphan).exists()).toBe(true);
 	});
 	test("keeps a blob that is itself a transcript linked into the sessions tree", async () => {
 		const innerHash = hashFor("inner");
