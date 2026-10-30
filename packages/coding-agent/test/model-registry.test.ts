@@ -22,6 +22,7 @@ import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolve
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import * as resolveConfigValue from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionModelThresholds, cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -1566,6 +1567,131 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some(m => m.id === "claude-custom-2")).toBe(true);
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
+		});
+
+		test("refresh() keeps the last-good custom layer when models.json becomes malformed", async () => {
+			writeModelsJson({
+				prov: providerConfig("https://example.com/v1", [{ id: "m1" }]),
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("prov", "m1");
+			expect(model).toBeDefined();
+			expect(registry.hasConfiguredAuth(model!)).toBe(true);
+
+			// A malformed edit must surface the error but preserve the live catalog
+			// and its config-sourced API key instead of dropping them until repair.
+			await Bun.write(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("prov", "m1")).toBeDefined();
+			expect(registry.hasConfiguredAuth(registry.find("prov", "m1")!)).toBe(true);
+		});
+
+		test("refresh() keeps the last-good overrides when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				openrouter: {
+					baseUrl: "https://last-good-gateway.example.com/v1",
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": { name: "Last-Good Sonnet" },
+					},
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const before = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(before?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(before?.name).toBe("Last-Good Sonnet");
+
+			// A malformed edit must restore the provider- and model-level overrides
+			// snapshotted before the reload cleared them — not the emptied maps the
+			// late lastGood reference snapshot would capture.
+			await Bun.write(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			const after = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(after?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(after?.name).toBe("Last-Good Sonnet");
+		});
+
+		test("refresh() keeps header command invalidation working when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				"cmd-prov": {
+					baseUrl: "https://cmd.example.com/v1",
+					api: "openai-completions",
+					apiKey: "!echo key-1",
+					headers: { "X-Cmd": "!echo hdr-1" },
+					models: [{ id: "m1" }],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await Bun.write(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+			expect(registry.getError()).toBeDefined();
+
+			// A 401 force-refresh must still drop the cached header credential of the
+			// restored last-good provider; otherwise retries keep sending the stale
+			// header until the file is repaired.
+			const invalidate = spyOn(resolveConfigValue, "invalidateCommandConfig");
+			await registry.getApiKeyWithCredentialForProvider("cmd-prov", undefined, { forceRefresh: true });
+			expect(invalidate).toHaveBeenCalledWith("!echo hdr-1");
+			invalidate.mockRestore();
+		});
+
+		test("refresh() keeps the last-good discoverable provider and its discovered models when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				"custom-local": {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:8080",
+					api: "openai-responses",
+					discovery: { type: "llama.cpp" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:8080/models", ["gpt-5.4"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			// Materialize discovery results (and their models.db cache rows) while
+			// the config is still valid.
+			await registry.refreshProvider("custom-local", "online");
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+
+			// A malformed edit must restore the discoverable providers snapshotted
+			// before the reload cleared them — not the empty list the late
+			// #loadModels snapshot would capture — so the discovery-backed
+			// provider and its discovered models stay available until repair.
+			await Bun.write(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+			expect(registry.hasProvider("custom-local")).toBe(true);
+		});
+
+		test("malformed edit does not shadow a restored explicit discovery provider with its implicit twin", async () => {
+			writeRawModelsJson({
+				ollama: {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:9999/v1",
+					api: "openai-responses",
+					discovery: { type: "proxy" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:9999/v1/models", ["shadow-probe"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("ollama", "online");
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+
+			// The restored explicit ollama entry must win over the implicit one:
+			// no second implicit entry may be appended, or it would clobber the
+			// restored provider's discovery state (and point discovery at the
+			// default endpoint) until the file is repaired.
+			await Bun.write(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+			const state = registry.getProviderDiscoveryState("ollama");
+			expect(state?.status).toBe("cached");
+			expect(state?.models).toContain("shadow-probe");
 		});
 
 		test("custom gpt-5.4 replacement keeps the hardcoded context window when contextWindow is omitted", () => {

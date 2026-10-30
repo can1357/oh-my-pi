@@ -134,7 +134,7 @@ import {
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
-import { combine, type SettingsScope } from "../config/registry";
+import { all, combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
@@ -988,6 +988,7 @@ export class AgentSession implements SettingsScope {
 	#autoQaEnabled = false;
 	/** Teardowns registered via {@link addDisposer} (including settings listeners bound to this session); drained on dispose. */
 	#disposers: Array<() => void> = [];
+	readonly #unreportedSettingChanges = new Set<string>();
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
 	#idleMaintenance: IdleMaintenance | undefined;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
@@ -1948,6 +1949,9 @@ export class AgentSession implements SettingsScope {
 		);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#disposers.push(
+			this.settings.onEffectiveChange(all(), setting => this.#unreportedSettingChanges.add(setting.id)),
+		);
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
@@ -11688,6 +11692,37 @@ export class AgentSession implements SettingsScope {
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
 		return this.#models.cycleRoleModels(roleOrder, direction);
+	}
+
+	/** Setting ids applied since startup or the previous reload report. */
+	takeSettingChanges(): string[] {
+		const ids = [...this.#unreportedSettingChanges].sort();
+		this.#unreportedSettingChanges.clear();
+		return ids;
+	}
+
+	/** Reload the unwatched models.yml catalog and re-adopt the active record. */
+	async refreshModels(): Promise<void> {
+		await this.#modelRegistry.awaitBackgroundRefresh();
+		await this.#modelRegistry.refresh("online-if-uncached");
+		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
+			this.#emit({ type: "config_warnings_changed" });
+		}
+		const current = this.model;
+		const found = current && this.#modelRegistry.find(current.provider, current.id);
+		const fresh = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+		if (fresh && fresh !== current && !this.#isDisposed) {
+			this.agent.setModel(fresh);
+			await this.#reconcileModelDependentState(fresh);
+			if (!this.#isDisposed) this.#emit({ type: "model_changed" });
+		}
+		const error = this.#modelRegistry.getError();
+		if (error) throw new Error(`models.yml failed to load: ${error.message}`);
+	}
+
+	/** Re-resolve role consumers after the catalog refresh. */
+	reapplyModelRoles(): void {
+		if (!this.#isDisposed) this.#advisors.reconcileModelRoles();
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */

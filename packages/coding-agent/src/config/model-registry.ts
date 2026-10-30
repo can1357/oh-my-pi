@@ -285,6 +285,24 @@ export interface ModelRegistryRefreshOptions {
 	refreshCommandCredentials?: boolean;
 }
 
+/**
+ * Config-sourced override state captured before a static reload clears it, so
+ * a malformed models.yml (parse error) can restore the last-good layer.
+ */
+interface LastGoodConfigOverrides {
+	providerOverrides: Map<string, ProviderOverride>;
+	modelOverrides: Map<string, Map<string, ModelOverride>>;
+	keylessProviders: Set<string>;
+	discoverableProviders: DiscoveryProviderConfig[];
+	/** `!cmd` header/key configs per provider, so a 401 retry can still invalidate them after a failed parse. */
+	commandConfigsByProvider: Map<string, Set<string>>;
+}
+
+/** Deep copy of the per-provider command-config index (the value Sets are mutated in place). */
+function cloneCommandConfigs(source: ReadonlyMap<string, ReadonlySet<string>>): Map<string, Set<string>> {
+	return new Map([...source].map(([provider, configs]) => [provider, new Set(configs)]));
+}
+
 /** Authentication material returned to legacy extensions for one model request. */
 export type ResolvedRequestAuth =
 	| {
@@ -942,6 +960,21 @@ export class ModelRegistry {
 			};
 		}
 		this.#modelsConfigFile.invalidate();
+		// Snapshot the config-sourced state BEFORE the clear so a malformed
+		// models.yml (parse error) can restore it: the last-good provider keys,
+		// override maps, keyless set, and discoverable providers must survive
+		// until the file is repaired, not vanish with the failed parse.
+		// #loadModels records its own snapshot by reference, so clearing first
+		// would leave it holding emptied maps (and, for the discoverable list,
+		// the empty array assigned below).
+		const lastGoodConfigApiKeys = new Map(this.#customProviderApiKeys);
+		const lastGoodOverrides: LastGoodConfigOverrides = {
+			providerOverrides: new Map(this.#providerOverrides),
+			modelOverrides: new Map(this.#modelOverrides),
+			keylessProviders: new Set(this.#keylessProviders),
+			discoverableProviders: [...this.#discoverableProviders],
+			commandConfigsByProvider: cloneCommandConfigs(this.#commandConfigsByProvider),
+		};
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
@@ -958,7 +991,7 @@ export class ModelRegistry {
 		this.#modelOverrides.clear();
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
-		this.#loadModels();
+		this.#loadModels({ lastGoodConfigApiKeys, lastGoodOverrides });
 		if (!preservedRuntimeState) return;
 
 		const preservedProviderIds = preservedRuntimeState.runtimeProviderIds;
@@ -1022,7 +1055,21 @@ export class ModelRegistry {
 		return warnings;
 	}
 
-	#loadModels() {
+	#loadModels(options?: { lastGoodConfigApiKeys?: Map<string, string>; lastGoodOverrides?: LastGoodConfigOverrides }) {
+		// Snapshot the last-good custom layer BEFORE reset so a malformed
+		// models.yml (status "error") restores the previous valid catalog instead
+		// of installing the empty custom layer + dropped config keys. The override
+		// maps may already have been cleared by #reloadStaticModels before this
+		// call, so the caller's pre-clear snapshot wins over the live fields.
+		const lastGood = {
+			customModels: this.#customModelOverlays,
+			providerOverrides: options?.lastGoodOverrides?.providerOverrides ?? new Map(this.#providerOverrides),
+			modelOverrides: options?.lastGoodOverrides?.modelOverrides ?? new Map(this.#modelOverrides),
+			keylessProviders: options?.lastGoodOverrides?.keylessProviders ?? new Set(this.#keylessProviders),
+			discoverableProviders: options?.lastGoodOverrides?.discoverableProviders ?? this.#discoverableProviders,
+			commandConfigsByProvider:
+				options?.lastGoodOverrides?.commandConfigsByProvider ?? cloneCommandConfigs(this.#commandConfigsByProvider),
+		};
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -1035,11 +1082,31 @@ export class ModelRegistry {
 			error: configError,
 		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
 		this.#configError = configError;
-		this.#keylessProviders = keylessProviders;
-		this.#discoverableProviders = discoverableProviders;
-		this.#customModelOverlays = customModels;
-		this.#providerOverrides = overrides;
-		this.#modelOverrides = modelOverrides;
+		// On a parse failure keep the last-good custom layer: dropping it loses
+		// every valid custom model/provider until the file is repaired. The error
+		// still surfaces via getError() so the reload reports the failure; the
+		// prior catalog stays live. Config-sourced API keys are restored too.
+		if (configError) {
+			this.#customModelOverlays = lastGood.customModels;
+			this.#providerOverrides = lastGood.providerOverrides;
+			this.#modelOverrides = lastGood.modelOverrides;
+			this.#keylessProviders = lastGood.keylessProviders;
+			this.#discoverableProviders = lastGood.discoverableProviders;
+			this.#commandConfigsByProvider = lastGood.commandConfigsByProvider;
+			for (const [provider, keyConfig] of options?.lastGoodConfigApiKeys ?? []) {
+				this.#installProviderApiKey(provider, keyConfig);
+			}
+			// configuredProviders comes from the failed parse (none), but the
+			// last-good discoverable set is restored above; the implicit add
+			// below skips names already present, so restored entries win and
+			// no implicit twin is appended alongside them.
+		} else {
+			this.#customModelOverlays = customModels;
+			this.#providerOverrides = overrides;
+			this.#modelOverrides = modelOverrides;
+			this.#keylessProviders = keylessProviders;
+			this.#discoverableProviders = discoverableProviders;
+		}
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
@@ -1666,7 +1733,12 @@ export class ModelRegistry {
 			: Bun.env.OLLAMA_HOST?.trim()
 				? "OLLAMA_HOST"
 				: undefined;
-		if (!configuredProviders.has("ollama") && !disabledProviders.has("ollama")) {
+		// Implicit entries are appended after every load; on an error-path reload
+		// the restored last-good list already carries them (or an explicit
+		// config-defined provider of the same name), so skip names already
+		// present instead of appending a duplicate/shadowing twin.
+		const presentProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		if (!configuredProviders.has("ollama") && !disabledProviders.has("ollama") && !presentProviders.has("ollama")) {
 			this.#discoverableProviders.push({
 				provider: "ollama",
 				api: "openai-responses",
@@ -1678,7 +1750,11 @@ export class ModelRegistry {
 			this.#implicitLocalProviders.add("ollama");
 			if (ollamaEndpointEnv) this.#implicitProviderEndpointEnv.set("ollama", ollamaEndpointEnv);
 		}
-		if (!configuredProviders.has("llama.cpp") && !disabledProviders.has("llama.cpp")) {
+		if (
+			!configuredProviders.has("llama.cpp") &&
+			!disabledProviders.has("llama.cpp") &&
+			!presentProviders.has("llama.cpp")
+		) {
 			this.#discoverableProviders.push({
 				provider: "llama.cpp",
 				api: "openai-responses",
@@ -1710,7 +1786,11 @@ export class ModelRegistry {
 			this.#keylessProviders.add("apple");
 			this.#implicitLocalProviders.add("apple");
 		}
-		if (!configuredProviders.has("lm-studio") && !disabledProviders.has("lm-studio")) {
+		if (
+			!configuredProviders.has("lm-studio") &&
+			!disabledProviders.has("lm-studio") &&
+			!presentProviders.has("lm-studio")
+		) {
 			this.#discoverableProviders.push({
 				provider: "lm-studio",
 				api: "openai-completions",

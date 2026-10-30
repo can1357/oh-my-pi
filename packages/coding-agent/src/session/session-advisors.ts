@@ -1263,6 +1263,8 @@ export class SessionAdvisors {
 		if (descriptors.length !== this.#advisors.length) return false;
 		for (let i = 0; i < descriptors.length; i++) {
 			if (descriptors[i].signature !== this.#advisors[i].signature) return false;
+			// Catalog refreshes can replace metadata without changing the selector.
+			if (descriptors[i].model !== this.#advisors[i].model) return false;
 		}
 		return true;
 	}
