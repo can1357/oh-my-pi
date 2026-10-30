@@ -1145,6 +1145,11 @@ function notifyCodexWebSocketInbound(
 	notifyRawSseEvent(observer, { event: type, data: text, raw });
 }
 
+/**
+ * Reports a frame the socket has already taken. Only
+ * `CodexWebSocketConnection.#sendReporting` calls it, after `socket.send`
+ * returned, for the reasons given there.
+ */
 function notifyCodexWebSocketOutbound(
 	observer: ((event: RawSseEvent) => void) | undefined,
 	request: Record<string, unknown>,
@@ -3903,6 +3908,12 @@ class CodexWebSocketConnection {
 	#failedSteers = new Set<string>();
 	/** Steering whose automatic successor the active attach request is reading. */
 	#attachSteerIds?: ReadonlySet<string>;
+	/**
+	 * Observer reports for inbound frames that arrived while
+	 * {@link #sendReporting} was handing a frame to the socket; set only during
+	 * that call.
+	 */
+	#reportsAfterSend?: (() => void)[];
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
 		this.#url = url;
@@ -4081,7 +4092,7 @@ class CodexWebSocketConnection {
 						parsed.message = inner.message;
 					}
 				}
-				notifyCodexWebSocketInbound(this.#streamObserver, parsed, text);
+				this.#reportInbound(observer => notifyCodexWebSocketInbound(observer, parsed, text));
 				// Steering acknowledgements belong to the submitter, not to the
 				// response stream they interleave with.
 				if (typeof parsed.type === "string" && parsed.type.startsWith("response.steer.")) {
@@ -4095,7 +4106,7 @@ class CodexWebSocketConnection {
 				}
 				this.#push(parsed);
 			} catch (error) {
-				notifyCodexWebSocketMalformed(this.#streamObserver, event.data, error);
+				this.#reportInbound(observer => notifyCodexWebSocketMalformed(observer, event.data, error));
 				this.#push(new CodexWebSocketTransportError(`${String(error)}`));
 			}
 		};
@@ -4172,9 +4183,8 @@ class CodexWebSocketConnection {
 				// a `/pause` engaged while they run, and this socket send is what the
 				// provider bills. The send runs in the same synchronous step as the
 				// hold's last check, so a pause landing after the hold answered still
-				// stops it.
+				// stops it; nothing in that step may call caller code before the send.
 				await dispatchWhenOpen(exchange.hold, signal, () => {
-					notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 					// Re-check liveness: the debug-session await above can outlive the socket.
 					// Preserve the abort cause: onAbort already queued a caused error, but this
 					// throw would otherwise mask it before #nextMessage() drains the queue.
@@ -4188,7 +4198,7 @@ class CodexWebSocketConnection {
 						throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 					}
 					try {
-						socket.send(requestPayload);
+						this.#sendReporting(socket, request, requestPayload, onSseEvent);
 					} catch (error) {
 						throw new CodexWebSocketTransportError(
 							`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4329,7 +4339,10 @@ class CodexWebSocketConnection {
 	 * Submit `response.steer` for `previousResponseId`, which must be streaming
 	 * on this socket. Resolves on the server's acknowledgement. The frame goes
 	 * out at once: a steer is new input, unlike an attach, so its
-	 * {@link CodexSteerPump} has already passed the request's dispatch hold.
+	 * {@link CodexSteerPump} has already passed the request's dispatch hold and
+	 * calls this in the same synchronous step as the hold's last check, so the
+	 * raw-stream observer hears of the frame only after the send
+	 * ({@link #sendReporting}).
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
 		const socket = this.#socket;
@@ -4341,9 +4354,8 @@ class CodexWebSocketConnection {
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		try {
-			socket.send(payload);
+			this.#sendReporting(socket, event, payload, this.#streamObserver);
 		} catch (error) {
 			this.#steerWaiters.splice(this.#steerWaiters.indexOf(waiter), 1);
 			reject(
@@ -4353,6 +4365,44 @@ class CodexWebSocketConnection {
 			);
 		}
 		return promise;
+	}
+
+	/**
+	 * Hand `payload`, the serialized `frame`, to `socket`, then tell `observer`
+	 * of it. Every frame sent runs this in the same synchronous step as the
+	 * dispatch hold's last check, and the observer is caller code: told before
+	 * the send, it could close the gate on a frame that goes out anyway, and it
+	 * would hear of a frame the socket then refused. Throws what `socket.send`
+	 * throws, having told the observer nothing of that frame.
+	 */
+	#sendReporting(
+		socket: Bun.WebSocket,
+		frame: Record<string, unknown>,
+		payload: string,
+		observer: ((event: RawSseEvent) => void) | undefined,
+	): void {
+		const arrived: (() => void)[] = [];
+		this.#reportsAfterSend = arrived;
+		try {
+			socket.send(payload);
+			notifyCodexWebSocketOutbound(observer, frame, payload);
+		} finally {
+			this.#reportsAfterSend = undefined;
+			for (const report of arrived) report();
+		}
+	}
+
+	/**
+	 * Tell the raw-stream observer of an inbound frame. One that arrives while
+	 * {@link #sendReporting} is handing a frame to the socket is told right
+	 * after that frame instead: a socket that delivers its reply within `send`
+	 * must not have the reply reported before the frame it answers.
+	 */
+	#reportInbound(notify: (observer: (event: RawSseEvent) => void) => void): void {
+		const observer = this.#streamObserver;
+		if (!observer) return;
+		if (this.#reportsAfterSend) this.#reportsAfterSend.push(() => notify(observer));
+		else notify(observer);
 	}
 
 	/** True when the server failed to commit any of the accepted steering `ids`. */
@@ -4671,19 +4721,22 @@ async function getOrCreateCodexWebSocketConnection(
 				// join or reuse it rather than tear it down.
 				const current = state.connection;
 				if (round < 2 && (current?.isOpen() || current?.isConnecting())) return undefined;
-				state.connection?.close("reconnect");
-				resetCodexWebSocketAppendState(state);
-				logger.time("codexWs:newSocket");
 				const connection = new CodexWebSocketConnection(url, connectHeaders, {
 					onHandshakeHeaders: handshakeHeaders => {
 						updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
 					},
 					proxy,
 				});
-				state.connection = connection;
 				// `connect` constructs the socket before its first await, so the
-				// handshake starts in this step too.
-				return connection.connect(signal).then(() => connection);
+				// handshake starts right after the hold's last check. Retiring the
+				// old socket comes after it, because closing one can log, and a log
+				// sink is code this step must not run before the wire.
+				const connected = connection.connect(signal).then(() => connection);
+				current?.close("reconnect");
+				state.connection = connection;
+				resetCodexWebSocketAppendState(state);
+				logger.time("codexWs:newSocket");
+				return connected;
 			},
 			async () => {
 				const attestation = await attest();

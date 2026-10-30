@@ -501,6 +501,20 @@ export type OpenAIResponseInclude =
  * probe that answered before a later hold waited is asked again too, on a
  * best-effort basis that fails the attempt if a later hold parks every time it
  * is asked behind it (a pacing delay).
+ *
+ * What the transport enforces and what it trusts. It enforces the order at
+ * every site that puts a request on the wire: every probe is read after
+ * every hold has answered and after any work that must not be older than the
+ * wait (a signature, a short-lived token), and the wire operation runs in
+ * that same synchronous step. Nothing of this layer's runs between that read
+ * and the wire: no `await`, no caller callback (`onPayload`, `onResponse`),
+ * no raw-stream observer (`onSseEvent` hears of a frame only once it is on
+ * the wire), no logger or request-debug hook. It trusts the rest, because no
+ * transport can check it: that each hold and probe tell the truth and the
+ * probe has no effects ({@link isClosed}), and that the wire operation a
+ * caller supplies (`StreamOptions.fetch`, a replacement `WebSocket`, a socket
+ * factory) puts the request out before it awaits anything or calls back into
+ * caller code.
  */
 export interface DispatchHold {
 	(): Promise<void> | void;
@@ -510,6 +524,14 @@ export interface DispatchHold {
 	 * closed the request does not go out, and the hold is awaited again.
 	 * Asked while this reads closed, the hold must wait until it opens, or
 	 * reject: one that answered at once would be asked again without end.
+	 *
+	 * The probe must be honest and pure: it reports its gate as it is, and
+	 * changes nothing, neither its own gate nor any other hold's. The
+	 * transport relies on both and can check neither. A probe that reads open
+	 * while its gate is closed lets the request out, and one that closes a
+	 * gate as it is read can close one already read, which the same check
+	 * does not see again: a hold or a probe that lies gets what it asked for.
+	 * A probe that throws fails the attempt with nothing sent.
 	 */
 	isClosed?: () => boolean;
 }
@@ -560,9 +582,11 @@ export interface StreamOptions {
 	 * throw from it fails that attempt like any other dispatch error.
 	 *
 	 * A hold that carries a probe ({@link DispatchHold.isClosed}) is also read
-	 * by the transport fetch in the same synchronous step that sends, so an
-	 * HTTP request never goes out while it reads closed. A plain function is
-	 * only awaited.
+	 * at each of those sites in the same synchronous step as its wire
+	 * operation, so no request goes out while the probe reads closed, as long
+	 * as the probe keeps the rules given there. A plain function is only
+	 * awaited. {@link DispatchHold} says which guarantees the transport
+	 * enforces and which it trusts the caller for.
 	 *
 	 * The wait ends when {@link signal} aborts, with that signal's reason, so a
 	 * cancelled request never stays parked on a hold nobody will release.
@@ -763,6 +787,9 @@ export interface StreamOptions {
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame
 	 * per JSON request/response message). WebSocket frames are tagged with a leading
 	 * `: ws → <type>` (outbound) or `: ws ← <type>` (inbound) comment line in `RawSseEvent.raw`.
+	 * An outbound frame is reported once the socket has taken it: never before, so an
+	 * observer that pauses on it cannot stop it, and never for a frame the socket refused
+	 * or a closed hold withheld. A reply is reported after the frame it answers.
 	 *
 	 * Diagnostic only: provider implementations must ignore callback failures and must not
 	 * let observers alter stream contents.

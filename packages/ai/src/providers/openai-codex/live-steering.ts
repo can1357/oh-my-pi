@@ -45,7 +45,8 @@ export interface CodexSteerSocket {
 	/**
 	 * Sends `response.steer` at once; resolves on the matching acknowledgement,
 	 * rejects when the socket closes first. The pump calls it in the same
-	 * synchronous step as the dispatch hold's last check.
+	 * synchronous step as the dispatch hold's last check, so it must reach the
+	 * socket send without awaiting or calling caller code.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck>;
 }

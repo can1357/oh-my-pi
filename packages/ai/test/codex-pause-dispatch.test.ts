@@ -9,9 +9,12 @@
  *
  * A hold that carries a probe (`DispatchHold.isClosed`) is read in the same
  * synchronous step as each of those sends, so a gate that closes in the
- * microtasks after the hold answered still stops it. The DeviceCheck
- * attestation a handshake or an SSE request carries is minted after the wait,
- * so a pause cannot leave a stale one on the wire.
+ * microtasks after the hold answered still stops it. The raw-stream observer
+ * (`onSseEvent`) hears of each frame only once the socket has taken it, so
+ * caller code it runs can neither close the gate on a frame it is told about
+ * nor hear of one that never went out. The DeviceCheck attestation a
+ * handshake or an SSE request carries is minted after the wait, so a pause
+ * cannot leave a stale one on the wire.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -24,6 +27,7 @@ import type {
 	LiveSteering,
 	Model,
 	ProviderSessionState,
+	RawSseEvent,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -77,6 +81,8 @@ class FakeSocket {
 	static script: {
 		connect?: (socket: FakeSocket, index: number) => void;
 		frame?: (frame: Frame, socket: FakeSocket) => void;
+		/** True when the socket refuses `frame`: `send` throws and the frame never reaches the wire. */
+		refuse?: (frame: Frame, socket: FakeSocket) => boolean;
 		close?: (reason: string | undefined) => void;
 	} = {};
 
@@ -112,6 +118,7 @@ class FakeSocket {
 
 	send(data: string): void {
 		const frame = JSON.parse(data) as Frame;
+		if (FakeSocket.script.refuse?.(frame, this)) throw new Error(`socket refused ${String(frame.type)}`);
 		FakeSocket.sent.push(frame);
 		FakeSocket.script.frame?.(frame, this);
 	}
@@ -256,6 +263,13 @@ function requestOptions(liveSteering?: LiveSteering) {
 
 function request(messages: (UserMessage | AssistantMessage)[], liveSteering?: LiveSteering) {
 	return streamSimple(createModel(), { systemPrompt: SYSTEM, messages }, requestOptions(liveSteering)).result();
+}
+
+/** A raw-stream observer (`onSseEvent`) that hands each outbound websocket frame it hears of to `heard`. */
+function outboundObserver(heard: (type: string | null) => void): (event: RawSseEvent) => void {
+	return event => {
+		if (event.raw[0]?.startsWith(": ws →")) heard(event.event);
+	};
 }
 
 const user: UserMessage = { role: "user", content: "Draft a plan", timestamp: 0 };
@@ -564,6 +578,7 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 			resetSessions();
 			const probe = new ProbedGate();
 			let sent = false;
+			const told: unknown[] = [];
 			installSocket({
 				frame: (frame, socket) => {
 					if (frame.type !== "response.create") return;
@@ -579,7 +594,7 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 			const result = streamSimple(
 				createModel(),
 				{ systemPrompt: SYSTEM, messages: [user] },
-				{ ...requestOptions(), beforeDispatch: hold },
+				{ ...requestOptions(), beforeDispatch: hold, onSseEvent: outboundObserver(type => told.push(type)) },
 			).result();
 			const message = await resumeUntilSettled(
 				result,
@@ -588,6 +603,8 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 				() => heldAt.push(depth),
 			);
 			expect(message.stopReason).toBe("stop");
+			// However many rounds the barrier went, the observer heard of the one frame that went out.
+			expect(told).toEqual(FakeSocket.sent.map(frame => frame.type));
 		}
 
 		expect(sentWhileClosed).toEqual([]);
@@ -639,6 +656,7 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 			const probe = new ProbedGate();
 			const created = Promise.withResolvers<void>();
 			let sent = false;
+			const told: unknown[] = [];
 			installSocket({
 				frame: (frame, socket) => {
 					if (frame.type === "response.create") {
@@ -660,7 +678,11 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 			const result = streamSimple(
 				createModel(),
 				{ systemPrompt: SYSTEM, messages: [user] },
-				{ ...requestOptions(steering.source), beforeDispatch: hold },
+				{
+					...requestOptions(steering.source),
+					beforeDispatch: hold,
+					onSseEvent: outboundObserver(type => told.push(type)),
+				},
 			).result();
 			await created.promise;
 			await nextTurn();
@@ -673,10 +695,196 @@ describe("Codex sends nothing while a probed gate reads closed", () => {
 			);
 			expect(message.stopReason).toBe("stop");
 			expect(steering.settled()).toBe("accepted");
+			expect(told).toEqual(FakeSocket.sent.map(frame => frame.type));
 		}
 
 		expect(sentWhileClosed).toEqual([]);
 		expect(heldAt.length).toBeGreaterThan(0);
+	});
+});
+
+/**
+ * The raw-stream observer is caller code. Told of a frame inside the step that
+ * reads the gate and sends, before the send, it could close the gate on a
+ * frame that then went out anyway, and it heard of frames the socket refused.
+ * Each case logs `wire:<type>` as the socket takes a frame and `told:<type>`
+ * as the observer hears of one, with the gate as it stood then.
+ */
+describe("Codex tells the raw-stream observer of a frame only once it is on the wire", () => {
+	let probe: ProbedGate;
+	let log: { event: string; closed: boolean }[];
+
+	beforeEach(() => {
+		probe = new ProbedGate();
+		log = [];
+	});
+
+	function record(event: string): void {
+		log.push({ event, closed: probe.closed });
+	}
+
+	/** Logs each outbound frame the observer hears of, and closes the gate on hearing of `pauseOn`. */
+	function pausingObserver(pauseOn?: string): (event: RawSseEvent) => void {
+		return outboundObserver(type => {
+			record(`told:${type}`);
+			if (type === pauseOn) probe.close();
+		});
+	}
+
+	function startStreaming(onSseEvent: (event: RawSseEvent) => void, liveSteering?: LiveSteering) {
+		return streamSimple(
+			createModel(),
+			{ systemPrompt: SYSTEM, messages: [user] },
+			{ ...requestOptions(liveSteering), beforeDispatch: probe.hold, onSseEvent },
+		).result();
+	}
+
+	/** A socket whose first response streams until the steer it is waiting for. */
+	function scriptSteerableSocket(
+		created: PromiseWithResolvers<void>,
+		refuse?: (frame: Frame, socket: FakeSocket) => boolean,
+	): void {
+		installSocket({
+			refuse,
+			frame: (frame, socket) => {
+				record(`wire:${frame.type}`);
+				if (frame.type === "response.create") {
+					socket.emit({ type: "response.created", response: { id: "resp_1" } }, ...messageFrames("msg_1", "Plan"));
+					created.resolve();
+					return;
+				}
+				socket.emit(...steeredFrames());
+			},
+		});
+	}
+
+	// The observer heard of `response.create` before the socket took it, and
+	// the pause it engaged from there did not stop the frame:
+	// told(closed=false), wire(closed=true).
+	it("sends response.create before an observer that pauses on it hears of it", async () => {
+		installSocket({
+			frame: (frame, socket) => {
+				record(`wire:${frame.type}`);
+				socket.emit(...completedFrames("resp_1", "Hi"));
+			},
+		});
+		const result = startStreaming(pausingObserver("response.create"));
+		const message = await resumeUntilSettled(
+			result,
+			probe,
+			() => false,
+			() => {},
+		);
+
+		expect(log).toEqual([
+			{ event: "wire:response.create", closed: false },
+			{ event: "told:response.create", closed: false },
+		]);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	// The same for the steer: told(closed=false), wire(closed=true), and the
+	// server accepted input sent under a closed gate.
+	it("sends response.steer before an observer that pauses on it hears of it", async () => {
+		const created = Promise.withResolvers<void>();
+		scriptSteerableSocket(created);
+		const steering = typedSteering("use tabs", () => {});
+		const result = startStreaming(pausingObserver("response.steer"), steering.source);
+		await created.promise;
+		await nextTurn();
+		steering.queue();
+		const message = await resumeUntilSettled(
+			result,
+			probe,
+			() => false,
+			() => {},
+		);
+
+		expect(log).toEqual([
+			{ event: "wire:response.create", closed: false },
+			{ event: "told:response.create", closed: false },
+			{ event: "wire:response.steer", closed: false },
+			{ event: "told:response.steer", closed: false },
+		]);
+		expect(steering.settled()).toBe("accepted");
+		expect(message.stopReason).toBe("stop");
+	});
+
+	// The observer heard of the refused first attempt as if it had gone out:
+	// told, then the retry's wire and told.
+	it("tells the observer nothing of a response.create the socket refused", async () => {
+		let refusals = 0;
+		installSocket({
+			refuse: frame => frame.type === "response.create" && refusals++ === 0,
+			frame: (frame, socket) => {
+				record(`wire:${frame.type}`);
+				socket.emit(...completedFrames("resp_1", "Hi"));
+			},
+		});
+		const message = await startStreaming(pausingObserver());
+
+		expect(refusals).toBe(2);
+		expect(log).toEqual([
+			{ event: "wire:response.create", closed: false },
+			{ event: "told:response.create", closed: false },
+		]);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	// The observer heard of a steer the socket refused, which the server never
+	// saw: told:response.steer with no wire before it.
+	it("tells the observer nothing of a response.steer the socket refused", async () => {
+		const created = Promise.withResolvers<void>();
+		scriptSteerableSocket(created, (frame, socket) => {
+			if (frame.type !== "response.steer") return false;
+			// The response the steer was meant for runs to its end without it.
+			socket.emit({ type: "response.completed", response: { id: "resp_1", status: "completed", usage: USAGE } });
+			return true;
+		});
+		const steering = typedSteering("use tabs", () => {});
+		const result = startStreaming(pausingObserver(), steering.source);
+		await created.promise;
+		await nextTurn();
+		steering.queue();
+		const message = await result;
+
+		expect(log).toEqual([
+			{ event: "wire:response.create", closed: false },
+			{ event: "told:response.create", closed: false },
+		]);
+		expect(steering.settled()).toBe("rejected");
+		expect(message.stopReason).toBe("stop");
+	});
+
+	// Told after the send, the observer heard a reply the socket delivers
+	// within `send` before the frame it answers: ← created, → create.
+	it("reports a reply the socket delivers within send after the frame it answers", async () => {
+		const timeline: string[] = [];
+		const created = Promise.withResolvers<void>();
+		installSocket({
+			frame: (frame, socket) => {
+				const [reply, ...rest] =
+					frame.type === "response.create"
+						? [{ type: "response.created", response: { id: "resp_1" } }, ...messageFrames("msg_1", "Plan")]
+						: steeredFrames();
+				socket.onmessage?.({ data: JSON.stringify(reply) } as MessageEvent);
+				socket.emit(...rest);
+				if (frame.type === "response.create") created.resolve();
+			},
+		});
+		const steering = typedSteering("use tabs", () => {});
+		const result = startStreaming(event => timeline.push(event.raw[0]!), steering.source);
+		await created.promise;
+		await nextTurn();
+		steering.queue();
+		const message = await result;
+
+		const steer = timeline.indexOf(": ws → response.steer");
+		expect(timeline.slice(0, 2)).toEqual([": ws → response.create", ": ws ← response.created"]);
+		expect(steer).toBeGreaterThan(1);
+		expect(timeline.slice(steer, steer + 2)).toEqual([": ws → response.steer", ": ws ← response.steer.accepted"]);
+		expect(steering.settled()).toBe("accepted");
+		expect(message.stopReason).toBe("stop");
 	});
 });
 
