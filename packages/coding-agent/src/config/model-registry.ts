@@ -2044,7 +2044,7 @@ export class ModelRegistry {
 	 * `offline` strategy nothing else refetches them.
 	 */
 	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v5" : "context-v5";
+		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2063,6 +2063,11 @@ export class ModelRegistry {
 			// reasoning ladder outranked the bundled reference; warm v4 rows kept
 			// `reasoning: false` (ids absent from the catalog) or an inherited
 			// `omitReasoningEffort`, so no effort dial appeared until a refresh.
+			// context-v6 invalidates rows cached before a row's advertised
+			// `reasoning_effort_map` / `reasoning_required` were kept on the
+			// model; warm v5 rows stayed without the aliases, so an unsupported
+			// requested effort kept clamping to the tier below and a thinking-off
+			// request could reach a route that rejects it.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
