@@ -382,7 +382,9 @@ This is the part that usually trips people up.
 
 ### Discovery-time `${...}` expansion
 
-OMP expands `${VAR}` and `${VAR:-default}` placeholders while discovering MCP configs from OMP-native files and standalone fallback files. Expansion applies recursively to string values in `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`; unresolved placeholders remain literal strings.
+OMP expands `${VAR}` and `${VAR:-default}` placeholders while discovering MCP configs from OMP-native files and standalone fallback files. Expansion applies recursively to string values in `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`. `${VAR:-default}` uses `default` when `VAR` is unset or empty.
+
+A plain `${VAR}` whose variable is unset is an error when it appears in `command`, `args`, `env`, `url`, or `headers` — in these files and in every other discovered config that OMP expands placeholders for (Claude Code, Cursor, Gemini CLI, VS Code, Windsurf, and plugin MCP configs). That server is not started and is reported as failed with a message naming the variable and field, for example `MCP server "github": environment variable GITHUB_TOKEN is not set (referenced in headers.Authorization)`. Other servers from the same file still load. `/mcp test` and `/mcp reauth` apply the same check to entries read from config files. Two exceptions: a variable defined in the server's own `env` block counts as set when referenced from `command` or `args`, because the spawned process receives it (for example `"args": ["-c", "run --key ${API_KEY}"]` with `"env": { "API_KEY": "..." }`); the placeholder is passed through for the shell to expand. And VS Code predefined variables such as `${workspaceFolder}`, `${userHome}`, or `${file}` are left as literal text instead of failing when no environment variable of that name is set. Unset placeholders in `cwd`, `auth`, and `oauth` remain literal strings.
 
 Example:
 

@@ -126,3 +126,91 @@ describe("standalone mcp.json oauth env expansion", () => {
 		expect(server?.auth).toBeUndefined();
 	});
 });
+
+describe("standalone mcp.json unresolved env placeholders", () => {
+	// Names no environment defines, so no test mutates process.env.
+	const UNSET = "OMP_MCP_JSON_TEST_UNSET_7F3A9C";
+	const OWN_KEY = "OMP_MCP_JSON_TEST_OWN_KEY_7F3A9C";
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-unresolved-"));
+		expect(Bun.env[UNSET]).toBeUndefined();
+		expect(Bun.env[OWN_KEY]).toBeUndefined();
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tempDir);
+	});
+
+	async function load(mcpServers: Record<string, unknown>): Promise<Map<string, MCPServer>> {
+		await fs.writeFile(path.join(tempDir, ".mcp.json"), JSON.stringify({ mcpServers }));
+		const servers = await loadStandaloneMcpConfig(tempDir);
+		return new Map(servers.map(server => [server.name, server]));
+	}
+
+	test("records an unset header variable on that server only", async () => {
+		const servers = await load({
+			github: {
+				type: "http",
+				url: "https://api.githubcopilot.com/mcp/",
+				headers: { Authorization: `Bearer ${envPlaceholder(UNSET)}` },
+			},
+			sibling: { type: "http", url: "https://sibling.example/mcp" },
+		});
+
+		expect(servers.get("github")?.unresolvedEnv).toEqual([{ variable: UNSET, field: "headers.Authorization" }]);
+		expect(servers.get("sibling")).toBeDefined();
+		expect(servers.get("sibling")?.unresolvedEnv).toBeUndefined();
+	});
+
+	test("treats a variable from the server's own env block as resolved in args", async () => {
+		const servers = await load({
+			ownEnv: {
+				command: "sh",
+				args: ["-c", `run --key ${envPlaceholder(OWN_KEY)}`],
+				env: { [OWN_KEY]: "secret" },
+			},
+			noEnv: {
+				command: "sh",
+				args: ["-c", `run --key ${envPlaceholder(OWN_KEY)}`],
+			},
+		});
+
+		expect(servers.get("ownEnv")?.unresolvedEnv).toBeUndefined();
+		// The spawned shell expands it from env, so the literal must survive.
+		expect(servers.get("ownEnv")?.args).toEqual(["-c", `run --key ${envPlaceholder(OWN_KEY)}`]);
+		expect(servers.get("noEnv")?.unresolvedEnv).toEqual([{ variable: OWN_KEY, field: "args[1]" }]);
+	});
+
+	test("uses the default of an unset placeholder with :- without flagging it", async () => {
+		const servers = await load({
+			remote: {
+				type: "http",
+				url: "https://remote.example/mcp",
+				headers: {
+					"X-Region": `\${${UNSET}:-us-east-1}`,
+					Authorization: envPlaceholder(UNSET),
+				},
+			},
+		});
+
+		const remote = servers.get("remote");
+		expect(remote?.headers?.["X-Region"]).toBe("us-east-1");
+		expect(remote?.unresolvedEnv).toEqual([{ variable: UNSET, field: "headers.Authorization" }]);
+	});
+
+	test("keeps an unset VS Code predefined variable literal without flagging it", async () => {
+		expect(Bun.env.workspaceFolder).toBeUndefined();
+		const servers = await load({
+			local: {
+				command: "node",
+				args: [`${envPlaceholder("workspaceFolder")}/server.js`, envPlaceholder(UNSET)],
+			},
+		});
+
+		const local = servers.get("local");
+		expect(local?.args).toEqual([`${envPlaceholder("workspaceFolder")}/server.js`, envPlaceholder(UNSET)]);
+		expect(local?.unresolvedEnv).toEqual([{ variable: UNSET, field: "args[1]" }]);
+	});
+});

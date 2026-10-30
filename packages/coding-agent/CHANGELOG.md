@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- MCP servers whose `command`, `args`, `env`, `url`, or `headers` reference an unset `${VAR}` without a `:-default` now fail with an error naming the server, variable, and field instead of starting with the literal `${VAR}`; other servers in the same config still load.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

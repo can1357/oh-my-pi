@@ -5,7 +5,7 @@
  * All providers translate their native format to this shape.
  */
 
-import type { MCPRequestIdFormat } from "../mcp/types";
+import type { MCPRequestIdFormat, UnresolvedEnvReference } from "../mcp/types";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -69,6 +69,12 @@ export interface MCPServer {
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
+	/**
+	 * `${VAR}` references in `command`/`args`/`env`/`url`/`headers` left
+	 * unresolved by provider expansion; the server is reported as failed
+	 * instead of connecting with the literal placeholder.
+	 */
+	unresolvedEnv?: UnresolvedEnvReference[];
 	/** Source metadata (added by loader) */
 	_source: SourceMeta;
 }

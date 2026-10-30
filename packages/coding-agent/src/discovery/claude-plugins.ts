@@ -16,12 +16,13 @@ import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import type { UnresolvedEnvReference } from "../mcp/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
-	expandEnvVarsDeep,
+	expandEnvVarsInField,
 	listClaudePluginRoots,
 	loadFilesFromDir,
 	scanSkillsFromDir,
@@ -545,11 +546,13 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
  * values or substitute ambient variables). Values that contained no
  * placeholder keep the legacy indirection (bare env-name lookup and
  * `!command` execution) unresolved, so it only runs when the surviving
- * enabled server is actually connected.
+ * enabled server is actually connected. Placeholders with no value and no
+ * default are appended to `unresolved` (field `env.<KEY>`).
  */
 async function resolveMarketplaceEnv(
 	env: Record<string, string>,
 	rootPath: string,
+	unresolved: UnresolvedEnvReference[],
 ): Promise<{ env: Record<string, string>; literalKeys: string[] }> {
 	// Null prototype: a `__proto__` env key must become an own property, not
 	// mutate the prototype chain (it would silently vanish before spawn).
@@ -560,10 +563,10 @@ async function resolveMarketplaceEnv(
 		// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
 		// the registered root inserted as the value is never re-scanned
 		// for `${...}`.
-		const final = expandEnvVarsDeep(rawValue, {
+		const final = expandEnvVarsInField(rawValue, `env.${key}`, unresolved, {
 			CLAUDE_PLUGIN_ROOT: rootPath,
 			OMP_PLUGIN_ROOT: rootPath,
-		}) as string;
+		});
 		if (final !== rawValue) literalKeys.push(key);
 		resolved[key] = final;
 	}
@@ -670,7 +673,14 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 				timeout = undefined;
 			}
-			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
+			const unresolvedEnv: UnresolvedEnvReference[] = [];
+			const resolvedEnv =
+				raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path, unresolvedEnv) : undefined;
+			// `command`/`args` only get plugin-root substitution (above), so only
+			// the env-expanded fields can carry an unresolved `${VAR}`.
+			const url = raw.url !== undefined ? expandEnvVarsInField(raw.url, "url", unresolvedEnv) : undefined;
+			const headers =
+				raw.headers !== undefined ? expandEnvVarsInField(raw.headers, "headers", unresolvedEnv) : undefined;
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
@@ -686,11 +696,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 						envLiteralKeys: resolvedEnv.literalKeys,
 					}),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-				...(raw.url !== undefined && { url: expandEnvVarsDeep(raw.url) }),
-				...(raw.headers !== undefined && { headers: expandEnvVarsDeep(raw.headers) }),
+				...(url !== undefined && { url }),
+				...(headers !== undefined && { headers }),
 				...(raw.auth !== undefined && { auth: raw.auth }),
 				...(raw.oauth !== undefined && { oauth: raw.oauth }),
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
+				...(unresolvedEnv.length > 0 && { unresolvedEnv }),
 				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
 			items.push(server);

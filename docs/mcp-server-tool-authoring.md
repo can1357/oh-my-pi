@@ -105,6 +105,8 @@ OMP-native MCP config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, plus their `.mc
 
 The standalone fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json`, expands the same `${...}` placeholders in endpoint/auth fields, and type-checks `enabled`/`timeout` without coercing string values. Both providers require a finite, non-negative timeout and validate `requestIdFormat` and boolean `instructions`.
 
+Every MCP provider that expands placeholders uses the shared helpers in `src/discovery/helpers.ts`: `expandMCPServerEnv()` for whole server definitions, `expandEnvVarsInField()` for the Claude marketplace plugin `env`/`url`/`headers` values. A plain `${VAR}` left unresolved (unset, no `:-default`) in `command`, `args`, `env`, `url`, or `headers` is recorded on the server as `unresolvedEnv`; a variable named in the server's own `env` block counts as resolved inside `command`/`args`, and unset VS Code predefined variables (`${workspaceFolder}`, `${userHome}`, …) stay literal without being recorded. `validateServerConfig()` turns `unresolvedEnv` into a startup failure (`MCP server "<name>": environment variable <VAR> is not set (referenced in <field>)`), so the server is never connected with the literal placeholder while siblings load normally.
+
 Invalid `enabled`/`timeout` values are ignored with warnings rather than failing the whole file.
 
 ## 3) Auth and runtime value resolution
