@@ -196,6 +196,480 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		]);
 	});
 
+	it("releases a queued refresh when the DA1 sentinel that ends a cycle never arrives", () => {
+		// The sentinel is what lets the next query start. A terminal that never
+		// answers it — or a layer that drops the reply — used to leave every
+		// later appearance change queued for the life of the process, with the
+		// last colour latched and an explicit refresh accepted but never sent.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		expect(terminal.appearance).toBe("dark");
+
+		// A refresh goes out and the terminal answers it — but its sentinel is
+		// lost, so the cycle never ends. A notification queues behind it.
+		const started = queryCount();
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		expect(queryCount()).toBe(started + 1);
+		process.stdin.emit("data", "\x1b[?997;2n");
+		vi.advanceTimersByTime(100);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		const stuck = queryCount();
+
+		// Nothing the terminal says now reaches the queued request: it is the
+		// sentinel, not a reply, that the cycle is still waiting for.
+		vi.advanceTimersByTime(4_000);
+		expect(queryCount()).toBe(stuck);
+		expect(terminal.appearance).toBe("dark");
+
+		// The cycle gives up on its own and the queued query runs.
+		vi.advanceTimersByTime(1_000);
+		expect(queryCount()).toBeGreaterThan(stuck);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(terminal.appearance).toBe("light");
+
+		terminal.stop();
+	});
+
+	it("gives a late DA1 sentinel to the cycle that gave up, not to the query that replaced it", () => {
+		// Recovery must not cost the protection the queue exists for: the FIFO
+		// is positional, so a sentinel that is merely late has to be matched to
+		// the cycle that asked for it. Attributing it to the replacement query
+		// would end that query as unanswered and strip the request identity its
+		// caller is waiting on.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ kind: "report", appearance, token });
+		});
+		terminal.onAppearanceChange((appearance, token) => {
+			events.push({ kind: "change", appearance, token });
+		});
+		events.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+		expect(queryCount()).toBe(2);
+
+		// The first cycle gives up; the queued refresh becomes the live query.
+		vi.advanceTimersByTime(5_000);
+		expect(queryCount()).toBe(3);
+
+		// The abandoned cycle's sentinel finally arrives. It belongs to that
+		// cycle, so the live query is untouched.
+		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(queryCount()).toBe(3);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		terminal.stop();
+
+		expect(events).toEqual([
+			{ kind: "report", appearance: "light", token: requestToken },
+			{ kind: "change", appearance: "light", token: requestToken },
+		]);
+	});
+
+	it("gives a late OSC 11 colour reply to the cycle that gave up, never the replacement's identity", () => {
+		// The deadline says when to stop waiting. It cannot say that bytes
+		// already on the wire will never land, and the colour reply is the half
+		// of the exchange that carries a value: published under the replacement
+		// request's token it is a wrong answer to a question nobody asked, and
+		// the real answer is then unrecognised and spills into application input.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// Cycle 41 gives up and 42 goes out — then 41's whole exchange arrives,
+		// reply first as a terminal always answers it, followed by 42's.
+		vi.advanceTimersByTime(5_000);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("retires a surrendered cycle's markers so a lost sentinel cannot offset the queue for good", () => {
+		// A sentinel that is lost rather than late would otherwise leave one
+		// marker in the FIFO for the life of the process: every later cycle
+		// would eat its predecessor's marker and then wait out its own deadline,
+		// however promptly the terminal answers.
+		//
+		// The cycle below did receive its colour, so the sentinel it is owed is
+		// still accounted for after the marker goes. The next cycle's own
+		// sentinel pays that debt — and must not inherit one, or every later
+		// refresh waits out a deadline for the rest of the session.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		// One cycle whose sentinel never comes at all.
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		vi.advanceTimersByTime(5_000);
+
+		// Long enough that the marker has stopped expecting anything.
+		vi.advanceTimersByTime(10_000);
+
+		// Each later cycle completes at once: the debt is paid by the first
+		// sentinel to arrive and is not passed on.
+		const before = queryCount();
+		for (let token = 42; token <= 45; token++) {
+			expect(terminal.refreshAppearance?.(token)).toBe(token);
+			expect(queryCount()).toBe(before + (token - 41));
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+		}
+
+		terminal.stop();
+	});
+
+	it("keeps swallowing an answer whose owner has expired, and still refuses to name it", () => {
+		// Retiring a marker is a statement about how long to wait, never proof
+		// that bytes on the wire cannot land. Expiring the swallow along with
+		// the ownership published a stale colour under the replacement's token
+		// and spilled the real reply into application input — the same defect
+		// the markers were added to prevent, moved later in time.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		// Request 41 is surrendered, then its ownership is retired as well.
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(15_000);
+
+		// 42 goes out, and only then does 41's whole exchange arrive, in order.
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("never hands an unowned OSC 11 report to the application", () => {
+		// It is a terminal→host report like the DA1 reply, so it is consumed
+		// whatever the bookkeeping says. Publishing it needs an owner; keeping
+		// it out of the keyboard stream does not.
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		received.length = 0;
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+
+		expect(received).toEqual([]);
+		expect(events).toEqual([]);
+		terminal.stop();
+	});
+
+	it.each([
+		["an echoed query", "\x1b]11;?\x07"],
+		["a hex colour this parser does not accept", "\x1b]11;#ffffff\x07"],
+		["an unparseable rgb body", "\x1b]11;rgb:zz/zz/zz\x1b\\"],
+	])("keeps the keyboard alive after %s", (_name, sequence) => {
+		// Swallowing belongs to a complete recognised colour report. A string
+		// that merely opens like one and finishes as something else must not be
+		// held: held, it became a response buffer every later keystroke was
+		// appended to, and the keyboard went silent for the rest of the session.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		received.length = 0;
+
+		process.stdin.emit("data", sequence);
+		process.stdin.emit("data", "ordinary");
+		process.stdin.emit("data", "\r");
+		process.stdin.emit("data", "after");
+		vi.advanceTimersByTime(30_000);
+
+		expect(received.join("")).toContain("ordinary\rafter");
+		terminal.stop();
+	});
+
+	it("keeps publishing after a lost cycle, one answer per query", () => {
+		// One unanswered cycle used to put every later answer one place out of
+		// step: its claim took the next cycle's answer, that cycle surrendered
+		// into a claim of its own, and nothing published again for the life of
+		// the terminal however promptly the terminal replied.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const tokens: Array<number | undefined> = [];
+		terminal.onAppearanceReport?.((_appearance, token) => {
+			tokens.push(token);
+		});
+
+		// A cycle that is never answered at all, surrendered and retired.
+		expect(terminal.refreshAppearance?.(40)).toBe(40);
+		vi.advanceTimersByTime(15_000);
+		tokens.length = 0;
+
+		for (let token = 41; token <= 45; token++) {
+			const before = queryCount();
+			expect(terminal.refreshAppearance?.(token)).toBe(token);
+			expect(queryCount()).toBe(before + 1);
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+			vi.advanceTimersByTime(5_000);
+		}
+
+		// The first answer settles the lost cycle's claim; every later one is
+		// published under the token that asked for it.
+		expect(tokens).toEqual([42, 43, 44, 45]);
+		expect(terminal.appearance).toBe("light");
+		terminal.stop();
+	});
+
+	it("does not let two retired cycles collapse into one claim", () => {
+		// Serialisation bounds how many cycles are live at once, never how many
+		// answers are still in flight behind them. With a single claim the
+		// second old colour took the live request's token and its real answer
+		// was discarded.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		vi.advanceTimersByTime(20_100);
+		const requestToken = 43;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// Both retired exchanges, then the live one, in the order asked.
+		for (const colour of ["0000/0000/0000", "0000/0000/0000", "ffff/ffff/ffff"]) {
+			process.stdin.emit("data", `\x1b]11;rgb:${colour}\x07`);
+			process.stdin.emit("data", "\x1b[?1;2c");
+		}
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(terminal.appearance).toBe("light");
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it.each([25_001, 30_000, 120_000])("still consumes a retired cycle's answer %i ms later", age => {
+		// A claim carried a deadline, and when it lapsed the old answer became
+		// the live request's: dark under token 42 at 25,001 ms where 24,999 ms
+		// was correct. A deadline says how long to wait; it never proves an
+		// answer cannot arrive, so the claim is plain data now and holds until
+		// it is spent.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(age);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events).toEqual([{ appearance: "light", token: requestToken }]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("charges a surrendered cycle's late answer to itself, not to its successor", () => {
+		// A cycle that surrendered still owns its own answer, so taking one on
+		// its behalf says nothing about whose turn was spent. Concluding that
+		// the live request had been answered deleted its record, and its own
+		// colour — still in flight — was then published under the request after
+		// it while the real answer disappeared.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(5_100);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		const requestToken = 43;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+
+		// 41 answers; 42 times out so 43 goes out; then 42 answers, then 43.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		vi.advanceTimersByTime(5_000);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events.filter(event => event.token === requestToken)).toEqual([
+			{ appearance: "light", token: requestToken },
+		]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("keeps a published cycle's sentinel even when something older took a turn first", () => {
+		// A cycle whose turn was spent elsewhere leaves nothing behind when it
+		// gives up. That has to stop the moment it receives and publishes its
+		// own colour: its sentinel is then outstanding and nothing is guessing
+		// about it, and deleting that slot handed the late arrival to the next
+		// question and ended it unanswered — the next request's own answer
+		// disappeared.
+		vi.useFakeTimers();
+		const { terminal, received } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ appearance, token });
+		});
+		events.length = 0;
+		received.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		vi.advanceTimersByTime(15_100);
+		expect(terminal.refreshAppearance?.(42)).toBe(42);
+		expect(terminal.refreshAppearance?.(43)).toBe(43);
+
+		// 41's whole exchange, then 42's own colour, then 42's late sentinel
+		// after its deadline, then 43's exchange — all in the order asked.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		vi.advanceTimersByTime(5_100);
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(events.filter(event => event.token === 43)).toEqual([{ appearance: "light", token: 43 }]);
+		expect(received).toEqual([]);
+		terminal.stop();
+	});
+
+	it("releases the queued refresh when a reply ends a cycle still inside multiplexer settlement", () => {
+		// Through a multiplexer cache the direct query waits on a settle timer
+		// that checks its cycle is still live. A reply that ends the cycle first
+		// made that callback return without sending anything, and nothing was
+		// left to start the request parked behind it: the terminal never asked
+		// about its colour again.
+		vi.useFakeTimers();
+		const originalTmux = Bun.env.TMUX;
+		Bun.env.TMUX = "/tmp/omp-appearance-settle,0,0";
+		const { terminal, queryCount } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+			// 41 is retired unanswered, 42 goes out and 43 queues behind it.
+			expect(terminal.refreshAppearance?.(41)).toBe(41);
+			vi.advanceTimersByTime(15_100);
+			expect(terminal.refreshAppearance?.(42)).toBe(42);
+			expect(terminal.refreshAppearance?.(43)).toBe(43);
+
+			// 41's own exchange finally lands; its claim takes it.
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+
+			// 42 gives up, so 43 goes out and enters multiplexer settlement with
+			// 44 parked behind it.
+			vi.advanceTimersByTime(5_100);
+			expect(terminal.refreshAppearance?.(44)).toBe(44);
+			const before = queryCount();
+
+			// 42's own answer arrives before the settle timer fires, ending 43's
+			// cycle. 44 must still reach the terminal.
+			process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+			vi.advanceTimersByTime(120_000);
+
+			expect(queryCount()).toBeGreaterThan(before);
+			terminal.stop();
+		} finally {
+			if (originalTmux === undefined) delete Bun.env.TMUX;
+			else Bun.env.TMUX = originalTmux;
+		}
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];
