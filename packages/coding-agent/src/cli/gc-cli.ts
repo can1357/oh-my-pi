@@ -2631,27 +2631,46 @@ function renderText(result: GcResult): string {
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
-	const result = await withGcLock(options.agentDir, async lockPath => {
-		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Stale cleanup may prune a missing first-save target's registry marker.
-		const registeredSessionPaths = options.runArchive
-			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
-			: [];
-		// Pruned collab replicas release their blobs to this run's sweep.
-		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) {
-			next.blobs = await runBlobGc(options, archiveRoot);
-			// On the result, so the JSON route carries it too: the renderer
-			// held the only copy and `--json` bypasses the renderer.
-			next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
-		}
-		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
-		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
-		if (options.runWal) next.wal = await runWalGc(options);
-		return next;
-	});
-
-	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
-	process.stdout.write(output);
-	return result;
+	// Built outside the lock so a phase that throws after an earlier one
+	// deleted something still has somewhere to say what was done.
+	const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath: "" };
+	const report = (): void => {
+		process.stdout.write(options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next));
+	};
+	try {
+		await withGcLock(options.agentDir, async lockPath => {
+			next.lockPath = lockPath;
+			// Stale cleanup may prune a missing first-save target's registry marker.
+			const registeredSessionPaths = options.runArchive
+				? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))
+				: [];
+			// Pruned collab replicas release their blobs to this run's sweep.
+			if (options.runStale) next.stale = await runStaleGc(options);
+			if (options.runBlobs) {
+				// On the result, so the JSON route carries it too: the
+				// renderer held the only copy and `--json` bypasses it.
+				next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
+				// And said *before* anything is deleted, on the stream that
+				// is not the result. A warning that arrives only when every
+				// later phase succeeds is a receipt, and the reader who most
+				// needs it is the one whose run then failed — a busy
+				// write-ahead checkpoint used to end a reclaiming run with
+				// exit 1, an empty stdout and nothing said about the
+				// deletion that had already happened.
+				if (options.apply) process.stderr.write(`warning: blobs: ${GC_BLOBS_WARNING}\n`);
+				next.blobs = await runBlobGc(options, archiveRoot);
+			}
+			if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
+			if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
+			if (options.runWal) next.wal = await runWalGc(options);
+			return next;
+		});
+	} catch (error) {
+		// What the run did before it failed, on the same stream and in the
+		// same shape as a run that did not.
+		report();
+		throw error;
+	}
+	report();
+	return next;
 }

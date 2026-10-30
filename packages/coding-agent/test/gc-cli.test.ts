@@ -536,6 +536,63 @@ describe("runGcCommand blob sweep", () => {
 			expect(text).toContain("omp gc --wal --apply");
 		});
 	}
+	for (const json of [false, true]) {
+		test(`says what it deleted when a later phase fails (${json ? "json" : "text"})`, async () => {
+			const orphan = await writeBlob(root, hashFor(`late-fail-${json}`), "orphan");
+			await agePath(orphan);
+			// A database for the checkpoint phase to reach.
+			await fs.mkdir(path.dirname(getHistoryDbPath(root)), { recursive: true });
+			const db = new Database(getHistoryDbPath(root), { create: true });
+			db.run("PRAGMA journal_mode = WAL");
+			db.run("CREATE TABLE IF NOT EXISTS t (x INTEGER)");
+			db.run("INSERT INTO t (x) VALUES (1)");
+			db.close();
+
+			const written: string[] = [];
+			const errors: string[] = [];
+			const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+				written.push(String(chunk));
+				return true;
+			});
+			const stderr = spyOn(process.stderr, "write").mockImplementation(chunk => {
+				errors.push(String(chunk));
+				return true;
+			});
+			// The write-ahead checkpoint fails the way a busy reader makes it
+			// fail — after reclamation has already deleted something.
+			const realPrepare = Database.prototype.prepare;
+			const query = spyOn(Database.prototype, "prepare").mockImplementation(function (
+				this: Database,
+				sql: string,
+				...rest: unknown[]
+			) {
+				if (sql.includes("wal_checkpoint")) throw new Error("database is locked");
+				return (realPrepare as (...args: unknown[]) => unknown).call(this, sql, ...rest);
+			} as typeof Database.prototype.prepare);
+			let failure: unknown;
+			try {
+				await runGcCommand({ flags: { agentDir: root, blobs: true, wal: true, apply: true, json } }).catch(
+					error => {
+						failure = error;
+					},
+				);
+			} finally {
+				query.mockRestore();
+				stderr.mockRestore();
+				stdout.mockRestore();
+			}
+
+			// Exit 1 and silence, after deleting something, is the worst
+			// output this command can produce: the warning goes out before
+			// the deletion, and what the run did survives the failure.
+			expect(failure).toBeDefined();
+			expect(errors.join("")).toContain(GC_BLOBS_WARNING);
+			expect(await Bun.file(orphan).exists()).toBe(false);
+			const text = written.join("");
+			expect(text).toContain(json ? '"deleted": 1' : "blobs: 1/1 files");
+			expect(text).toContain(json ? GC_BLOBS_WARNING : "warning: blobs:");
+		});
+	}
 	test("reads a transcript a breadcrumb registers while it is listing", async () => {
 		const referencedHash = hashFor("late-crumb-referenced");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
