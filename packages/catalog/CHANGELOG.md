@@ -5,6 +5,7 @@
 ### Added
 
 - Added TokenRhythm (`tokenrhythm`) as a provider: `/login tokenrhythm` with an API key, the live `/v1/models` roster, and per-family reasoning controls verified against the host (DeepSeek V4 toggle plus low/high/max; Qwen and Seed toggle; GLM, Kimi, LongCat, MiniMax and MiMo always on with no disable field) ([#16053](https://github.com/can1357/oh-my-pi/pull/16053) by [@openvictory](https://github.com/openvictory))
+
 ### Changed
 
 - Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
