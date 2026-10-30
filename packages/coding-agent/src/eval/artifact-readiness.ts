@@ -47,7 +47,21 @@ export async function resolveSettledArtifact(
 		const found = await artifactInDirectory(dir, id);
 		const after = artifactCopyActivity(dir);
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
-		if (after.announced === before.announced && after.pending === 0) return found;
+		if (after.announced === before.announced && after.pending === 0) {
+			if (found) return found;
+			// A miss belongs to the directory that asked. Handing the id back
+			// for the ordinary lookup would answer it from whatever directory
+			// the session reads now, which for a cell suspended across a
+			// re-adoption is a different conversation's artifact wearing the
+			// same number.
+			const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+			if (current && path.resolve(current) !== path.resolve(dir)) {
+				throw new ToolError(
+					`artifact://${id} is not in ${dir}, the artifacts directory this cell was started with`,
+				);
+			}
+			return null;
+		}
 		// Copies arriving back to back with no gap between them would keep a
 		// reader here forever. Saying so is better than answering from a
 		// listing that was out of date before it finished.

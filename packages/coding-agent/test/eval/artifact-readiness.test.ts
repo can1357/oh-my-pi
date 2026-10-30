@@ -165,11 +165,16 @@ describe("eval artifact readiness", () => {
 		const readdir = fs.promises.readdir;
 		let injected = false;
 		const hook = spyOn(fs.promises, "readdir").mockImplementation((async (...args: unknown[]) => {
-			if (!injected && String(args[0]) === destination) {
-				injected = true;
-				await copySessionArtifacts(`${source}.jsonl`, `${destination}.jsonl`);
+			if (injected || String(args[0]) !== destination) {
+				return await readdir(...(args as Parameters<typeof readdir>));
 			}
-			return await readdir(...(args as Parameters<typeof readdir>));
+			injected = true;
+			// The names as they were when the listing started, handed back
+			// after a whole copy has come and gone: nothing is pending by then,
+			// and only the count of what was announced says the answer is old.
+			const stale = await readdir(...(args as Parameters<typeof readdir>));
+			await copySessionArtifacts(`${source}.jsonl`, `${destination}.jsonl`);
+			return stale;
 		}) as typeof fs.promises.readdir);
 
 		try {
@@ -201,6 +206,26 @@ describe("eval artifact readiness", () => {
 		} finally {
 			hook.mockRestore();
 		}
+	});
+
+	it("refuses a miss under a root the session has since left", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const suspended = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_suspended");
+		const current = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_current");
+		fs.mkdirSync(suspended, { recursive: true });
+		fs.mkdirSync(current, { recursive: true });
+		// The same number, a different conversation.
+		fs.writeFileSync(path.join(current, "1.bash.log"), "ANOTHER CONVERSATION'S");
+
+		// The cell was started on `suspended` and the session has re-adopted
+		// since. Answering its miss from the directory the session reads now
+		// would hand it that other artifact.
+		await expect(resolveSettledArtifact(sessionWithArtifacts(current), "1", suspended)).rejects.toThrow(
+			"artifacts directory this cell was started with",
+		);
+		// The same miss on the session's own directory still falls through to
+		// the ordinary lookup, which is how another session's artifact is read.
+		expect(await resolveSettledArtifact(sessionWithArtifacts(current), "9", current)).toBeNull();
 	});
 
 	it("does not hold a cell for a staging tree that no copy is using", async () => {

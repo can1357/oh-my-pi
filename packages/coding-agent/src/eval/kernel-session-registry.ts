@@ -11,6 +11,18 @@ import {
 	waitForPromiseWithCancellation,
 } from "./executor-base";
 
+/**
+ * The bridge identity of a kernel.
+ *
+ * The kernel, not the eval session: two kernels can share a session id with
+ * different working directories, and a bridge keyed by the session would have
+ * one kernel's disposal take the other's standing authority with it. The key's
+ * separators go, because this id is passed to the kernel in its environment.
+ */
+export function bridgeSessionIdFor(sessionKey: string): string {
+	return `kernel:${sessionKey.replaceAll("\0", "|")}`;
+}
+
 interface KernelSessionRegistryOptions {
 	sessionId?: string;
 	kernelOwnerId?: string;
@@ -428,7 +440,12 @@ export function createKernelSessionRegistry<
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		if (options.bridge && !options.bridgeSessionId) {
-			options.bridgeSessionId = sessionId;
+			// The kernel, not the eval session: two kernels can share a session
+			// id with different working directories, and a bridge keyed by the
+			// session would have one kernel's disposal take the other's
+			// standing authority with it. The separators go, because this id
+			// is passed to the kernel in its environment.
+			options.bridgeSessionId = bridgeSessionIdFor(sessionKey);
 		}
 		if (options.reset) {
 			const inFlight = resettingSessions.get(sessionKey);

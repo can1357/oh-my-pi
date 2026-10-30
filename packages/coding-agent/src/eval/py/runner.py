@@ -2579,6 +2579,22 @@ _MANAGED_ENV_KEYS = (
 )
 
 
+def _request_url_roots(req: dict) -> str | None:
+    """The internal-URL roots this request carries.
+
+    From the request, never from the process environment: the environment is
+    this kernel's, patched per request, and reading it before the patch is
+    applied gives the previous cell's roots — which is the artifacts directory
+    of whatever ran last rather than of the cell being started.
+    """
+    env = req.get("env")
+    if isinstance(env, dict):
+        roots = env.get("PI_EVAL_LOCAL_ROOTS")
+        if isinstance(roots, str):
+            return roots
+    return os.environ.get("PI_EVAL_LOCAL_ROOTS")
+
+
 def _apply_request_runtime(req: dict) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
@@ -2649,7 +2665,7 @@ def _handle_tool_request(req: dict) -> None:
     """Describe or invoke a kernel-defined tool on a dedicated runner thread."""
     rid = str(req.get("id"))
     token = _CURRENT_RID.set(rid)
-    roots_token = _CURRENT_URL_ROOTS.set(os.environ.get("PI_EVAL_LOCAL_ROOTS"))
+    roots_token = _CURRENT_URL_ROOTS.set(_request_url_roots(req))
     status = "ok"
     _emit({"type": "started", "id": rid})
     try:
@@ -2697,7 +2713,7 @@ async def _handle_request_async(req: dict) -> None:
     execution_reserved = bool(req.pop("_execution_reserved", False))
     execution_started = False
     token = _CURRENT_RID.set(rid)
-    roots_token = _CURRENT_URL_ROOTS.set(os.environ.get("PI_EVAL_LOCAL_ROOTS"))
+    roots_token = _CURRENT_URL_ROOTS.set(_request_url_roots(req))
     displayed_matplotlib_token = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.set(set())
     _STATE.capture_rid = rid
     reset_call_occurrences = _STATE.user_ns.get("__omp_reset_call_occurrences__")

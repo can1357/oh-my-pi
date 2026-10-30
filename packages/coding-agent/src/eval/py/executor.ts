@@ -21,6 +21,7 @@ import { getEnabledEvalPreludes } from "../preludes";
 import { updateEvalState } from "../state";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
+	bridgeSessionIdFor,
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
 	formatSessionTimeoutAnnotation,
@@ -350,7 +351,7 @@ async function shutdownInvalidatedSession(session: PythonSession): Promise<Kerne
 	if (replacement) await replacement.promise.catch(() => undefined);
 	// The kernel is going, so the threads it left running go with it: the
 	// session's standing bridge entry has nothing left to answer.
-	unregisterPyToolBridgeSession(session.sessionId);
+	unregisterPyToolBridgeSession(bridgeSessionIdFor(session.sessionKey));
 	return await session.kernel.shutdown();
 }
 
@@ -519,7 +520,9 @@ async function invokePythonToolRequest(
 	await ensureToolBridge(bridgeOptions);
 
 	const runId = Snowflake.next();
-	const unregister = registerPyToolBridge(options.sessionId, runId, {
+	// The same identity the kernel's own cells register under: the bridge
+	// belongs to the kernel, and the prelude sends that id with every call.
+	const unregister = registerPyToolBridge(bridgeOptions.bridgeSessionId ?? options.sessionId, runId, {
 		toolSession: options.toolSession,
 		signal: options.signal,
 		emitStatus: undefined,
