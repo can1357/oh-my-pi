@@ -318,7 +318,7 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "steer"` (default while streaming) — steers the current run
 - `deliverAs: "followUp"` — queued behind the current run while streaming
 - `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
-- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn. Plan mode or user-interrupt auto-resume suppression folds it into context instead, unless `triggerTurn` is true: an aside sent with `triggerTurn` that no running turn consumes starts a turn even then, and folds only when a user interrupt came after it was sent
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
