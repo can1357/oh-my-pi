@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `omp gc --apply` no longer archives cold sessions by default (`gc.archive` is now off): it still reclaims unreferenced blobs, checkpoints database WAL files and compresses idle sessions, but it no longer moves cold sessions into `archive/sessions`, where nothing in this release can find or read them. Pass `--archive` to ask for it by name ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- `omp gc --blobs` no longer deletes a blob that only a symlinked transcript references: the walk that collects session files follows symlinks, the way `FileSessionStorage.listFilesSync` already does ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))

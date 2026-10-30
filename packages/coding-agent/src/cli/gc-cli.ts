@@ -408,9 +408,20 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 	}
 }
 
-async function collectJsonlFiles(root: string): Promise<string[]> {
+/**
+ * Every transcript below `root`, links followed.
+ *
+ * `followSymlinks` because a transcript placed in a session directory as a
+ * symlink is a transcript like any other — `FileSessionStorage.listFilesSync`
+ * already treats one that way — and a blob it references must not be swept
+ * as unreferenced because this walk could not see the file that references
+ * it.
+ */
+async function scanSessionTree(glob: Bun.Glob, root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true }), name =>
+			path.join(root, name),
+		);
 		files.sort();
 		return files;
 	} catch (error) {
@@ -419,15 +430,12 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
+async function collectJsonlFiles(root: string): Promise<string[]> {
+	return await scanSessionTree(JSONL_GLOB, root);
+}
+
 async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
-	try {
-		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
-		files.sort();
-		return files;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
+	return await scanSessionTree(JSONL_GZ_GLOB, root);
 }
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {

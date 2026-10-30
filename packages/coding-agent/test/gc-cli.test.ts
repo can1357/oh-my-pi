@@ -177,6 +177,31 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
+	test("keeps a blob only a symlinked transcript references", async () => {
+		const referencedHash = hashFor("referenced");
+		const orphanHash = hashFor("orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+		// A transcript kept elsewhere and linked into the sessions tree: the
+		// session storage lists one as a transcript like any other, so the
+		// blob it references is referenced.
+		const elsewhere = path.join(root, "elsewhere");
+		await fs.mkdir(elsewhere, { recursive: true });
+		const offloaded = await writeSession(root, "project", "linked", "complete", {
+			blobRef: `blob:sha256:${referencedHash}`,
+		});
+		const moved = path.join(elsewhere, path.basename(offloaded));
+		await fs.rename(offloaded, moved);
+		await fs.symlink(moved, offloaded);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");
@@ -871,6 +896,20 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(keepRecent).exists()).toBe(true);
 		expect(await Bun.file(pending).exists()).toBe(true);
 		expect(await Bun.file(interrupted).exists()).toBe(true);
+	});
+	test("an unqualified apply leaves cold sessions where they are", async () => {
+		const cold = await writeSession(root, "project", "cold", "complete", { ageDays: 90 });
+		await agePath(await writeBlob(root, hashFor("orphan"), "orphan"));
+
+		// No phase flag, so the run takes its phases from settings — where
+		// archiving is now off, because nothing in this release can find or
+		// read what it leaves in `archive/sessions`.
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+
+		expect(result.archive).toBeUndefined();
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(cold).exists()).toBe(true);
+		expect(await Bun.file(path.join(root, "archive", "sessions", "project", "cold.jsonl.gz")).exists()).toBe(false);
 	});
 
 	test("keeps the source journal when compression encounters a read error", async () => {

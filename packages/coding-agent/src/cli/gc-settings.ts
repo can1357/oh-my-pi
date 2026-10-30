@@ -6,7 +6,13 @@ import { register } from "../config/registry";
 
 export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: true });
 
-export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: true });
+// Opt-in, like `gc.stale` and for a stronger reason: archiving is the one
+// phase that moves a session out of the sessions tree, and nothing in this
+// release — or in any release up to and including 18.14.0 — can find or read
+// what it leaves in `archive/sessions`. An unqualified `omp gc --apply`
+// therefore leaves cold sessions where they are; `--archive --apply` still
+// archives, for anyone who asks for it by name.
+export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });
 
