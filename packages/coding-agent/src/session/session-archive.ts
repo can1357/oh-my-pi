@@ -28,7 +28,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
-import { sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
+import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -222,9 +222,13 @@ export async function inflateArchivedTranscript(
 ): Promise<number> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	// A directory this run mints and records, so the stage is a file of this
-	// run's own making and a kill leaves a record to reclaim it by.
-	const ground = await mintStagingGround(destination, ledger);
+	// run's own making and a kill leaves a record to reclaim it by. The
+	// transcript keeps the archive's mode, which is the live transcript's: a
+	// private session must not come back readable by more than it was.
+	const mode = (await fs.stat(source)).mode & 0o7777;
+	const ground = await mintStagingGround(destination, ledger, mode);
 	try {
+		await ground.handle.chmod(mode);
 		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle);
 		const landed = await fs.lstat(ground.file).catch(() => undefined);
 		if (landed?.dev !== ground.created.dev || landed.ino !== ground.created.ino) {
@@ -1033,12 +1037,13 @@ async function copyEntryDereferenced(
 async function copyTreeDereferenced(
 	source: string,
 	destination: string,
-	ledger: string,
+	agentDir: string,
 	notes: string[],
 ): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
-	const isResidue = await stagingResidueUnder(ledger, source);
+	const isResidue = await stagingResidueUnder(agentDir, source);
+	const ledger = stagingLedgerDir(agentDir);
 	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue);
 	await assertLiveTreeHoldsArchive(source, destination, archiveRoot, isResidue);
 }
@@ -1062,12 +1067,14 @@ export function stagingLedgerDir(agentDir: string): string {
 
 /**
  * What a run records about one staging directory it minted. Written first
- * with only the names, before the directory exists, and replaced with the
- * staged file's identity once that file has been created.
+ * with only the names, before the directory exists, and replaced once the
+ * directory and its file exist with both their identities.
  */
 interface StagingRecord {
 	dir: string;
 	file: string;
+	/** The minted directory's identity; absent while the run had not yet made it. */
+	dirIdentity?: { dev: number; ino: number };
 	/** The staged file's identity; absent while the run had not yet created it. */
 	identity?: { dev: number; ino: number };
 }
@@ -1095,6 +1102,25 @@ const STAGING_MINT_ATTEMPTS = 16;
 const STAGING_RECORD_PART = ".part";
 
 /**
+ * Refuse a ledger anybody but this user can write. A record is only as
+ * trustworthy as the directory it sits in: one other users can write is a
+ * place they can put records, and a record that has once been writable by
+ * someone else stays suspect after a `chmod`, so this refuses rather than
+ * repairing.
+ */
+async function assertPrivateLedger(ledger: string): Promise<void> {
+	const standing = await fs.lstat(ledger);
+	const uid = process.getuid?.();
+	const shared = process.platform !== "win32" && (standing.mode & 0o077) !== 0;
+	if (!standing.isDirectory() || (uid !== undefined && standing.uid !== uid) || shared) {
+		throw new Error(
+			`${ledger} is not a private directory owned by this user, so no staging record in it can be trusted; ` +
+				`look at what is in it, then remove it or \`chmod 700\` it, and run again`,
+		);
+	}
+}
+
+/**
  * Mint a staging directory of this run's own beside `target`, create the
  * file to stage into inside it, and record both in `ledger`.
  *
@@ -1102,11 +1128,15 @@ const STAGING_RECORD_PART = ".part";
  * about to make; then the directory is made with `mkdir` without
  * `recursive`, so `EEXIST` is the kernel saying the name is taken and
  * another is minted, up to {@link STAGING_MINT_ATTEMPTS} times; then the
- * file is created and the record replaced, by `rename`, with the file's
- * identity. So there is no moment at which this run has made something the
- * ledger does not name: a run killed before the identity lands leaves a
- * record naming an empty file, which {@link reclaimRecordedStagingGrounds}
- * can take away without knowing its inode because it holds no bytes.
+ * file is created and the record replaced, by `rename`, with the
+ * directory's and the file's identities. So, while the machine stays up,
+ * there is no moment at which this run has made something the ledger does
+ * not name: a run killed before the identities land leaves a record naming
+ * a `0700` directory with at most an empty file in it, which
+ * {@link reclaimRecordedStagingGrounds} can take away without knowing an
+ * inode because it holds no bytes. Nothing here is synced, so after a power
+ * loss the directory can outlive its record; it is then indistinguishable
+ * from an artifact and is treated as one.
  *
  * Mode `0700`, so nothing without this user's rights puts a file inside.
  * What the directory is not: a boundary against a process that can write
@@ -1118,6 +1148,7 @@ const STAGING_RECORD_PART = ".part";
  */
 export async function mintStagingGround(target: string, ledger: string, mode = 0o666): Promise<StagingGround> {
 	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	await assertPrivateLedger(ledger);
 	for (let attempt = 0; attempt < STAGING_MINT_ATTEMPTS; attempt++) {
 		const dir = sessionStagingPath(target);
 		const file = path.join(dir, path.basename(target));
@@ -1134,9 +1165,14 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		let handle: fs.FileHandle | undefined;
 		let created: Stats | undefined;
 		try {
+			const minted = await fs.lstat(dir);
 			handle = await fs.open(file, "wx+", mode);
 			created = await handle.stat();
-			const recorded: StagingRecord = { ...intent, identity: { dev: created.dev, ino: created.ino } };
+			const recorded: StagingRecord = {
+				...intent,
+				dirIdentity: { dev: minted.dev, ino: minted.ino },
+				identity: { dev: created.dev, ino: created.ino },
+			};
 			await fs.writeFile(`${record}${STAGING_RECORD_PART}`, JSON.stringify(recorded), { mode: 0o600 });
 			await fs.rename(`${record}${STAGING_RECORD_PART}`, record);
 			return { dir, file, handle, created, record };
@@ -1232,6 +1268,19 @@ export interface StagingReclaim {
 	notes: string[];
 }
 
+function parseIdentity(value: unknown): { dev: number; ino: number } | undefined {
+	if (value === undefined) return undefined;
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!("dev" in value && typeof value.dev === "number") ||
+		!("ino" in value && typeof value.ino === "number")
+	) {
+		throw new Error("not a staging record");
+	}
+	return { dev: value.dev, ino: value.ino };
+}
+
 function parseStagingRecord(text: string): StagingRecord {
 	const entry: unknown = JSON.parse(text);
 	if (
@@ -1242,35 +1291,30 @@ function parseStagingRecord(text: string): StagingRecord {
 	) {
 		throw new Error("not a staging record");
 	}
-	if (!("identity" in entry) || entry.identity === undefined) return { dir: entry.dir, file: entry.file };
-	const identity = entry.identity;
-	if (
-		typeof identity !== "object" ||
-		identity === null ||
-		!("dev" in identity && typeof identity.dev === "number") ||
-		!("ino" in identity && typeof identity.ino === "number")
-	) {
-		throw new Error("not a staging record");
-	}
-	return { dir: entry.dir, file: entry.file, identity: { dev: identity.dev, ino: identity.ino } };
+	const dirIdentity = parseIdentity("dirIdentity" in entry ? entry.dirIdentity : undefined);
+	const identity = parseIdentity("identity" in entry ? entry.identity : undefined);
+	return { dir: entry.dir, file: entry.file, dirIdentity, identity };
 }
 
-/** Every record in `ledger` with its path, and a note for each that could not be read. */
+/**
+ * Every record in the agent directory's ledger with its path. A ledger that
+ * cannot be read, is not private, or holds a record that cannot be parsed
+ * comes back as `failure`: what such a record named can no longer be told
+ * apart from an artifact, so a caller that would act on the difference has
+ * to stop rather than guess.
+ */
 async function readStagingRecords(
-	ledger: string,
-): Promise<{ records: { path: string; entry: StagingRecord }[]; parts: string[]; notes: string[] }> {
-	const found = {
-		records: [] as { path: string; entry: StagingRecord }[],
-		parts: [] as string[],
-		notes: [] as string[],
-	};
+	agentDir: string,
+): Promise<{ records: { path: string; entry: StagingRecord }[]; parts: string[]; failure?: string }> {
+	const ledger = stagingLedgerDir(agentDir);
+	const found = { records: [] as { path: string; entry: StagingRecord }[], parts: [] as string[] };
 	let names: string[];
 	try {
 		names = await fs.readdir(ledger);
+		await assertPrivateLedger(ledger);
 	} catch (error) {
-		if (!isEnoent(error))
-			found.notes.push(`${ledger} could not be read, so no staging directory was reclaimed: ${error}`);
-		return found;
+		if (isEnoent(error)) return found;
+		return { ...found, failure: `${ledger} could not be read: ${errorText(error)}` };
 	}
 	for (const name of names.sort()) {
 		const record = path.join(ledger, name);
@@ -1281,10 +1325,74 @@ async function readStagingRecords(
 		try {
 			found.records.push({ path: record, entry: parseStagingRecord(await fs.readFile(record, "utf8")) });
 		} catch (error) {
-			found.notes.push(`${record} could not be read, so the staging directory it records was left alone: ${error}`);
+			return { ...found, failure: `${record} could not be read: ${errorText(error)}` };
 		}
 	}
 	return found;
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** What a record turns out to name, once checked against what is on disk. */
+type RecordedGround =
+	/** The directory the run minted, still there with the identity it recorded. */
+	| { kind: "minted" }
+	/** A record written before the run made its directory, which is there. */
+	| { kind: "intent" }
+	/** Nothing of that run's stands at the name any more. */
+	| { kind: "gone"; note?: string }
+	/** A record no run of this feature could have written. */
+	| { kind: "refused"; note: string };
+
+/**
+ * Check a record against what a run could have minted, before anything acts
+ * on it. A record can only ever narrow what is already known to be staging
+ * ground — it is never authority by itself: the directory it names has to
+ * be named the way {@link sessionStagingPath} names one, hold the file the
+ * record names directly, sit inside the sessions tree or the archive, and,
+ * when the record says so, still be the inode the run made. A record that
+ * fails the first three is refused outright, whatever else it says.
+ */
+async function checkRecordedGround(entry: StagingRecord, roots: readonly string[]): Promise<RecordedGround> {
+	const shaped =
+		path.dirname(entry.file) === entry.dir &&
+		SESSION_STAGING_RE.exec(path.basename(entry.dir))?.[1] === path.basename(entry.file);
+	if (!shaped) return { kind: "refused", note: `${entry.dir} is not a staging directory, so its record was refused` };
+	let standing: Stats;
+	try {
+		standing = await fs.lstat(entry.dir);
+	} catch (error) {
+		if (isEnoent(error)) return { kind: "gone" };
+		return { kind: "refused", note: `${entry.dir} could not be read, so it was left as it is: ${errorText(error)}` };
+	}
+	const real = await fs.realpath(entry.dir).catch(() => undefined);
+	const contained = real !== undefined && roots.some(root => isWithin(root, real) && real !== root);
+	if (!contained) {
+		return {
+			kind: "refused",
+			note: `${entry.dir} is outside the sessions and archive trees, so its record was refused and it was left alone`,
+		};
+	}
+	if (!standing.isDirectory()) {
+		return { kind: "gone", note: `${entry.dir} is no longer the directory a run staged in, so it was left alone` };
+	}
+	if (!entry.dirIdentity) return { kind: "intent" };
+	if (standing.dev !== entry.dirIdentity.dev || standing.ino !== entry.dirIdentity.ino) {
+		return { kind: "gone", note: `${entry.dir} is no longer the directory a run staged in, so it was left alone` };
+	}
+	return { kind: "minted" };
+}
+
+/** The real paths a staging directory may sit inside: the sessions tree and the archive. */
+async function stagingRoots(agentDir: string): Promise<string[]> {
+	const roots: string[] = [];
+	for (const root of [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)]) {
+		const real = await fs.realpath(root).catch(() => undefined);
+		if (real !== undefined) roots.push(real);
+	}
+	return roots;
 }
 
 /**
@@ -1292,49 +1400,56 @@ async function readStagingRecords(
  * clean up. Without `apply`, only count them.
  *
  * The caller holds the gc lock, so every record here belongs to a run that
- * is gone — see {@link stagingLedgerDir}. What goes is what the record
- * names: the one staged file while it is still the regular file recorded
- * (or, for a run that died before recording its identity, while it is
- * empty), and then the directory once nothing else is in it. Anything else
- * is reported and the record kept, so the directory stays residue and the
- * next run reports it again rather than forgetting it. A record replacement
- * a run died writing is the ledger's own, and goes.
+ * is gone — see {@link stagingLedgerDir} — and each is checked first, see
+ * {@link checkRecordedGround}. What goes is what a checked record names: the
+ * one staged file while it is still the regular file recorded, then the
+ * directory once nothing else is in it. A record written before its run
+ * made the directory names a directory that run may or may not have made,
+ * so it is acted on only while that directory is `0700` and holds nothing
+ * but the named file, empty — nothing whose loss costs a byte. Anything else
+ * is reported and the record kept, so it is reported again rather than
+ * forgotten. A record replacement a run died writing is the ledger's own,
+ * and goes.
  */
-export async function reclaimRecordedStagingGrounds(ledger: string, apply: boolean): Promise<StagingReclaim> {
+export async function reclaimRecordedStagingGrounds(agentDir: string, apply: boolean): Promise<StagingReclaim> {
 	const result: StagingReclaim = { found: 0, removed: 0, bytes: 0, notes: [] };
-	const { records, parts, notes } = await readStagingRecords(ledger);
-	result.notes.push(...notes);
+	const { records, parts, failure } = await readStagingRecords(agentDir);
+	if (failure) {
+		result.notes.push(`${failure}; no staging directory was reclaimed`);
+		return result;
+	}
 	if (apply) for (const part of parts) await fs.rm(part, { force: true }).catch(() => undefined);
+	const roots = await stagingRoots(agentDir);
 	for (const { path: record, entry } of records) {
-		let standing: Stats | undefined;
-		try {
-			standing = await fs.lstat(entry.dir);
-		} catch (error) {
-			if (!isEnoent(error)) {
-				result.notes.push(`${entry.dir} could not be read, so it was left as it is: ${error}`);
-				continue;
-			}
+		const ground = await checkRecordedGround(entry, roots);
+		if (ground.kind === "refused") {
+			result.notes.push(ground.note);
+			continue;
 		}
-		if (!standing?.isDirectory()) {
-			// Nothing of that run's stands at the name any more. A record
-			// that names nothing is dropped; the name is somebody else's.
-			if (standing)
-				result.notes.push(`${entry.dir} is no longer the directory a run staged in, so it was left alone`);
+		if (ground.kind === "gone") {
+			if (ground.note) result.notes.push(ground.note);
 			if (apply) await fs.rm(record, { force: true }).catch(() => undefined);
 			continue;
 		}
 		result.found += 1;
-		const staged = await fs.lstat(entry.file).catch(() => undefined);
-		if (entry.identity && staged?.dev === entry.identity.dev && staged.ino === entry.identity.ino) {
-			result.bytes += staged.size;
+		if (ground.kind === "minted") {
+			const staged = await fs.lstat(entry.file).catch(() => undefined);
+			if (entry.identity && staged?.dev === entry.identity.dev && staged.ino === entry.identity.ino) {
+				result.bytes += staged.size;
+			}
 		}
 		if (!apply) continue;
-		const note = await clearStagingGround(
-			entry.dir,
-			entry.file,
-			entry.identity ?? "empty",
-			"the run that recorded it",
-		);
+		let note: string | undefined;
+		if (ground.kind === "intent" && ((await fs.lstat(entry.dir)).mode & 0o777) !== 0o700) {
+			note = `${entry.dir} is not a directory a run minted, so it was left alone`;
+		} else {
+			note = await clearStagingGround(
+				entry.dir,
+				entry.file,
+				ground.kind === "minted" && entry.identity ? entry.identity : "empty",
+				"the run that recorded it",
+			);
+		}
 		if (note) {
 			result.notes.push(note);
 			continue;
@@ -1346,19 +1461,27 @@ export async function reclaimRecordedStagingGrounds(ledger: string, apply: boole
 }
 
 /**
- * Whether an entry below `root` is a staging directory a run recorded and
- * could not clear — residue, not an artifact. Decided by the record, never
- * by the name: see {@link stagingLedgerDir}. Compared by real path relative
- * to `root`, so an archive reached through a symlink still matches the
- * directory a run minted inside it.
+ * Whether an entry below `root` is a staging directory a run minted, recorded
+ * and could not clear — residue, not an artifact. Decided by a checked record
+ * ({@link checkRecordedGround}), never by a name. Compared by real path
+ * relative to `root`, so an archive reached through a symlink still matches
+ * the directory a run minted inside it.
+ *
+ * Throws when the ledger cannot be read or holds a record that cannot be
+ * parsed: without it, residue and artifact cannot be told apart, and a walk
+ * that carried on would publish a partial file as one or skip an artifact as
+ * the other.
  */
-export async function stagingResidueUnder(ledger: string, root: string): Promise<(entry: string) => boolean> {
-	const { records } = await readStagingRecords(ledger);
+export async function stagingResidueUnder(agentDir: string, root: string): Promise<(entry: string) => boolean> {
+	const { records, failure } = await readStagingRecords(agentDir);
+	if (failure) throw new Error(`${failure}; staging residue cannot be told from artifacts, so nothing was carried`);
 	if (records.length === 0) return () => false;
 	const realRoot = await fs.realpath(root).catch(() => undefined);
 	if (realRoot === undefined) return () => false;
+	const roots = await stagingRoots(agentDir);
 	const residue = new Set<string>();
 	for (const { entry } of records) {
+		if ((await checkRecordedGround(entry, roots)).kind !== "minted") continue;
 		const real = await fs.realpath(entry.dir).catch(() => undefined);
 		if (real === undefined) continue;
 		const relative = path.relative(realRoot, real);
@@ -1382,11 +1505,11 @@ export async function stagingResidueUnder(ledger: string, root: string): Promise
 export async function archivedPathsWithoutLiveCopies(
 	archiveFile: string,
 	sessionFile: string,
-	ledger: string,
+	agentDir: string,
 ): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
-	const isResidue = await stagingResidueUnder(ledger, archiveArtifacts);
+	const isResidue = await stagingResidueUnder(agentDir, archiveArtifacts);
 	const outstanding: string[] = [];
 	for (const file of await treeFiles(archiveArtifacts)) {
 		const name = path.relative(archiveArtifacts, file);
@@ -1395,6 +1518,61 @@ export async function archivedPathsWithoutLiveCopies(
 		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
 	}
 	return outstanding.sort();
+}
+
+/**
+ * What restoring `archiveFile` would refuse in its artifact tree, without
+ * writing anything: each live destination that already holds something
+ * other than the archived entry, or a prefix of it — the same questions
+ * {@link copyEntryDereferenced} asks before it publishes.
+ */
+export async function artifactRestoreConflicts(
+	archiveFile: string,
+	sessionFile: string,
+	agentDir: string,
+): Promise<string[]> {
+	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
+	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	if (!(await statIfPresent(archiveArtifacts))) return [];
+	const archiveRoot = await fs.realpath(archiveArtifacts);
+	const isResidue = await stagingResidueUnder(agentDir, archiveArtifacts);
+	const conflicts: string[] = [];
+	const visit = async (source: string, destination: string): Promise<void> => {
+		const stat = await fs.stat(source).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat || isResidue(source)) return;
+		const existing = await fs.lstat(destination).catch(() => undefined);
+		if (stat.isDirectory()) {
+			if (existing && !(await statIfPresent(destination).catch(() => undefined))?.isDirectory()) {
+				conflicts.push(`${destination} is not a directory, so ${source} could not be restored into it`);
+				return;
+			}
+			for (const entry of (await fs.readdir(source)).sort()) {
+				await visit(path.join(source, entry), path.join(destination, entry));
+			}
+			return;
+		}
+		if (!stat.isFile() || !existing) return;
+		const live = await openRegularFile(destination).catch(() => undefined);
+		try {
+			if (
+				live &&
+				(await survivesRemovalOf(destination, await live.stat(), stat, archiveRoot)) &&
+				(await sourceIsPrefixOfDestination(Bun.file(source).stream(), live, false))
+			) {
+				return;
+			}
+		} finally {
+			await live?.close().catch(() => undefined);
+		}
+		conflicts.push(
+			`${destination} already holds something else, so the archived ${source} would be left in the archive`,
+		);
+	};
+	await visit(archiveArtifacts, liveArtifacts);
+	return conflicts;
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */
@@ -1693,11 +1871,12 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	}
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
-	const ledger = stagingLedgerDir(agentDir ?? getAgentDir());
+	const stagingAgentDir = agentDir ?? getAgentDir();
+	const ledger = stagingLedgerDir(stagingAgentDir);
 	// A dead run's staged copies go by their records before this walks a
 	// tree one of them could be in. What cannot go is the archive phase's to
 	// report: a resume is not the place to fail over somebody else's residue.
-	await reclaimRecordedStagingGrounds(ledger, true);
+	await reclaimRecordedStagingGrounds(stagingAgentDir, true);
 	// Read through a non-blocking descriptor: a FIFO at the live transcript's
 	// name, or anywhere in either tree, owns nothing and must not hang this.
 	const headerId = async (file: string): Promise<string | undefined> => {
@@ -1779,7 +1958,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, ledger, notes);
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, stagingAgentDir, notes);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(

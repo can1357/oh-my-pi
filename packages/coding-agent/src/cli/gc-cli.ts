@@ -61,6 +61,7 @@ import {
 	openRegularFile,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
+	artifactRestoreConflicts,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
 import { readSessionHeaderId } from "../session/session-loader";
@@ -305,6 +306,8 @@ interface ArchiveCandidate {
 	recovery: string;
 	/** Where this run records the staging directories it mints. */
 	ledger: string;
+	/** The agent directory, whose ledger says what is staging residue. */
+	agentDir: string;
 }
 
 interface ResolvedGcOptions {
@@ -978,7 +981,7 @@ function archiveDestination(
 	archiveRoot: string,
 	sessionsRoot: string,
 	session: SessionInfo,
-): Omit<ArchiveCandidate, "session" | "recovery" | "ledger"> | null {
+): Omit<ArchiveCandidate, "session" | "recovery" | "ledger" | "agentDir"> | null {
 	const sessionPath = session.path;
 	const relativePath = path.relative(sessionsRoot, sessionPath);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
@@ -1098,9 +1101,13 @@ async function gzipSessionFile(
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	// A directory of this run's own minting, recorded, so a killed run
 	// leaves a record its successor reclaims the stage by.
-	const ground = await mintStagingGround(destination, ledger);
+	// The archive keeps the transcript's own mode: a private session copied
+	// into the archive must not become readable by more than it was.
+	const mode = (await fs.stat(source)).mode & 0o7777;
+	const ground = await mintStagingGround(destination, ledger, mode);
 	let linked = false;
 	try {
+		await ground.handle.chmod(mode);
 		const expected = await digestStream(Bun.file(source).stream());
 		await pipeline(Bun.file(source).stream(), createGzip({ level: 9 }), ground.handle.createWriteStream());
 		const stagedNow = await fs.lstat(ground.file).catch(() => undefined);
@@ -1947,7 +1954,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	// open that session silently incomplete.
 	const record = restoreRecordPath(destSession);
 	if (await pathExists(record)) {
-		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession, candidate.ledger);
+		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession, candidate.agentDir);
 		if (outstanding.length === 0) {
 			await fs.rm(record, { force: true });
 		} else {
@@ -2034,7 +2041,7 @@ async function sweepSessionStagingFiles(
 			if (codeOf(error) !== "ENOENT") result.errors.push(`${file}: ${errorMessage(error)}`);
 		}
 	}
-	const grounds = await reclaimRecordedStagingGrounds(stagingLedgerDir(options.agentDir), options.apply);
+	const grounds = await reclaimRecordedStagingGrounds(options.agentDir, options.apply);
 	result.wouldDeleteTemps += grounds.found;
 	result.deletedTemps += grounds.removed;
 	result.tempBytes += grounds.bytes;
@@ -2103,6 +2110,7 @@ async function runArchiveGc(
 			session,
 			recovery: agentDirFlag(options.agentDir),
 			ledger: stagingLedgerDir(options.agentDir),
+			agentDir: options.agentDir,
 		});
 	}
 
@@ -2501,6 +2509,21 @@ export function renderText(result: GcResult): string {
 }
 
 /**
+ * What `--restore --apply` would refuse in the artifact tree, for the
+ * preview to say first. A preview that checks only the transcript exits 0
+ * over a destination that applying then reports.
+ */
+async function previewArtifactConflicts(archiveFile: string, sessionPath: string, agentDir: string): Promise<string[]> {
+	try {
+		return (await artifactRestoreConflicts(archiveFile, sessionPath, agentDir)).map(
+			conflict => `the artifact tree would not be restored whole: ${conflict}`,
+		);
+	} catch (error) {
+		return [`the artifact tree could not be checked: ${errorMessage(error)}`];
+	}
+}
+
+/**
  * Bring one archived session back to the sessions tree, and say what coming
  * back does not include. A person should not have to reconstruct the original
  * path and run `gunzip` by hand — and a hand-run `gunzip -c … > …` truncates
@@ -2555,6 +2578,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 				return result;
 			}
 			result.sessionPath = sessionPath;
+			result.errors.push(...(await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir)));
 			return result;
 		}
 		try {
@@ -2566,6 +2590,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 			return result;
 		}
 		result.sessionPath = sessionPath;
+		result.errors.push(...(await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir)));
 		return result;
 	}
 	try {

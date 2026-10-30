@@ -3599,3 +3599,95 @@ for (const apply of [false, true]) {
 		expect((await fs.lstat(sessionFile)).isFIFO()).toBe(true);
 	}, 15_000);
 }
+
+test("a private transcript stays private through archive, reclaim and restore", async () => {
+	await fs.chmod(sessionFile, 0o600);
+
+	await archiveEverything();
+	expect((await fs.stat(archiveFile)).mode & 0o777).toBe(0o600);
+	await restoreArchivedSession(archiveFile, root);
+
+	expect((await fs.stat(sessionFile)).mode & 0o777).toBe(0o600);
+});
+
+/** A staging record written by somebody other than a run: whatever it names, with identities to match. */
+async function plantStagingRecord(dir: string, file: string): Promise<void> {
+	const [dirStat, fileStat] = await Promise.all([fs.stat(dir), fs.stat(file)]);
+	await fs.mkdir(stagingLedgerDir(root), { recursive: true, mode: 0o700 });
+	await Bun.write(
+		path.join(stagingLedgerDir(root), "1.json"),
+		JSON.stringify({
+			dir,
+			file,
+			dirIdentity: { dev: dirStat.dev, ino: dirStat.ino },
+			identity: { dev: fileStat.dev, ino: fileStat.ino },
+		}),
+	);
+}
+
+test("a planted record cannot make a restore skip, or a sweep delete, an archived directory", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "customer", "work", "doc.txt"), "ONLY COPY");
+	await archiveEverything();
+	const archived = path.join(archivedArtifacts, "customer", "work");
+	await plantStagingRecord(archived, path.join(archived, "doc.txt"));
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored).toEqual([]);
+	expect(await Bun.file(path.join(liveArtifacts, "customer", "work", "doc.txt")).text()).toBe("ONLY COPY");
+	expect(await Bun.file(path.join(archived, "doc.txt")).text()).toBe("ONLY COPY");
+});
+
+test("a planted record naming a directory outside the session trees deletes nothing", async () => {
+	const outside = sessionStagingPath(path.join(root, "documents", "doc.txt"));
+	await Bun.write(path.join(outside, "doc.txt"), "");
+
+	await plantStagingRecord(outside, path.join(outside, "doc.txt"));
+	const result = await archiveOnly();
+
+	expect(await Bun.file(path.join(outside, "doc.txt")).exists()).toBe(true);
+	expect(result.archive?.errors.join("\n")).toContain("outside");
+});
+
+test("a staging ledger other users can write is refused, not trusted", async () => {
+	await fs.mkdir(stagingLedgerDir(root), { recursive: true });
+	await fs.chmod(stagingLedgerDir(root), 0o777);
+
+	const result = await archiveOnly();
+
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain("is not a private directory");
+});
+
+test("a staging record that cannot be read stops the restore of the artifact tree", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	// Truncated mid-write: whatever it named can no longer be told apart
+	// from an artifact, so nothing may be carried home on the strength of
+	// its absence.
+	await fs.mkdir(stagingLedgerDir(root), { recursive: true, mode: 0o700 });
+	await Bun.write(path.join(stagingLedgerDir(root), "1.json"), '{"dir":"');
+
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored.join("\n")).toContain("could not be read");
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).exists()).toBe(false);
+});
+
+test("a restore preview reports a FIFO where an archived artifact belongs", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveEverything();
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	expect(await Bun.spawn(["mkfifo", path.join(liveArtifacts, "a.log")]).exited).toBe(0);
+
+	const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(applied.restore?.errors.length).toBeGreaterThan(0);
+	expect(preview.restore?.errors.join("\n")).toContain(path.join(liveArtifacts, "a.log"));
+});
