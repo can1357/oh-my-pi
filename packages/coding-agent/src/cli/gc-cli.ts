@@ -2628,6 +2628,34 @@ function renderText(result: GcResult): string {
 	return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Put `text` on stderr and wait until the kernel has it.
+ *
+ * `process.stderr.write` returns false when the pipe is full and keeps the
+ * bytes in a userspace buffer, so a run that carried straight on could
+ * delete a blob and then be killed with the warning never delivered —
+ * measured at one unlinked blob and zero warning bytes. Awaiting the drain
+ * is what makes "before the deletion" a fact about the reader rather than
+ * about the order of two statements.
+ *
+ * A write that fails is the same answer as a write that cannot finish:
+ * nothing is deleted. `/dev/full` and a closed stderr already end the run
+ * before the blob phase, and that is the behaviour being kept.
+ */
+async function writeWarningBeforeDeleting(text: string): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	// `true` means the stream handed the bytes straight to the kernel:
+	// nothing is queued, so there is nothing to wait for. `false` means they
+	// are sitting in a userspace buffer, which is the case this exists for —
+	// wait for the write callback, or for the drain that says the buffer has
+	// emptied, whichever the host delivers.
+	const accepted = process.stderr.write(text, error => (error ? reject(error) : resolve()));
+	if (accepted) return;
+	process.stderr.once("drain", resolve);
+	process.stderr.once("error", reject);
+	await promise;
+}
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
@@ -2650,14 +2678,15 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 				// On the result, so the JSON route carries it too: the
 				// renderer held the only copy and `--json` bypasses it.
 				next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
-				// And said *before* anything is deleted, on the stream that
-				// is not the result. A warning that arrives only when every
-				// later phase succeeds is a receipt, and the reader who most
-				// needs it is the one whose run then failed — a busy
-				// write-ahead checkpoint used to end a reclaiming run with
-				// exit 1, an empty stdout and nothing said about the
-				// deletion that had already happened.
-				if (options.apply) process.stderr.write(`warning: blobs: ${GC_BLOBS_WARNING}\n`);
+				// And delivered *before* anything is deleted, which means
+				// waiting for the write to drain rather than queueing it:
+				// `write` returns false when the pipe is full, and the bytes
+				// then sit in a buffer the process can be killed with — one
+				// blob unlinked, zero warning bytes delivered. A warning
+				// that arrives only when every later phase succeeds is a
+				// receipt, and the reader who most needs it is the one whose
+				// run then failed.
+				if (options.apply) await writeWarningBeforeDeleting(`warning: blobs: ${GC_BLOBS_WARNING}\n`);
 				next.blobs = await runBlobGc(options, archiveRoot);
 			}
 			if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);

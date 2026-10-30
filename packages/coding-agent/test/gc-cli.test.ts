@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -593,6 +593,77 @@ describe("runGcCommand blob sweep", () => {
 			expect(text).toContain(json ? GC_BLOBS_WARNING : "warning: blobs:");
 		});
 	}
+	test("does not delete while the warning is still queued", async () => {
+		const orphan = await writeBlob(root, hashFor("backpressure-orphan"), "orphan");
+		await agePath(orphan);
+		const referencedHash = hashFor("backpressure-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		await writeSession(root, "project", "live", "complete", { blobRef: `blob:sha256:${referencedHash}` });
+
+		// A real pipe, really full. Mocking the write cannot show this: the
+		// defect is that the bytes sit in a userspace buffer while the run
+		// goes on to delete, so the test has to make the kernel refuse them.
+		const fifo = path.join(root, "stderr.fifo");
+		await Bun.spawn(["mkfifo", fifo]).exited;
+		const reader = await fs.open(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+		const writer = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+		const block = Buffer.alloc(4096, 0x50);
+		let prefilled = 0;
+		for (;;) {
+			try {
+				prefilled += (await writer.write(block)).bytesWritten;
+			} catch {
+				break;
+			}
+		}
+		expect(prefilled).toBeGreaterThan(0);
+
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "..", "src", "cli.ts"), "gc", "--blobs", "--apply"],
+			{
+				env: { ...process.env, PI_CODING_AGENT_DIR: root, NO_COLOR: "1" },
+				stdout: "pipe",
+				stderr: writer.fd,
+			},
+		);
+		try {
+			// While the warning cannot be delivered, nothing may go.
+			await Bun.sleep(3_000);
+			expect(await Bun.file(orphan).exists()).toBe(true);
+
+			// Drained: the warning arrives, and only then the deletion.
+			const drained: Buffer[] = [];
+			const sink = Buffer.alloc(65_536);
+			for (;;) {
+				try {
+					const read = await reader.read(sink, 0, sink.length);
+					if (read.bytesRead === 0) break;
+					drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+				} catch {
+					break;
+				}
+			}
+			expect(await child.exited).toBe(0);
+			for (;;) {
+				try {
+					const read = await reader.read(sink, 0, sink.length);
+					if (read.bytesRead === 0) break;
+					drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+				} catch {
+					break;
+				}
+			}
+			expect(Buffer.concat(drained).toString().slice(prefilled)).toContain("Quiescent machines only");
+			expect(await Bun.file(orphan).exists()).toBe(false);
+			expect(await Bun.file(referenced).exists()).toBe(true);
+		} finally {
+			child.kill();
+			await child.exited;
+			await writer.close();
+			await reader.close();
+		}
+	}, 60_000);
 	test("reads a transcript a breadcrumb registers while it is listing", async () => {
 		const referencedHash = hashFor("late-crumb-referenced");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
