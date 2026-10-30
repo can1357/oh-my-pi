@@ -13,7 +13,9 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
+import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
@@ -93,6 +95,11 @@ async function createSession(
 	options?: {
 		xdev?: XdevState;
 		builtInToolNames?: string[];
+		toolRegistry?: Map<string, AgentTool>;
+		presentationPinnedToolNames?: ReadonlySet<string>;
+		mcpManagerToolNames?: Iterable<string>;
+		agentKind?: "main" | "sub";
+		createVibeTools?: () => AgentTool[];
 		persist?: boolean;
 	},
 ): Promise<AgentSession> {
@@ -116,7 +123,7 @@ async function createSession(
 		streamFn: () => new AssistantMessageEventStream(),
 	});
 
-	const toolRegistry = options?.xdev?.tools ?? new Map<string, AgentTool>();
+	const toolRegistry = options?.toolRegistry ?? options?.xdev?.tools ?? new Map<string, AgentTool>();
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 	const sess = new AgentSession({
 		agent,
@@ -126,6 +133,10 @@ async function createSession(
 		toolRegistry,
 		xdev: options?.xdev,
 		builtInToolNames: options?.builtInToolNames,
+		presentationPinnedToolNames: options?.presentationPinnedToolNames,
+		mcpManagerToolNames: options?.mcpManagerToolNames,
+		agentKind: options?.agentKind,
+		createVibeTools: options?.createVibeTools,
 	});
 
 	if (bridge) sess.setClientBridge(bridge);
@@ -142,6 +153,8 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+	await disposeAllVmContexts();
+	await disposeAllKernelSessions();
 	await tempDir.remove();
 });
 
@@ -194,6 +207,12 @@ it("eval refuses both canonical and wire names after their tool is disabled", as
 	expect(session.getToolForEvalBridge("edit")).toBeUndefined();
 	expect(session.getToolForEvalBridge("apply_patch")).toBeUndefined();
 	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+	for (const name of ["edit", "apply_patch", "xd://apply_patch"]) {
+		await expect(callSessionTool(name, {}, { session: toolSession })).rejects.toThrow("disabled or excluded");
+	}
 });
 
 it("eval preserves raw patch validation when resolving a wire alias", async () => {
@@ -226,17 +245,22 @@ it("eval rejects ambiguous wire names rather than choosing a registry insertion 
 	const second = { ...makeFakeTool("second"), customWireName: "shared" };
 	session = await createSession([first, second]);
 
-	expect(session.getToolForEvalBridge("shared")).toBeUndefined();
+	expect(() => session!.getToolForEvalBridge("shared")).toThrow("Ambiguous tool alias");
 	expect(session.getEvalBridgeToolNames()).toEqual(["first", "second"]);
 });
 
 it("eval does not advertise tools that require a direct tool result", async () => {
-	session = await createSession([
-		{ ...makeFakeTool("checkpoint"), customWireName: "savepoint" },
-		{ ...makeFakeTool("rewind"), customWireName: "restorepoint" },
-		makeFakeTool("read"),
-	]);
-
+	const checkpoint = { ...makeFakeTool("checkpoint"), customWireName: "savepoint" };
+	const rewind = { ...makeFakeTool("rewind"), customWireName: "restorepoint" };
+	session = await createSession([checkpoint, rewind, makeFakeTool("read")]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	for (const name of ["checkpoint", "xd://checkpoint", "savepoint", "rewind", "xd://rewind", "restorepoint"]) {
+		await expect(callSessionTool(name, {}, { session: toolSession })).rejects.toThrow(
+			"cannot run through the eval bridge",
+		);
+	}
+	expect([checkpoint.executeCalls, rewind.executeCalls]).toEqual([0, 0]);
 	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
 });
 
@@ -251,36 +275,78 @@ it("eval applies direct-only restrictions to the resolved tool rather than its w
 	expect(tool.executeCalls).toBe(1);
 });
 
-it("eval resolves xd:// and Claude Code MCP spellings over enabled tools only", async () => {
-	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(makeFakeTool);
+it.each(["js", "py"] as const)(
+	"eval %s cells execute dormant MCP tools and unmounted devices without activating them",
+	async language => {
+		const read = makeFakeTool("read");
+		const mcp = makeFakeTool("mcp__srv_idle");
+		const device = Object.assign(makeFakeTool("ast_grep"), { loadMode: "discoverable" as const });
+		const registry = new Map([read, mcp, device].map(tool => [tool.name, tool]));
+		const xdev: XdevState = {
+			tools: registry,
+			mountedNames: new Set(),
+			builtInNames: new Set(),
+			isActive: name => session?.getActiveToolNames().includes(name) ?? false,
+		};
+		session = await createSession([read], undefined, {}, { xdev });
+		const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+		toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+		toolSession.getToolByName = name => session!.getToolByName(name);
+		toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
+		const evalTool = new EvalTool(toolSession);
+		const description = evalTool.description;
+		const code =
+			language === "js"
+				? `for (const name of ["mcp__srv__idle", "xd://ast_grep"]) {
+	try { console.log(name + ": " + await tool[name]({})); }
+	catch (error) { console.log(name + ": " + error.message); }
+}`
+				: `for name in ["mcp__srv__idle", "xd://ast_grep"]:
+    try:
+        print(name + ": " + str(await tool[name]({})))
+    except Exception as error:
+        print(name + ": " + str(error))`;
+		const result = await evalTool.execute(`dormant-${language}`, { language, code });
+		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text).toContain("mcp__srv__idle: ok");
+		expect(text).toContain("xd://ast_grep: ok");
+		expect([mcp.executeCalls, device.executeCalls]).toEqual([1, 1]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(xdev.mountedNames.size).toBe(0);
+		expect(evalTool.description).toBe(description);
+	},
+	30_000,
+);
+
+it("eval resolves xd:// and Claude Code MCP spellings over enabled and activatable tools", async () => {
+	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(name =>
+		Object.assign(makeFakeTool(name), { loadMode: "discoverable" as const }),
+	);
 	const xdev: XdevState = {
 		tools: new Map(tools.map(tool => [tool.name, tool])),
 		mountedNames: new Set(),
 		builtInNames: new Set(),
 		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
 	};
-	session = await createSession(tools, undefined, {}, { xdev });
-	await session.setActiveToolsByName(["read", "mcp__srv_active"]);
+	session = await createSession(tools.slice(0, 2), undefined, {}, { xdev });
 	xdev.mountedNames.add("lsp");
 	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
 	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
 	toolSession.getToolByName = name => session!.getToolByName(name);
+	toolSession.getEvalBridgeToolNames = () => session!.getEvalBridgeToolNames();
 
 	await callSessionTool("mcp__srv__active", {}, { session: toolSession });
 	await callSessionTool("xd://lsp", {}, { session: toolSession });
 	await callSessionTool("xd://read", {}, { session: toolSession });
-	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 0, 1, 0]);
-
-	await expect(callSessionTool("mcp__srv__idle", {}, { session: toolSession })).rejects.toThrow(
-		"registered but not available",
-	);
-	await expect(callSessionTool("xd://ast_grep", {}, { session: toolSession })).rejects.toThrow(
-		"registered but not available",
-	);
+	await callSessionTool("mcp__srv__idle", {}, { session: toolSession });
+	await callSessionTool("xd://ast_grep", {}, { session: toolSession });
+	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 1, 1, 1]);
 	await expect(callSessionTool("nope", {}, { session: toolSession })).rejects.toThrow("Unknown tool");
+	await expect(callSessionTool("xd://rea", {}, { session: toolSession })).rejects.toThrow("Did you mean read");
+	expect(tools[0]!.executeCalls).toBe(1);
 });
 
-it("eval leaves a Claude Code MCP spelling unresolved when mounted and active tools both answer it", async () => {
+it("eval rejects ambiguous MCP aliases even when only one matching tool is enabled", async () => {
 	const emitted = "mcp__foo__bar__foo_bar_baz";
 	const active = makeFakeTool(createMCPToolName("foo__bar", "foo_bar_baz"));
 	const mounted = makeFakeTool(createMCPToolName("foo", "bar__foo_bar_baz"));
@@ -294,9 +360,159 @@ it("eval leaves a Claude Code MCP spelling unresolved when mounted and active to
 	await session.setActiveToolsByName([active.name]);
 	xdev.mountedNames.add(mounted.name);
 
-	expect(session.getToolForEvalBridge(emitted)).toBeUndefined();
+	expect(() => session!.getToolForEvalBridge(emitted)).toThrow("Ambiguous tool alias");
 	xdev.mountedNames.delete(mounted.name);
-	expect(session.getToolForEvalBridge(emitted)?.name).toBe(active.name);
+	expect(() => session!.getToolForEvalBridge(emitted)).toThrow("Ambiguous tool alias");
+	expect(session.getToolForEvalBridge(active.name)?.name).toBe(active.name);
+	expect([active.executeCalls, mounted.executeCalls]).toEqual([0, 0]);
+});
+
+it("eval keeps explicit removals disabled until the tool is re-enabled", async () => {
+	const read = makeFakeTool("read");
+	const mcp = makeFakeTool("mcp__srv_disabled");
+	const device = Object.assign(makeFakeTool("ast_grep"), { loadMode: "discoverable" as const });
+	session = await createSession([read, mcp, device]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+	await session.setActiveToolsByName(["read"]);
+	for (const name of [mcp.name, "mcp__srv__disabled", "xd://ast_grep"]) {
+		await expect(callSessionTool(name, {}, { session: toolSession })).rejects.toThrow("disabled or excluded");
+	}
+	expect([mcp.executeCalls, device.executeCalls]).toEqual([0, 0]);
+	await session.setActiveToolsByName(["read", mcp.name]);
+	await callSessionTool("mcp__srv__disabled", {}, { session: toolSession });
+	expect(mcp.executeCalls).toBe(1);
+	expect(session.getToolForEvalBridge(device.name)).toBeUndefined();
+});
+
+it.each(["main", "sub"] as const)("eval respects explicit %s tool grants for dormant tools", async agentKind => {
+	const read = makeFakeTool("read");
+	const mcp = makeFakeTool("mcp__srv_idle");
+	const device = Object.assign(makeFakeTool("ast_grep"), { loadMode: "discoverable" as const });
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, mcp, device].map(tool => [tool.name, tool])),
+			presentationPinnedToolNames: new Set(["read"]),
+			agentKind,
+		},
+	);
+	expect(session.getToolForEvalBridge("mcp__srv__idle")).toBeUndefined();
+	expect(session.getToolForEvalBridge("xd://ast_grep")).toBeUndefined();
+	expect([mcp.executeCalls, device.executeCalls]).toEqual([0, 0]);
+});
+
+it.each(["plan", "vibe"] as const)("eval respects %s mode narrowing for dormant tools", async mode => {
+	const read = makeFakeTool("read");
+	const mcp = makeFakeTool("mcp__srv_idle");
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, mcp].map(tool => [tool.name, tool])),
+			createVibeTools: () => [makeFakeTool("director")],
+		},
+	);
+	if (mode === "plan") session.setPlanModeState({ enabled: true, planFilePath: tempDir.join("plan.md") });
+	else await session.activateVibeTools(["read"]);
+	expect(session.getToolForEvalBridge("mcp__srv__idle")).toBeUndefined();
+	if (mode === "plan") session.setPlanModeState(undefined);
+	else await session.deactivateVibeTools(["read"]);
+	expect(session.getToolForEvalBridge("mcp__srv__idle")?.name).toBe(mcp.name);
+});
+
+it("eval refuses inactive registry tools outside discovery eligibility", async () => {
+	const read = makeFakeTool("read");
+	const hidden = { ...makeFakeTool("private_helper"), loadMode: "essential" as const };
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, hidden].map(tool => [tool.name, tool])),
+		},
+	);
+	expect(session.getToolForEvalBridge(hidden.name)).toBeUndefined();
+});
+
+it.each([
+	["device", "hidden"],
+	["device", "defaultInactive"],
+	["extension MCP", "hidden"],
+	["extension MCP", "defaultInactive"],
+] as const)("eval refuses a %s tool marked %s until explicitly enabled", async (kind, restriction) => {
+	const read = makeFakeTool("read");
+	const loadMode = kind === "device" ? "discoverable" : "essential";
+	const inactive = Object.assign(makeFakeTool(kind === "device" ? "ast_grep" : "mcp__ext_inactive"), {
+		loadMode,
+		[restriction]: true,
+	});
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, inactive].map(tool => [tool.name, tool])),
+			mcpManagerToolNames: [],
+		},
+	);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+	await expect(callSessionTool(inactive.name, {}, { session: toolSession })).rejects.toThrow("disabled or excluded");
+	expect(inactive.executeCalls).toBe(0);
+	await session.setActiveToolsByName(["read", inactive.name]);
+	expect(await callSessionTool(inactive.name, {}, { session: toolSession })).toBe("ok");
+	expect(inactive.executeCalls).toBe(1);
+});
+
+it("eval admits dormant extension MCP tools without enabling them", async () => {
+	const read = makeFakeTool("read");
+	const mcp = makeFakeTool("mcp__ext_query");
+	session = await createSession(
+		[read],
+		undefined,
+		{},
+		{
+			toolRegistry: new Map([read, mcp].map(tool => [tool.name, tool])),
+			mcpManagerToolNames: [],
+		},
+	);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	expect(await callSessionTool("mcp__ext__query", {}, { session: toolSession })).toBe("ok");
+	expect(mcp.executeCalls).toBe(1);
+	expect(session.getActiveToolNames()).toEqual(["read"]);
+});
+
+it.each(["allow_once", "reject_once"] as const)("eval dormant device calls still require ACP %s", async kind => {
+	const read = makeFakeTool("read");
+	const device = Object.assign(makeFakeTool("delete"), { loadMode: "discoverable" as const });
+	const bridge = makeBridge({ outcome: "selected", optionId: kind, kind });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession(
+		[read],
+		bridge,
+		{},
+		{
+			toolRegistry: new Map([read, device].map(tool => [tool.name, tool])),
+		},
+	);
+	const toolSession = makeToolSession(bridge);
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	if (kind === "allow_once") {
+		expect(await callSessionTool("xd://delete", {}, { session: toolSession })).toBe("ok");
+		expect(device.executeCalls).toBe(1);
+	} else {
+		await expect(callSessionTool("xd://delete", {}, { session: toolSession })).rejects.toThrow("rejected by user");
+		expect(device.executeCalls).toBe(0);
+	}
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(session.getActiveToolNames()).toEqual(["read"]);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {
