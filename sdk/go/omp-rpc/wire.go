@@ -7306,6 +7306,27 @@ func (v *LiveStartResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type LiveConnectResult struct {
+	Voice     string `json:"voice"`
+	SdpAnswer string `json:"sdpAnswer"`
+}
+
+func (v *LiveConnectResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LiveConnectResult", v.decodeFrom)
+}
+
+func (v *LiveConnectResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LiveConnectResult
+	d := fieldDecoder{raw: raw, owner: "LiveConnectResult"}
+	d.required("voice", &out.Voice)
+	d.required("sdpAnswer", &out.SdpAnswer)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type LiveMuteResult struct {
 	Muted bool `json:"muted"`
 }
@@ -7955,6 +7976,20 @@ func (c Commands) LiveStart(ctx context.Context, p LiveStartCommand) (string, er
 	var out LiveStartResult
 	err := c.call(ctx, "live_start", p, 0, &out)
 	return out.Voice, err
+}
+
+// LiveConnectCommand holds the parameters of "live_connect".
+type LiveConnectCommand struct {
+	SdpOffer     string  `json:"sdpOffer"`
+	Voice        *string `json:"voice,omitempty"`
+	Instructions *string `json:"instructions,omitempty"`
+}
+
+// LiveConnect sends "live_connect": Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.
+func (c Commands) LiveConnect(ctx context.Context, p LiveConnectCommand) (LiveConnectResult, error) {
+	var out LiveConnectResult
+	err := c.call(ctx, "live_connect", p, 0, &out)
+	return out, err
 }
 
 // LiveStop sends "live_stop": Stop the live voice session, if any.

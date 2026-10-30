@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.13.3",
+  "version": "18.14.0",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -72,6 +72,7 @@
       "import": "./native/index.js",
       "default": "./native/index.js"
     },
+    "./THIRD-PARTY-NOTICES.txt": "./THIRD-PARTY-NOTICES.txt",
     "./path": {
       "types": "./native/path.d.ts",
       "import": "./native/path.js",

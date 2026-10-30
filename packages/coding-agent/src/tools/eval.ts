@@ -38,7 +38,13 @@ import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
 import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
 import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
-import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	findColumnCapped,
+	OutputSink,
+	type OutputSummary,
+	TailBuffer,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
@@ -183,8 +189,8 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
-	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic. */
-	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation">[];
+	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
+	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation" | "inlineDocumentation">[];
 	/**
 	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
@@ -237,10 +243,16 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 	return topics;
 }
 
-/** Model-facing eval description: core kernel surface plus one pointer per doc topic. */
+/** Model-facing eval description: core kernel surface plus one pointer per linked doc topic. */
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
+	const inlinePreludes: { name: string; documentation: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
+		if (prelude.inlineDocumentation && !options.inlineTopics) {
+			const documentation = prelude.documentation.trim();
+			if (documentation) inlinePreludes.push({ name: prelude.name, documentation });
+			continue;
+		}
 		const summary = evalPreludeSummary(prelude);
 		if (summary) preludes.push({ name: prelude.name, summary });
 	}
@@ -248,6 +260,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		...evalTemplateContext(options),
 		preludes,
 		toolNames: options.toolNames,
+		inlinePreludes,
 		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
 	});
 }
@@ -1001,7 +1014,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const imageText = cellImageNotes.join("\n");
 				const cellOutput = [stdoutTrimmed, imageText].filter(Boolean).join("\n\n");
 				cellResult.output = cellOutput;
-				cellResult.views = cellViews.length > 0 ? cellViews : undefined;
+				cellResult.views = cellViews.length > 0 ? placeViews(cellOutput, cellViews) : undefined;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
 				cellResult.statusEvents = cellStatus.statusEvents;
@@ -1077,6 +1090,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			}
 		}
 	}
+}
+
+/**
+ * `views` with each `text` replaced by the span of `output` that shows it, which renderers look
+ * for: the column cap cuts long printed lines to a head and `…`. Views whose text does not show
+ * keep theirs.
+ */
+function placeViews(output: string, views: readonly EvalViewEntry[]): EvalViewEntry[] {
+	let cursor = 0;
+	return views.map(entry => {
+		const span = findColumnCapped(output, entry.text, cursor);
+		if (!span) return entry;
+		cursor = span.end;
+		return { text: output.slice(span.start, span.end), view: entry.view };
+	});
 }
 
 async function summarizeFinal(

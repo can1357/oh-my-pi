@@ -7380,8 +7380,8 @@ describe("agentLoop streaming snapshots", () => {
 		// partial immediately before its push (the mutate-then-push stream
 		// contract). The producer advances in lockstep with the consumer — one
 		// step per observed assistant event — so each snapshot sees exactly the
-		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
-		// free-running timer producer would race ahead during that sleep.
+		// deltas delivered so far; a free-running timer producer could race
+		// ahead of the consumer.
 		const partial = createAssistantMessage([], "stop");
 		let advance = (): void => {};
 		const streamFn = () => {

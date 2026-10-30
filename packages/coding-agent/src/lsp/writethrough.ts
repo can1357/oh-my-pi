@@ -23,6 +23,7 @@ import {
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	limitDiagnosticMessages,
 	type ServerVersionMap,
+	unreportedSummary,
 } from "./diagnostics";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
@@ -213,6 +214,7 @@ function mergeDiagnostics(
 	let formatted = false;
 	let hasFailed = false;
 	let hasUnsupported = false;
+	const unreported = new Set<string>();
 
 	for (const result of results) {
 		if (!result) continue;
@@ -228,6 +230,7 @@ function mergeDiagnostics(
 		if (result.messages.length > 0) {
 			messages.push(...result.messages);
 		}
+		for (const server of result.unreported ?? []) unreported.add(server);
 		if (result.formatter !== undefined) {
 			hasFormatter = true;
 			if (result.formatter === FileFormatResult.FORMATTED) {
@@ -253,6 +256,9 @@ function mergeDiagnostics(
 		errored = summaryInfo.errored;
 		limitedMessages = limitDiagnosticMessages(messages);
 	}
+	if (unreported.size > 0) {
+		summary = unreportedSummary(Array.from(unreported), messages.length > 0 ? summary : undefined);
+	}
 	// Priority: FAILED > FORMATTED > UNCHANGED > UNSUPPORTED
 	const formatter = hasFormatter
 		? hasFailed
@@ -269,8 +275,14 @@ function mergeDiagnostics(
 		messages: limitedMessages,
 		summary,
 		errored,
+		unreported: unreported.size > 0 ? Array.from(unreported) : undefined,
 		formatter,
 	};
+}
+
+/** A late result that adds nothing: no diagnostics, and some server still unanswered. */
+function isUnverifiedOnly(diagnostics: FileDiagnosticsResult): boolean {
+	return diagnostics.messages.length === 0 && diagnostics.unreported !== undefined;
 }
 
 async function scheduleDeferredDiagnosticsFetch(args: {
@@ -292,7 +304,7 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 			expectedDocumentVersions: args.expectedDocumentVersions,
 			timeoutMs: args.waitMs,
 		});
-		if (args.signal.aborted || diagnostics === undefined) return;
+		if (args.signal.aborted || diagnostics === undefined || isUnverifiedOnly(diagnostics)) return;
 		args.callback(diagnostics);
 	} catch {
 		// Cancelled or LSP gave up; silently discard.
@@ -368,7 +380,9 @@ async function fetchDiagnosticsWithDeferral(args: {
 	// deferred sink (edit tool) applies its own dedup, so pass the raw result.
 	void fetchPromise
 		.then(diagnostics => {
-			if (diagnostics && !deferred.signal.aborted) deferred.onDeferredDiagnostics(diagnostics);
+			if (diagnostics && !isUnverifiedOnly(diagnostics) && !deferred.signal.aborted) {
+				deferred.onDeferredDiagnostics(diagnostics);
+			}
 		})
 		.catch(() => {});
 	return undefined;
@@ -587,11 +601,15 @@ async function runLspWritethrough(
 	}
 
 	if (formatter !== undefined) {
+		// Carries the formatter result. With diagnostics requested, none arrived in time
+		// (or they come later through the deferred channel): do not vouch for the file.
+		const unreported = enableDiagnostics ? servers.map(([name]) => name) : undefined;
 		diagnostics ??= {
 			server: servers.map(([name]) => name).join(", "),
 			messages: [],
-			summary: "OK",
+			summary: unreported ? unreportedSummary(unreported) : "OK",
 			errored: false,
+			unreported,
 		};
 		diagnostics.formatter = formatter;
 	}

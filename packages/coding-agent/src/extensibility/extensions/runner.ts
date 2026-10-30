@@ -44,10 +44,12 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
 	AssistantMessageRewriteResult,
+	AssistantTextRenderer,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -81,6 +83,7 @@ import type {
 	CacheWarmingAction,
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
+	LinkActivateEvent,
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
@@ -105,7 +108,7 @@ import type {
 	UserPythonEventResult,
 } from "./types";
 
-import { cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -464,6 +467,10 @@ const noOpUIContext: ExtensionUIContext = {
 	input: async (_title, _placeholder, _dialogOptions) => undefined,
 	notify: () => {},
 	onTerminalInput: () => () => {},
+	rerenderMessage: () => {},
+	// A subagent's runner has no UI of its own, yet its links are picked from the interactive screen
+	// while its transcript is focused: answer as the interactive UI does.
+	getLinkClicksAvailable: extensionLinkClicksAvailable,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
@@ -525,6 +532,7 @@ export class ExtensionRunner {
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
@@ -540,6 +548,8 @@ export class ExtensionRunner {
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
+	/** Link schemes already reported as claimed by more than one extension. */
+	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
@@ -550,6 +560,10 @@ export class ExtensionRunner {
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
+	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
+	#suspensionListeners = new Set<() => void>();
+	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
+	#suspensionParent: ExtensionRunner | undefined;
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -848,6 +862,7 @@ export class ExtensionRunner {
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 		this.#runEphemeralTurnFn = contextActions.runEphemeralTurn;
+		this.#startLiveFn = contextActions.startLive;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -1159,8 +1174,9 @@ export class ExtensionRunner {
 	/**
 	 * Suspend or resume loaded extensions in place (e.g. after a live `disabledExtensions`
 	 * edit). A suspended extension keeps its module state but stops contributing event
-	 * handlers, commands, tools, message renderers, shortcuts, flags, and file fallbacks
-	 * until resumed. Returns the extensions whose state changed.
+	 * handlers, commands, tools, message renderers, link schemes, shortcuts, flags, and file
+	 * fallbacks until resumed. Returns the extensions whose state changed, after notifying
+	 * {@link onSuspensionChange} listeners when there are any.
 	 */
 	setSuspendedExtensions(shouldSuspend: (extension: Extension) => boolean): {
 		suspended: Extension[];
@@ -1183,8 +1199,18 @@ export class ExtensionRunner {
 		if (suspended.length > 0 || resumed.length > 0) {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
+			for (const listener of this.#suspensionListeners) listener();
 		}
 		return { suspended, resumed };
+	}
+
+	/**
+	 * Call `listener` whenever {@link setSuspendedExtensions} suspends or resumes an extension, so
+	 * a UI can redraw what their renderers and link schemes drew. Returns the unsubscribe.
+	 */
+	onSuspensionChange(listener: () => void): () => void {
+		this.#suspensionListeners.add(listener);
+		return () => this.#suspensionListeners.delete(listener);
 	}
 
 	/** Get all registered tools from all extensions. */
@@ -1404,6 +1430,96 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
+	/**
+	 * Draw with what `parent` (the main session's runner) leaves active: a subagent's runner loads
+	 * its own copies of the extensions, and a live `disabledExtensions` edit suspends only the main
+	 * copies. While this runner's transcript is on screen, its renderers, link schemes and link
+	 * clicks skip every extension `parent` has suspended. `undefined` draws with all of its own.
+	 */
+	followSuspension(parent: ExtensionRunner | undefined): void {
+		this.#suspensionParent = parent === this ? undefined : parent;
+	}
+
+	/** Whether the extension loaded from `resolvedPath` is loaded here and suspended. */
+	isExtensionSuspended(resolvedPath: string): boolean {
+		for (const extension of this.#suspendedExtensions) if (extension.resolvedPath === resolvedPath) return true;
+		return false;
+	}
+
+	/** Active extensions that draw: those {@link followSuspension}'s parent has not suspended. */
+	#drawingExtensions(): Extension[] {
+		const parent = this.#suspensionParent;
+		return parent ? this.extensions.filter(ext => !parent.isExtensionSuspended(ext.resolvedPath)) : this.extensions;
+	}
+
+	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
+	getAssistantTextRenderers(): AssistantTextRenderer[] {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
+		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+	}
+
+	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
+	getLinkSchemes(): string[] {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
+		const owners = new Map<string, Extension>();
+		for (const ext of this.#drawingExtensions()) {
+			for (const scheme of ext.linkSchemes) {
+				const owner = owners.get(scheme);
+				if (!owner) owners.set(scheme, ext);
+				else if (owner !== ext && !this.#warnedLinkSchemes.has(scheme)) {
+					this.#warnedLinkSchemes.add(scheme);
+					logger.warn("Link scheme claimed by several extensions; the first loaded gets its clicks", {
+						scheme,
+						owner: owner.path,
+						ignored: ext.path,
+					});
+				}
+			}
+		}
+		return [...owners.keys()];
+	}
+
+	/**
+	 * Deliver a click on `url` as `link_activate` to the extension that claimed its scheme (the first
+	 * one in load order, when several did). Returns whether an extension owns the link.
+	 *
+	 * `ui` is the UI that drew the link, for a runner that has none of its own: a subagent's runner
+	 * runs headless, but its transcript can be on screen while that subagent is focused, and the
+	 * handler's `ctx.ui.rerenderMessage` must reach that screen.
+	 *
+	 * Like a command or shortcut, a click is the user's own action, and its handler may open a
+	 * dialog: it runs without the event-handler timeout. A failure is reported, not thrown.
+	 */
+	async emitLinkActivate(url: string, ui?: ExtensionUIContext): Promise<boolean> {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return false;
+		const colon = url.indexOf(":");
+		if (colon <= 0) return false;
+		const scheme = url.slice(0, colon).toLowerCase();
+		const owner = this.#drawingExtensions().find(ext => ext.linkSchemes.includes(scheme));
+		if (!owner) return false;
+		const handlers = owner.handlers.get("link_activate");
+		if (!handlers || handlers.length === 0) return true;
+		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
+		const base = this.createContext();
+		const ctx: ExtensionContext =
+			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+		for (const handler of handlers) {
+			try {
+				await this.runScoped(() => handler(event, ctx));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
+				this.emitError({
+					extensionPath: owner.path,
+					event: event.type,
+					error: message,
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
+		}
+		return true;
+	}
+
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {
 		this.#commandDiagnostics = [];
 
@@ -1536,6 +1652,7 @@ export class ExtensionRunner {
 						return await this.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
 					}
 				: undefined,
+			startLive: this.#startLiveFn,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and

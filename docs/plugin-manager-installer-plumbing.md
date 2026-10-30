@@ -37,7 +37,7 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 - `src/commands/plugin.ts` defines command/flags and forwards to `runPluginCommand`.
 - `src/cli/plugin-cli.ts` maps npm/link subcommands to `PluginManager` methods:
-  - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`, and npm/git `upgrade`
+   - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`, and npm/git `upgrade`
 - `discover`, marketplace `upgrade`, and `marketplace ...` subcommands use `MarketplaceManager`.
 - `upgrade <package-name>` updates an npm/git plugin; a bare name matching one installed marketplace plugin resolves to that marketplace ID instead. Multiple marketplace matches require qualification. `upgrade` without a target upgrades outdated marketplace plugins only.
 
@@ -50,9 +50,9 @@ The plugin root contains:
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
 - `node_modules/` — installed npm packages plus link and marketplace-cache symlinks
 - `omp-plugins.lock.json` — runtime state for npm/link/marketplace plugins:
-  - enabled/disabled per plugin
-  - selected feature set per plugin
-  - persisted plugin settings
+   - enabled/disabled per plugin
+   - selected feature set per plugin
+   - persisted plugin settings
 
 Project-root resolution first walks upward for the nearest `.omp/`; only when none exists does it use the nearest `.git` anchor. Project runtime plugins live in `<anchor>/.omp/plugins/{node_modules,omp-plugins.lock.json}`. Explicit marketplace project installs can create `<cwd>/.omp/plugins/` when neither anchor exists (except when cwd is home). Enabled project packages shadow user packages with the same package name; disabled project packages do not. npm/git/link CLI operations remain user-scoped; their install handler warns and ignores `--scope`.
 
@@ -270,8 +270,8 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 ## Malformed/missing manifest behavior summary
 
 - Missing `omp`/`pi` field:
-  - install/list: tolerated (minimal manifest)
-  - runtime enabled-plugin discovery: skipped as non-plugin
+   - install/list: tolerated (minimal manifest)
+   - runtime enabled-plugin discovery: skipped as non-plugin
 - Unknown feature referenced by install spec or feature mutation: hard error with available feature list when the manifest declares a feature map; without a map, names can be retained without validation
 - Invalid or unreadable `plugin-overrides.json`: logged with its path and error, then ignored with fallback to the next project config path or `{}`. Missing files remain silent.
 - Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`

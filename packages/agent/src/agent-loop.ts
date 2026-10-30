@@ -109,7 +109,6 @@ import {
 	isSoftToolRequirement,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
-import { yieldIfDue } from "./utils/yield";
 
 async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
 	try {
@@ -944,7 +943,8 @@ export function normalizeMessagesForProvider(
 	});
 }
 
-const INTENT_FIELD_DESCRIPTION = "concise intent";
+/** Schema description of the injected `i` field; `PI_INTENT_DESC` replaces it. */
+const DEFAULT_INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
 // Memoize injection per input schema identity: normalizeTools runs on every
@@ -1021,7 +1021,7 @@ function injectIntentIntoSchema(
 		...schemaRecord,
 		properties: {
 			[INTENT_FIELD]: describeIntent
-				? { type: "string", description: INTENT_FIELD_DESCRIPTION }
+				? { type: "string", description: Bun.env.PI_INTENT_DESC || DEFAULT_INTENT_FIELD_DESCRIPTION }
 				: { type: "string" },
 			...properties,
 		},
@@ -1072,9 +1072,8 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 }
 
 /**
- * Longest `i` value accepted as an intent. The injected field is described as
- * a "concise intent" (INTENT_FIELD_DESCRIPTION); anything past this is a tool
- * payload the model put in the wrong field, not a label.
+ * Longest `i` value accepted as an intent; anything past this is a tool
+ * payload the model put in the wrong field, not an intent.
  */
 const MAX_INTENT_LENGTH = 200;
 
@@ -1336,9 +1335,6 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-				// Yield at the top of each iteration to prevent busy-wait when
-				// the agent loop is executing tool calls back-to-back.
-				await yieldIfDue();
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
@@ -2379,10 +2375,6 @@ async function streamAssistantResponse(
 						return await finishAbortedStream();
 					}
 
-					// Yield to the event loop periodically to prevent busy-wait
-					// when the LLM is streaming chunks faster than the loop can rest.
-					await yieldIfDue();
-
 					if (event.type === "toolcall_start") {
 						const block = event.partial.content[event.contentIndex];
 						if (block?.type === "toolCall") {
@@ -2790,14 +2782,7 @@ function buildToolCallAbortMessages(
  *  `signal.reason` is the default `AbortError` `DOMException`) falls back to the
  *  generic sentinel that downstream renderers treat as "no specific reason". */
 export function abortReasonText(signal: AbortSignal | undefined): string {
-	const scopedReason = toolScopedAbortReason(signal);
-	if (scopedReason) return scopedReason.message;
-	const reason = signal?.reason;
-	if (typeof reason === "string" && reason.trim().length > 0) return reason;
-	if (reason instanceof Error && reason.name !== "AbortError" && reason.message.trim().length > 0) {
-		return reason.message;
-	}
-	return "Request was aborted";
+	return toolScopedAbortReason(signal)?.message ?? AIError.callerAbortReason(signal) ?? "Request was aborted";
 }
 
 function emitAbortedAssistantMessage(
@@ -3917,9 +3902,6 @@ async function executeToolCalls(
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
 	}
-	// Yield after batch tool execution to let GC and I/O catch up,
-	// especially when tool results are large (e.g. bash output).
-	await yieldIfDue();
 
 	for (const record of records) {
 		if (!record.toolResultMessage) {

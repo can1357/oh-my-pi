@@ -198,9 +198,10 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 /**
  * Kinds newer than some Tern builds that answer `TERM_PROGRAM=tern`: used only
  * once the real `hello` lists them, so the optimistic start never emits a node
- * an older terminal cannot draw (`media`: files Tern loads by path).
+ * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
+ * raw JSON values Tern draws as its own tree).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives

@@ -30,9 +30,9 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import {
 	buildTransformedCodexRequestBody,
-	getOpenAICodexTransportDetails,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getOpenAICodexTransportDetails } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,

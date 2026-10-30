@@ -65,6 +65,7 @@ interface AppKeybindings {
 	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.links.hint": true;
 	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
@@ -264,6 +265,10 @@ export const KEYBINDINGS = {
 	"app.history.search": {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
+	},
+	"app.links.hint": {
+		defaultKeys: "alt+o",
+		description: "Pick an extension link on screen by its hint tag",
 	},
 	"app.stt.pushToTalk": {
 		defaultKeys: "space",
