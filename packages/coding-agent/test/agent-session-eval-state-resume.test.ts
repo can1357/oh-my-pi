@@ -72,6 +72,7 @@ it("keeps the previous process's request as the resumed request prefix", async (
 	await seed.flush();
 	const file = seed.getSessionFile();
 	if (!file) throw new Error("Expected a persisted session");
+	await seed.close();
 
 	/**
 	 * One `omp -p --continue` process: reopen the file, prompt once, optionally
@@ -115,6 +116,8 @@ it("keeps the previous process's request as the resumed request prefix", async (
 		await session.waitForIdle();
 		if (evalCallId) appendEval(manager, evalCallId);
 		await manager.flush();
+		// The process ends here; the next one resumes the file from scratch.
+		await manager.close();
 		const last = requests.at(-1);
 		if (!last) throw new Error("Expected a provider request");
 		return last;

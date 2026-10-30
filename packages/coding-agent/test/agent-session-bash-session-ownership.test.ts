@@ -463,6 +463,42 @@ describe("AgentSession bash session ownership", () => {
 		expect(result.output).toBe("[]");
 	});
 
+	it("keeps a session resumed while its own bash still runs in that session's journal", async () => {
+		// The whole user path, not a unit of it: a command is still running when
+		// the user starts a new session and then comes back to the one they were
+		// in. The session manager handed that journal to a clone, so coming back
+		// to it must not read as a second writer and move the conversation.
+		const { completion, extensionRunner } = createGatedBashRunner();
+		const oldSessionFile = await createSwitchableSession(extensionRunner);
+		const oldSessionId = session.sessionId;
+		const pending = session.executeBash("still-running-command");
+
+		await session.newSession();
+		await session.switchSession(oldSessionFile);
+
+		expect(session.sessionId).toBe(oldSessionId);
+		expect(session.sessionFile).toBe(oldSessionFile);
+
+		// The person types their next turn while the command is still running:
+		// that is the moment the journal has two writers, and the moment the
+		// conversation used to be moved to a third file.
+		await session.prompt("after resume");
+		await session.waitForIdle();
+		expect(session.sessionFile).toBe(oldSessionFile);
+
+		completion.resolve({ result: bashResult });
+		await pending;
+		await session.sessionManager.flush();
+
+		const journal = fs.readFileSync(oldSessionFile, "utf8");
+		expect(journal).toContain("after resume");
+		expect(journal).toContain("still-running-command");
+		// Two journals in the directory, the resumed one and the one `/new` made
+		// — not a third one the conversation was pushed into.
+		const sessionDir = path.dirname(oldSessionFile);
+		expect(fs.readdirSync(sessionDir).filter(name => name.endsWith(".jsonl")).length).toBe(2);
+	});
+
 	it("stores minimized bash output with the originating session", async () => {
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		createSession(SessionManager.create(tempDir.path(), sessionDir));

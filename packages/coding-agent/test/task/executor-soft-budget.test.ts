@@ -52,6 +52,14 @@ function assistantText(text: string, stopReason: "stop" | "aborted" = "stop") {
 	return { role: "assistant" as const, content: [{ type: "text" as const, text }], stopReason };
 }
 
+/**
+ * The session manager the executor built for a mock session. A real
+ * `AgentSession` closes the manager it was built with when it disposes, which
+ * gives up that journal's ownership lease; the mock has to do the same or the
+ * parked transcript stays claimed by this process.
+ */
+const mockOwnedManagers = new WeakMap<AgentSession, SessionManager>();
+
 function createMockSession(
 	onPrompt: (params: {
 		promptIndex: number;
@@ -153,6 +161,7 @@ function createMockSession(
 		},
 		dispose: async () => {
 			disposeCount += 1;
+			await mockOwnedManagers.get(session as AgentSession)?.close();
 		},
 	};
 
@@ -166,12 +175,15 @@ function createMockSession(
 }
 
 function mockCreateAgentSession(session: AgentSession) {
-	return vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-		session,
-		extensionsResult: {} as unknown as LoadExtensionsResult,
-		setToolUIContext: () => {},
-		eventBus: new EventBus(),
-	} satisfies CreateAgentSessionResult);
+	return vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		if (options?.sessionManager) mockOwnedManagers.set(session, options.sessionManager);
+		return {
+			session,
+			extensionsResult: {} as unknown as LoadExtensionsResult,
+			setToolUIContext: () => {},
+			eventBus: new EventBus(),
+		} satisfies CreateAgentSessionResult;
+	});
 }
 // Use a bundled scout so these runSubprocess tests exercise the built-in
 // ceiling together with a lower task.softRequestBudget setting.

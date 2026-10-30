@@ -64,8 +64,13 @@ export class SessionFocusController {
 		return this.#attachedSession;
 	}
 	/** Focus the main view on an agent's live session. Throws an Error with a user-displayable message. */
-	async focusAgent(id: string): Promise<void> {
+	async focusAgent(requestedId: string): Promise<void> {
 		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
+		// A name can resolve to an agent registered under another id: the
+		// transcript this pane runs is the pane's own session, under the name
+		// peers and the roster know it by. Focusing it is returning to the main
+		// view, not attaching a second one.
+		const id = this.registry.get(requestedId)?.id ?? requestedId;
 		if (id === MAIN_AGENT_ID) return this.unfocus();
 		const request = ++this.#focusRequestSeq;
 		let session: AgentSession;

@@ -117,6 +117,7 @@ import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
+	isSameJournalFile,
 	MemorySessionStorage,
 	type SessionStorage,
 	type SessionStorageWriter,
@@ -1014,6 +1015,15 @@ export class SessionManager {
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 	#persistenceNoticeCallbacks = new Set<(notice: SessionPersistenceNotice) => void>();
+	/**
+	 * Observers of the journal this manager writes moving to another path or
+	 * another session. Whoever published this manager's file keeps its copy
+	 * current from here: the agent registry carries it as the running agent's
+	 * `sessionFile`, and a roster scan reads that to tell which session runs a
+	 * transcript, so a stale copy hides the agent under one name and answers
+	 * for it under another.
+	 */
+	#sessionFileChangedCallbacks = new Set<() => void>();
 	/** Every notice raised so far, replayed to each later subscriber. */
 	#persistenceNotices: SessionPersistenceNotice[] = [];
 	/**
@@ -1023,6 +1033,20 @@ export class SessionManager {
 	 * after {@link close} gave the claim up.
 	 */
 	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	/**
+	 * Set once a running agent loop took this manager over
+	 * ({@link claimForWriting}). Every session it switches to afterwards is
+	 * claimed as that loop writes it, rather than waiting for the first append.
+	 */
+	#writerOwned = false;
+	/**
+	 * Journals this manager handed to a clone of itself
+	 * ({@link cloneCurrentSession}), by session id, while that clone still
+	 * writes them. Read by {@link #reclaimsJournalHandedToClone} so coming back
+	 * to such a session is not refused as a second writer. Weak, so a clone
+	 * nobody holds any more cannot keep its entry alive.
+	 */
+	#journalsHandedToClones = new Map<string, { sessionFile: string; clone: WeakRef<SessionManager> }>();
 	/**
 	 * The background artifact copy a move or branch to `sessionFile` started (see
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
@@ -1108,31 +1132,136 @@ export class SessionManager {
 	}
 
 	/**
+	 * Observe the journal this manager writes moving: a resume or a branch
+	 * (`setSessionFile`), a new session, a `/move`, a restored state, and a
+	 * write that found the file owned elsewhere and went to a sibling. The
+	 * callback runs after the manager points at the new file, and only when
+	 * the file really changed. Returns the unsubscribe.
+	 */
+	onSessionFileChanged(callback: () => void): () => void {
+		this.#sessionFileChangedCallbacks.add(callback);
+		return () => this.#sessionFileChangedCallbacks.delete(callback);
+	}
+
+	#notifySessionFileChanged(previousSessionFile: string | undefined): void {
+		if (this.#sessionFile === previousSessionFile) return;
+		for (const observer of this.#sessionFileChangedCallbacks) this.#invokePersistenceObserver(observer, undefined);
+	}
+
+	/**
 	 * Hold this process's ownership claim on `#sessionId`, moving it off a
 	 * previous session. Only write paths claim, so the first process to write a
 	 * session owns it and inspection (`omp share`, `--export`, `render`) never
 	 * does. A failed claim is retried on the next write, so a writer takes over
 	 * once the owner closed the session or exited.
+	 *
+	 * The claim is a writer's: a second manager on one journal — this process
+	 * reopening a session it already runs — is refused here and moved to a
+	 * sibling, the same way a second process is. The one exception is the
+	 * journal this manager itself handed to a clone; see
+	 * {@link #reclaimsJournalHandedToClone}.
 	 */
-	#claimSession(): void {
+	#claimSession(options?: { handover?: boolean }): void {
 		const sessionId = this.#sessionId;
 		const sessionFile = this.#sessionFile;
 		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
 		const current = this.#sessionClaim;
 		if (current?.sessionId === sessionId && current.release) return;
 		if (current && current.sessionId !== sessionId) current.release?.();
+		const handover = options?.handover === true || this.#reclaimsJournalHandedToClone(sessionId, sessionFile);
 		// The storage also checks that the path still holds this session: if
 		// another session was moved onto it, the claim fails and the next write
 		// moves this session to a sibling instead of appending into that journal.
-		this.#sessionClaim = { sessionId, release: this.#storage.claimSession(sessionId, sessionFile) ?? undefined };
+		this.#sessionClaim = {
+			sessionId,
+			release: this.#storage.claimSession(sessionId, sessionFile, { writer: true, handover }) ?? undefined,
+		};
 	}
 
 	/**
-	 * Whether another live omp process owns this session, claiming it first
-	 * when it is free. A non-owner never writes the session's file: its next
-	 * write moves this session to a sibling with a new id instead, so two
-	 * processes never mix their entries in one journal and the owner's full
-	 * rewrites never race the other process's appends.
+	 * Whether `sessionFile` is the journal this manager handed to a clone of
+	 * itself and that clone is still writing it. Coming back to that session is
+	 * the ordinary end of a session transition — a bash command still running
+	 * when the user starts a new session and then resumes the one they were in
+	 * — and refusing it would move the conversation the person is looking at to
+	 * a sibling file with a new id while its own detached work keeps the
+	 * original.
+	 *
+	 * Narrow on purpose, because the refusal it steps around is what keeps one
+	 * journal to one agent loop:
+	 * - only the journal this manager handed over, and only while the clone it
+	 *   handed it to still holds a writer slot on that same file, which also
+	 *   clears the record once the clone lets go;
+	 * - the record is dropped as soon as it stops holding, so a transcript a
+	 *   different manager took over afterwards is refused like any other;
+	 * - a weak reference, so a dropped clone cannot keep the record alive;
+	 * - a second omp process is untouched: `handover` only waives this
+	 *   process's own one-writer refusal, never the cross-process lease.
+	 */
+	#reclaimsJournalHandedToClone(sessionId: string, sessionFile: string): boolean {
+		const handed = this.#journalsHandedToClones.get(sessionId);
+		if (!handed) return false;
+		const clone = handed.clone.deref();
+		const stillWriting =
+			clone !== undefined &&
+			clone.#sessionId === sessionId &&
+			clone.#sessionClaim?.release !== undefined &&
+			clone.#sessionFile !== undefined &&
+			isSameJournalFile(clone.#sessionFile, sessionFile);
+		if (!stillWriting) {
+			this.#journalsHandedToClones.delete(sessionId);
+			return false;
+		}
+		return isSameJournalFile(handed.sessionFile, sessionFile);
+	}
+
+	/**
+	 * Take this process's writer claim on the session now, instead of at the
+	 * first append, and keep taking it for every session this manager switches
+	 * to afterwards. A session handed to a running agent loop writes its
+	 * journal, and the claim is what tells the rest of the process that this
+	 * journal is open here — a roster scan must not offer it as a revivable
+	 * transcript, and a revive must not reopen it, before the agent's first
+	 * entry lands. Inspection paths (`omp share`, `--export`, `render`) never
+	 * call it, so reading a session still claims nothing.
+	 *
+	 * Returns the undo for a loop that never started: a session construction
+	 * that fails before its agent exists gives the claim back, so the next
+	 * attempt on that journal rebuilds it in place instead of being moved to a
+	 * sibling by a claim nothing holds any more. The undo drops nothing it did
+	 * not take: it is a no-op when a caller already owned this manager as a
+	 * writer, and once the manager moved on to another session. One manager
+	 * belongs to one agent loop, so a second caller taking it over while the
+	 * first is still starting is not a state this reverses.
+	 */
+	claimForWriting(): () => void {
+		const alreadyOwned = this.#writerOwned;
+		const claimBefore = this.#sessionClaim;
+		this.#writerOwned = true;
+		this.#claimSession();
+		const claimed = this.#sessionClaim;
+		if (alreadyOwned) return () => {};
+		let undone = false;
+		return () => {
+			if (undone) return;
+			undone = true;
+			if (!this.#writerOwned || this.#sessionClaim !== claimed) return;
+			this.#writerOwned = false;
+			if (claimed === claimBefore) return;
+			claimed?.release?.();
+			// Cleared rather than restored: the next write re-claims, and a
+			// claim this manager no longer holds must not read as held.
+			this.#sessionClaim = undefined;
+		};
+	}
+
+	/**
+	 * Whether another writer owns this session, claiming it first when it is
+	 * free. Another writer is a live omp process, or a second manager in this
+	 * process that opened the same journal. A non-owner never writes the
+	 * session's file: its next write moves this session to a sibling with a new
+	 * id instead, so two writers never mix their entries in one journal and the
+	 * owner's full rewrites never race the other writer's appends.
 	 */
 	#sessionOwnedElsewhere(): boolean {
 		if (this.#released || this.#sessionFileRelocating) return false;
@@ -1313,6 +1442,7 @@ export class SessionManager {
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
 		this.#notifyPersistenceNotice({ reason, from, to });
+		this.#notifySessionFileChanged(from);
 		return to;
 	}
 
@@ -2020,6 +2150,7 @@ export class SessionManager {
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+		const previousSessionFile = this.#sessionFile;
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
@@ -2082,6 +2213,7 @@ export class SessionManager {
 			this.#sessionFile = undefined;
 		}
 
+		this.#notifySessionFileChanged(previousSessionFile);
 		return this.#sessionFile;
 	}
 
@@ -2282,11 +2414,44 @@ export class SessionManager {
 			clone.#fileIsCurrent = false;
 			clone.#rewriteRequired = false;
 			clone.#forceFileCreation = false;
+		} else if (this.#sessionClaim?.release) {
+			// A clone of the manager that holds this journal's claim is that
+			// writer handing the journal over, not a second writer on it:
+			// `BashRunner.beginSessionTransition` clones just before the host
+			// moves to another session, and `newSession` does the same. Without
+			// this the clone's first append is refused by the one-writer rule and
+			// the detached work goes to a sibling file nobody reads — and on a
+			// backend whose full rewrites fail, nowhere at all.
+			//
+			// Its OWN slot, never a copy of this manager's claim record: two
+			// managers sharing one release closure would each disarm the other,
+			// so the first of them to switch away or close would leave the
+			// journal reading `free` while the other still appends to it, and
+			// that is exactly the live-journal-offered-as-parked state this
+			// change exists to end.
+			clone.#writerOwned = this.#writerOwned;
+			clone.#claimSession({ handover: true });
+			// Remember which journal went where, so coming back to this session
+			// while the clone still writes it is not refused as a second writer
+			// ({@link #reclaimsJournalHandedToClone}).
+			if (clone.#sessionClaim?.release && clone.#sessionFile) {
+				// Entries are read lazily, so drop the ones whose clone is gone here
+				// rather than let a long-lived manager accumulate one per session it
+				// ever cloned.
+				for (const [id, handed] of this.#journalsHandedToClones) {
+					if (handed.clone.deref() === undefined) this.#journalsHandedToClones.delete(id);
+				}
+				this.#journalsHandedToClones.set(clone.#sessionId, {
+					sessionFile: clone.#sessionFile,
+					clone: new WeakRef(clone),
+				});
+			}
 		}
 		return clone;
 	}
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		const previousSessionFile = this.#sessionFile;
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
@@ -2314,6 +2479,9 @@ export class SessionManager {
 		this.#adoptedArtifactManager = null;
 
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+		// The restored session is the one this manager's agent loop now writes.
+		if (this.#writerOwned) this.#claimSession();
+		this.#notifySessionFileChanged(previousSessionFile);
 	}
 
 	/**
@@ -2356,7 +2524,9 @@ export class SessionManager {
 	}
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
+		const previousSessionFile = this.#sessionFile;
 		await this.#setSessionFile(sessionFile);
+		this.#notifySessionFileChanged(previousSessionFile);
 	}
 
 	async #setSessionFile(
@@ -2368,7 +2538,8 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 		// A switch gives up the previous file. Opening claims nothing: the first
-		// write does, so inspecting a session never counts as owning it.
+		// write does, so inspecting a session never counts as owning it. A
+		// manager a running agent loop owns re-claims the new file below.
 		this.#sessionClaim?.release?.();
 		this.#sessionClaim = undefined;
 
@@ -2447,6 +2618,10 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		// The agent loop that owns this manager now writes this journal: claim it
+		// here rather than at its first append, so a roster scan cannot offer the
+		// adopted transcript as revivable in between.
+		if (this.#writerOwned) this.#claimSession();
 	}
 
 	/**
@@ -2523,11 +2698,13 @@ export class SessionManager {
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 
 		await this.#rewriteAtomically();
+		this.#notifySessionFileChanged(oldSessionFile);
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
 	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
+		const previousSessionFile = this.#sessionFile;
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
@@ -2639,6 +2816,16 @@ export class SessionManager {
 							await moveFileAcrossDevices(oldSessionFile, newSessionFile);
 						}
 						sessionMoved = true;
+						// The claim names the file its writer appends to, and the
+						// journal is at the new path from here on. Point it there
+						// before the artifact directory is relocated below — an
+						// awaited rename a scan can land in the middle of — and
+						// without giving the lease up for an instant, which a move
+						// must not do. A scan then still reads this journal as the
+						// one a session here is running, not as a copy of it.
+						if (this.#sessionClaim?.release) {
+							this.#storage.retargetWriterClaim?.(this.#sessionClaim.sessionId, newSessionFile);
+						}
 					}
 
 					if (artifactPathChanged) {
@@ -2699,6 +2886,12 @@ export class SessionManager {
 				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
+				// Idempotent with the retarget above, which runs as the journal is
+				// renamed; this one also covers a path change with no rename to do
+				// (a session with nothing on disk yet).
+				if (this.#sessionClaim?.release) {
+					this.#storage.retargetWriterClaim?.(this.#sessionClaim.sessionId, newSessionFile);
+				}
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
 			}
@@ -2738,6 +2931,10 @@ export class SessionManager {
 			this.#sessionFileRelocating = null;
 			// The destination is ours or untouched now.
 			destination?.release();
+			// Whether the move landed or rolled back, the path this manager
+			// writes is settled here; a rollback restores the old one and
+			// notifies nothing.
+			this.#notifySessionFileChanged(previousSessionFile);
 		}
 	}
 
@@ -4136,6 +4333,7 @@ export class SessionManager {
 			this.#sessionFile = undefined;
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = false;
+			this.#notifySessionFileChanged(sourceSessionFile);
 			return undefined;
 		}
 
@@ -4149,6 +4347,7 @@ export class SessionManager {
 		this.#expectedDiskSize = null;
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
+		this.#notifySessionFileChanged(sourceSessionFile);
 		return newSessionFile;
 	}
 

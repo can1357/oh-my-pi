@@ -25,6 +25,7 @@
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
+import { isSameJournalFile, sessionJournalLiveness } from "../session/session-storage";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -34,8 +35,23 @@ import {
 	type RegistryEvent,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
+import { type LiveJournalHolder, liveJournalRefusal, suppressedTranscriptNote } from "./persisted-agents";
 
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
+
+/** Where a request to reach an agent by name landed. */
+export interface LiveAgentTarget {
+	/** The live session the name reached. */
+	session: AgentSession;
+	/**
+	 * The id that session is registered under. Not always the name asked for:
+	 * the transcript a pane is running is that pane's own session, so peers
+	 * that know it by its file name reach it under the id it runs as.
+	 */
+	agentId: string;
+	/** Whether getting there rebuilt a parked transcript into a new session. */
+	revived: boolean;
+}
 
 const AGENT_RELEASE_GRACE_MS = 5000;
 
@@ -370,13 +386,25 @@ export class AgentLifecycleManager {
 	/**
 	 * Return the live session, reviving from the sessionFile if parked or
 	 * killed. Throws a plain Error if the id is unknown, or its transcript
-	 * cannot be revived (no reviver, no session contract, workspace gone).
-	 * Concurrent calls share one in-flight revive.
+	 * cannot be revived (no reviver, no session contract, workspace gone, or a
+	 * live session holds its journal). Concurrent calls share one in-flight
+	 * revive.
 	 *
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
 	async ensureLive(id: string): Promise<AgentSession> {
+		return (await this.ensureLiveTarget(id)).session;
+	}
+
+	/**
+	 * {@link ensureLive}, with where the request landed: a name can resolve to
+	 * an agent registered under another id (the transcript a pane is running
+	 * is that pane's session, not a peer of it), and a caller that reports
+	 * delivery needs the id that actually received it and whether a transcript
+	 * was rebuilt to get there.
+	 */
+	async ensureLiveTarget(id: string): Promise<LiveAgentTarget> {
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -384,12 +412,12 @@ export class AgentLifecycleManager {
 			// thrashing dispose + revive.
 			if (parked?.session && !park.detached && park.cancel()) {
 				await park.promise;
-				const kept = this.#registry.get(id)?.session;
-				if (kept) {
+				const kept = this.#registry.get(id);
+				if (kept?.session) {
 					// Park cleared the idle timer; re-arm so TTL park still works.
 					const adopted = this.#adopted.get(id);
 					if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
-					return kept;
+					return { session: kept.session, agentId: kept.id, revived: false };
 				}
 			} else {
 				// Already committed to detach (or no live session): wait for park,
@@ -401,23 +429,59 @@ export class AgentLifecycleManager {
 		let ref = this.#registry.get(id);
 		if (!ref) {
 			throw new Error(
-				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
+				suppressedTranscriptNote(id) ??
+					`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
 		if (ref.status === "aborted") ref = await this.#reopen(id, ref);
 		// A revive attaches its session before it finishes initializing it: join the revive rather
-		// than hand out a session whose extensions have not re-registered their tools yet.
+		// than hand out a session whose extensions have not re-registered their tools yet. This
+		// comes before the liveness probe below: a revive in flight has already claimed the
+		// journal, so probing first would read this process's own revive as a live session
+		// holding the transcript and refuse to join it.
 		const inflight = this.#revivals.get(id);
-		if (inflight?.ref === ref) return inflight.promise;
-		if (ref.session) return ref.session;
+		if (inflight?.ref === ref) return { session: await inflight.promise, agentId: ref.id, revived: true };
+		if (ref.session) return { session: ref.session, agentId: ref.id, revived: false };
+		// A ref whose journal a live agent loop writes is not revivable, however
+		// it got here (a scan that ran before the session went live, a kill and
+		// re-registration, a collab mirror): rebuilding it would run a second
+		// agent loop on a running session.
+		if (ref.sessionFile) {
+			const holder = sessionJournalLiveness(ref.sessionFile);
+			if (holder !== "free") return this.#liveJournalTarget(ref.id, ref.sessionFile, holder);
+		}
 		const revival = this.#resolveAndRevive(id, ref);
 		const pending: RevivingAgent = { ref, promise: revival };
 		this.#revivals.set(id, pending);
 		try {
-			return await revival;
+			return { session: await revival, agentId: ref.id, revived: true };
 		} finally {
 			if (this.#revivals.get(id) === pending) this.#revivals.delete(id);
 		}
+	}
+
+	/**
+	 * Where a request for a ref whose journal a live session holds goes. When
+	 * that session runs here, the name means it: hand the request to it, and
+	 * repair the registry — drop the dead ref, bind the name to the live agent
+	 * — so every later lookup agrees without re-deriving this. A journal held
+	 * in another process, or a copy of a live journal (same session id,
+	 * different file), has no local session to hand back; say what holds it
+	 * instead of forking the agent.
+	 */
+	#liveJournalTarget(id: string, sessionFile: string, holder: LiveJournalHolder): LiveAgentTarget {
+		if (holder === "here") {
+			for (const live of this.#registry.list()) {
+				if (live.id === id || !live.session || !live.sessionFile) continue;
+				if (!isSameJournalFile(live.sessionFile, sessionFile)) continue;
+				const stale = this.#registry.get(id);
+				if (stale && !stale.session && stale.sessionFile === sessionFile) this.#registry.unregister(id, stale);
+				this.#registry.bindLiveName(id, live.id, live.sessionFile);
+				logger.debug("Resolved a live session's transcript to the agent running it", { id, agentId: live.id });
+				return { session: live.session, agentId: live.id, revived: false };
+			}
+		}
+		throw new Error(liveJournalRefusal(id, sessionFile, holder));
 	}
 
 	/**

@@ -147,6 +147,26 @@ export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 	commitGuard?: () => boolean;
 }
 
+/** How a caller holds a session's ownership claim; see {@link SessionStorage.claimSession}. */
+export interface SessionClaimOptions {
+	/**
+	 * The caller appends to the journal for as long as it holds the claim, so
+	 * it is the journal's one writer: a second writer in this process is
+	 * refused rather than admitted beside the first.
+	 */
+	writer?: boolean;
+	/**
+	 * Take a writer slot beside the writer that already holds this journal,
+	 * for a manager taking the journal over from it rather than opening the
+	 * session a second time ({@link SessionManager.cloneCurrentSession}).
+	 * Honoured only when the current writer appends to the same file: a second
+	 * writer on another path under one session id is the copy this refuses.
+	 * Each holder releases its own slot, so the journal reads live until the
+	 * last of them lets go.
+	 */
+	handover?: boolean;
+}
+
 export interface SessionStorage {
 	/**
 	 * `true` when synchronous writes ({@link writeTextSync} and a writer's
@@ -233,10 +253,28 @@ export interface SessionStorage {
 	 * holds a different session (another session was moved onto it), so the
 	 * caller's appends would land in that session's journal; `SessionManager`
 	 * then moves its session to a sibling instead of writing that file.
+	 *
+	 * `options.writer` claims as the journal's one writer: it is refused while
+	 * another writer in THIS process holds the session, so two session managers
+	 * can never append to one journal. The one exception is
+	 * {@link SessionClaimOptions.handover}, for a clone taking the same journal
+	 * over from the writer that holds it. Claims without `writer` (a transfer
+	 * guard held across an operation that then opens the session) keep sharing
+	 * the process's lease.
+	 *
 	 * Optional because only backends with a process-owned lock can tell that
 	 * another process writes a session.
 	 */
-	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
+	claimSession?(sessionId: string, sessionPath: string, options?: SessionClaimOptions): (() => void) | null;
+	/**
+	 * Point this process's writer claim for `sessionId` at the file it appends
+	 * to now, after a move carried the journal to a new path. The claim is kept
+	 * (a move must not give the lease up for an instant), only its path
+	 * changes, so a liveness probe still reads the moved journal as the one a
+	 * session here is running rather than a copy of it. Optional, like
+	 * {@link claimSession}, whose claims it retargets.
+	 */
+	retargetWriterClaim?(sessionId: string, sessionPath: string): void;
 	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
@@ -541,11 +579,23 @@ function isPidAlive(pid: number): boolean {
 
 /**
  * This process's ownership leases by session id, shared by every
- * `FileSessionStorage` instance: managers in one process share one lease per
- * session and only ever contend with other processes. The OS reclaims a lease
- * when its process exits, so a crashed owner never blocks a later claim.
+ * `FileSessionStorage` instance: one lease per session, so this process only
+ * ever contends with other processes for it. The OS reclaims a lease when its
+ * process exits, so a crashed owner never blocks a later claim.
+ *
+ * `writers` counts the holders that append to the journal while they hold it
+ * (see {@link SessionClaimOptions.writer}), and `writerPath` is the file that
+ * writer appends to. The lease is shared, the writer slot is not: one journal
+ * has one writer in this process, exactly as it has one across processes.
  */
-const sessionLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
+interface SessionLease {
+	lease: FileLockHandle;
+	holders: number;
+	writers: number;
+	writerPath?: string;
+}
+
+const sessionLeases = new Map<string, SessionLease>();
 
 const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 
@@ -575,33 +625,122 @@ function sessionOwnersDir(): string {
 const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
 
 /**
+ * Bytes read first. The title slot is a fixed 256 and an ordinary header line
+ * is a few hundred more, so this answers every realistic file in one small
+ * read; a header line longer than this falls back to the bound above. The
+ * roster scan asks this of every transcript it meets, so the difference is a
+ * whole scan's worth of decoding.
+ */
+const SESSION_HEADER_FIRST_READ_BYTES = 8 * 1024;
+
+/** Reused across calls: reading a header never yields, so one buffer serves every read. */
+const sessionHeaderBuffer = Buffer.allocUnsafe(SESSION_HEADER_PREFIX_BYTES);
+
+/** The session id in the first header line of `prefix`, past the title slot. */
+function parseSessionHeaderId(prefix: string): string | undefined {
+	const body = parseTitleSlotFromContent(prefix) ? prefix.slice(prefix.indexOf("\n") + 1) : prefix;
+	const end = body.indexOf("\n");
+	if (end === -1) return undefined;
+	try {
+		const entry: unknown = JSON.parse(body.slice(0, end));
+		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
+			return typeof entry.id === "string" ? entry.id : undefined;
+		}
+	} catch {}
+	return undefined;
+}
+
+/**
  * The session id in the header of the file at `sessionPath`, read
  * synchronously from a bounded prefix (past the title slot), or `undefined`
  * when there is no readable file or no header in that prefix.
  */
 function readSessionHeaderIdSync(sessionPath: string): string | undefined {
-	let prefix: string;
 	try {
 		const fd = fs.openSync(sessionPath, "r");
 		try {
-			const buf = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
-			prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
+			const read = fs.readSync(fd, sessionHeaderBuffer, 0, SESSION_HEADER_FIRST_READ_BYTES, 0);
+			const id = parseSessionHeaderId(sessionHeaderBuffer.toString("utf8", 0, read));
+			// Only a file whose header line did not fit is read again.
+			if (id !== undefined || read < SESSION_HEADER_FIRST_READ_BYTES) return id;
+			const full = fs.readSync(fd, sessionHeaderBuffer, 0, SESSION_HEADER_PREFIX_BYTES, 0);
+			return parseSessionHeaderId(sessionHeaderBuffer.toString("utf8", 0, full));
 		} finally {
 			fs.closeSync(fd);
 		}
 	} catch {
 		return undefined;
 	}
-	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
-	const end = prefix.indexOf("\n");
-	if (end === -1) return undefined;
+}
+
+/**
+ * Whether both paths name one file: the same journal reached through a
+ * symlinked session directory, a `--session-dir` that points into the same
+ * tree, or a hard link. Path equality answers the usual case, the inode pair
+ * the rest. A copy of a journal is a different file however much content it
+ * shares, so this — not {@link sessionJournalLiveness}, which is keyed by the
+ * session id both copies carry — is the test for "the journal that session is
+ * writing".
+ */
+export function isSameJournalFile(sessionPath: string, otherPath: string): boolean {
+	if (path.resolve(sessionPath) === path.resolve(otherPath)) return true;
 	try {
-		const entry: unknown = JSON.parse(prefix.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
+		const here = fs.statSync(sessionPath);
+		const there = fs.statSync(otherPath);
+		return here.ino === there.ino && here.dev === there.dev;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Where the agent loop that writes a journal runs: nowhere (`free`), in this
+ * process on this very file (`here`), in this process on another file that
+ * carries the same session id (`copy`), or in another omp process
+ * (`elsewhere`).
+ */
+export type SessionJournalLiveness = "free" | "here" | "copy" | "elsewhere";
+
+/**
+ * Whether a live agent loop writes the session in the journal at
+ * `sessionPath`, and where it runs. A `free` journal is a parked transcript:
+ * it can be reopened, revived, and offered to peers as revivable. Anything
+ * else belongs to a running session, so a registry ref derived from it would
+ * offer a running agent as a revivable transcript.
+ *
+ * Keyed by the session id in the header — the identity the ownership lease
+ * uses — so one journal reached through a symlink, a hard link, or after a
+ * move gives one answer. A plain copy of a live journal carries that same id,
+ * so it reads as live too; `copy` separates it from the journal this process
+ * actually writes, which `here` names, because only the latter is a session
+ * running here. Across processes the lease carries no path, so a copy of a
+ * journal another process runs is `elsewhere` like the original: nothing may
+ * run a second loop under a session id while the first loop holds it.
+ */
+export function sessionJournalLiveness(sessionPath: string): SessionJournalLiveness {
+	const id = readSessionHeaderIdSync(sessionPath);
+	if (id === undefined) return "free";
+	const held = sessionLeases.get(id);
+	// This process holds the lease. Only a writer is an agent loop appending to
+	// the journal — a transfer guard or a collab replica claim is not — and the
+	// lock below answers "held" for this process's own lease anyway.
+	if (held) {
+		if (held.writers === 0) return "free";
+		return held.writerPath !== undefined && isSameJournalFile(held.writerPath, sessionPath) ? "here" : "copy";
+	}
+	let lease: FileLockHandle | null;
+	try {
+		lease = tryAcquireSessionLease(id);
+	} catch (err) {
+		// A lock this process cannot probe says nothing about the journal: keep
+		// the answer every caller had before the probe existed rather than hide
+		// a transcript behind a broken lock directory.
+		logger.debug("Session ownership lease probe failed", { sessionPath, error: toError(err).message });
+		return "free";
+	}
+	if (!lease) return "elsewhere";
+	lease.release();
+	return "free";
 }
 
 /**
@@ -1296,12 +1435,29 @@ export class FileSessionStorage implements SessionStorage {
 	 * under ~/.omp/run/session-owners), so the kernel drops a dead owner's claim.
 	 * Never throws: a lock that cannot be taken for another reason counts as
 	 * owned, so it never moves a session off its file.
+	 *
+	 * A writer claim is refused while this process already has a writer on the
+	 * journal, so the caller is diverted to a sibling file exactly as a second
+	 * process is, instead of appending into a journal another session here is
+	 * writing.
 	 */
-	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+	claimSession(sessionId: string, sessionPath: string, options?: SessionClaimOptions): (() => void) | null {
 		const onDisk = readSessionHeaderIdSync(sessionPath);
 		if (onDisk !== undefined && onDisk !== sessionId) return null;
+		const writer = options?.writer === true;
 		let held = sessionLeases.get(sessionId);
-		if (!held) {
+		if (held) {
+			// A handover takes a slot beside the writer of the SAME journal, and
+			// only that: the manager being cloned keeps appending until it moves
+			// on, and each of the two releases its own slot, so the journal reads
+			// live throughout. A writer on any other path under this session id
+			// is the copy the one-writer rule exists to refuse.
+			const handover =
+				options?.handover === true &&
+				held.writerPath !== undefined &&
+				isSameJournalFile(held.writerPath, sessionPath);
+			if (writer && held.writers > 0 && !handover) return null;
+		} else {
 			let lease: FileLockHandle | null;
 			try {
 				lease = tryAcquireSessionLease(sessionId);
@@ -1310,19 +1466,34 @@ export class FileSessionStorage implements SessionStorage {
 				return () => {};
 			}
 			if (!lease) return null;
-			held = { lease, holders: 0 };
+			held = { lease, holders: 0, writers: 0 };
 			sessionLeases.set(sessionId, held);
 		}
 		const claim = held;
 		claim.holders++;
+		if (writer) {
+			claim.writers++;
+			// One writer per journal, so one path: it tells a journal this
+			// process is running from a copy of it that shares the session id.
+			claim.writerPath = sessionPath;
+		}
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
+			if (writer) {
+				claim.writers--;
+				if (claim.writers === 0) claim.writerPath = undefined;
+			}
 			if (--claim.holders > 0) return;
 			sessionLeases.delete(sessionId);
 			claim.lease.release();
 		};
+	}
+
+	retargetWriterClaim(sessionId: string, sessionPath: string): void {
+		const held = sessionLeases.get(sessionId);
+		if (held && held.writers > 0) held.writerPath = sessionPath;
 	}
 
 	/**

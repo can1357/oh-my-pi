@@ -301,6 +301,10 @@ export function createPersistedSubagentReviverFactory(
 				}));
 			} catch (error) {
 				mcpFollower?.dispose();
+				// The session claimed this journal as its writer before it failed.
+				// Leaving it claimed would divert the next revive of this
+				// transcript to a sibling file instead of rebuilding it in place.
+				await reopened.close();
 				throw error;
 			}
 			mcpFollower?.bind(session);
