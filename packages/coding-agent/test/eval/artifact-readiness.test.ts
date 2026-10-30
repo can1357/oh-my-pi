@@ -5,6 +5,8 @@ import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import {
 	awaitEvalArtifactsSettled,
 	EVAL_ARTIFACTS_READY_BRIDGE_NAME,
+	holdArtifactRoot,
+	releaseArtifactRoots,
 	resolveSettledArtifact,
 } from "../../src/eval/artifact-readiness";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
@@ -257,6 +259,62 @@ describe("eval artifact readiness", () => {
 		// A bare id is the helpers' own business, and anything else is left be.
 		expect(await helpers.pinArtifact("artifact://1")).toBe("artifact://1");
 		expect(await helpers.pinArtifact("local://notes.md")).toBe("local://notes.md");
+	});
+
+	it("gives one hold to every cell starting at once on one artifacts directory", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const started = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_started");
+		fs.mkdirSync(started, { recursive: true });
+
+		try {
+			// Checking for a hold and then opening one is check-before-await,
+			// and cells start together: every racing start would make its own,
+			// and the ceiling would then close holds their readers are using.
+			const tokens = await Promise.all(Array.from({ length: 256 }, () => holdArtifactRoot(started)));
+			expect(new Set(tokens).size).toBe(1);
+			expect(tokens[0]).toBeString();
+
+			// A name that has come to mean another directory gets its own hold,
+			// and the first one stays open for the cells still reading it.
+			fs.renameSync(started, `${started}.moved`);
+			fs.mkdirSync(started);
+			const replaced = await holdArtifactRoot(started);
+			expect(replaced).not.toBe(tokens[0]);
+		} finally {
+			await releaseArtifactRoots();
+		}
+	});
+
+	it("refuses a root that exists and could not be held, and allows one that is not there yet", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-readiness-");
+		const started = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_started");
+		fs.mkdirSync(started, { recursive: true });
+		fs.writeFileSync(path.join(started, "0.bash.log"), "THE SESSION'S OWN");
+		const absent = path.join(tempDir.path(), "2026-01-01T00-00-02-000Z_absent");
+
+		const open = fs.promises.open;
+		const hook = spyOn(fs.promises, "open").mockImplementation((async (...args: unknown[]) => {
+			// What a process out of descriptors gets, and what a directory
+			// whose permissions changed gets. Not the same as "not there".
+			if (String(args[0]) === started) throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+			return await open(...(args as Parameters<typeof open>));
+		}) as typeof fs.promises.open);
+
+		try {
+			// A root that is there and cannot be held refuses: reading it by
+			// name is reading with no identity behind it, which is the thing
+			// the hold is for.
+			await expect(holdArtifactRoot(started)).rejects.toThrow("could not be held open");
+			await expect(resolveSettledArtifact(sessionWithArtifacts(started), "0", started)).rejects.toThrow(
+				"could not be held open",
+			);
+			// A root that does not exist yet is ordinary: a cell can start
+			// before its session has one.
+			expect(await holdArtifactRoot(absent)).toBeUndefined();
+		} finally {
+			hook.mockRestore();
+			await releaseArtifactRoots();
+		}
 	});
 
 	it("does not hold a cell for a staging tree that no copy is using", async () => {

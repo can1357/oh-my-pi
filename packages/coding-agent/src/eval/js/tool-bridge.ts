@@ -253,8 +253,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		const root = isRecord(args) && typeof args.root === "string" ? args.root : undefined;
 		const token = isRecord(args) && typeof args.token === "string" ? args.token : undefined;
 		const wantText = isRecord(args) && args.text === true;
+		const file = isRecord(args) && typeof args.file === "string" ? args.file : undefined;
 		const resolved = await withBridgeTimeoutPause(options.emitStatus, () =>
-			resolveSettledArtifact(options.session, id, root, token, options.signal, wantText),
+			resolveSettledArtifact(options.session, id, root, token, options.signal, wantText, file),
 		);
 		// The file and what it is: the reader checks the object it opens
 		// against this, because it opens it later than this was answered.

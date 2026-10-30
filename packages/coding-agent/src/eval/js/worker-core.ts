@@ -317,7 +317,7 @@ export class WorkerCore {
 			// Not bound to a run: the reader may be work a finished cell left
 			// behind, and the copy it has to be told about belongs to the
 			// session rather than to any one cell.
-			resolveArtifact: (id, root, token, text) => this.#resolveArtifact(id, root, token, text),
+			resolveArtifact: (id, root, token, text, file) => this.#resolveArtifact(id, root, token, text, file),
 			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
@@ -471,6 +471,7 @@ export class WorkerCore {
 		root: string,
 		token?: string,
 		text?: boolean,
+		file?: string,
 	): Promise<SettledArtifactAnswer | null> {
 		const callId = `tc-artifacts-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
@@ -481,7 +482,7 @@ export class WorkerCore {
 				id: callId,
 				runId: "",
 				name: EVAL_ARTIFACTS_READY_BRIDGE_NAME,
-				args: { id, root, token, text },
+				args: { id, root, token, text, file },
 			});
 		} catch (error) {
 			this.#pendingTools.delete(callId);

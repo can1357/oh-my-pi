@@ -101,7 +101,13 @@ export interface RuntimeOptions {
 	 * started a background reader has ended; left out by one where no artifact
 	 * copy can run.
 	 */
-	resolveArtifact?(id: string, root: string, token?: string, text?: boolean): Promise<SettledArtifactAnswer | null>;
+	resolveArtifact?(
+		id: string,
+		root: string,
+		token?: string,
+		text?: boolean,
+		file?: string,
+	): Promise<SettledArtifactAnswer | null>;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -315,6 +321,7 @@ export function settledArtifactOf(value: unknown): SettledArtifactAnswer | null 
 		path: answer.path,
 		device: answer.device,
 		inode: answer.inode,
+		...(typeof answer.file === "string" ? { file: answer.file } : {}),
 		...(typeof answer.text === "string" ? { text: answer.text } : {}),
 	};
 }
@@ -428,7 +435,7 @@ export class JsRuntime {
 			// — so a failure here fails the read.
 			...(opts.resolveArtifact
 				? {
-						resolveArtifact: async (id: string, root: string, token?: string, text?: boolean) => {
+						resolveArtifact: async (id: string, root: string, token?: string, text?: boolean, file?: string) => {
 							// Through the reader's own run, so the wait belongs
 							// to that cell's timeout and its abort ends it. The
 							// host answers this one name with the session's own
@@ -437,8 +444,8 @@ export class JsRuntime {
 							// and no reading of error text to find it.
 							const hooks = this.#activeHooks("tool");
 							const value = hooks
-								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root, token, text })
-								: await opts.resolveArtifact!(id, root, token, text);
+								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root, token, text, file })
+								: await opts.resolveArtifact!(id, root, token, text, file);
 							return settledArtifactOf(value);
 						},
 					}

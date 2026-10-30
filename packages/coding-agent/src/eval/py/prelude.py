@@ -4,7 +4,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, time, types, typing
+    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, stat as stat_module, time, types, typing
     from urllib.parse import unquote
 
 
@@ -79,7 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
             return result["text"]
         return result
 
-    def _artifact_file(path: str, want_text: bool = False) -> dict | None:
+    def _artifact_file(path: str, want_text: bool = False, file: str | None = None) -> dict | None:
         """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
         artifacts dir), or None when the id is not there or no dir is known.
 
@@ -100,6 +100,9 @@ if "__omp_prelude_loaded__" not in globals():
                 "id": path[11:],
                 "root": os.path.abspath(root),
                 "text": want_text,
+                # The handle the host kept on the very file it answered about,
+                # for a read that found the name no longer reaches it.
+                "file": file,
                 # The hold this cell was given on that directory: the host
                 # answers from the directory the cell was started on, not from
                 # whatever its pathname reaches when the read lands.
@@ -141,18 +144,30 @@ if "__omp_prelude_loaded__" not in globals():
         """
         data = answer.get("text")
         if not isinstance(data, str):
-            with open(answer["path"], "rb") as handle:
-                stat = os.fstat(handle.fileno())
-                if str(stat.st_dev) == answer.get("device") and str(stat.st_ino) == answer.get("inode"):
-                    data = handle.read().decode("utf-8")
+            # Non-blocking, because an ordinary open of a FIFO waits for a
+            # writer before any check can run: a name that stopped meaning its
+            # file can have become something that does not answer an open at
+            # all, and a reader that hangs there never gets to refuse.
+            fd = os.open(answer["path"], os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                stat = os.fstat(fd)
+                if (
+                    stat_module.S_ISREG(stat.st_mode)
+                    and str(stat.st_dev) == answer.get("device")
+                    and str(stat.st_ino) == answer.get("inode")
+                ):
+                    with os.fdopen(os.dup(fd), "rb") as handle:
+                        data = handle.read().decode("utf-8")
                 else:
                     data = None
+            finally:
+                os.close(fd)
         if data is None:
             # The pathname reaches something else now — its directory was
             # replaced between the answer and this read. The host still holds
             # that directory open, so it can read the file this answer is
             # about; what it cannot do is hand over a name that still means it.
-            again = _artifact_file(uri, want_text=True)
+            again = _artifact_file(uri, want_text=True, file=answer.get("file"))
             if again is None or not isinstance(again.get("text"), str):
                 raise RuntimeError(
                     f"{answer['path']} is no longer the artifact this session was told to read"

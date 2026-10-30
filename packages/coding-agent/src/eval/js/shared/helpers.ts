@@ -1,3 +1,4 @@
+import { constants as nodeFsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -9,7 +10,9 @@ export interface SettledArtifactAnswer {
 	path: string;
 	device: string;
 	inode: string;
-	/** The bytes, when the host had to read them through its own hold. */
+	/** The handle the host kept on this very file, for a reader that has to come back for the bytes. */
+	file?: string;
+	/** The bytes, when the host had to read them from the file it still holds open. */
 	text?: string;
 }
 
@@ -44,7 +47,13 @@ export interface HelperContext {
 	 * answer fails the read rather than letting it see a directory nobody has
 	 * vouched for.
 	 */
-	resolveArtifact?(id: string, root: string, token?: string, text?: boolean): Promise<SettledArtifactAnswer | null>;
+	resolveArtifact?(
+		id: string,
+		root: string,
+		token?: string,
+		text?: boolean,
+		file?: string,
+	): Promise<SettledArtifactAnswer | null>;
 }
 
 /**
@@ -248,10 +257,14 @@ async function readSettledArtifact(
 	answer: SettledArtifactAnswer,
 ): Promise<string> {
 	if (answer.text !== undefined) return answer.text;
-	const handle = await fs.open(answer.path, "r");
+	// Non-blocking, because an ordinary open of a FIFO waits for a writer
+	// before any check can run: a name that stopped meaning its file can have
+	// become something that does not answer an open at all, and a reader that
+	// hangs there never gets to refuse.
+	const handle = await fs.open(answer.path, nodeFsConstants.O_RDONLY | nodeFsConstants.O_NONBLOCK);
 	try {
 		const stat = await handle.stat({ bigint: true });
-		if (String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
+		if (stat.isFile() && String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
 			return await handle.readFile("utf8");
 		}
 	} finally {
@@ -261,7 +274,7 @@ async function readSettledArtifact(
 	// between the answer and this read. The host still holds that directory
 	// open, so it can read the file this answer is about; what it cannot do is
 	// hand over a name that still means it.
-	const again = await ctx.resolveArtifact?.(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN], true);
+	const again = await ctx.resolveArtifact?.(id, root, ctx.localRoots()[ARTIFACT_ROOT_TOKEN], true, answer.file);
 	if (again?.text !== undefined) return again.text;
 	throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
 }
