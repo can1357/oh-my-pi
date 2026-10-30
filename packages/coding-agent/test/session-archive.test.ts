@@ -4509,7 +4509,7 @@ for (const kept of ["its first byte", "half of it"] as const) {
 	});
 }
 
-test("a retry of a finished quarantine that moved only its record says it cannot tell that from a directory removed by hand", async () => {
+test("a retry of a finished quarantine that moved only its record says it cannot tell that from a directory removed by hand, and what to do next", async () => {
 	const { ground, record } = await archivedWithKilledStage();
 	// The directory gone before the quarantine: it moves only the record.
 	await fs.rename(ground.dir, path.join(root, "gone-before"));
@@ -4523,4 +4523,111 @@ test("a retry of a finished quarantine that moved only its record says it cannot
 	const told = repeated.quarantine?.errors.join("\n") ?? "";
 	expect(told).toContain("cannot tell");
 	expect(told).toContain("already gone when the record was quarantined");
+	expect(told).toContain("stop running this command and go on with the restore");
+});
+
+// The review's false-arrival fixtures, each standing before the retry starts:
+// a whole copy of the record in the destination and the ledger record gone,
+// with something beside the copy that matches the directory's identity
+// without being the directory that moved.
+test("a quarantine retry does not take a directory that reuses the recorded inode for the one that moved", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	await quarantineStopped(ground, record, "before the directory moves");
+	await fs.unlink(ground.record);
+	await fs.rm(ground.dir, { recursive: true });
+	const replacement = path.join(destination, path.basename(ground.dir));
+	await Bun.write(path.join(replacement, "foreign"), "UNRELATED DATA");
+	// The review saw ext4 give the freed directory inode to the first new
+	// directory. That reuse cannot be waited for here, so the copy is made
+	// to name the replacement's inode, which is the state it leaves.
+	const made = await fs.stat(replacement);
+	const copy = path.join(destination, record);
+	const entry = JSON.parse(await Bun.file(copy).text());
+	await fs.writeFile(copy, JSON.stringify({ ...entry, dirIdentity: { dev: made.dev, ino: made.ino } }));
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(replacement);
+		expect(told).toContain("carries it home");
+	}
+	expect(await Bun.file(path.join(replacement, "foreign")).text()).toBe("UNRELATED DATA");
+});
+
+test("a quarantine retry whose destination resolves into the session tree it came from is refused", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	await quarantineStopped(ground, record, "before the directory moves");
+	await fs.unlink(ground.record);
+	// The record's copy beside the stage it names, and the destination a
+	// link to that place: the stage is "beside the copy" without moving.
+	const parent = path.dirname(ground.dir);
+	await fs.rename(path.join(destination, record), path.join(parent, record));
+	await fs.rmdir(destination);
+	await fs.symlink(parent, destination);
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain("inside a session tree");
+		expect(told).toContain("carries it home");
+	}
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
+
+test("a quarantine retry does not take an alias of the directory still in its tree for the one that moved", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	const stageAt = path.join(destination, path.basename(ground.dir));
+	await quarantineStopped(ground, record, "before the directory moves");
+	await fs.unlink(ground.record);
+	// What a bind mount of the stage at its destination name shows a
+	// look at that name: the very directory still in its tree, by device
+	// and inode. Mounting needs privileges a test does not take.
+	const realLstat = fs.lstat;
+	const alias = spyOn(fs, "lstat").mockImplementation(
+		(async (target: string, ...rest: unknown[]) =>
+			await (realLstat as (...args: unknown[]) => Promise<Stats>)(
+				String(target) === stageAt ? ground.dir : target,
+				...rest,
+			)) as typeof fs.lstat,
+	);
+	let applied: GcResult;
+	try {
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		alias.mockRestore();
+	}
+
+	expect(applied.quarantine?.moved).toBe(false);
+	const told = applied.quarantine?.errors.join("\n") ?? "";
+	expect(told).toContain(ground.dir);
+	expect(told).toContain("carries it home");
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+});
+
+test("a quarantine retry with no ledger record and nothing in any destination still warns about the directory left in its tree", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	// The review's fixture: a quarantine killed before its record was linked,
+	// leaving an empty destination, and the ledger record then removed.
+	await fs.mkdir(quarantineDestination(record), { recursive: true, mode: 0o700 });
+	await fs.unlink(ground.record);
+
+	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
+	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	for (const run of [preview, applied]) {
+		expect(run.quarantine?.moved).toBe(false);
+		const told = run.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain("carries it home");
+		expect(told).toContain("session trees");
+	}
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 });

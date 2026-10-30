@@ -1615,20 +1615,50 @@ async function readQuarantinePlace(destination: string, recordName: string): Pro
 	return place;
 }
 
+/** Where a staging directory left in its tree with no ledger record ends up, and what to do about it. */
+const UNRECORDED_STAGE_WARNING =
+	`with no record in the ledger, a restore takes it for an artifact and carries it home, partial file and all; ` +
+	`look for it in the session trees — a directory named \`.<file name>.<16 hexadecimal digits>.tmp\` — and move it ` +
+	`out by hand to keep it out`;
+
+/**
+ * Whether the directory `copied` records is proved to have moved beside its
+ * copy in `destination`: the destination resolves outside both session
+ * trees, nothing is at the directory's old name, and the directory there is
+ * the one recorded — its inode, and the inode of the file it staged at that
+ * file's name, since an inode is given out again once its directory is gone
+ * and the first directory made after it can carry it. A record written
+ * before its run took the inodes has only names to go by.
+ */
+async function provedArrival(destination: string, copied: StagingRecord, roots: readonly string[]): Promise<boolean> {
+	const resolved = await resolvedPath(destination).catch(() => undefined);
+	if (!resolved || roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) return false;
+	const left = await checkRecordedGround(copied, roots);
+	if (left.kind !== "gone" || left.note !== undefined) return false;
+	const stageAt = path.join(destination, path.basename(copied.dir));
+	const there = await fs.lstat(stageAt).catch(() => undefined);
+	if (!there?.isDirectory()) return false;
+	if (!copied.dirIdentity || !copied.identity) return true;
+	if (there.dev !== copied.dirIdentity.dev || there.ino !== copied.dirIdentity.ino) return false;
+	const staged = await fs.lstat(path.join(stageAt, path.basename(copied.file))).catch(() => undefined);
+	return staged?.isFile() === true && staged.dev === copied.identity.dev && staged.ino === copied.identity.ino;
+}
+
 /**
  * Answer `gc --quarantine` for a record no longer in the ledger, from what
  * `places` — every place a quarantine of it uses that holds anything — hold.
  *
- * Done only on evidence that the recorded directory arrived: a whole copy of
- * the record beside a directory that is the one it records, by identity, or
- * by name for a record written before its run took the identity, with
- * nothing at the name the record gives it in its tree. A copy says the
- * record arrived, not the directory; a directory that cannot be looked at,
- * stands elsewhere or is gone is not one that moved. Anything short of that
- * is refused, naming every place that holds anything — one place named of
- * two sends a reader looking in the wrong one — and saying that a staging
- * directory still in its tree with no record in the ledger is one a restore
- * takes for an artifact and carries home.
+ * Done only on proof that the recorded directory arrived — see
+ * {@link provedArrival}. A copy says the record arrived, not the directory,
+ * and a matching inode says only that an inode matches: a directory that
+ * cannot be looked at, stands elsewhere, is gone, is still at its old name
+ * under an alias, or is a later directory given its inode is not one that
+ * moved. Anything short of proof is refused, naming every place that holds
+ * anything — one place named of two sends a reader looking in the wrong
+ * one — and every refusal says that a staging directory still in its tree
+ * with no record in the ledger is one a restore takes for an artifact and
+ * carries home: quarantine is where that is decided, and restore cannot tell
+ * such a directory from an artifact of the same shape.
  */
 async function settleWithoutLedgerRecord(
 	result: StagingQuarantine,
@@ -1649,12 +1679,15 @@ async function settleWithoutLedgerRecord(
 					: `${place.destination} holds ${place.paths.join(", ")}`,
 			)
 			.join("; ");
-	if (places.length === 0) return refuse(`${record} is not a staging record in ${ledger}`);
+	if (places.length === 0) {
+		return refuse(
+			`${record} is not a staging record in ${ledger}, and no place a quarantine of it uses holds anything. If a gc run ` +
+				`wrote it and its staging directory is still where the killed run left it, ${UNRECORDED_STAGE_WARNING}`,
+		);
+	}
 	const copies = places.filter(place => place.copy !== undefined);
 	for (const place of copies) {
-		const recorded = place.copy!.dirIdentity;
-		const there = await fs.lstat(path.join(place.destination, path.basename(place.copy!.dir))).catch(() => undefined);
-		if (there?.isDirectory() && recorded && there.dev === recorded.dev && there.ino === recorded.ino) {
+		if (await provedArrival(place.destination, place.copy!, roots)) {
 			result.quarantine = place.destination;
 			result.moved = true;
 			return result;
@@ -1665,19 +1698,25 @@ async function settleWithoutLedgerRecord(
 		const copied = first.copy!;
 		const copy = path.join(first.destination, path.basename(record));
 		const stageAt = path.join(first.destination, path.basename(copied.dir));
-		const there = await fs.lstat(stageAt).catch(() => undefined);
-		const left = await checkRecordedGround(copied, roots);
-		result.quarantine = first.destination;
-		if (!copied.dirIdentity && there?.isDirectory() && left.kind === "gone" && left.note === undefined) {
-			result.moved = true;
-			return result;
-		}
 		const others = places.filter(place => place !== first);
 		const elsewhere = others.length > 0 ? ` Also: ${holding(others)}.` : "";
+		result.quarantine = first.destination;
+		const resolved = await resolvedPath(first.destination).catch(() => undefined);
+		if (resolved && roots.some(root => isWithin(root, resolved.real) || isWithin(resolved.real, root))) {
+			return refuse(
+				`${record} is not in ${ledger}, and ${first.destination}, which holds a copy of it, resolves to ${resolved.real}, ` +
+					`inside a session tree, so nothing there is taken for a quarantine: what stands beside that copy may be the ` +
+					`staging directory itself, still in its tree, and ${UNRECORDED_STAGE_WARNING}. To quarantine it, make ` +
+					`${first.destination} a directory of its own outside the session trees, put a copy of ${copy} back at ` +
+					`${record}, and run the same command again.${elsewhere}`,
+			);
+		}
+		const left = await checkRecordedGround(copied, roots);
 		if (left.kind === "minted" || left.kind === "intent") {
-			// Stopped between the record and the directory; and an archive
-			// run keeps the ledger entry of a directory still in its tree,
-			// so something else removed it.
+			// Stopped between the record and the directory, or the directory
+			// shown in the destination under an alias; and an archive run
+			// keeps the ledger entry of a directory still in its tree, so
+			// something else removed it.
 			result.directory = copied.dir;
 			return refuse(
 				`${record} is not in ${ledger}, but ${copy} holds a copy of it, and the directory it names, ${copied.dir}, ` +
@@ -1687,20 +1726,31 @@ async function settleWithoutLedgerRecord(
 					`back to ${record} and run the same command again.${elsewhere}`,
 			);
 		}
-		const where =
+		const there = await fs.lstat(stageAt).catch(() => undefined);
+		const sameInode =
+			there?.isDirectory() &&
+			copied.dirIdentity !== undefined &&
+			there.dev === copied.dirIdentity.dev &&
+			there.ino === copied.dirIdentity.ino;
+		const atStage = !there
+			? `nothing is at ${stageAt}`
+			: sameInode
+				? `${stageAt} has that directory's inode but not the file it staged, ${path.basename(copied.file)}, with its ` +
+					`inode, and an inode is given out again once its directory is gone`
+				: `what is at ${stageAt} is not that directory`;
+		const atSource =
 			left.kind === "refused"
-				? `and it could not be checked where it was: ${left.note}`
+				? `its old name could not be checked: ${left.note}`
 				: left.note !== undefined
-					? `and it is not where it was either: ${left.note}`
-					: "and it is not where it was either";
+					? `something else is at its old name: ${left.note}`
+					: "nothing is at its old name";
 		return refuse(
-			`${record} is not in ${ledger}, but ${copy} holds a copy of it, and the directory it names, ${copied.dir}, ` +
-				`is not in ${first.destination}${there ? ` (what is at ${stageAt} is not that directory)` : ""}, ${where}. ` +
-				`So this cannot tell that the quarantine finished. It did if that directory was already gone when the record ` +
-				`was quarantined, since then only the record moves. Otherwise something other than gc moved it, removed it or ` +
-				`keeps it from being read, and if it is still in a session tree, a restore, with no record in the ledger, takes ` +
-				`it for an artifact and carries it home; if you find it there, copy ${copy} back to ${record} and run the same ` +
-				`command again.${elsewhere}`,
+			`${record} is not in ${ledger}, but ${copy} holds a copy of it, and this cannot tell that the directory it names, ` +
+				`${copied.dir}, moved into ${first.destination}: ${atStage}, and ${atSource}. If that directory was already gone ` +
+				`when the record was quarantined, the quarantine is finished, since then only the record moves: stop running ` +
+				`this command and go on with the restore. Otherwise something other than gc moved it, removed it or keeps it ` +
+				`from being read, and if it is still in a session tree, ${UNRECORDED_STAGE_WARNING}; or, once you find it, copy ` +
+				`${copy} back to ${record} and run the same command again.${elsewhere}`,
 		);
 	}
 	// No whole copy anywhere: this command never leaves that itself.
@@ -1719,8 +1769,7 @@ async function settleWithoutLedgerRecord(
 				`no record in the ledger a restore takes it for an artifact and carries it home, partial file and all; move it ` +
 				`out of the session trees by hand to keep it out.`
 			: ` If the staging directory the record named is still where the killed gc run left it, it is in none of these ` +
-				`places, and with no record in the ledger a restore takes it for an artifact and carries it home, partial file ` +
-				`and all; look for it in the session trees and move it out by hand to keep it out.`;
+				`places, and ${UNRECORDED_STAGE_WARNING}.`;
 	return refuse(
 		`${record} is not in ${ledger}, and no place a quarantine of this record uses holds a whole copy of it: ` +
 			`${holding(places)}. This command never leaves that itself: it moves the directory only once the record's copy ` +
