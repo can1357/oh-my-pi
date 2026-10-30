@@ -1725,3 +1725,29 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
 	});
 });
+
+describe("effortMap aliases in clampThinkingLevelForModel", () => {
+	const gateway = (efforts: Effort[], effortMap: Record<string, string>) =>
+		createModel({
+			id: "example-route",
+			api: "openai-completions",
+			provider: "example-gateway",
+			thinking: { mode: "effort", efforts, effortMap },
+		});
+
+	it("follows an alias to a served tier instead of climbing down", () => {
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
+	});
+
+	it("climbs down when the alias names an unserved tier", () => {
+		const model = gateway([Effort.Low, Effort.High], { medium: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
+	});
+
+	it("climbs down when the map remaps the alias target again", () => {
+		// Honouring `medium → high` would serialize `max` because the map sends `high` on.
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high", high: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
+	});
+});

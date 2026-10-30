@@ -778,6 +778,8 @@ export type RotateCredentialOptions = {
 	apiKey?: string;
 	credentialId?: number;
 	signal?: AbortSignal;
+	/** Whether to wait for a briefly blocked sibling; defaults to true. The failed credential is blocked either way. */
+	waitForSibling?: boolean;
 };
 
 /**
@@ -1379,7 +1381,7 @@ export interface LimitsApi {
 	 *
 	 * For usage-limit and account-policy failures with no free sibling, waits
 	 * (abortable via `options.signal`) when a sibling's block expires within a
-	 * few seconds, then reports `afterSiblingWait`.
+	 * few seconds, then reports `afterSiblingWait`, unless `options.waitForSibling` is false.
 	 */
 	rotate(
 		provider: string,

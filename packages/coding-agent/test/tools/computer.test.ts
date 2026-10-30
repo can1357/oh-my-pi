@@ -4790,3 +4790,155 @@ describe("computer background fallback", () => {
 		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
 	});
 });
+
+describe("window() waiting for a window to appear", () => {
+	class OpeningSession extends FakeNativeSession {
+		listings = 0;
+		constructor(readonly appearsAt: number) {
+			super();
+		}
+		override async listWindows(): Promise<DesktopWindow[]> {
+			this.listings += 1;
+			return this.listings >= this.appearsAt
+				? [windowFixture, { ...windowFixture, id: "151", app: "Preview", title: "report.pdf" }]
+				: [windowFixture];
+		}
+	}
+
+	async function run(native: NativeDesktopSession, code: string, readOnly = false, timeoutMs = 5_000) {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({
+			type: "run",
+			id,
+			code,
+			timeoutMs,
+			session: snapshot(readOnly),
+			escape: escapeScope(),
+		});
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+		return message;
+	}
+
+	/** One event-loop turn, which fake timers leave alone: every pending promise of the worker runs first. */
+	function turn(): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		return promise;
+	}
+
+	/**
+	 * Under fake timers, let `native` list `count` times, moving the clock one 100 ms poll interval after each
+	 * listing but the last, once the worker is asleep in that interval.
+	 */
+	async function pollListings(native: OpeningSession, count: number): Promise<void> {
+		for (let listed = 1; ; listed++) {
+			while (native.listings < listed) await turn();
+			if (listed === count) return;
+			await turn();
+			vi.advanceTimersByTime(100);
+		}
+	}
+
+	it("polls a filter with wait until the window appears in a read-only run", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(4);
+			const pending = run(
+				native,
+				'return (await desktop.window({ app: "Preview", title: "report.pdf", wait: 2000 })).id',
+				true,
+			);
+			await pollListings(native, 4);
+			const result = await pending;
+			if (!result.ok) throw new Error(result.error.message);
+			expect(result.payload.returnValue).toBe("151");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops polling when the run is cancelled by its deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 10000 })', false, 300);
+			// Listings at 0, 100 and 200 ms; the 300 ms deadline cancels the run during the next interval.
+			await pollListings(native, 3);
+			await turn();
+			vi.advanceTimersByTime(100);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toContain("timed out");
+			// A loop that outlived its run would list again in each later interval.
+			for (let interval = 0; interval < 5; interval++) {
+				await turn();
+				vi.advanceTimersByTime(100);
+			}
+			await turn();
+			expect(native.listings).toBe(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("still fails at once without wait", async () => {
+		const native = new OpeningSession(4);
+		const result = await run(native, 'return await desktop.window({ app: "Preview" })');
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith('no window matches {"app":"Preview"}');
+		expect(native.listings).toBe(1);
+	});
+
+	it("reports the window miss after waiting when nothing appears", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
+			// Listings at 0, 100 and 200 ms and the last at the 300 ms deadline.
+			await pollListings(native, 4);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toStartWith('no window matches {"app":"Preview","wait":300}');
+			expect(result.error.message).toContain("Open windows by app");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each(["60000", "NaN", '"soon"'])("refuses an invalid wait of %s", async wait => {
+		const native = new OpeningSession(1);
+		const result = await run(native, `return await desktop.window({ app: "Preview", wait: ${wait} })`);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toContain("window({ wait }) takes milliseconds from 0 to 10000");
+		expect(native.listings).toBe(0);
+	});
+
+	it("resolves a delayed window through Python keyword filters", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new OpeningSession(3);
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		const result = await executePython(
+			'win = await computer.window(app="Preview", title="report.pdf", wait=2000)\nprint(win.id)',
+			{
+				cwd: process.cwd(),
+				sessionId: `computer-window-wait-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n").at(-1)).toBe("151");
+		expect(native.listings).toBe(3);
+	});
+});
