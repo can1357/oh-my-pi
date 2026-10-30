@@ -788,7 +788,13 @@ export class TurnRecovery {
 		};
 		// A retry saga can have persisted the refused turn; drop it from the branch too,
 		// so the reminder is appended to the refusal's parent and reloads never see it.
+		const generation = this.#host.promptGeneration();
 		await this.#dropAssistantTurnDurably(message);
+		// An abort, disposal or new prompt may land during the durable rewrite; the
+		// refused turn is already gone, so stop without leaving a reminder behind.
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+			return false;
+		}
 		this.#host.agent.appendMessage(reminder);
 		this.#host.sessionManager.appendMessage(reminder);
 		this.#host.scheduleAgentContinue({

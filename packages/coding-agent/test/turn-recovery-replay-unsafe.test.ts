@@ -1467,4 +1467,25 @@ describe("TurnRecovery classifier-refusal continuation", () => {
 		expect(branched).toEqual(["parent-entry"]);
 		expect(discarded).toEqual(["refused-entry"]);
 	});
+
+	it("leaves no reminder when an abort lands during the durable drop", async () => {
+		const failed = refusal();
+		const host = createHostWithContinuation({}, [failed]);
+		let aborted = false;
+		const appended: unknown[] = [];
+		const scheduled: unknown[] = [];
+		Object.assign(host, { abortInProgress: () => aborted, scheduleAgentContinue: (o: unknown) => scheduled.push(o) });
+		Object.assign(host.agent, { appendMessage: (m: unknown) => appended.push(m) });
+		Object.assign(host.sessionManager, {
+			getBranchView: () => [{ id: "refused-entry", parentId: "parent-entry", type: "message", message: failed }],
+			branch: () => {},
+			discardEntryDurably: async () => {
+				aborted = true;
+			},
+		});
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleClassifierRefusalContinuation(failed)).toBe(false);
+		expect(appended).toEqual([]);
+		expect(scheduled).toEqual([]);
+	});
 });
