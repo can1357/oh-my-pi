@@ -19,6 +19,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	FetchImpl,
 	Model,
 	ModelSpec,
 	SimpleStreamOptions,
@@ -26,6 +27,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 
 const SOURCE_ID = "before-dispatch-test";
 const API = "before-dispatch-test" as Api;
@@ -386,5 +388,25 @@ describe("beforeDispatch", () => {
 
 		// The chokepoint's hold, then one per HTTP attempt.
 		expect(order).toEqual(["hold", "hold", "request-1", "hold", "request-2"]);
+	});
+
+	// The hold lives in the one transport wrapper, so re-entering it (the auth
+	// retry does, and `streamSimple` re-enters `stream`) must not add a second
+	// layer: that would hold twice and, under `PI_REQ_DEBUG`, capture twice.
+	test("adds one transport layer, holding once per attempt", async () => {
+		const calls: string[] = [];
+		const base = (async () => {
+			calls.push("request");
+			return new Response("{}", { status: 200 });
+		}) satisfies FetchImpl;
+		const hold = () => {
+			calls.push("hold");
+		};
+		const once = transportFetch(model(), base, hold);
+		expect(transportFetch(model(), once, hold)).toBe(once);
+
+		await once("https://example.invalid/v1/messages", { method: "POST" });
+
+		expect(calls).toEqual(["hold", "request"]);
 	});
 });

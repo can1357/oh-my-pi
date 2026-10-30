@@ -1795,24 +1795,6 @@ function assertExplicitOpenAIResponsesPromptCacheSupport<TApi extends Api>(
 	);
 }
 
-/**
- * Wrap `fetchImpl` so the caller's dispatch hold runs before every HTTP attempt.
- *
- * The hold at the dispatch chokepoint covers the attempt the stream layer makes;
- * it does not cover what the transport does after that — an extension's
- * `onPayload` await, then `fetchWithRetry`'s own attempts after a `Retry-After`
- * sleep. Each of those is another paid request, so each waits here. Returns
- * `fetchImpl` unchanged when the caller gates nothing.
- */
-function holdingFetch(fetchImpl: FetchImpl | undefined, hold: (() => Promise<void> | void) | undefined) {
-	if (!hold) return fetchImpl;
-	const send = fetchImpl ?? ((input, init) => globalThis.fetch(input as string | URL | Request, init));
-	return (async (input, init) => {
-		await hold();
-		return send(input, init);
-	}) satisfies FetchImpl;
-}
-
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	rawOptions?: SimpleStreamOptions,
@@ -1858,7 +1840,7 @@ function mapOptionsForApi<TApi extends Api>(
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
 		execHandlers: options?.execHandlers,
-		fetch: holdingFetch(options?.fetch, options?.beforeDispatch),
+		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,

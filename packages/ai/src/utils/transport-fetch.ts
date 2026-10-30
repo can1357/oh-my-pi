@@ -12,17 +12,26 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
 
 /**
  * The one fetch every inference request goes through. Per call it applies, in
- * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
- * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
- * never layer transport concerns themselves.
+ * order: the caller's dispatch hold, the inference User-Agent default,
+ * `NODE_EXTRA_CA_CERTS`, the per-provider proxy, and `PI_REQ_DEBUG`
+ * request/response recording — then calls `fetchImpl` (or the model's default
+ * fetch) exactly once. Providers never layer transport concerns themselves.
  *
- * Idempotent: the built fetch is stamped and returned as-is on later passes.
- * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
- * on auth retries, so without the stamp each entry point would add another
- * layer (three PI_REQ_DEBUG dumps for one request).
+ * `hold` is the caller's `beforeDispatch`. It belongs here because this is the
+ * only place every HTTP attempt passes through: a provider's own retry loop
+ * and its setup requests reach the wire through this fetch and nothing else.
+ *
+ * Idempotent: the built fetch is stamped and returned as-is on later passes,
+ * hold and all — `streamSimple` re-enters `stream`, and `streamSimpleRequest`
+ * re-enters itself on auth retries, so without the stamp each entry point
+ * would add another layer (three PI_REQ_DEBUG dumps, and three holds, for one
+ * request).
  */
-export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
+export function transportFetch(
+	model: Model<Api>,
+	fetchImpl: FetchImpl | undefined,
+	hold?: () => Promise<void> | void,
+): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
@@ -30,6 +39,7 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
+		await hold?.();
 		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 			recordDispatchOrigin(model, input);
 		}
@@ -80,8 +90,15 @@ export function resetDispatchOriginsForTesting(): void {
 	dispatchOrigins.clear();
 }
 
-/** Options-bag form of {@link transportFetch}; returns `options` untouched when its fetch is already built. */
-export function withTransportFetch<T extends { fetch?: FetchImpl }>(model: Model<Api>, options: T): T {
-	const fetch = transportFetch(model, options.fetch);
+/**
+ * Options-bag form of {@link transportFetch}; returns `options` untouched when
+ * its fetch is already built and it gates nothing. A `beforeDispatch` travels
+ * into the built fetch, so every HTTP attempt the transport makes waits on it.
+ */
+export function withTransportFetch<T extends { fetch?: FetchImpl; beforeDispatch?: () => Promise<void> | void }>(
+	model: Model<Api>,
+	options: T,
+): T {
+	const fetch = transportFetch(model, options.fetch, options.beforeDispatch);
 	return fetch === options.fetch ? options : { ...options, fetch };
 }

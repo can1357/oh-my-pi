@@ -1355,6 +1355,11 @@ async function runGitLabDuoWorkflow(
 	let settledNormally = false;
 	try {
 		for (let attempt = 0; attempt < 12; attempt++) {
+			// This loop opens a socket of its own on every restart — a reconnect,
+			// an approval round, a step-limit restart. Each is traffic the caller's
+			// gate has to see; the REST calls above reach the wire through the
+			// transport fetch, which holds for the same reason.
+			await options.beforeDispatch?.();
 			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
 				token: workflowConnection.token,
 				projectId: webSocketProjectId,
