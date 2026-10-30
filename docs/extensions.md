@@ -408,10 +408,12 @@ Verification surfaces:
 - `mise run smoke:fallback-shake`: installed binary and personal extension against a loopback HTTP provider, including request-body and persisted-entry comparisons; `OMP_FALLBACK_SHAKE_BINARY` and `OMP_FALLBACK_SHAKE_EXTENSION` override the installed paths
 
 The proof and regression tasks prepare locked dependencies and the host native
-addon in clean checkouts. To reuse an already built native artifact in an
-immutable verification snapshot, set `ATASK_NATIVE_ARTIFACT_DIR` to its directory.
-The existing native installer stamps, copies, and load-probes that artifact;
-the TypeScript source and tests still run from the snapshot, not the build tree.
+addon in clean checkouts, then run with an isolated temporary home so they never
+probe the developer's real credentials. To reuse a built native artifact in an
+immutable verification snapshot, set `ATASK_NATIVE_ARTIFACT_DIR` to its Bazel
+artifact root (`natives-<target>/<addon>.node`). The existing native installer
+stamps, copies, and load-probes that artifact; the TypeScript source and tests
+still run from the snapshot, not the build tree.
 
 ### Ephemeral side turns (`ctx.runEphemeralTurn`)
 

@@ -1,12 +1,12 @@
 [tasks."test:fallback-shake"]
 description = "Prove automatic fallback elides only older exchanges before the replacement request"
 depends = ["test:prepare-fallback-shake"]
-run = "bun test packages/coding-agent/test/fallback-shake.test.ts packages/coding-agent/examples/extensions/fallback-shake/rule.test.ts"
+run = "bun scripts/fallback-shake-tests.ts packages/coding-agent/test/fallback-shake.test.ts packages/coding-agent/examples/extensions/fallback-shake/rule.test.ts"
 
 [tasks."test:shake-regression"]
 description = "Check existing shake, tool protection, and retry fallback contracts"
 depends = ["test:prepare-fallback-shake"]
-run = "bun test packages/agent/test/shake.test.ts packages/agent/test/tool-protection.test.ts packages/coding-agent/test/shake.test.ts packages/coding-agent/test/agent-session-retry-fallback.test.ts"
+run = "bun scripts/fallback-shake-tests.ts packages/agent/test/shake.test.ts packages/agent/test/tool-protection.test.ts packages/coding-agent/test/shake.test.ts packages/coding-agent/test/agent-session-retry-fallback.test.ts"
 
 [tasks."test:prepare-fallback-shake"]
 description = "Prepare locked dependencies and the host native addon for clean verification checkouts"
