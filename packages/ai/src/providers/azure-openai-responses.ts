@@ -153,6 +153,10 @@ const streamAzureOpenAIResponsesOnce = (
 			);
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
+			// One first-event budget runs from the wire to the first event: the
+			// request guard spends the part before headers, and the event iterator
+			// below waits on what it left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			while (true) {
 				// A guard rather than a plain timer: it rides on the request signal,
 				// so the transport stops its clock while the request is prepared and
@@ -184,6 +188,8 @@ const streamAzureOpenAIResponsesOnce = (
 						onSseEvent: rawSseObserver,
 					});
 					openaiStream = handle.events;
+					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					break;
 				} catch (error) {
 					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
@@ -204,7 +210,7 @@ const streamAzureOpenAIResponsesOnce = (
 
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
-				firstItemTimeoutMs: firstEventTimeoutMs,
+				firstItemTimeoutMs: firstEventBudgetLeftMs,
 				firstItemErrorMessage: AZURE_OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 				errorMessage: "Azure OpenAI responses stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),

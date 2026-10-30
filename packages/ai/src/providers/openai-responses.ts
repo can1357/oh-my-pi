@@ -813,6 +813,10 @@ const streamOpenAIResponsesOnce = (
 				body: chained.params,
 			};
 			rawRequestDump = activeRawRequestDump;
+			// One first-event budget runs from the wire to the first event: each
+			// request's guard spends the part before headers, and the event
+			// iterator below waits on what that guard left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			const openResponsesStream = async (
 				requestParams: OpenAIResponsesSamplingParams,
 			): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -861,9 +865,11 @@ const streamOpenAIResponsesOnce = (
 						// sleep with one budget, so retries cannot extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
-					// Disarm the first-event watchdog as soon as headers arrive — a slow
-					// onResponse callback must not abort an already-connected stream.
+					// Disarm the guard as soon as headers arrive, so it can never
+					// abort the connected body, and a slow onResponse callback is not
+					// charged to the provider.
 					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
@@ -1033,7 +1039,7 @@ const streamOpenAIResponsesOnce = (
 				nativeOutputItems.length = 0;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
-					firstItemTimeoutMs: firstEventTimeoutMs,
+					firstItemTimeoutMs: firstEventBudgetLeftMs,
 					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),

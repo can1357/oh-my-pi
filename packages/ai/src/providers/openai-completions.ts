@@ -908,6 +908,10 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
+			// One first-event budget runs from the wire to the first chunk: the
+			// request guard spends the part before headers, and the chunk iterator
+			// below waits on what it left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -980,14 +984,14 @@ const streamOpenAICompletionsOnce = (
 						},
 					});
 					responseHeaders = response.headers;
-					// Disarm the first-event watchdog as soon as headers arrive — a slow
-					// onResponse callback must not abort an already-connected stream.
+					// Disarm the guard as soon as headers arrive, so it can never
+					// abort the connected body, and a slow onResponse callback is not
+					// charged to the provider.
 					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					// Headers arrived (or the request failed); from here the
-					// first-event deadline is enforced by `iterateWithIdleTimeout`.
 					requestGuard.clear();
 				}
 			};
@@ -1368,7 +1372,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
-				firstItemTimeoutMs: firstEventTimeoutMs,
+				firstItemTimeoutMs: firstEventBudgetLeftMs,
 				firstItemErrorMessage: OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE,
 				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),

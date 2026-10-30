@@ -101,8 +101,39 @@ export function getOpenAIStreamFirstEventTimeoutMs(
  * pre-response request (issue #2422 regression: large `write` tool-call streams
  * died at the budget with `TimeoutError: The operation timed out.` despite
  * deltas actively flowing). This arms a `clearTimeout`-able timer instead;
- * callers MUST `clear()` as soon as the guarded transport attempt settles so
- * the body stream is left to the iterator-level idle watchdog.
+ * callers MUST `clear()` as soon as the guarded transport attempt settles, so
+ * the guard never aborts a body that is already streaming.
+ *
+ * Clearing the guard at headers does not end the first-event budget. One
+ * budget covers the wait from the wire to the first stream event, and headers
+ * do not renew it: the guard bounds the part before them, and whatever waits
+ * for the first event after them gets only what is left, which
+ * {@link PreResponseTimeout.remaining} reports. A host that holds its headers
+ * while the model thinks therefore spends the same budget as one that sends
+ * headers at once and then thinks. The shared stream watchdog that
+ * `register-builtins` installs keeps this rule by itself, because its
+ * first-item deadline runs from the wire on the same budget, so a provider
+ * behind it only clears the guard. Factory's Gemini route keeps its guard
+ * armed until the first chunk instead. Every other provider that owns its
+ * first-event watchdog (Anthropic, OpenAI completions and responses, Azure,
+ * Codex's SSE transport, Gemini CLI and pi-native) hands that watchdog the
+ * remainder.
+ *
+ * `stream()` and `streamSimple()` are what arm that shared body watchdog,
+ * through `register-builtins`; the provider modules do not arm one of their
+ * own. Bedrock (`amazon-bedrock`), Google (`google`), Vertex (`google-vertex`),
+ * Ollama, Cursor, Devin and Apple's on-device model rely on it for both the
+ * first event and the gaps after it, and Gemini CLI relies on it for the gaps.
+ * A caller that imports one of those modules through
+ * `@oh-my-pi/pi-ai/providers/*` and calls its stream function directly gets
+ * none of it: the module's own pre-response guard, where it has one, bounds
+ * the wait for headers, and nothing bounds the stream after them. Such a
+ * caller must wrap the returned stream in {@link iterateWithIdleTimeout}
+ * itself, as `register-builtins` does: the first-event and idle budgets, the
+ * `start` event excluded from progress, and the returned stream as
+ * `localWork` so the first-event deadline runs from the wire. This is
+ * deliberate. A body watchdog inside each module would stack a second one
+ * under `register-builtins` on every request made the supported way.
  *
  * Retrying callers SHOULD arm a fresh guard for each transport attempt and keep
  * the retry loop's base signal reserved for caller cancellation. Reusing the
@@ -136,15 +167,17 @@ export function getOpenAIStreamFirstEventTimeoutMs(
  * without this an outer budget would keep running through a hold the inner
  * one excludes.
  *
- * Returns the caller signal unchanged (and a no-op `clear`) when no positive
- * timeout is configured.
+ * Returns the caller signal unchanged, a no-op `clear` and no remainder when
+ * no positive timeout is configured.
  */
 export function armPreResponseTimeout(
 	callerSignal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
 	heldWork?: Pick<EventStream<unknown>, "trackLocalWork">,
-): { signal: AbortSignal | undefined; clear: () => void } {
-	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, clear: () => {} };
+): PreResponseTimeout {
+	if (timeoutMs === undefined || timeoutMs <= 0) {
+		return { signal: callerSignal, clear: () => {}, remaining: () => undefined };
+	}
 	const controller = new AbortController();
 	let timer: NodeJS.Timeout | undefined;
 	let remainingMs = timeoutMs;
@@ -231,7 +264,26 @@ export function armPreResponseTimeout(
 			closeHeld();
 			startEnclosing();
 		},
+		remaining: () => Math.max(1, timer === undefined ? remainingMs : remainingMs - (Date.now() - startedAt)),
 	};
+}
+
+/** A pre-response budget armed by {@link armPreResponseTimeout}. */
+export interface PreResponseTimeout {
+	/** The caller's signal combined with the budget; the caller's own signal when no budget is armed. */
+	signal: AbortSignal | undefined;
+	/** Disarms the guard for good, once the attempt it covers has its headers or has failed. */
+	clear: () => void;
+	/**
+	 * What is left of the budget for the watchdog that waits for the first
+	 * event after headers; `undefined` when no budget is armed. Read it once
+	 * headers arrive. That watchdog starts its own clock when the body is first
+	 * read, so a caller's `onResponse` hook in between counts as our time, as a
+	 * hold does. Never below 1 ms: a budget that ran out in the turn the headers
+	 * arrived must still bound the first event, and 0 would read as no
+	 * watchdog at all.
+	 */
+	remaining: () => number | undefined;
 }
 
 /** Attached by {@link armPreResponseTimeout} to the signal it hands the transport. */

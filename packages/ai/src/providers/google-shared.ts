@@ -1098,8 +1098,11 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					}
 				} finally {
 					// Cleared once headers (or a finite error body) arrive: an absolute
-					// deadline would keep aborting an actively streaming body. Stream
-					// liveness belongs to the event iterator's idle watchdog.
+					// deadline would keep aborting an actively streaming body. Headers do
+					// not renew the first-event budget: the wait for the first event
+					// stays on the first-item deadline of the stream watchdog
+					// `register-builtins` installs, which runs from the wire on the same
+					// budget, and later stalls belong to its idle watchdog.
 					watchdog.clear();
 				}
 				if (!response.body) {

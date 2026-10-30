@@ -2630,6 +2630,10 @@ const streamAnthropicOnce = (
 					} finally {
 						requestGuard.clear();
 					}
+					// One first-event budget runs from the wire to the first event: the
+					// guard spent the part before headers, and the event iterator below
+					// waits on what it left, not on a fresh budget.
+					const firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -2679,7 +2683,7 @@ const streamAnthropicOnce = (
 							: undefined;
 					const timedAnthropicStream = iterateWithIdleTimeout(anthropicStream, {
 						idleTimeoutMs,
-						firstItemTimeoutMs: firstEventTimeoutMs,
+						firstItemTimeoutMs: firstEventBudgetLeftMs,
 						errorMessage: idleTimeoutAbortError.message,
 						firstItemErrorMessage: firstEventTimeoutAbortError.message,
 						onIdle: () => activeAbortTracker.abortLocally(idleTimeoutAbortError),

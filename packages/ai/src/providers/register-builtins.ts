@@ -61,11 +61,15 @@ interface StreamLimits {
 	/**
 	 * The provider implementation already wraps its upstream transport with
 	 * stream timeouts. Keep the shared watchdog from racing it with generic errors.
+	 * Such a provider must keep the one first-event budget itself: its body
+	 * iterator waits for the first event on what its pre-response guard left at
+	 * headers.
 	 */
 	providerHandlesStreamTimeouts?: boolean;
 	/**
 	 * The provider retries or fails over when no first event arrives, while the
-	 * shared wrapper continues to own steady-state idle detection.
+	 * shared wrapper continues to own steady-state idle detection. The same
+	 * one-budget rule applies to the provider's first-event watchdog.
 	 */
 	providerHandlesFirstEventTimeouts?: boolean;
 	/**
@@ -122,6 +126,14 @@ function forwardStream<TApi extends Api>(
 					(limits?.openAIIdleEnvFloorsFirstEvent
 						? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs)
 						: getStreamIdleTimeoutMs(idleTimeoutFallbackMs)));
+			// One budget from the wire to the first event (see
+			// `armPreResponseTimeout`). The clock starts here, but the provider's
+			// pre-response guard reports its preparation and any dispatch hold on
+			// `source` as local work, so this deadline lands a full budget after the
+			// request reaches the wire. The provider clears that guard at headers
+			// and this deadline keeps running, so headers do not buy a second
+			// budget. A provider that handles its own timeouts gets 0 here and owns
+			// the rule itself.
 			const firstItemTimeoutMs =
 				providerHandlesStreamTimeouts || providerHandlesFirstEventTimeouts
 					? 0
