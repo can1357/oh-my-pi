@@ -250,6 +250,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import { SessionMailbox } from "./mailbox/watcher";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
@@ -872,6 +873,16 @@ export interface CreateAgentSessionOptions {
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
+
+	/**
+	 * Mail (`omp poke`) addressed to this session. Every persisted session
+	 * announces that it is open from the moment it opens, so `omp poke --resume`
+	 * never resumes it headless in another process while it is open here; its
+	 * mail waits for the next process that delivers. With
+	 * `deliver: true` this process injects the mail as turns. Default: presence
+	 * only, so an embedding host never sees turns it did not start.
+	 */
+	mailbox?: { deliver: boolean; host?: string };
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
@@ -1952,6 +1963,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const mailbox = new SessionMailbox(sessionManager, {
+		deliver: options.mailbox?.deliver ?? false,
+		host: options.mailbox?.host ?? "sdk",
+	});
+	startupCleanup.defer(() => mailbox.stop());
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: cfgWorkspaceAdditionalDirectories.get(settings);
@@ -5729,6 +5745,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		startDeferredMCPDiscovery?.(session);
 
+		mailbox.bind(session);
 		startupCleanup.move();
 		return {
 			session,
