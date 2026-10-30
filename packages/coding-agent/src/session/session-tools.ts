@@ -1881,11 +1881,21 @@ export class SessionTools {
 		};
 	}
 
+	/** Whether an enabled tool, top-level or xd://-mounted, can read `skill://` URIs. */
+	canReadSkillUris(): boolean {
+		return this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
+	}
+
+	/** The `<skills>` catalog rows: visible skills with rendered descriptions, or none without a skill reader. */
+	renderVisibleSkillCatalog(): Array<Skill & { description: string }> {
+		if (!this.canReadSkillUris()) return [];
+		return this.#skillDescriptions.render(this.#skills.filter(skill => skill.hide !== true));
+	}
+
 	#snapshotSkillCatalog(enabled = cfgSkillful.get(this.#host.settings)): SkillNoticeEntry[] {
-		const canRead = this.getEnabledToolNames().some(name => toolReadsSkillUris(this.#toolRegistry.get(name)));
-		if (!enabled || !canRead) return [];
+		if (!enabled) return [];
 		const descriptions = new Map(this.#skills.map(skill => [skill.name, skill.description]));
-		return this.#skillDescriptions.render(this.#skills.filter(skill => skill.hide !== true)).map(skill => ({
+		return this.renderVisibleSkillCatalog().map(skill => ({
 			name: skill.name,
 			description: skill.description,
 			key: JSON.stringify([skill.filePath, descriptions.get(skill.name), this.#skillRevisions.get(skill.name) ?? 0]),

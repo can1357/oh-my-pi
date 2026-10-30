@@ -226,7 +226,6 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
-import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -2779,22 +2778,7 @@ export class AgentSession implements SettingsScope {
 			},
 			resetAdvisorRuntimes: (reason, options) => this.#advisors.resetAllRuntimes(reason, options),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
-			rebaseAfterCompaction: () => {
-				// Compaction may remove the only announcement of a catalog delta while
-				// keeping the cached base. Restore it before an autonomous continuation.
-				const notice = this.#tools.takeSkillDeltaNotice();
-				if (notice) {
-					this.agent.appendMessage(notice);
-					this.sessionManager.appendCustomMessageEntry(
-						notice.customType,
-						notice.content,
-						notice.display,
-						notice.details,
-						notice.attribution,
-					);
-				}
-				this.#stats.rebaseAfterCompaction();
-			},
+			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -5504,11 +5488,13 @@ export class AgentSession implements SettingsScope {
 
 	#scheduleAutoContinuePrompt(generation: number): boolean {
 		const continuePrompt = async () => {
-			// Compaction summarizes away the first-message eager preludes, so re-assert the
-			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
-			// at invocation (past the abort check below), so an aborted continuation queues
+			// Compaction summarizes away the first-message eager preludes and any delivered
+			// skill-delta notice, so re-assert both on this auto-resumed turn. This runs at
+			// invocation (past the abort check below), so an aborted continuation queues
 			// nothing; scoped to this request via prependMessages, never the shared queue.
+			const skillDeltaNotice = this.#tools.takeSkillDeltaNotice();
 			const eagerNudges = this.#todo.buildPostCompactionEagerNudges();
+			const prependMessages = skillDeltaNotice ? [skillDeltaNotice, ...eagerNudges] : eagerNudges;
 			await this.#promptWithMessage(
 				{
 					role: "developer",
@@ -5523,7 +5509,7 @@ export class AgentSession implements SettingsScope {
 				autoContinuePrompt,
 				{
 					skipPostPromptRecoveryWait: true,
-					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					prependMessages: prependMessages.length > 0 ? prependMessages : undefined,
 				},
 			);
 		};
@@ -11935,10 +11921,8 @@ export class AgentSession implements SettingsScope {
 		} else if (enabled) {
 			// Enabled covers top-level and xd://-mounted tools: every path through
 			// which the model can still reach a reader.
-			const hasSkillReader = this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
-			const renderedSkills = this.#skillDescriptions.render(
-				hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [],
-			);
+			const hasSkillReader = this.#tools.canReadSkillUris();
+			const renderedSkills = this.#tools.renderVisibleSkillCatalog();
 			// Hidden-only sessions have no catalog rows, but the notice template
 			// still carries the `skill://<name>` syntax the model needs: hidden
 			// skills stay reachable by URI even though they are never listed.

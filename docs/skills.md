@@ -152,7 +152,7 @@ When no tool metadata is supplied, the prompt builder uses the presence of `read
 
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
 
-Agent-driven rediscovery (including `manage_skill`, skill-minting `learn`, `skill://` misses, and subagent autoload) updates the runtime registry and `/skill:` commands immediately without rebuilding the system prompt. A hidden notice on the next user request announces new or updated visible skills and marks removed skills unavailable. Compaction restores any still-needed delta notice if it summarizes the original announcement, while leaving the system prompt cached. The `<skills>` listing catches up on the next unrelated base-prompt rebuild or session start/resume; explicit user reloads still rebuild it immediately.
+Agent-driven rediscovery (including `manage_skill`, skill-minting `learn`, `skill://` misses, and subagent autoload) updates the runtime registry and `/skill:` commands immediately without rebuilding the system prompt. A hidden notice on the next user request announces new or updated visible skills and marks removed skills unavailable. If compaction summarizes the original announcement, the next user request or the post-compaction auto-continue prompt re-announces any still-needed delta while the system prompt stays cached. The `<skills>` listing catches up on the next unrelated base-prompt rebuild or session start/resume; explicit user reloads still rebuild it immediately.
 
 ### Interactive `/skill:<name>` commands
 

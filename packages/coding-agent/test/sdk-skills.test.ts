@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { type Api, type Context, clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, type Context, clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -123,7 +123,9 @@ Loaded via symbolic link.
 	};
 	const removeTempHome = cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }));
 
-	const captureSkillRequests = () => {
+	const captureSkillRequests = (
+		respond: (requestIndex: number) => AssistantMessage = () => createAssistantMessage("ok"),
+	) => {
 		const api = "test-sdk-skill-notices";
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected bundled skill-notice test model");
@@ -132,10 +134,11 @@ Loaded via symbolic link.
 		sharedAuthStorage.keys.setRuntime(model.provider, "test-key");
 		registerCustomApi(api, (_model, context) => {
 			requests.push({ ...context, messages: structuredClone(context.messages) });
+			const message = respond(requests.length - 1);
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-				const message = createAssistantMessage("ok");
-				stream.push({ type: "done", reason: "stop", message });
+				if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
+				else stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
 			});
 			return stream;
 		});
@@ -492,14 +495,14 @@ This skill is added after session creation.
 			await session.compact();
 			expect(compact).toHaveBeenCalledTimes(1);
 			expect(session.agent.state.systemPrompt).toEqual(initialPrompt);
-			// The replacement summary deliberately carries no skill knowledge.
-			// Restoration must already be in context before any continuation, not
-			// only when another user prompt happens to arrive.
-			const notices = session.agent.state.messages.filter(
-				message => message.role === "custom" && message.customType === "skill-delta-notice",
-			);
-			expect(notices).toHaveLength(1);
-			expect(notices[0]).not.toBe(originalNotice);
+			// The replacement summary deliberately carries no skill knowledge, and
+			// compaction itself leaves the history tail untouched: the delta is
+			// re-derived with the next prompt instead.
+			expect(
+				session.agent.state.messages.filter(
+					message => message.role === "custom" && message.customType === "skill-delta-notice",
+				),
+			).toHaveLength(0);
 			await session.sendUserMessage("Continue with the compacted context.");
 			expect(skillNotices(requests.at(-1))).toHaveLength(1);
 			expect(skillNotices(requests.at(-1))[0]).toContain("compaction-managed-skill");
@@ -515,6 +518,105 @@ This skill is added after session creation.
 			await session.refreshBaseSystemPrompt();
 			await session.sendUserMessage("Do not replay stale notices from an older base.");
 			expect(skillNotices(requests.at(-1))).toHaveLength(2);
+		} finally {
+			await session.dispose();
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("drops the overflowed turn before retrying when a skill delta is pending", async () => {
+		const originalAgentDir = getAgentDir();
+		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(managedAgentDir);
+		// The model writes a skill mid-turn, then the follow-up request overflows,
+		// so the auto-compaction retry runs with an undelivered skill delta.
+		const { model, requests } = captureSkillRequests(requestIndex => {
+			if (requestIndex === 2) {
+				return {
+					...createAssistantMessage(""),
+					content: [
+						{
+							type: "toolCall",
+							id: "overflow-skill-create",
+							name: "manage_skill",
+							arguments: {
+								action: "create",
+								name: "overflow-managed-skill",
+								description: "A skill written in the overflowing turn.",
+								body: "Written right before the context overflowed.",
+							},
+						},
+					],
+					stopReason: "toolUse",
+				};
+			}
+			if (requestIndex === 3) {
+				return {
+					...createAssistantMessage(""),
+					api: "test-sdk-skill-notices",
+					provider: "sdk-skill-notices",
+					model: "claude-sonnet-4-5",
+					stopReason: "error",
+					errorMessage: "prompt is too long: 250000 tokens > 200000 maximum",
+					usage: { ...createAssistantMessage("").usage, input: 250_000, totalTokens: 250_000 },
+				};
+			}
+			return createAssistantMessage("ok");
+		});
+		const settings = Settings.isolated({
+			"skills.enabled": true,
+			"skills.enableCodexUser": false,
+			"skills.enableClaudeUser": false,
+			"skills.enableClaudeProject": false,
+			"skills.enablePiUser": false,
+			"skills.enablePiProject": true,
+			"autolearn.enabled": true,
+			"compaction.enabled": true,
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.experimentalContextManagement": false,
+		});
+		const { session } = await createSession({
+			cwd: tempDir,
+			agentDir: managedAgentDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+			model,
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "Compacted conversation.",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+			let retryTail: { role: string; stopReason?: string; customType?: string }[] | undefined;
+			session.subscribe(event => {
+				if (event.type !== "auto_compaction_end" || !event.willRetry) return;
+				retryTail = session.agent.state.messages.map(message => ({
+					role: message.role,
+					stopReason: message.role === "assistant" ? message.stopReason : undefined,
+					customType: message.role === "custom" ? message.customType : undefined,
+				}));
+			});
+			// Older turns large enough that summarizing them reduces context.
+			await session.sendUserMessage(`Start a session. ${"lorem ipsum ".repeat(4000)}`);
+			await session.sendUserMessage(`Build up history. ${"lorem ipsum ".repeat(4000)}`);
+			await session.sendUserMessage("Write a skill, then keep going.");
+			await session.waitForIdle();
+
+			expect(retryTail).toBeDefined();
+			expect(retryTail!.filter(message => message.stopReason === "error")).toHaveLength(0);
+			expect(retryTail!.at(-1)?.role).toBe("toolResult");
+			expect(retryTail!.some(message => message.customType === "skill-delta-notice")).toBe(false);
+			// The retry request resumes from the tool result, and the delta still
+			// reaches the model with the next prompt.
+			expect(requests.length).toBeGreaterThan(4);
+			await session.sendUserMessage("Continue after the retry.");
+			expect(skillNotices(requests.at(-1)).join("\n")).toContain("overflow-managed-skill");
 		} finally {
 			await session.dispose();
 			setAgentDir(originalAgentDir);
