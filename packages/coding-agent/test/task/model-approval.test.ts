@@ -381,6 +381,22 @@ describe("per-call model advertisement", () => {
 		});
 	});
 
+	it.each([
+		{ allowlist: [], expected: true },
+		{ allowlist: ["mock/target"], expected: true },
+		{ allowlist: ["mock/other"], expected: false },
+	])("keeps the configured default value as a grant without advertising its alias for $allowlist", ({
+		allowlist,
+		expected,
+	}) => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "mock/target" },
+			"task.perCallModelAllow": allowlist,
+		});
+		expect(approved(target, { settings, agentName: "worker" })).toBe(expected);
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([]);
+	});
+
 	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
