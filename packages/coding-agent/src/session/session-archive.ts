@@ -130,7 +130,7 @@ function archiveReadError(file: string, cause: unknown): unknown {
 	const id = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	return new Error(
 		`Cannot read the archived session "${file}": ${cause instanceof Error ? cause.message : String(cause)}. ` +
-			`The archive is damaged; \`omp gc --restore ${id}\` reports the same without touching it.`,
+			`The archive is damaged; \`omp gc --restore ${shellQuote(id)}${agentDirFlag(getAgentDir())}\` reports the same without touching it.`,
 		{ cause },
 	);
 }
@@ -1026,6 +1026,28 @@ async function tryAcquireRestoreLeases(owners: () => Promise<(string | undefined
 }
 
 /**
+ * `value` as one shell word, so a path with a space in it survives being
+ * pasted into a terminal. An instruction that splits into two words sends
+ * the reader to a directory that does not exist, and the recovery it was
+ * printed for does not happen.
+ */
+export function shellQuote(value: string): string {
+	return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The `--agent-dir` a printed instruction needs to run where this one did.
+ *
+ * Always printed, never "add it when it is not the default one": whether the
+ * directory came from the flag, the environment or the config is invisible
+ * to whoever copies the line, and a recovery command that runs against the
+ * wrong default reports success for a session it never touched.
+ */
+export function agentDirFlag(agentDir?: string): string {
+	return agentDir ? ` --agent-dir ${shellQuote(agentDir)}` : "";
+}
+
+/**
  * Put an archived transcript back where it belongs, with its artifact tree,
  * and drop the archive copy so the session exists in exactly one place.
  *
@@ -1081,12 +1103,12 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
+	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirFlag(agentDir ?? getAgentDir())}`;
 	const leases = await tryAcquireRestoreLeases(owners);
 	const noOwners = (): Error =>
 		new Error(
 			`Cannot restore "${archiveFile}": a running process owns this session or one of its subagent sessions. ` +
-				`Close it and run \`omp gc --restore ${target} --apply\` again ` +
-				`(add \`--agent-dir <dir>\` when it is not the default one).`,
+				`Close it and run \`${restoreCommand}\` again.`,
 		);
 	if (!leases) throw noOwners();
 	try {
@@ -1101,8 +1123,8 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				throw new Error(
 					`Refusing to restore over a different session file: ${sessionPath} is not this archive carried on. ` +
 						`To bring the archived one home, move ${sessionPath} and its artifact directory ${liveArtifacts} aside, ` +
-						`then run \`omp gc --restore ${target} --apply\` ` +
-						`(add \`--agent-dir <dir>\` when it is not the default one; without \`--apply\` it only reports). ` +
+						`then run \`${restoreCommand}\` ` +
+						"(without `--apply` it only reports). " +
 						`To keep the live one and be rid of the archived one, move both halves out of the archive directory ` +
 						`yourself — the transcript ${archiveFile} and its artifact directory ${archiveArtifacts}; ` +
 						`there is nothing for \`--restore\` to do once they are gone, and restoring by id would report ` +
@@ -1133,7 +1155,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 					throw new Error(
 						`the subagent sessions below ${archiveArtifacts} changed while it was being restored; ` +
 							`everything carried home is there and the archive is untouched — ` +
-							`run \`omp gc --restore ${target} --apply\` again`,
+							`run \`${restoreCommand}\` again`,
 					);
 				}
 				artifactsRestored = true;
@@ -1252,9 +1274,10 @@ export async function materializeSessionFile(sessionFile: string, agentDir?: str
 	const restored = await restoreArchivedSession(archived, agentDir);
 	if (restored.notRestored.length > 0) {
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
+		const retry = `omp gc --restore ${shellQuote(stem.slice(stem.lastIndexOf("_") + 1) || stem)} --apply${agentDirFlag(agentDir ?? getAgentDir())}`;
 		throw new Error(
 			`Restored the transcript of "${archived}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
-				`The archive is kept; \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` retries it once the path is clear.`,
+				`The archive is kept; \`${retry}\` retries it once the path is clear.`,
 		);
 	}
 	return restored.sessionPath;

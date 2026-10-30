@@ -57,6 +57,26 @@ async function writeSession(stamp: string, id: string, prompt = PROMPT): Promise
 	return file;
 }
 
+/** Age every live session and archive it, keeping the live copy. */
+async function archiveOnly(agentDir = root): Promise<GcResult> {
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	const bucket = path.join(getSessionsDir(agentDir), "--work--");
+	for (const entry of await fs.readdir(bucket, { recursive: true }).catch(() => [])) {
+		await fs.utimes(path.join(bucket, entry), old, old).catch(() => undefined);
+	}
+	return await runGcCommand({
+		flags: {
+			agentDir,
+			archive: true,
+			apply: true,
+			json: true,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+		},
+	});
+}
+
 /**
  * Archive every cold session and then give up each live copy — what a single
  * `--archive --apply` used to do, and what it now takes two commands to do.
@@ -2566,4 +2586,98 @@ test("a staging close that fails still leaves no temp behind", async () => {
 	for (const name of await fs.readdir(archivedArtifacts).catch(() => [])) {
 		expect(name.endsWith(".tmp")).toBe(false);
 	}
+});
+test("a preview that would give up the session says so rather than reporting nothing", async () => {
+	const archive = await archiveOnly();
+	expect(archive.archive?.archived).toBe(1);
+
+	const preview = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, forwardOnly: true, json: true },
+	});
+
+	// "would give up nothing" is the refusal's wording; a preview with
+	// nothing to refuse printing it tells the reader the opposite of what
+	// applying would do.
+	expect(preview.reclaim?.errors).toEqual([]);
+	expect(preview.reclaim?.wouldReclaim).toBe(1);
+	expect(renderGcText(preview)).toContain(`reclaim: would give up ${sessionFile}`);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("a reclaim whose transcript is already gone names the artifact tree it leaves", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+	await archiveOnly();
+	// Someone removed the transcript by hand. The artifact tree — usually
+	// the larger half — is still there.
+	await fs.unlink(sessionFile);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.keptArtifactTree).toBe(liveArtifacts);
+	expect(collectGcErrors(result).join("\n")).toContain("its live artifact tree is still there");
+	expect(renderGcText(result)).toContain(`reclaim kept the live artifact tree: ${liveArtifacts}`);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+});
+
+for (const apply of [false, true]) {
+	test(`a session tree that cannot be listed is reported as that, not as an owner (${apply ? "apply" : "preview"})`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const sub = sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4d", "SUB", root);
+		await Bun.write(path.join(liveArtifacts, "sub.jsonl"), sub);
+		await archiveOnly();
+
+		const realScan = Bun.Glob.prototype.scan;
+		const scan = spyOn(Bun.Glob.prototype, "scan").mockImplementation(function (
+			this: InstanceType<typeof Bun.Glob>,
+			options?: Parameters<typeof realScan>[0],
+		) {
+			const cwd = typeof options === "string" ? options : options?.cwd;
+			if (String(cwd ?? "").startsWith(liveArtifacts)) {
+				throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+			}
+			return realScan.call(this, options as never);
+		});
+		let result: GcResult;
+		try {
+			result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply, forwardOnly: true, json: true },
+			});
+		} finally {
+			scan.mockRestore();
+		}
+
+		// Telling the reader to close a process that does not exist is a
+		// refusal they cannot act on, and the preview must report it rather
+		// than throwing past the result the command renders.
+		const errors = collectGcErrors(result).join("\n");
+		expect(errors).toContain("could not be listed");
+		expect(errors).not.toContain("a running process owns");
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	});
+}
+
+test("a printed recovery command survives an agent directory with a space in it", async () => {
+	const spaced = path.join(root, "agent dir");
+	await fs.mkdir(path.join(getSessionsDir(spaced), "--work--"), { recursive: true });
+	const name = "2026-01-01T00-00-00-000Z_01a18630-42ae-7117-ba7c-029b1eee0f4e.jsonl";
+	const spacedSession = path.join(getSessionsDir(spaced), "--work--", name);
+	await Bun.write(spacedSession, sessionBody("01a18630-42ae-7117-ba7c-029b1eee0f4e", PROMPT, spaced));
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(spacedSession, old, old);
+	await archiveOnly(spaced);
+	const spacedArchive = path.join(getArchivedSessionsDir(spaced), "--work--", `${name}.gz`);
+	// Advanced past the archive, so the reclaim refuses and prints the way back.
+	await Bun.write(spacedSession, `${await Bun.file(spacedSession).text()}${JSON.stringify({ type: "late" })}\n`);
+
+	const result = await runGcCommand({
+		flags: { agentDir: spaced, reclaim: spacedArchive, apply: true, forwardOnly: true, json: true },
+	});
+
+	// One shell word, or the reader's terminal looks in "…/agent" and the
+	// recovery reports success for a session it never touched.
+	expect(collectGcErrors(result).join("\n")).toContain(`--agent-dir '${spaced}'`);
 });

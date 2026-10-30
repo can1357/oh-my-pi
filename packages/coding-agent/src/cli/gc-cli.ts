@@ -41,7 +41,9 @@ import {
 	inflateArchivedTranscript,
 	isArchivedSessionPath,
 	listArchivedSessionFiles,
+	agentDirFlag,
 	archivedHandleIsHeldBy,
+	shellQuote,
 	archivedHandleIsPrefixOfLive,
 	isSamePath,
 	liveSessionPathForArchive,
@@ -189,6 +191,8 @@ export interface ReclaimGcResult {
 	sessionPath?: string;
 	/** 1 when the live copy went, 0 when it was kept and the reason is in `errors`. */
 	reclaimed: number;
+	/** 1 when a preview found nothing to refuse, so applying would give the live copy up. */
+	wouldReclaim?: number;
 	/** The live artifact tree a refused reclaim left in place, with the reason in `errors`. */
 	keptArtifactTree?: string;
 	errors: string[];
@@ -301,6 +305,8 @@ interface ArchiveCandidate {
 	session: SessionInfo;
 	relativePath: string;
 	destinationPath: string;
+	/** The `--agent-dir` suffix an instruction this run prints needs to be runnable. */
+	recovery: string;
 }
 
 interface ResolvedGcOptions {
@@ -974,7 +980,7 @@ function archiveDestination(
 	archiveRoot: string,
 	sessionsRoot: string,
 	session: SessionInfo,
-): Omit<ArchiveCandidate, "session"> | null {
+): Omit<ArchiveCandidate, "session" | "recovery"> | null {
 	const sessionPath = session.path;
 	const relativePath = path.relative(sessionsRoot, sessionPath);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
@@ -1152,6 +1158,8 @@ interface ArchiveCopyState {
 	brokenLinks: number;
 	/** Entries this copy created, shallowest first. */
 	created: ArchiveCreation[];
+	/** The `--agent-dir` suffix an instruction this copy prints needs to be runnable. */
+	recovery: string;
 }
 
 /**
@@ -1279,11 +1287,11 @@ async function publishArtifactIntoArchive(
 				!(await archivedHandleIsHeldBy(archived, verified, tempPath))
 			) {
 				const stem = path.basename(sourceRoot);
+				const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 				throw new Error(
 					`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
 						`the archive is left as it is. Bring the session home with ` +
-						`\`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
-						`— add \`--agent-dir <dir>\` when it is not the default one — and archive it again, ` +
+						`\`omp gc --restore ${shellQuote(target)} --apply${state.recovery}\` and archive it again, ` +
 						`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
 				);
 			}
@@ -1528,9 +1536,13 @@ async function removeProvenLiveTree(
  * archived one carried on, and re-archiving it writes the longer copy over
  * the shorter rather than refusing.
  */
-async function copyArtifactsTree(source: string, destination: string): Promise<{ brokenLinks: number }> {
+async function copyArtifactsTree(
+	source: string,
+	destination: string,
+	recovery: string,
+): Promise<{ brokenLinks: number }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const state: ArchiveCopyState = { brokenLinks: 0, created: [] };
+	const state: ArchiveCopyState = { brokenLinks: 0, created: [], recovery };
 	try {
 		await copyArtifactEntryIntoArchive(source, destination, source, state);
 	} catch (error) {
@@ -1594,10 +1606,11 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 			: undefined;
 	if ((await pathExists(destSession)) && !alreadyArchived && !supersedes) {
 		const stem = path.basename(destSession, ".jsonl.gz");
+		const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 		throw new Error(
 			`the archive at ${destSession} holds a different session, so ${sourceSession} was left where it is. ` +
-				`Bring the archived one home with \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
-				`— add \`--agent-dir <dir>\` when it is not the default one — and archive again; ` +
+				`Bring the archived one home with \`omp gc --restore ${shellQuote(target)} --apply${candidate.recovery}\` ` +
+				`and archive again; ` +
 				`or keep it yourself by moving both halves out of the archive directory, the transcript ${destSession} ` +
 				`and its artifact directory ${destArtifacts}, and archive again. Moving the transcript alone is not enough: ` +
 				`the artifact directory left behind holds the other session's subagent transcripts and tool output, ` +
@@ -1624,7 +1637,7 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	// it; its artifact tree still does.
 	if (!alreadyArchived) await gzipSessionFile(sourceSession, destSession, supersedes);
 	if (await pathExists(sourceArtifacts)) {
-		brokenLinks = (await copyArtifactsTree(sourceArtifacts, destArtifacts)).brokenLinks;
+		brokenLinks = (await copyArtifactsTree(sourceArtifacts, destArtifacts, candidate.recovery)).brokenLinks;
 	}
 	return { brokenLinks };
 }
@@ -1790,7 +1803,7 @@ async function runArchiveGc(
 		if (options.coldArchiveAfterDays > 0 && session.modified.getTime() > cutoffMs) continue;
 		const destination = archiveDestination(archiveRoot, sessionsRoot, session);
 		if (!destination) continue;
-		candidates.push({ ...destination, session });
+		candidates.push({ ...destination, session, recovery: agentDirFlag(options.agentDir) });
 	}
 
 	// Before archiving moves transcripts away from the temps staged beside them,
@@ -2087,7 +2100,7 @@ export function renderText(result: GcResult): string {
 			// keeps both sides, so it frees nothing by itself.
 			lines.push(
 				`these sessions would be copied to ${result.archive.archiveDir}, keeping the live copy; ` +
-					`\`omp gc --reclaim <id> --apply --forward-only\` gives the live one up afterwards`,
+					`\`omp gc --reclaim <id> --apply --forward-only${agentDirFlag(result.agentDir)}\` gives the live one up afterwards`,
 			);
 		}
 		for (const tree of result.archive.keptArtifactTrees ?? []) {
@@ -2122,9 +2135,17 @@ export function renderText(result: GcResult): string {
 		} else if (partial.length > 0) {
 			// Neither "gave up nothing" nor "kept the tree" is true once part
 			// of it is gone, and printing both is how a reader stops believing
-			// either. One line, saying what happened.
+			// either. One line, saying what happened — and qualified the way
+			// the error is, because stdout saying the archive holds all of it
+			// while stderr says a joining child's turn may be missing is the
+			// reader believing the half that is easier to read.
 			lines.push(
-				`reclaim: gave up ${partial.length} of ${reclaim.sessionPath ?? reclaim.query} and then stopped; the archive holds all of it`,
+				`reclaim: gave up ${partial.length} of ${reclaim.sessionPath ?? reclaim.query} and then stopped; ` +
+					`the archive holds what was proved before it stopped — see the error for what it may not hold`,
+			);
+		} else if (reclaim.wouldReclaim) {
+			lines.push(
+				`reclaim: would give up ${reclaim.sessionPath}; the session would then be only in ${reclaim.archivePath}`,
 			);
 		} else {
 			// A refusal has to read as one. Reporting only what was given up
@@ -2298,9 +2319,21 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const archiveFile = matches[0];
 	result.archivePath = archiveFile;
 	const sessionPath = liveSessionPathForArchive(archiveFile, options.agentDir);
+	const recovery = agentDirFlag(options.agentDir);
 	if (!sessionPath || !(await pathExists(sessionPath))) {
+		// The transcript being gone is not the same as the space being given
+		// back: removing a transcript by hand leaves its whole artifact tree,
+		// which is usually the larger half, and saying the space is back
+		// sends the reader away from the directory still holding it.
+		const strandedTree = sessionPath ? await pathExists(sessionPath.slice(0, -".jsonl".length)) : false;
+		if (sessionPath && strandedTree) result.keptArtifactTree = sessionPath.slice(0, -".jsonl".length);
 		result.errors.push(
-			`${archiveFile} has no live copy to reclaim${sessionPath ? ` at ${sessionPath}` : ""}; the space is already given back`,
+			`${archiveFile} has no live transcript to reclaim${sessionPath ? ` at ${sessionPath}` : ""}; ` +
+				(strandedTree
+					? `its live artifact tree is still there and this command does not remove it on its own. ` +
+						`Bring the session home with \`omp gc --restore ${shellQuote(path.basename(archiveFile, ".jsonl.gz"))} --apply${recovery}\` ` +
+						`and reclaim it, or remove the tree yourself`
+					: "the space is already given back"),
 		);
 		return result;
 	}
@@ -2310,30 +2343,44 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const holdsLive = async (): Promise<boolean> => await archiveAlreadyHolds(sessionPath, archiveFile);
 	const notACopy = (): string =>
 		`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
-		`\`omp gc --archive --apply\` and reclaim after that`;
+		`\`omp gc --archive --apply${recovery}\` and reclaim after that`;
 	// A refusal names the live tree it left behind, on every path that can
 	// reach one. Reporting it only sometimes is how a reader learns to stop
 	// trusting it.
 	const keepTree = async (): Promise<void> => {
 		if (await pathExists(liveArtifacts)) result.keptArtifactTree = liveArtifacts;
 	};
-	const restoreCommand = `omp gc --restore ${path.basename(archiveFile, ".jsonl.gz")} --apply${
-		options.agentDirWasGiven ? ` --agent-dir ${options.agentDir}` : ""
-	}`;
+	const restoreCommand = `omp gc --restore ${shellQuote(path.basename(archiveFile, ".jsonl.gz"))} --apply${recovery}`;
+	// An enumeration that fails says nothing about who owns the session, and
+	// reporting it as an owner sends the reader to close a process that does
+	// not exist. Both halves are named for what they are.
+	const sessionTree = async (session: SessionInfo): Promise<{ files?: string[]; failure?: string }> => {
+		try {
+			return { files: await collectSessionFiles(session) };
+		} catch (error) {
+			return { failure: `${sessionPath} and its subagent sessions could not be listed: ${errorMessage(error)}` };
+		}
+	};
 	if (!options.apply) {
 		// A preview that reports nothing is a preview nobody can act on, and
 		// its exit status is how a script learns the difference. Everything
 		// applying would refuse for is checked here too, short of taking the
 		// leases: the owner is probed and released, and the tree is proved.
 		const session = await readSessionInfo(sessionPath).catch(() => undefined);
-		const probe = session ? await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session)) : null;
+		const listed = session ? await sessionTree(session) : undefined;
+		const probe = listed?.files ? await tryAcquireSessionTreeLeases(session!, listed.files) : null;
 		if (probe) for (const held of probe.leases) held.release();
 		if (!session) {
 			result.errors.push(`${sessionPath} is not a session file`);
+			await keepTree();
+		} else if (listed?.failure) {
+			result.errors.push(listed.failure);
+			await keepTree();
 		} else if (!probe) {
 			result.errors.push(
 				`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
 			);
+			await keepTree();
 		}
 		if (!(await holdsLive())) {
 			await keepTree();
@@ -2349,6 +2396,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 				result.errors.push(`${liveArtifacts} would be kept: ${errorMessage(error)}`);
 			}
 		}
+		// A preview that found nothing to refuse has to say what applying
+		// would take. Reporting it the way a refusal reports itself — "would
+		// give up nothing" — tells the reader the opposite of what is about
+		// to happen.
+		if (result.errors.length === 0) result.wouldReclaim = 1;
 		return result;
 	}
 	// Leases first, and the whole tree's, the way the archive phase takes
@@ -2362,15 +2414,13 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		result.errors.push(`${sessionPath} is not a session file`);
 		return result;
 	}
-	const tree = await (async () => {
-		// Awaited inside, so an enumeration failure becomes this function's
-		// answer rather than escaping past the result the caller renders.
-		try {
-			return await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session));
-		} catch {
-			return null;
-		}
-	})();
+	const listed = await sessionTree(session);
+	if (listed.failure) {
+		await keepTree();
+		result.errors.push(listed.failure);
+		return result;
+	}
+	const tree = await tryAcquireSessionTreeLeases(session, listed.files ?? []);
 	if (!tree) {
 		await keepTree();
 		result.errors.push(
