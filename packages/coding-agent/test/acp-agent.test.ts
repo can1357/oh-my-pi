@@ -2500,6 +2500,41 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 	});
 
+	it("gives /mcp an extension sends through sendUserInput the session's live MCP manager, as typed input gets it", async () => {
+		// A client-declared server lives only in the session's MCP manager, in no config file. Typed
+		// `/mcp reauth broken` resolves it there (and answers with the stdio guidance); without the
+		// manager the same text sent by an extension would answer "not found".
+		let actions: ExtensionActions | undefined;
+		const harness = await createHarness({
+			decorateSession: session => {
+				Object.assign(session, {
+					extensionRunner: {
+						initialize: (extensionActions: ExtensionActions) => {
+							actions = extensionActions;
+						},
+						emit: async () => undefined,
+						hasHandlers: () => false,
+						getRegisteredCommands: () => [],
+					},
+				});
+			},
+		});
+		await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "broken", command: "/nonexistent/omp-fixture-binary", args: [], env: [] }],
+		});
+		if (!actions?.sendUserInput) throw new Error("expected ACP to wire the extension sendUserInput action");
+
+		const result = await actions.sendUserInput("/mcp reauth broken");
+
+		expect(result).toMatchObject({
+			handled: "command",
+			output: expect.stringContaining("stdio servers manage their own credentials"),
+		});
+
+		harness.abortController.abort();
+	}, 15_000);
+
 	it("reports nothing to the client for a built-in a session_start handler sends before the session/new response", async () => {
 		// A client drops notifications for a session id it has not received yet, which is why
 		// `#scheduleBootstrapUpdates` defers the first ones. `session_start` runs inside
