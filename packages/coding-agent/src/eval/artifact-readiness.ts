@@ -6,37 +6,7 @@ import { contextLocalProtocolOptions } from "../internal-urls/context";
 import { artifactsDirsFromRegistry } from "../internal-urls/registry-helpers";
 import { artifactCopyActivity, whenArtifactCopiesSettle } from "../session/session-manager";
 import type { ToolSession } from "../tools";
-
-export { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "./artifact-readiness-name";
-
-/** What a reader is told about the file it asked for, so it can check what it opens. */
-export interface SettledArtifact {
-	path: string;
-	device: string;
-	inode: string;
-	/**
-	 * The handle this answer was opened on, kept here for the reader that has
-	 * to come back for the bytes. A re-ask names this rather than the file,
-	 * because the name is what stopped meaning the file.
-	 */
-	file?: string;
-	/**
-	 * The hold this answer was read through, for a cell that was given none.
-	 *
-	 * A cell started before its artifacts directory existed has no token, and
-	 * taking a fresh hold at every read would let the directory change under
-	 * it between two reads — the re-derivation this file exists to remove, one
-	 * level out. Its first read binds it: the token comes back here and the
-	 * reader sends it with everything after.
-	 */
-	root?: string;
-	/**
-	 * The artifact's text, read from the descriptor this process still holds
-	 * on that very file. Sent only when the reader asks for it, which it does
-	 * when what its pathname reaches is no longer what it was answered about.
-	 */
-	text?: string;
-}
+import type { ArtifactRequest, SettledArtifact } from "./artifact-wire";
 
 /**
  * An artifacts directory held open for the cells that were given it.
@@ -216,16 +186,53 @@ async function evictUnusedHold(): Promise<boolean> {
 	return false;
 }
 
-/** Give up every held root; for tests and for a process winding down. */
+/** Give up every held root and every pin; for tests and for a process winding down. */
 export async function releaseArtifactRoots(): Promise<void> {
-	for (const pinned of pinnedFiles.values()) await pinned.handle.close().catch(() => {});
-	pinnedFiles.clear();
-	pinnedPerScope.clear();
+	await Promise.all(Array.from(pins.values(), pin => pin.release()));
 	const held = [...heldRoots.values()];
 	heldRoots.clear();
 	tokensByPath.clear();
 	rootHolds.clear();
 	for (const root of held) await root.close();
+}
+
+/** Who a request comes from, beyond the session it is answered for. */
+export interface ArtifactRequestContext {
+	/** Cancels the wait and the answer alike. */
+	signal?: AbortSignal;
+	/**
+	 * The cell, or the kernel a finished cell's work runs on, that the asking
+	 * reader is part of. Its pins end when it does. A caller that names none
+	 * has its pins end with its session, its lease, or its own release.
+	 */
+	owner?: ArtifactPinOwner;
+}
+
+/** Answer one request a reader sent across the bridge. */
+export async function answerArtifactRequest(
+	session: ToolSession,
+	request: ArtifactRequest,
+	context: ArtifactRequestContext = {},
+): Promise<SettledArtifact | null> {
+	switch (request.op) {
+		case "release":
+			await releasePinnedArtifact(request.file);
+			return null;
+		case "take":
+			return await takePinnedArtifact(request.file);
+		case "answer":
+		case "locate":
+			return await resolveSettledArtifact(
+				session,
+				request.id,
+				request.root,
+				request.token,
+				context.signal,
+				false,
+				undefined,
+				{ owner: context.owner, locate: request.op === "locate" },
+			);
+	}
 }
 
 /**
@@ -244,7 +251,22 @@ export async function releaseArtifactRoots(): Promise<void> {
  * this answer later still. A reader opens the path and checks the object it
  * opened against the identity here; a directory replaced in between gives a
  * different file, and the read is refused instead of returning somebody else's
- * artifact under this session's number.
+ * artifact under this session's number. Unless the caller only wants the
+ * location, the answer carries a pin on the file it is about, charged to the
+ * asking session, for the reader to take if the name has stopped meaning it.
+ *
+ * `wantText` hands over the bytes instead: taken from the pin `file` names
+ * when the caller has one — the object already opened, never the name again,
+ * because the name is what stopped meaning it — and otherwise read now
+ * through the cell's hold, with nothing left pinned.
+ *
+ * No product path passes `wantText` or `file`: readers cross the bridge
+ * through {@link answerArtifactRequest}, which takes a pin with
+ * {@link takePinnedArtifact}. The two positional arguments stay, in this
+ * order, because the review's recorded reproductions call this function as
+ * `(session, id, root, token, signal, wantText, file)` and are replayed
+ * unchanged against every head. Moving or removing them turns each of those
+ * replays into an argument mismatch that no longer tests anything.
  *
  * The caller's signal cancels the wait and the answer alike: a listing taken
  * before an abort is not something to hand back afterwards as though the read
@@ -258,17 +280,16 @@ export async function resolveSettledArtifact(
 	signal?: AbortSignal,
 	wantText = false,
 	file?: string,
-	release?: string,
+	options: { owner?: ArtifactPinOwner; locate?: boolean } = {},
 ): Promise<SettledArtifact | null> {
-	// The answer this reader has finished with. A pin exists for the gap
-	// between answering and consuming, and nothing else: a reader that got
-	// what it needed says so with its next question rather than leaving the
-	// slot to a timeout.
-	if (release) await releasePinnedArtifact(release);
-	// A re-ask is for the object already opened, never for the name again:
-	// the reader is here because the name stopped meaning that object, and
-	// resolving it a second time is what it was trying to avoid.
-	if (wantText && file) return await textFromPinnedFile(file);
+	if (wantText && file) return await takePinnedArtifact(file);
+	// The reader is charged, never the directory the artifact turns out to be
+	// in: a session reading another's artifacts spends its own quota.
+	const handout: Handout = wantText
+		? "text"
+		: options.locate
+			? "location"
+			: { account: pinAccountOf(session), owner: options.owner };
 	// A cell started before its artifacts directory existed carries no token,
 	// because there was nothing to hold. The directory may exist by now, and
 	// reading it by name alone is reading with no identity behind it, so the
@@ -285,7 +306,7 @@ export async function resolveSettledArtifact(
 	}
 	if (held) held.refs++;
 	try {
-		const answer = await answerFromHold(session, id, root, held, signal, wantText);
+		const answer = await answerFromHold(session, id, root, held, signal, handout);
 		return answer && bound ? { ...answer, root: bound } : answer;
 	} finally {
 		if (held) await releaseHold(held);
@@ -304,7 +325,7 @@ async function answerFromHold(
 	root: string | undefined,
 	held: HeldRoot | undefined,
 	signal: AbortSignal | undefined,
-	wantText: boolean,
+	handout: Handout,
 ): Promise<SettledArtifact | null> {
 	// One rule decides a read, and it is about the object rather than the
 	// route: a read is refused when what is reached is not what this answer
@@ -322,9 +343,9 @@ async function answerFromHold(
 	// re-adoption is not the session's current one.
 	const dir = held?.path ?? root ?? contextLocalProtocolOptions(session)?.getArtifactsDir?.();
 	if (!dir) return null;
-	const found = await settledArtifactIn(held?.at ?? dir, dir, id, signal, wantText);
+	const found = await settledArtifactIn(held?.at ?? dir, dir, id, signal, handout);
 	if (found) return found;
-	const elsewhere = await artifactElsewhere(session, dir, id, held, signal);
+	const elsewhere = await artifactElsewhere(session, dir, id, held, signal, handout);
 	if (elsewhere) return elsewhere;
 	throw new ToolError(`artifact://${id} is in none of the artifacts directories this cell may read: ${dir}`);
 }
@@ -343,8 +364,8 @@ async function settledArtifactIn(
 	at: string,
 	where: string,
 	id: string,
-	signal?: AbortSignal,
-	wantText = false,
+	signal: AbortSignal | undefined,
+	handout: Handout,
 ): Promise<SettledArtifact | null> {
 	for (let attempt = 1; ; attempt++) {
 		await whenArtifactCopiesSettle(where, signal);
@@ -357,7 +378,7 @@ async function settledArtifactIn(
 			// for an answer this loop is going to throw away holds a slot
 			// nobody will ever come back for, and a listing overtaken by a
 			// copy is exactly that.
-			return found ? await finalAnswer(found, wantText, where) : null;
+			return found ? await finalAnswer(found, handout) : null;
 		}
 		await found?.handle.close();
 		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
@@ -392,8 +413,9 @@ async function artifactElsewhere(
 	session: ToolSession,
 	dir: string,
 	id: string,
-	held?: HeldRoot,
-	signal?: AbortSignal,
+	held: HeldRoot | undefined,
+	signal: AbortSignal | undefined,
+	handout: Handout,
 ): Promise<SettledArtifact | null> {
 	const current = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
 	const consulted = session.seanceSourceArtifactsDir;
@@ -411,31 +433,12 @@ async function artifactElsewhere(
 		// directory an artifact was inherited into is the ordinary case, and a
 		// search that does not wait for it reports the artifact missing while
 		// it is on its way.
-		const found = await settledArtifactIn(other, other, id, signal);
+		const found = await settledArtifactIn(other, other, id, signal, handout);
 		if (found) return found;
 	}
 	return null;
 }
 
-/**
- * Files answered for and still open, by the handle token in the answer.
- *
- * A reader opens the pathname it was given, and a name can stop meaning its
- * file between the answer and that open — a different file put there, or a
- * symlink to one outside the directory entirely. The reader comes back for the
- * bytes, and this is what serves them: the object that was opened when the
- * answer was made, which nothing standing at the name can take its place in.
- */
-interface PinnedFile {
-	handle: fs.promises.FileHandle;
-	answer: SettledArtifact;
-	at: number;
-	scope: string;
-}
-
-const pinnedFiles = new Map<string, PinnedFile>();
-/** How many answers each session may have outstanding, so one cannot deny another. */
-const pinnedPerScope = new Map<string, number>();
 /**
  * The clock a lease is measured on.
  *
@@ -445,66 +448,235 @@ const pinnedPerScope = new Map<string, number>();
  * did.
  */
 const leaseClock = (): number => performance.now();
-/** Answers held open for a re-ask at once. */
+/** Answers one session may hold pinned at once, so one cannot deny another. */
 const PINNED_FILES_MAX = 32;
 /**
- * How long an answer is its reader's before the slot can be taken back.
+ * How long an answer is its reader's before the pin lapses.
  *
  * The lease covers one bridge round trip — the reader opens what it was told
  * about and comes straight back if that is not what it found — so it is a
- * breath, not a timeout. Long enough and ordinary reads, which never come
- * back, hold every slot and starve the next session for the length of it.
+ * breath, not a timeout. A pin lapses at the end of it whether or not anyone
+ * else wants the slot: a reader that never came back is not holding a file
+ * open for anything.
  */
 const PINNED_FILE_LEASE_MS = 2_000;
 
-/** Give back the pin on an answer its reader has consumed. */
-export async function releasePinnedArtifact(file: string): Promise<void> {
-	const pinned = pinnedFiles.get(file);
-	if (!pinned) return;
-	pinnedFiles.delete(file);
-	const left = (pinnedPerScope.get(pinned.scope) ?? 1) - 1;
-	if (left > 0) pinnedPerScope.set(pinned.scope, left);
-	else pinnedPerScope.delete(pinned.scope);
-	await pinned.handle.close().catch(() => {});
-}
+/**
+ * A cell, or the kernel a finished cell's work runs on: something a reader is
+ * part of, which can end, and whose pins end with it.
+ *
+ * An answer's pin exists for the gap between answering and the reader's read,
+ * and a reader inside something that has ended has no read left to do: a
+ * killed consumer, a completed cell whose last answer was never taken, a
+ * kernel that was disposed. So each pin is held by the owner its request came
+ * through, and ending the owner gives back every pin it still holds. One that
+ * has ended takes no new ones.
+ */
+export class ArtifactPinOwner {
+	readonly #pins = new Set<ArtifactPin>();
+	#ended = false;
 
-function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, scope: string): string {
-	// An answer already handed to a reader is that reader's until it comes
-	// back for the bytes or gives up: capacity must not revoke one, because a
-	// reader whose name was replaced has nothing else left to read from. So
-	// the ones that go are the ones nobody can still be waiting on, and when
-	// there are none the *new* answer is refused instead.
-	while ((pinnedPerScope.get(scope) ?? 0) >= PINNED_FILES_MAX) {
-		const expired = [...pinnedFiles].find(
-			([, pinned]) => pinned.scope === scope && leaseClock() - pinned.at >= PINNED_FILE_LEASE_MS,
-		);
-		if (!expired) {
-			void handle.close().catch(() => {});
-			throw new ToolError(
-				`${PINNED_FILES_MAX} artifact answers are outstanding for ${scope} and none has lapsed; ${answer.path} cannot be answered for`,
-			);
+	/** Hold `pin` for as long as it lasts; refused once this owner has ended. */
+	hold(pin: ArtifactPin): () => void {
+		if (this.#ended) {
+			throw new ToolError("the cell this read belongs to has ended; its answer cannot be held for it");
 		}
-		void releasePinnedArtifact(expired[0]);
-		pinnedFiles.delete(expired[0]);
-		pinnedPerScope.set(scope, (pinnedPerScope.get(scope) ?? 1) - 1);
+		this.#pins.add(pin);
+		return () => {
+			this.#pins.delete(pin);
+		};
 	}
-	const token = `file-${crypto.randomUUID()}`;
-	pinnedFiles.set(token, { handle, answer, at: leaseClock(), scope });
-	pinnedPerScope.set(scope, (pinnedPerScope.get(scope) ?? 0) + 1);
-	return token;
+
+	/** End this owner, and with it every pin it holds. */
+	async end(): Promise<void> {
+		this.#ended = true;
+		await Promise.all(Array.from(this.#pins, pin => pin.release()));
+	}
 }
 
-/** The bytes of a file answered for earlier, read from the descriptor that answered. */
-async function textFromPinnedFile(file: string): Promise<SettledArtifact | null> {
-	const pinned = pinnedFiles.get(file);
-	if (!pinned) {
+/** Who an answer is pinned for: the session charged for it, and what it ends with. */
+interface PinReader {
+	account: string;
+	owner: ArtifactPinOwner | undefined;
+}
+
+/** What an answer hands over: a pin for its reader, the bytes read now, or only where the file is. */
+type Handout = PinReader | "text" | "location";
+
+/** Every pin not yet taken, by the token its answer carried. */
+const pins = new Map<string, ArtifactPin>();
+/** The pins each session holds; the quota is the size of its set, and nothing else. */
+const accounts = new Map<string, Set<ArtifactPin>>();
+
+/**
+ * The session a reader is part of, which is what its pins are charged to.
+ *
+ * The session's id where it has one. An embedder that gives none is told
+ * apart by its own artifacts directory — the directory it reads as its own,
+ * never the one an answer was found in.
+ */
+function pinAccountOf(session: ToolSession): string {
+	const id = session.getSessionId?.();
+	if (id) return `session:${id}`;
+	const own = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
+	return own ? `artifacts:${path.resolve(own)}` : "unscoped";
+}
+
+/**
+ * One reader's claim on the file an answer was about.
+ *
+ * A reader opens the pathname it was given, and a name can stop meaning its
+ * file between the answer and that open — a different file put there, or a
+ * symlink to one outside the directory entirely. The reader comes back for the
+ * bytes, and this is what serves them: the object that was opened when the
+ * answer was made, which nothing standing at the name can take its place in.
+ *
+ * The pin is the claim, not a number kept near it. From the moment it is made
+ * it is in the token table, its session's account and its owner; taking it
+ * removes it from all three in one synchronous step and hands over the
+ * descriptor. So one reader takes it and the next finds nothing, a release
+ * after a take or a lapse gives nothing back twice, and a session's count is
+ * the pins it holds because it *is* the set of them.
+ */
+class ArtifactPin {
+	readonly token = `file-${crypto.randomUUID()}`;
+	readonly #since = leaseClock();
+	#handle: fs.promises.FileHandle | undefined;
+	readonly #account: Set<ArtifactPin>;
+	readonly #accountKey: string;
+	readonly #letGo: (() => void) | undefined;
+	readonly #lapse: NodeJS.Timeout;
+
+	constructor(
+		handle: fs.promises.FileHandle,
+		readonly answer: SettledArtifact,
+		reader: PinReader,
+	) {
+		// The owner first: an owner that has ended refuses, and nothing has
+		// been recorded anywhere yet for the refusal to leave behind.
+		this.#letGo = reader.owner?.hold(this);
+		this.#handle = handle;
+		this.#accountKey = reader.account;
+		let account = accounts.get(reader.account);
+		if (!account) accounts.set(reader.account, (account = new Set()));
+		this.#account = account;
+		account.add(this);
+		pins.set(this.token, this);
+		this.#lapse = setTimeout(() => void this.release(), PINNED_FILE_LEASE_MS);
+		this.#lapse.unref();
+	}
+
+	/** Whether the lease is over, so the slot is no longer the reader's. */
+	get lapsed(): boolean {
+		return leaseClock() - this.#since >= PINNED_FILE_LEASE_MS;
+	}
+
+	/**
+	 * The descriptor, to the first caller only. The pin is gone from every
+	 * table before this returns, and the caller owns closing what it got.
+	 */
+	take(): fs.promises.FileHandle | undefined {
+		const handle = this.#handle;
+		if (!handle) return undefined;
+		this.#handle = undefined;
+		clearTimeout(this.#lapse);
+		pins.delete(this.token);
+		this.#account.delete(this);
+		if (this.#account.size === 0 && accounts.get(this.#accountKey) === this.#account) {
+			accounts.delete(this.#accountKey);
+		}
+		this.#letGo?.();
+		return handle;
+	}
+
+	/** End the claim without reading it. A second release has nothing to give back. */
+	async release(): Promise<void> {
+		await this.take()
+			?.close()
+			.catch(() => {});
+	}
+}
+
+/**
+ * Give back the pin on an answer its reader has read.
+ *
+ * Sent by the reader after its read, whatever the read found. A token that is
+ * no longer pinned — taken, lapsed, or ended with its owner — is already back.
+ */
+export async function releasePinnedArtifact(file: string): Promise<void> {
+	await pins.get(file)?.release();
+}
+
+/** Give back every pin a session holds; for the session ending. */
+export async function releaseArtifactPinsOf(sessionId: string | null | undefined): Promise<void> {
+	if (!sessionId) return;
+	const account = accounts.get(`session:${sessionId}`);
+	if (account) await Promise.all(Array.from(account, pin => pin.release()));
+}
+
+/**
+ * The bytes of a file answered for earlier, read from the descriptor that
+ * answered, and the end of its pin.
+ *
+ * Taken before anything is awaited: a second reader of the same token finds
+ * nothing to take and is refused, instead of reading on from wherever the
+ * first left the shared descriptor's offset.
+ */
+export async function takePinnedArtifact(file: string): Promise<SettledArtifact> {
+	const pin = pins.get(file);
+	const handle = pin?.take();
+	if (!pin || !handle) {
 		throw new ToolError("the artifact this session was told to read is no longer held open");
 	}
 	try {
-		return { ...pinned.answer, text: await pinned.handle.readFile("utf8") };
+		return { ...pin.answer, text: await handle.readFile("utf8") };
 	} finally {
-		await releasePinnedArtifact(file);
+		await handle.close().catch(() => {});
 	}
+}
+
+/**
+ * Pin `handle` for `reader`, or refuse.
+ *
+ * An answer already handed to a reader is that reader's until it comes back,
+ * gives up, or its lease ends: capacity must not revoke one, because a reader
+ * whose name was replaced has nothing else left to read from. So the one that
+ * goes to make room is the oldest that has lapsed, and when none has the
+ * *new* answer is refused instead.
+ *
+ * The count is read, the lapsed pin taken and the new one made in one tick:
+ * an await between them lets a second answer for the same session see the
+ * slot that was freed and fill it too.
+ */
+async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, reader: PinReader): Promise<string> {
+	const account = accounts.get(reader.account);
+	let displaced: fs.promises.FileHandle | undefined;
+	if (account && account.size >= PINNED_FILES_MAX) {
+		let lapsed: ArtifactPin | undefined;
+		for (const pin of account) {
+			if (pin.lapsed) {
+				lapsed = pin;
+				break;
+			}
+		}
+		if (!lapsed) {
+			await handle.close().catch(() => {});
+			throw new ToolError(
+				`${PINNED_FILES_MAX} artifact answers are outstanding for this session and none has lapsed; ${answer.path} cannot be answered for`,
+			);
+		}
+		displaced = lapsed.take();
+	}
+	let token: string;
+	try {
+		token = new ArtifactPin(handle, answer, reader).token;
+	} catch (error) {
+		await handle.close().catch(() => {});
+		throw error;
+	} finally {
+		await displaced?.close().catch(() => {});
+	}
+	return token;
 }
 
 /** The `<id>.<tool>.log` file in the directory reached by `at`, with what it is. */
@@ -513,16 +685,20 @@ interface OpenArtifact {
 	handle: fs.promises.FileHandle;
 }
 
-/** The answer to hand out: its bytes if they were asked for, otherwise a pin on the file. */
-async function finalAnswer(found: OpenArtifact, wantText: boolean, scope: string): Promise<SettledArtifact> {
-	if (wantText) {
+/** The answer to hand out: pinned for its reader, its bytes read now, or just the location. */
+async function finalAnswer(found: OpenArtifact, handout: Handout): Promise<SettledArtifact> {
+	if (handout === "text") {
 		try {
 			return { ...found.answer, text: await found.handle.readFile("utf8") };
 		} finally {
 			await found.handle.close();
 		}
 	}
-	return { ...found.answer, file: pinFile(found.handle, found.answer, scope) };
+	if (handout === "location") {
+		await found.handle.close();
+		return found.answer;
+	}
+	return { ...found.answer, file: await pinFile(found.handle, found.answer, handout) };
 }
 
 async function artifactInDirectory(at: string, where: string, id: string): Promise<OpenArtifact | null> {

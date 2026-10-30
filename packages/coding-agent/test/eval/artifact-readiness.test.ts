@@ -4,14 +4,13 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import {
 	awaitEvalArtifactsSettled,
-	EVAL_ARTIFACTS_READY_BRIDGE_NAME,
 	holdArtifactRoot,
 	releaseArtifactRoots,
 	releasePinnedArtifact,
 	resolveSettledArtifact,
 } from "../../src/eval/artifact-readiness";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME, settledArtifactOf } from "../../src/eval/artifact-wire";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
-import { settledArtifactOf } from "../../src/eval/js/shared/runtime";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import { copySessionArtifacts, whenArtifactCopiesSettle } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
@@ -80,10 +79,8 @@ describe("eval artifact readiness", () => {
 			env: new Map(),
 			localRoots: () => ({ artifact: destination }),
 			emitStatus: () => {},
-			resolveArtifact: async (id, root) => {
-				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root }, { session });
-				return settledArtifactOf(value);
-			},
+			resolveArtifact: async request =>
+				settledArtifactOf(await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, request, { session })),
 		});
 
 		const { promise: held, resolve: release } = Promise.withResolvers<void>();
@@ -248,10 +245,8 @@ describe("eval artifact readiness", () => {
 			env: new Map(),
 			localRoots: () => ({ artifact: started }),
 			emitStatus: () => {},
-			resolveArtifact: async (id, root) => {
-				const value = await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, { id, root }, { session });
-				return settledArtifactOf(value);
-			},
+			resolveArtifact: async request =>
+				settledArtifactOf(await callSessionTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, request, { session })),
 		});
 
 		// The selector travels; the id does not, because by the time the read
@@ -345,46 +340,37 @@ describe("eval artifact readiness", () => {
 		}
 	});
 
-	it("gives an answer's slot back when the reader has consumed it, per session", async () => {
+	it("gives an answer's slot back when the reader has read it, per session", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-readiness-");
 		const mine = path.join(tempDir.path(), "2026-01-01T00-00-04-000Z_mine");
 		const theirs = path.join(tempDir.path(), "2026-01-01T00-00-05-000Z_theirs");
 		fs.mkdirSync(mine, { recursive: true });
 		fs.mkdirSync(theirs, { recursive: true });
 		fs.writeFileSync(path.join(theirs, "0.read.log"), "ANOTHER SESSION'S");
+		const me = { getArtifactsDir: () => mine, getSessionId: () => "mine" } as unknown as ToolSession;
+		const them = { getArtifactsDir: () => theirs, getSessionId: () => "theirs" } as unknown as ToolSession;
 
 		try {
-			// Forty ordinary reads, each giving back the one before it: a pin
-			// is for the gap between answering and consuming, so reads that
+			// Forty ordinary reads, each giving its pin back once read: a pin
+			// is for the gap between answering and reading, so reads that
 			// finished must not hold the slots.
-			let spent: string | undefined;
 			for (let n = 0; n < 40; n++) {
 				fs.writeFileSync(path.join(mine, `${n}.read.log`), `MINE ${n}`);
-				const answer = await resolveSettledArtifact(
-					sessionWithArtifacts(mine),
-					String(n),
-					mine,
-					undefined,
-					undefined,
-					false,
-					undefined,
-					spent,
-				);
+				const answer = await resolveSettledArtifact(me, String(n), mine);
 				expect(answer?.path).toBe(path.join(mine, `${n}.read.log`));
-				spent = answer?.file;
+				if (answer?.file) await releasePinnedArtifact(answer.file);
 			}
-			if (spent) await releasePinnedArtifact(spent);
 
 			// And the quota is one session's: a session holding all of its
 			// answers cannot stop another from reading.
 			const held: string[] = [];
 			for (let n = 0; n < 32; n++) {
 				fs.writeFileSync(path.join(mine, `h${n}.read.log`), `HELD ${n}`);
-				const answer = await resolveSettledArtifact(sessionWithArtifacts(mine), `h${n}`, mine);
+				const answer = await resolveSettledArtifact(me, `h${n}`, mine);
 				if (answer?.file) held.push(answer.file);
 			}
 			expect(held.length).toBe(32);
-			const other = await resolveSettledArtifact(sessionWithArtifacts(theirs), "0", theirs);
+			const other = await resolveSettledArtifact(them, "0", theirs);
 			expect(other?.path).toBe(path.join(theirs, "0.read.log"));
 			for (const file of held) await releasePinnedArtifact(file);
 		} finally {

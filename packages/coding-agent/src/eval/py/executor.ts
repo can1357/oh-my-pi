@@ -352,7 +352,7 @@ async function shutdownInvalidatedSession(session: PythonSession): Promise<Kerne
 	if (replacement) await replacement.promise.catch(() => undefined);
 	// The kernel is going, so the threads it left running go with it: the
 	// session's standing bridge entry has nothing left to answer.
-	unregisterPyToolBridgeSession(bridgeSessionIdFor(session.sessionKey));
+	await unregisterPyToolBridgeSession(bridgeSessionIdFor(session.sessionKey));
 	return await session.kernel.shutdown();
 }
 
@@ -442,7 +442,7 @@ async function executePerCall(code: string, cwd: string, options: PythonExecutor
 	} finally {
 		// The kernel is this call's and goes with it, and so does the standing
 		// authority its cells registered: nothing is left running to ask.
-		if (options.bridgeSessionId) unregisterPyToolBridgeSession(options.bridgeSessionId);
+		if (options.bridgeSessionId) await unregisterPyToolBridgeSession(options.bridgeSessionId);
 		await kernel.shutdown().catch(() => undefined);
 	}
 }
@@ -551,7 +551,7 @@ async function invokePythonToolRequest(
 		const execution = await kernel.invokeTool(carried, { id: runId, signal: options.signal });
 		return { execution, envelope: execution.reply };
 	} finally {
-		unregister();
+		await unregister();
 	}
 }
 

@@ -184,12 +184,11 @@ describe("python prelude", () => {
 		expect(requests).toEqual([
 			{
 				name: "__artifacts_ready__",
-				// `text: false`: the kernel asks for the file, and only asks for
-				// the bytes if what it opens is not what it was told about.
-				// `text: false` and no `file`: the kernel asks for the file, and
-				// only asks for the bytes if what it opens is not what it was
-				// told about. `token` is the hold the cell was given.
-				args: { file: null, id: "12", release: null, root: artifacts.path(), text: false, token: null },
+				// `answer`: the kernel asks for the file, and only comes back
+				// for the bytes if what it opens is not what it was told about.
+				// `token` is the hold the cell was given. This answer holds no
+				// pin, so there is nothing for the kernel to give back.
+				args: { id: "12", op: "answer", root: artifacts.path(), token: null },
 				run: "",
 				session: "test-session",
 			},

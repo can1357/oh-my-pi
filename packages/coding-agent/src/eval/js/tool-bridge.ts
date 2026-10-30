@@ -16,7 +16,8 @@ import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME, resolveSettledArtifact } from "../artifact-readiness";
+import { type ArtifactPinOwner, answerArtifactRequest } from "../artifact-readiness";
+import { artifactRequestOf, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
 import {
 	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
@@ -51,6 +52,8 @@ export interface ToolBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
+	/** The cell or kernel an artifact reader asking through this bridge is part of; its pins end with it. */
+	artifactPins?: ArtifactPinOwner;
 }
 
 type ToolValue =
@@ -248,15 +251,10 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		// a read that waits for an inheritance to arrive is not a cell that
 		// has gone idle, and charging it the difference is how a one-second
 		// timeout kills a three-second copy's reader.
-		const id = isRecord(args) && typeof args.id === "string" ? args.id : undefined;
-		if (id === undefined) throw new ToolError("Artifact readiness call needs an id");
-		const root = isRecord(args) && typeof args.root === "string" ? args.root : undefined;
-		const token = isRecord(args) && typeof args.token === "string" ? args.token : undefined;
-		const wantText = isRecord(args) && args.text === true;
-		const file = isRecord(args) && typeof args.file === "string" ? args.file : undefined;
-		const release = isRecord(args) && typeof args.release === "string" ? args.release : undefined;
+		const request = artifactRequestOf(args);
+		if (!request) throw new ToolError("Artifact readiness call is not a request this host answers");
 		const resolved = await withBridgeTimeoutPause(options.emitStatus, () =>
-			resolveSettledArtifact(options.session, id, root, token, options.signal, wantText, file, release),
+			answerArtifactRequest(options.session, request, { signal: options.signal, owner: options.artifactPins }),
 		);
 		// The file and what it is: the reader checks the object it opens
 		// against this, because it opens it later than this was answered.

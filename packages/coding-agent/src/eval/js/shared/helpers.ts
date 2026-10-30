@@ -3,20 +3,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type ArtifactRequest, EVAL_ARTIFACT_ROOT_TOKEN, type SettledArtifact } from "../../artifact-wire";
 import type { JsStatusEvent } from "./types";
-
-/** What the host says `artifact://<id>` is, so the reader can check what it opens. */
-export interface SettledArtifactAnswer {
-	path: string;
-	device: string;
-	inode: string;
-	/** The handle the host kept on this very file, for a reader that has to come back for the bytes. */
-	file?: string;
-	/** The hold this answer was read through, for a cell that was given none; its first read binds it. */
-	root?: string;
-	/** The bytes, when the host had to read them from the file it still holds open. */
-	text?: string;
-}
 
 export interface HelperOptions {
 	limit?: number;
@@ -39,24 +27,17 @@ export interface HelperContext {
 	localRoots(): Record<string, string>;
 	emitStatus(event: JsStatusEvent): void;
 	/**
-	 * Resolve `artifact://<id>` to its file through the host, once the copies
-	 * filling this session's artifacts directory have finished — the waiting
-	 * and the listing in one answer, because a copy can be announced between
-	 * two of them.
+	 * Ask the host about `artifact://<id>`: resolve it to its file once the
+	 * copies filling this session's artifacts directory have finished — the
+	 * waiting and the listing in one answer, because a copy can be announced
+	 * between two of them — and take or give back the pin that answer holds.
 	 *
 	 * Its absence is a declaration, not a fallback: an embedder that leaves it
 	 * out is saying no copy can be running here. One that has it and cannot
 	 * answer fails the read rather than letting it see a directory nobody has
 	 * vouched for.
 	 */
-	resolveArtifact?(
-		id: string,
-		root: string,
-		token?: string,
-		text?: boolean,
-		file?: string,
-		release?: string,
-	): Promise<SettledArtifactAnswer | null>;
+	resolveArtifact?(request: ArtifactRequest): Promise<SettledArtifact | null>;
 }
 
 /**
@@ -87,8 +68,7 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 		read: async (rawPath, options = {}) => {
 			const settled = await settledArtifactFor(ctx, rawPath);
 			if (settled) {
-				const id = ARTIFACT_URL_RE.exec(rawPath)?.[1] ?? "";
-				let text = await readSettledArtifact(ctx, id, ctx.localRoots().artifact ?? "", settled);
+				let text = await readSettledArtifact(ctx, settled);
 				text = selectedLines(text, options);
 				ctx.emitStatus({ op: "read", path: settled.path, bytes: text.length, chars: text.length });
 				return text;
@@ -200,9 +180,9 @@ async function resolveArtifactPath(ctx: HelperContext, root: string, id: string)
 	// a verdict and a listing a copy can be announced, and the listing would
 	// be of a directory half an inheritance had reached.
 	if (ctx.resolveArtifact) {
-		const answer = await ctx.resolveArtifact(id, root, rootToken(ctx, root), false, undefined, takeSpentAnswer(ctx));
-		bindRoot(ctx, answer);
-		rememberSpentAnswer(ctx, answer);
+		// Located, not pinned: the path goes on to the read tool, and nothing
+		// here comes back for the bytes.
+		const answer = await askArtifact(ctx, "locate", id, root);
 		return answer?.path;
 	}
 	let files: string[];
@@ -231,30 +211,19 @@ function selectedLines(text: string, options: HelperOptions): string {
  * What the host says `artifact://<id>` is for this cell, or `undefined` when
  * the path is not a bare artifact id or no host can be asked.
  */
-async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<SettledArtifactAnswer | undefined> {
+async function settledArtifactFor(ctx: HelperContext, rawPath: string): Promise<SettledArtifact | undefined> {
 	if (!ctx.resolveArtifact) return undefined;
 	const match = INTERNAL_URL_RE.exec(rawPath);
 	if (match === null || match[1].toLowerCase() !== "artifact" || !ARTIFACT_ID_RE.test(match[2])) return undefined;
 	const root = ctx.localRoots().artifact;
 	if (!root) return undefined;
-	const answer = await ctx.resolveArtifact(
-		match[2],
-		root,
-		rootToken(ctx, root),
-		false,
-		undefined,
-		takeSpentAnswer(ctx),
-	);
-	bindRoot(ctx, answer);
-	rememberSpentAnswer(ctx, answer);
+	const answer = await askArtifact(ctx, "answer", match[2], root);
 	return answer ?? undefined;
 }
 
-/** A bare `artifact://<id>`, with the id. */
-const ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/i;
-
 /**
- * Remember the hold a cell's first read bound, on that cell's own roots.
+ * Ask the host one lookup through the hold this cell reads, and remember the
+ * hold a cell's first read bound, on that cell's own roots.
  *
  * A cell started before its artifacts directory existed carries no token. Its
  * first read takes a hold, and that hold is what every read after it uses:
@@ -263,36 +232,17 @@ const ARTIFACT_URL_RE = /^artifact:\/\/(\d+)$/i;
  * written on the roots object this run was given, so it binds this cell and
  * not the next one, which is assigned the directory as it is then.
  */
-function bindRoot(ctx: HelperContext, answer: SettledArtifactAnswer | null | undefined): void {
-	if (answer?.root) ctx.localRoots()[ARTIFACT_ROOT_TOKEN] ??= answer.root;
-}
-
-/**
- * The answer this cell has finished with, carried to the host with its next
- * question so the slot it holds goes back at consumption rather than at a
- * timeout. The last read of a cell leaves one, which its lease covers.
- */
-function takeSpentAnswer(ctx: HelperContext): string | undefined {
+async function askArtifact(
+	ctx: HelperContext,
+	op: "answer" | "locate",
+	id: string,
+	root: string,
+): Promise<SettledArtifact | null | undefined> {
 	const roots = ctx.localRoots();
-	const spent = roots[SPENT_ANSWER];
-	if (spent) delete roots[SPENT_ANSWER];
-	return spent;
+	const answer = await ctx.resolveArtifact?.({ op, id, root, token: roots[EVAL_ARTIFACT_ROOT_TOKEN] });
+	if (answer?.root) roots[EVAL_ARTIFACT_ROOT_TOKEN] ??= answer.root;
+	return answer;
 }
-
-function rememberSpentAnswer(ctx: HelperContext, answer: SettledArtifactAnswer | null | undefined): void {
-	if (answer?.file) ctx.localRoots()[SPENT_ANSWER] = answer.file;
-}
-
-/** Where a cell keeps the answer it has consumed until its next question. */
-const SPENT_ANSWER = "__artifactSpent";
-
-/** The hold this cell reads through: the one it was given, or the one its first read bound. */
-function rootToken(ctx: HelperContext, _root: string): string | undefined {
-	return ctx.localRoots()[ARTIFACT_ROOT_TOKEN];
-}
-
-/** The key the cell's roots carry the host's hold on the artifacts directory under. */
-const ARTIFACT_ROOT_TOKEN = "__artifactRoot";
 
 /**
  * The text of the artifact the host answered with, read from the object the
@@ -302,42 +252,54 @@ const ARTIFACT_ROOT_TOKEN = "__artifactRoot";
  * opened: a directory replaced between the host's answer and this read gives a
  * different file, and that is a refusal rather than another conversation's
  * artifact under this session's number.
+ *
+ * The pin the answer holds is this read's, and only this read ends it: by
+ * taking it when the name no longer means the file, or by giving it back once
+ * the bytes are in hand — never before, and never on another read's behalf.
  */
-async function readSettledArtifact(
-	ctx: HelperContext,
-	id: string,
-	root: string,
-	answer: SettledArtifactAnswer,
-): Promise<string> {
-	if (answer.text !== undefined) return answer.text;
-	// Non-blocking, because an ordinary open of a FIFO waits for a writer
-	// before any check can run: a name that stopped meaning its file can have
-	// become something that does not answer an open at all, and a reader that
-	// hangs there never gets to refuse.
-	// A name that stopped meaning its file may not open at all — it was
-	// removed, or what is there now refuses this open — and that is the same
-	// answer as opening something else: ask the host, which still holds the
-	// file this answer was about.
-	const handle = await fs
-		.open(answer.path, nodeFsConstants.O_RDONLY | nodeFsConstants.O_NONBLOCK)
-		.catch(() => undefined);
-	if (handle) {
-		try {
-			const stat = await handle.stat({ bigint: true });
-			if (stat.isFile() && String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
-				return await handle.readFile("utf8");
+async function readSettledArtifact(ctx: HelperContext, answer: SettledArtifact): Promise<string> {
+	let taken = false;
+	try {
+		// Non-blocking, because an ordinary open of a FIFO waits for a writer
+		// before any check can run: a name that stopped meaning its file can
+		// have become something that does not answer an open at all, and a
+		// reader that hangs there never gets to refuse.
+		// A name that stopped meaning its file may not open at all — it was
+		// removed, or what is there now refuses this open — and that is the
+		// same answer as opening something else: ask the host, which still
+		// holds the file this answer was about.
+		const handle = await fs
+			.open(answer.path, nodeFsConstants.O_RDONLY | nodeFsConstants.O_NONBLOCK)
+			.catch(() => undefined);
+		if (handle) {
+			try {
+				const stat = await handle.stat({ bigint: true });
+				if (stat.isFile() && String(stat.dev) === answer.device && String(stat.ino) === answer.inode) {
+					return await handle.readFile("utf8");
+				}
+			} finally {
+				await handle.close();
 			}
-		} finally {
-			await handle.close();
+		}
+		// The pathname reaches something else now — its directory was replaced
+		// between the answer and this read. The host still holds the file this
+		// answer is about, under the pin; what it cannot do is hand over a name
+		// that still means it.
+		if (answer.file !== undefined) {
+			taken = true;
+			const again = await ctx.resolveArtifact?.({ op: "take", file: answer.file });
+			if (again?.text !== undefined) return again.text;
+		}
+		throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
+	} finally {
+		// Read, or refused: either way this read is over, and its pin goes
+		// back now rather than when a lease runs out. A give-back that cannot
+		// be delivered changes nothing here — the pin still ends with its
+		// cell, its kernel or its lease.
+		if (!taken && answer.file !== undefined) {
+			await ctx.resolveArtifact?.({ op: "release", file: answer.file }).catch(() => {});
 		}
 	}
-	// The pathname reaches something else now — its directory was replaced
-	// between the answer and this read. The host still holds that directory
-	// open, so it can read the file this answer is about; what it cannot do is
-	// hand over a name that still means it.
-	const again = await ctx.resolveArtifact?.(id, root, rootToken(ctx, root), true, answer.file);
-	if (again?.text !== undefined) return again.text;
-	throw new ToolError(`${answer.path} is no longer the artifact this session was told to read`);
 }
 
 /** Resolve an internal-URL relative path under its root, mirroring the host

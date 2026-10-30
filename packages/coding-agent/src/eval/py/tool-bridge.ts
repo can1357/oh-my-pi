@@ -10,7 +10,8 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
+import { ArtifactPinOwner } from "../artifact-readiness";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
@@ -32,6 +33,12 @@ export interface PyToolBridgeEntry {
 	shadowCell?: EvalShadowCellSession;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
+	/**
+	 * The artifact answers the readers asking through this entry hold: a
+	 * cell's for a run entry, the kernel's for its standing one. Given back
+	 * when the entry goes.
+	 */
+	artifactPins?: ArtifactPinOwner;
 }
 
 export interface PyToolBridgeInfo {
@@ -143,6 +150,7 @@ async function callSessionToolPromptOnAbort(
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
 		identity,
+		artifactPins: entry.artifactPins,
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
@@ -285,41 +293,56 @@ export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
 	}
 }
 
-/**
- * Register a tool session for the duration of one execution. The returned
- * function MUST be called to remove the entry once execution finishes.
- */
 function bridgeRegistrationKey(sessionId: string, runId: string): string {
 	return `${sessionId}:${runId}`;
 }
 
-export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
+/**
+ * Register a tool session for the duration of one execution. The returned
+ * function MUST be called to remove the entry once execution finishes; it
+ * gives back the artifact answers the cell's readers still hold.
+ */
+export function registerPyToolBridge(
+	sessionId: string,
+	runId: string,
+	entry: Omit<PyToolBridgeEntry, "artifactPins">,
+): () => Promise<void> {
 	const key = bridgeRegistrationKey(sessionId, runId);
-	registrations.set(key, entry);
+	const registered: PyToolBridgeEntry = { ...entry, artifactPins: new ArtifactPinOwner() };
+	registrations.set(key, registered);
 	// Also as the kernel's standing authority, kept after the cell ends: a
 	// thread a finished cell left running still reads this session's artifacts
-	// and has no run to name. Only the tool session goes in it.
-	sessionRegistrations.set(sessionId, { toolSession: entry.toolSession });
-	return () => {
-		if (registrations.get(key) === entry) {
+	// and has no run to name. Only the tool session goes in it, and the
+	// kernel's own pins, which outlast any one cell.
+	sessionRegistrations.set(sessionId, {
+		toolSession: entry.toolSession,
+		artifactPins: sessionRegistrations.get(sessionId)?.artifactPins ?? new ArtifactPinOwner(),
+	});
+	return async () => {
+		if (registrations.get(key) === registered) {
 			registrations.delete(key);
 		}
+		await registered.artifactPins?.end();
 	};
 }
 
-/** Release a kernel's standing bridge entry when the kernel goes. */
-export function unregisterPyToolBridgeSession(bridgeSessionId: string): void {
+/** Release a kernel's standing bridge entry, and the answers its readers hold, when the kernel goes. */
+export async function unregisterPyToolBridgeSession(bridgeSessionId: string): Promise<void> {
+	const standing = sessionRegistrations.get(bridgeSessionId);
 	sessionRegistrations.delete(bridgeSessionId);
+	await standing?.artifactPins?.end();
 }
 
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {
+	const entries = [...registrations.values(), ...sessionRegistrations.values()];
 	registrations.clear();
 	// The standing authority a kernel keeps for its background readers goes
 	// with the bridge: there is nothing left to answer through, and an entry
 	// that outlives the server answers for a kernel that can no longer be
-	// reached.
+	// reached. The answers held for either kind of entry go with them.
 	sessionRegistrations.clear();
+	await Promise.all(entries.map(entry => entry.artifactPins?.end()));
 	const pending = serverPromise;
 	serverPromise = null;
 	if (!pending) return;

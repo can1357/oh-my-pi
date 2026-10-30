@@ -1,7 +1,5 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
-import { settledArtifactOf } from "./shared/runtime";
-import type { SettledArtifactAnswer } from "./shared/helpers";
+import { type ArtifactRequest, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -317,8 +315,7 @@ export class WorkerCore {
 			// Not bound to a run: the reader may be work a finished cell left
 			// behind, and the copy it has to be told about belongs to the
 			// session rather than to any one cell.
-			resolveArtifact: (id, root, token, text, file, release) =>
-				this.#resolveArtifact(id, root, token, text, file, release),
+			resolveArtifact: request => this.#resolveArtifact(request),
 			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
@@ -461,20 +458,15 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Ask the host for `artifact://<id>`'s file, outside any run.
+	 * Ask the host about `artifact://<id>`, outside any run.
 	 *
 	 * A background reader outlives the cell that started it, so a call carrying
 	 * that cell's run would be refused as belonging to a run no longer active —
 	 * which is not an answer about whether a copy is filling the directory.
+	 * The request goes as it is and the reply comes back as it is: the runtime
+	 * reads it, in the one place the answer is read.
 	 */
-	async #resolveArtifact(
-		id: string,
-		root: string,
-		token?: string,
-		text?: boolean,
-		file?: string,
-		release?: string,
-	): Promise<SettledArtifactAnswer | null> {
+	async #resolveArtifact(request: ArtifactRequest): Promise<unknown> {
 		const callId = `tc-artifacts-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		this.#pendingTools.set(callId, { resolve, reject });
@@ -484,13 +476,13 @@ export class WorkerCore {
 				id: callId,
 				runId: "",
 				name: EVAL_ARTIFACTS_READY_BRIDGE_NAME,
-				args: { id, root, token, text, file, release },
+				args: request,
 			});
 		} catch (error) {
 			this.#pendingTools.delete(callId);
 			reject(error);
 		}
-		return settledArtifactOf(await promise);
+		return await promise;
 	}
 
 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {

@@ -15,8 +15,8 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../../artifact-readiness-name";
-import { createHelpers, type HelperBundle, type SettledArtifactAnswer } from "./helpers";
+import { type ArtifactRequest, EVAL_ARTIFACTS_READY_BRIDGE_NAME, settledArtifactOf } from "../../artifact-wire";
+import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
@@ -95,20 +95,14 @@ export interface RuntimeOptions {
 	/** Selected package directory consulted after the importing file's project. */
 	packageRoot?: string;
 	/**
-	 * Resolve `artifact://<id>` through the host once the copies filling this
+	 * Ask the host about `artifact://<id>` once the copies filling this
 	 * session's artifacts directory have finished. Supplied by an embedder
 	 * whose host can be asked at any time, including after the run that
 	 * started a background reader has ended; left out by one where no artifact
-	 * copy can run.
+	 * copy can run. Resolves to the bridge's reply as it arrived, which the
+	 * runtime reads the same way whichever way the request went.
 	 */
-	resolveArtifact?(
-		id: string,
-		root: string,
-		token?: string,
-		text?: boolean,
-		file?: string,
-		release?: string,
-	): Promise<SettledArtifactAnswer | null>;
+	resolveArtifact?(request: ArtifactRequest): Promise<unknown>;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -309,24 +303,6 @@ function compiles(source: string): boolean {
  * back through `RuntimeHooks` that the embedder supplies — wire format is the embedder's
  * concern.
  */
-/** The host's answer about an artifact, as it crosses the bridge. */
-export function settledArtifactOf(value: unknown): SettledArtifactAnswer | null {
-	if (!value || typeof value !== "object") return null;
-	const details = (value as { details?: unknown }).details;
-	if (!details || typeof details !== "object") return null;
-	const answer = details as Partial<SettledArtifactAnswer>;
-	if (typeof answer.path !== "string" || typeof answer.device !== "string" || typeof answer.inode !== "string") {
-		return null;
-	}
-	return {
-		path: answer.path,
-		device: answer.device,
-		inode: answer.inode,
-		...(typeof answer.file === "string" ? { file: answer.file } : {}),
-		...(typeof answer.text === "string" ? { text: answer.text } : {}),
-	};
-}
-
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
@@ -436,31 +412,19 @@ export class JsRuntime {
 			// — so a failure here fails the read.
 			...(opts.resolveArtifact
 				? {
-						resolveArtifact: async (
-							id: string,
-							root: string,
-							token?: string,
-							text?: boolean,
-							file?: string,
-							release?: string,
-						) => {
+						resolveArtifact: async (request: ArtifactRequest) => {
 							// Through the reader's own run, so the wait belongs
 							// to that cell's timeout and its abort ends it. The
 							// host answers this one name with the session's own
 							// authority when the run has ended, so a reader
 							// that outlived its cell needs no second channel
-							// and no reading of error text to find it.
+							// and no reading of error text to find it. Either
+							// way the request goes whole and the reply is read
+							// here, once.
 							const hooks = this.#activeHooks("tool");
 							const value = hooks
-								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, {
-										id,
-										root,
-										token,
-										text,
-										file,
-										release,
-									})
-								: await opts.resolveArtifact!(id, root, token, text, file, release);
+								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, request)
+								: await opts.resolveArtifact!(request);
 							return settledArtifactOf(value);
 						},
 					}

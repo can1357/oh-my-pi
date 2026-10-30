@@ -1,6 +1,7 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
 import { holdArtifactRoot } from "./artifact-readiness";
+import { EVAL_ARTIFACT_ROOT_TOKEN } from "./artifact-wire";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -97,9 +98,6 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
 
 /** What a cell carries when its artifacts directory was there at assignment and could not be held. */
 const LOST_ARTIFACT_ROOT = "root-lost";
-
-/** The key a cell's roots carry its hold on the artifacts directory under. */
-export const EVAL_ARTIFACT_ROOT_TOKEN = "__artifactRoot";
 
 /**
  * {@link resolveEvalUrlRoots} with the artifacts directory held open for the

@@ -6,7 +6,8 @@ import {
 	resolveWorkerSpawnCmd,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
-import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-readiness-name";
+import { ArtifactPinOwner } from "../artifact-readiness";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -87,6 +88,8 @@ interface PendingRun {
 	 */
 	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
 	settled: boolean;
+	/** The artifact answers this run's readers hold; given back when the run ends. */
+	artifactPins: ArtifactPinOwner;
 }
 
 interface JsSession {
@@ -110,6 +113,11 @@ interface JsSession {
 	 * artifacts, and has to be told about a copy filling them.
 	 */
 	lastToolSession?: ToolSession;
+	/**
+	 * The artifact answers held for readers outside any run — work a finished
+	 * cell left running — given back when this kernel goes.
+	 */
+	artifactPins: ArtifactPinOwner;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -246,6 +254,7 @@ export async function invokeJsTool(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	session.pending.set(runId, pending);
 	// Kept past the run for the artifact readiness question (see `handleToolCall`).
@@ -270,6 +279,7 @@ export async function invokeJsTool(
 	} finally {
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		await pending.artifactPins.end();
 	}
 
 	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
@@ -472,6 +482,7 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -521,6 +532,7 @@ async function runOnce(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	session.pending.set(runId, pending);
 	// Kept past the run for the artifact readiness question (see `handleToolCall`).
@@ -595,6 +607,7 @@ async function runOnce(
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		await pending.artifactPins.end();
 	}
 }
 
@@ -644,6 +657,7 @@ async function acquireSession(
 			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			artifactPins: new ArtifactPinOwner(),
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -816,7 +830,10 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			return;
 		}
 		try {
-			const value = await callSessionTool(msg.name, msg.args, { session: toolSession });
+			const value = await callSessionTool(msg.name, msg.args, {
+				session: toolSession,
+				artifactPins: session.artifactPins,
+			});
 			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 		} catch (error) {
 			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
@@ -847,6 +864,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			signal: ctrl.signal,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
+			artifactPins: pending.artifactPins,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
@@ -918,6 +936,8 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	session.pendingSnapshots.clear();
 	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
 	session.pendingShadowRuns.clear();
+	// The kernel is going, and the readers outside any run go with it.
+	await session.artifactPins.end();
 	if (options.force) {
 		await session.worker.terminate().catch(() => undefined);
 		return;
