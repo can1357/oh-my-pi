@@ -1,0 +1,9 @@
+[
+	{
+		"conversationId": "c9",
+		"chat": [[{ "id": 0, "role": "user", "content": "alpha" }]],
+		"probingQuestions": {
+			"event_ordering": [{ "question": "q dangling", "source_chat_ids": ["0,7"] }]
+		}
+	}
+]
