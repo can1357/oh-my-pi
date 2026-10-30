@@ -178,6 +178,13 @@ export interface ReclaimGcResult {
 	/** What the caller asked for: a session id prefix or an archive path. */
 	query: string;
 	archivePath?: string;
+	/**
+	 * Live paths a refused run had already removed before it stopped. Empty on
+	 * every ordinary refusal, because nothing goes until the whole tree is
+	 * proved; non-empty only when the removal itself failed part-way, and then
+	 * the archive holds all of it.
+	 */
+	partiallyRemoved?: string[];
 	sessionPath?: string;
 	/** 1 when the live copy went, 0 when it was kept and the reason is in `errors`. */
 	reclaimed: number;
@@ -441,6 +448,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.restore?.errors ?? []).map(error => `restore: ${error}`),
+		...(result.reclaim?.errors ?? []).map(error => `reclaim: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 	];
 }
@@ -1055,21 +1063,42 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 		// A killed run can leave this name linked to the archive it published;
 		// writing onto it would damage that archive before anything read it.
 		await fs.rm(tempPath, { force: true });
-		await pipeline(
-			Bun.file(source).stream(),
-			createGzip({ level: 9 }),
-			(await fs.open(tempPath, "w")).createWriteStream(),
-		);
+		const handle = await fs.open(tempPath, "w");
+		// The identity of the file this run wrote, taken from the descriptor it
+		// wrote through. Stating the temp's name afterwards would adopt
+		// whatever replaced it, and the rollback would then delete the new
+		// canonical entry as if this run had put it there.
+		const staged = await handle.stat();
+		await pipeline(Bun.file(source).stream(), createGzip({ level: 9 }), handle.createWriteStream());
+		const stagedNow = await fs.lstat(tempPath).catch(() => undefined);
+		if (stagedNow?.dev !== staged.dev || stagedNow.ino !== staged.ino) {
+			throw new Error(
+				`${tempPath} was replaced while the archive was being written; run \`omp gc --archive\` again`,
+			);
+		}
 		if (supersedes) {
 			// The archive holds an earlier part of this very session — proved a
 			// prefix of what is being written — so replacing it loses nothing,
 			// and refusing would make a restored session unarchivable the moment
-			// it takes another turn. The entry is re-identified immediately
-			// before the rename, so a destination that changed since is refused
-			// rather than written over.
-			const standing = await statIfPresent(destination);
-			if (!standing || standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
-				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			// it takes another turn.
+			//
+			// Proved again here, by reading the file rather than its name. An
+			// inode comparison cannot see a replacement written in place, and
+			// the earlier proof was taken before the gzip temp existed, so it
+			// is an observation about bytes that may since have changed. What
+			// survives this is only the gap between the read and the rename.
+			const archived = await fs.open(destination, "r").catch(error => {
+				if (codeOf(error) === "ENOENT") return undefined;
+				throw error;
+			});
+			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
+			if (!archived) throw new Error(changed);
+			try {
+				const standing = await archived.stat();
+				if (standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) throw new Error(changed);
+				if (!(await archiveIsPrefixOfLive(destination, source))) throw new Error(changed);
+			} finally {
+				await archived.close();
 			}
 			await fs.rename(tempPath, destination);
 		} else {
@@ -1078,10 +1107,7 @@ async function gzipSessionFile(source: string, destination: string, supersedes?:
 			// someone else's, and `EEXIST` says so rather than writing over it.
 			await fs.link(tempPath, destination);
 		}
-		// Recorded from the temp, which is the same file either way: reading it
-		// from the destination could record whatever replaced it since, and the
-		// rollback below would then delete that instead.
-		published = await statIfPresent(tempPath);
+		published = staged;
 		const stored = await digestArchivedSessionFile(destination);
 		if (stored.hash !== expected.hash) {
 			throw new Error(
@@ -1188,17 +1214,17 @@ async function publishArtifactIntoArchive(
 		// on the data.
 		await fs.rm(tempPath, { force: true });
 		await fs.copyFile(source, tempPath);
+		// The identity of the file this run staged. Stating the name later
+		// would adopt whatever replaced it, and the rollback would then delete
+		// the new canonical entry as if this run had put it there.
+		const staged = await fs.lstat(tempPath);
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
 		});
 		if (!archived) {
-			// The inode is read from the temp, which `link` makes the same file:
-			// reading it from the destination afterwards would record whatever
-			// replaced it in between, and the rollback would then delete that.
-			const published = await statIfPresent(tempPath);
 			await fs.link(tempPath, destination);
-			if (published) state.created.push({ path: destination, dev: published.dev, ino: published.ino });
+			state.created.push({ path: destination, dev: staged.dev, ino: staged.ino });
 			return;
 		}
 		try {
@@ -1229,15 +1255,16 @@ async function publishArtifactIntoArchive(
 			// copy — means the longer replaces the shorter, which loses nothing
 			// because the shorter is inside it.
 			if (verified.size === (await fs.stat(tempPath)).size) return;
-			// Asked again through the descriptor that was read, with nothing
-			// left to do but rename. An inode comparison cannot see a file
-			// updated in place; this can, because it reads the file rather
-			// than its name.
-			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
-				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
-			}
+			// The name is settled first and the content last, so the content
+			// proof is the final thing before the rename. An inode comparison
+			// cannot see a file updated in place; reading it through the
+			// descriptor that was examined can. What survives is the gap
+			// between that read and the rename itself.
 			const standing = await statIfPresent(destination);
 			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
+				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			}
+			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
 				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
 			}
 			await fs.rename(tempPath, destination);
@@ -1334,73 +1361,109 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[]): Promise
 }
 
 /**
- * Remove the live tree, one entry at a time, each only once the archive has
- * been shown to hold what that entry holds *now*. Only `--reclaim` calls
- * this: it is the one deletion left in the feature, and an operator asks for
- * it on a session they name.
+ * Prove the archive holds every file of a live tree, collecting the files in
+ * the order they would be removed.
  *
- * Each file is compared in full through a descriptor of its own and unlinked
- * immediately after. An entry that cannot be proved is kept and reported,
- * never thrown over: the archive holds a complete copy by this point, so
- * giving up on the rest would reclaim nothing and lose the report.
+ * Nothing is removed while this runs. Proving entry by entry and deleting as
+ * it went meant a tree that refused on its last file had already lost the
+ * ones before it, and the refusal then said the tree "was kept" while part
+ * of it was gone. The whole tree is settled first; only then does anything
+ * go.
  *
- * What this does not establish, stated rather than implied: a subagent
- * session created between an entry's comparison and its unlink is not
- * excluded. Creating one consults nothing this process can hold —
- * `FileSessionStorage.claimSession` reads the child's own header and takes a
- * lease keyed by the child's own id, and its path is derived from the
- * parent's by string — so there is no parent-side admission to hold shut.
- * The window is one entry's compare-and-unlink, in a command that deletes
- * and does nothing else, on a session someone named.
+ * Throws the reason the first unproved entry could not be proved, with
+ * nothing deleted.
  */
-async function removeLiveTreeOnceArchived(source: string, destination: string, sourceRoot: string): Promise<boolean> {
+async function proveLiveTreeIsArchived(
+	source: string,
+	destination: string,
+	sourceRoot: string,
+	proven: { files: string[]; directories: string[] },
+): Promise<void> {
 	const stat = await fs.lstat(source).catch(error => {
 		if (codeOf(error) === "ENOENT") return undefined;
 		throw error;
 	});
-	if (!stat) return true;
+	if (!stat) return;
 	if (stat.isDirectory()) {
-		let emptied = true;
 		for (const entry of (await fs.readdir(source)).sort()) {
-			emptied =
-				(await removeLiveTreeOnceArchived(path.join(source, entry), path.join(destination, entry), sourceRoot)) &&
-				emptied;
+			await proveLiveTreeIsArchived(path.join(source, entry), path.join(destination, entry), sourceRoot, proven);
 		}
-		if (!emptied) return false;
-		return await fs
-			.rmdir(source)
-			.then(() => true)
-			.catch(() => false);
+		// Deepest first when the removal walks it back.
+		proven.directories.unshift(source);
+		return;
 	}
 	if (!stat.isFile()) {
 		// A link the copy resolved rather than carried, or a device: its own
-		// name is all there is to drop.
-		return await fs
-			.unlink(source)
-			.then(() => true)
-			.catch(() => false);
+		// name is all there is to drop, and there is nothing to compare.
+		proven.files.push(source);
+		return;
 	}
-	const live = await fs.open(source, "r").catch(() => undefined);
+	const live = await fs.open(source, "r").catch(error => {
+		// Only absence is nothing. Anything else says what is there could not
+		// be read, which is not the same as the archive holding it.
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!live) return;
 	try {
-		const liveStat = await live?.stat();
-		if (!live || !liveStat?.isFile()) return false;
-		if (!(await survivesSourceRemoval(destination, sourceRoot))) return false;
-		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) return false;
+		const liveStat = await live.stat();
+		if (!liveStat.isFile()) throw new Error(`${source} is not a file the archive can hold`);
+		if (!(await survivesSourceRemoval(destination, sourceRoot))) {
+			throw new Error(`${destination} is not an independent archived copy of ${source}`);
+		}
+		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) {
+			throw new Error(`${source} holds what ${destination} does not`);
+		}
 	} finally {
-		await live?.close();
+		await live.close();
 	}
-	return await fs
-		.unlink(source)
-		.then(() => true)
-		.catch(() => false);
+	proven.files.push(source);
+}
+
+/**
+ * Remove a live tree the archive has been shown to hold in full. Only
+ * `--reclaim` calls this: it is the one deletion left in the feature, and an
+ * operator asks for it on a session they name.
+ *
+ * Every entry was proved before any of them went — see
+ * {@link proveLiveTreeIsArchived} — so what is left here is the removal
+ * itself. A removal that fails part-way reports exactly what went, because
+ * saying a tree "was kept" when some of it is gone is the misreport this
+ * replaces.
+ *
+ * What this does not establish, stated rather than implied: a subagent
+ * session that joins the tree while the command runs is not excluded, and
+ * joining need not happen late. A child created after the files were
+ * collected holds its own lease throughout; if it writes before its file is
+ * compared the proof sees it and refuses, and if it writes after, its file
+ * is removed with the rest. Creating one consults nothing this process can
+ * hold — `FileSessionStorage.claimSession` reads the child's own header and
+ * takes a lease keyed by the child's own id, and its path is derived from
+ * the parent's by string — so there is no parent-side admission to hold
+ * shut.
+ */
+async function removeProvenLiveTree(
+	proven: { files: string[]; directories: string[] },
+	removed: string[],
+): Promise<void> {
+	// Appended as each one goes, so a removal that throws part-way leaves the
+	// caller holding exactly what it had already given up.
+	for (const file of proven.files) {
+		await fs.unlink(file);
+		removed.push(file);
+	}
+	for (const directory of proven.directories) {
+		await fs.rmdir(directory);
+		removed.push(directory);
+	}
 }
 
 /**
  * Copy an artifact tree into the archive with symlinks resolved into real
- * files, then drop the source. The archive must hold the bytes: a link into
- * a tree that is relocated or cleaned later archives a session that cannot
- * come back. `fs.rename` is not an option either — the archive root is
- * routinely a symlink onto another filesystem.
+ * files, leaving the live tree where it is. The archive must hold the bytes:
+ * a link into a tree that is relocated or cleaned later archives a session
+ * that cannot come back. `fs.rename` is not an option either — the archive
+ * root is routinely a symlink onto another filesystem.
  *
  * A link whose target is already gone is skipped and counted: one broken
  * link must not make a session unarchivable forever.
@@ -1408,21 +1471,15 @@ async function removeLiveTreeOnceArchived(source: string, destination: string, s
  * No archived file is replaced with bytes it does not already contain, and
  * the deciding and the writing are the same walk of the same tree — see
  * {@link publishArtifactIntoArchive} and {@link copyArtifactEntryIntoArchive}.
+ * That is not the same as "cannot lose anything": a writer mutating archive
+ * paths without the gc lock is outside the contract, and the last gap
+ * between a proof and the rename it authorises belongs to it.
  *
  * A failure part-way through removes only what this copy wrote, so a retry
  * finds no stray tree of its own making — but anything the archive already
- * held stays. After a restore that brought the transcript home and stopped
- * before its artifact tree, the live tree is a subset of the archived one
- * and re-archiving it copies fewer files than are already there; a cleanup
- * that removed the destination would delete the only copy of every artifact
- * the restore had not reached yet, and the transcript rollback could not
- * bring those back.
- *
- * Once the copy is complete the archive holds the session, and a failure to
- * drop the live tree (a locked file, a read-only directory) is reported as a
- * leftover rather than thrown: rolling the move back from here would delete
- * the archive — the only complete copy — and leave the half-removed live tree
- * behind.
+ * held stays. After a restore, which keeps its copy, the live tree is the
+ * archived one carried on, and re-archiving it writes the longer copy over
+ * the shorter rather than refusing.
  */
 async function copyArtifactsTree(source: string, destination: string): Promise<{ brokenLinks: number }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -1961,7 +2018,7 @@ async function runWalGc(options: ResolvedGcOptions): Promise<WalGcResult> {
 	};
 }
 
-function renderText(result: GcResult): string {
+export function renderText(result: GcResult): string {
 	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
 	if (result.stale) {
 		const stale = result.stale;
@@ -2009,6 +2066,25 @@ function renderText(result: GcResult): string {
 		}
 		for (const note of restore.notRestored) lines.push(`not restored: ${note}`);
 		if (restore.errors.length > 0) lines.push(`restore errors: ${restore.errors.length}`);
+	}
+	if (result.reclaim) {
+		const reclaim = result.reclaim;
+		if (reclaim.reclaimed > 0 && reclaim.sessionPath) {
+			lines.push(`reclaim: gave up ${reclaim.sessionPath}; the session is now only in ${reclaim.archivePath}`);
+		} else {
+			// A refusal has to read as one. Reporting only what was given up
+			// lets a run that deleted nothing — or deleted part of a tree and
+			// stopped — print the same line as a run that worked.
+			const verb = result.apply ? "gave up nothing" : "would give up nothing";
+			lines.push(`reclaim: ${verb} for "${reclaim.query}"`);
+		}
+		if (reclaim.keptArtifactTree !== undefined) {
+			lines.push(`reclaim kept the live artifact tree: ${reclaim.keptArtifactTree}`);
+		}
+		for (const removed of reclaim.partiallyRemoved ?? []) {
+			lines.push(`reclaim removed before it refused: ${removed}`);
+		}
+		if (reclaim.errors.length > 0) lines.push(`reclaim errors: ${reclaim.errors.length}`);
 	}
 	if (result.compress) {
 		const compress = result.compress;
@@ -2151,6 +2227,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			? [path.resolve(query)]
 			: await findArchivedSessionFiles(query, options.agentDir);
 	} catch (error) {
+		// Returned, not thrown: a command that cannot find what it was asked
+		// about has an answer, and throwing it past the result means the
+		// caller reports nothing at all.
 		result.errors.push(errorMessage(error));
 		return result;
 	}
@@ -2179,9 +2258,18 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const notACopy = (): string =>
 		`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
 		`\`omp gc --archive --apply\` and reclaim after that`;
+	// A refusal names the live tree it left behind, on every path that can
+	// reach one. Reporting it only sometimes is how a reader learns to stop
+	// trusting it.
+	const keepTree = async (): Promise<void> => {
+		if (await pathExists(liveArtifacts)) result.keptArtifactTree = liveArtifacts;
+	};
 	if (!options.apply) {
 		// Say now what applying would refuse, without taking anything.
-		if (!(await holdsLive())) result.errors.push(notACopy());
+		if (!(await holdsLive())) {
+			await keepTree();
+			result.errors.push(notACopy());
+		}
 		return result;
 	}
 	// Leases first, and the whole tree's, the way the archive phase takes
@@ -2189,13 +2277,15 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	// between the proof and the lease, and the deletion then runs against a
 	// reading that is already stale. And a parent's lease says nothing about
 	// the subagent sessions below it, whose files this deletes too.
-	const session = await readSessionInfo(sessionPath);
+	const session = await readSessionInfo(sessionPath).catch(() => undefined);
 	if (!session) {
+		await keepTree();
 		result.errors.push(`${sessionPath} is not a session file`);
 		return result;
 	}
-	const tree = await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session));
+	const tree = await tryAcquireSessionTreeLeases(session, await collectSessionFiles(session)).catch(() => null);
 	if (!tree) {
+		await keepTree();
 		result.errors.push(
 			`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
 		);
@@ -2205,18 +2295,40 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// Proved under the leases, so what was read is what no writer holding
 		// one can change while this runs.
 		if (!(await holdsLive())) {
+			await keepTree();
 			result.errors.push(notACopy());
 			return result;
 		}
-		if (
-			(await pathExists(liveArtifacts)) &&
-			!(await removeLiveTreeOnceArchived(liveArtifacts, archiveArtifacts, liveArtifacts))
-		) {
-			result.keptArtifactTree = liveArtifacts;
-			result.errors.push(`${liveArtifacts} holds what the archive does not; it was kept`);
+		// Every file settled before any of it goes. Proving and deleting as
+		// the walk went meant a tree that refused on its last file had
+		// already lost the ones before it, while the report said it was kept.
+		const proven = { files: [] as string[], directories: [] as string[] };
+		if (await pathExists(liveArtifacts)) {
+			try {
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, proven);
+			} catch (error) {
+				await keepTree();
+				result.errors.push(`${liveArtifacts} was kept: ${errorMessage(error)}`);
+				return result;
+			}
+		}
+		const removed: string[] = [];
+		try {
+			await removeProvenLiveTree(proven, removed);
+			await fs.unlink(sessionPath);
+		} catch (error) {
+			// The removal itself failed part-way. What went is named, because
+			// the live tree is no longer whole and saying it was kept would be
+			// false; the archive holds all of it, and `omp gc --restore` brings
+			// it back.
+			result.partiallyRemoved = removed;
+			await keepTree();
+			result.errors.push(
+				`${sessionPath} was partly given up and then could not be finished: ${errorMessage(error)}. ` +
+					`The archive holds all of it — \`omp gc --restore ${path.basename(archiveFile, ".jsonl.gz")} --apply\` brings it back`,
+			);
 			return result;
 		}
-		await fs.unlink(sessionPath);
 		result.reclaimed = 1;
 	} catch (error) {
 		result.errors.push(errorMessage(error));

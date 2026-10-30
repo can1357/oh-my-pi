@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
-import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import {
+	collectGcErrors,
+	type GcResult,
+	renderText as renderGcText,
+	runGcCommand,
+} from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { resolveSessionFileArg } from "@oh-my-pi/pi-coding-agent/cli/session-arg";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html";
 import {
@@ -718,8 +723,10 @@ test("an artifact tree that cannot be dropped leaves the archive complete, not d
 	try {
 		const result = await archiveEverything();
 
-		// The live tree could not be given up, so reclaiming kept it and said so.
-		expect(result.archive?.errors.join("\n")).toContain("holds what the archive does not");
+		// The removal could not be finished, and the report names that rather
+		// than claiming the tree was kept whole.
+		expect(result.archive?.errors.join("\n")).toContain("was partly given up");
+		expect(result.archive?.errors.join("\n")).toContain("brings it back");
 		// The session is recoverable: the archive holds the transcript and the tree.
 		expect(await Bun.file(archiveFile).exists()).toBe(true);
 		expect(await Bun.file(path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl")).text()).toContain(
@@ -1340,7 +1347,7 @@ test("a live artifact rewritten after it was staged is kept, not deleted", async
 		copyFile.mockRestore();
 	}
 
-	expect(result.archive?.errors.join("\n")).toContain("holds what the archive does not");
+	expect(result.archive?.errors.join("\n")).toContain("was kept:");
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("NEW WORK");
 });
 
@@ -2138,4 +2145,113 @@ test("an archived artifact updated in place is not written over by a superseding
 
 	expect(result.archive?.archived).toBe(0);
 	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("XXXXXX");
+});
+test("a reclaim that gives up nothing says so and exits nonzero", async () => {
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	// Advanced past the archive, so the proof refuses.
+	await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "late" })}\n`);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	// A refusal nobody can see is the same as no refusal: the reason has to
+	// reach `collectGcErrors`, which is what sets the exit status, and the
+	// rendered output has to say nothing was given up.
+	expect(collectGcErrors(result).join("\n")).toContain("reclaim: ");
+	expect(renderGcText(result)).toContain("reclaim: gave up nothing");
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("an unknown reclaim target is reported, not thrown past the result", async () => {
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: "no-such-session", apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(collectGcErrors(result).join("\n")).toContain("reclaim: no archived session matches");
+});
+
+test("a reclaim names the live tree it kept, on every refusal", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARTIFACT");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	const lease = tryAcquireSessionLease(SESSION_ID);
+	expect(lease).not.toBeNull();
+
+	let owned: GcResult;
+	try {
+		owned = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		lease?.release();
+	}
+	await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "late" })}\n`);
+	const advanced = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	for (const result of [owned, advanced]) {
+		expect(result.reclaim?.keptArtifactTree).toBe(liveArtifacts);
+		expect(renderGcText(result)).toContain("reclaim kept the live artifact tree:");
+	}
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("ARTIFACT");
+});
+
+test("a reclaim that refuses on one artifact has removed none of the others", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "child", "only.log"), "NESTED");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "LAST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	// The last file by sort order diverges, so the proof refuses at the end.
+	// Everything proved before it must still be there: the tree is settled
+	// whole before any of it goes.
+	await Bun.write(path.join(liveArtifacts, "z.log"), "DIVERGED");
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+	expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+	expect(await Bun.file(path.join(liveArtifacts, "child", "only.log")).text()).toBe("NESTED");
+	expect(await Bun.file(path.join(liveArtifacts, "z.log")).text()).toBe("DIVERGED");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
+
+test("a reclaim whose removal fails part-way names what it had already removed", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "LAST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		if (String(target).endsWith("z.log")) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		return await realUnlink(target);
+	});
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+	}
+
+	// Part of the tree is gone, so saying it was kept would be false. What
+	// went is named, and so is the command that brings it back.
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved).toEqual([path.join(liveArtifacts, "a.log")]);
+	expect(collectGcErrors(result).join("\n")).toContain("was partly given up");
+	expect(renderGcText(result)).toContain("reclaim removed before it refused:");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
