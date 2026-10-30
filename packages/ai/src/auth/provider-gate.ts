@@ -195,3 +195,27 @@ export function copyOAuthCredentials(
 	}
 	return copy as OAuthCredentials;
 }
+
+/**
+ * The copy of a host credential record a session's callback is handed in place of the record.
+ *
+ * An object handed to author code is the author's from then on: it can install a getter on it or
+ * assign into it. Handed the host's own record — the credential pool's entry, or the row a refresh
+ * is about to merge — the host's next read of that record would run the author's getter or take
+ * its assignment, outside the session's admission and after its retirement, from whichever
+ * subsystem asks for the credential next. So the callback gets this copy and the host never reads
+ * it again: changing it changes nothing the host stores, and what the author returns is what the
+ * host keeps.
+ *
+ * Copied by the schema {@link copyOAuthCredentials} copies a returned record with, so the author
+ * receives the fields its parameter type declares. The record is the host's own data, so nothing
+ * in it is refused. A host registration is the host's code and is handed the record itself.
+ */
+export function handOAuthCredentials(credentials: OAuthCredentials): OAuthCredentials {
+	const copy: Record<string, unknown> = {};
+	for (const field in OAUTH_CREDENTIAL_FIELDS) {
+		const value: unknown = Reflect.get(credentials, field);
+		if (value !== undefined) copy[field] = value;
+	}
+	return copy as OAuthCredentials;
+}

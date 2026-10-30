@@ -19,7 +19,9 @@ import type {
 	Context,
 	Model,
 	SimpleStreamOptions,
+	ToolCall,
 } from "@oh-my-pi/pi-ai/types";
+import { getStreamingPartialJson, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream, EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 /** The session whose work is running, as the extension loader keeps it: an async-local store
@@ -374,9 +376,17 @@ describe("the stream the host consumes for a session's producer", () => {
 				const producerResult = await settle(produced[0]!.result());
 
 				expect(seen).toEqual(types);
-				// The same value or the same rejection, by identity, as the producer's own result.
+				// The same rejection, by identity, as the producer's own result. The same value: the
+				// producer's own for the host's API, and for a session's a host copy equal to it, so that
+				// nothing the caller reads afterwards is the session's object.
 				expect(callerResult.ok).toBe(producerResult.ok);
-				if (callerResult.ok && producerResult.ok) expect(callerResult.value).toBe(producerResult.value);
+				if (callerResult.ok && producerResult.ok) {
+					if (owner === "host") expect(callerResult.value).toBe(producerResult.value);
+					else {
+						expect(callerResult.value).not.toBe(producerResult.value);
+						expect(callerResult.value).toEqual(producerResult.value);
+					}
+				}
 				if (!callerResult.ok && !producerResult.ok) expect(callerResult.error).toBe(producerResult.error);
 				// A failed producer throws its own error into the caller's iteration.
 				if (!iteration.ok && !producerResult.ok) expect(iteration.error).toBe(producerResult.error);
@@ -897,5 +907,287 @@ describe("the signal a custom API's producer is called with", () => {
 		}
 
 		expect(open).toEqual([0, 0, 0, 0, 0, 0]);
+	});
+});
+
+type Built = { message: AssistantMessage; events: AssistantMessageEvent[] };
+
+describe("what a session's stream carries reaches the host as a copy taken inside its admission", () => {
+	/** Makes `field` of `target` a getter that answers `authored` when it is read as `gate`'s work and
+	 *  `substitute` otherwise, recording whether each read was inside. */
+	function twoFaced<T extends object>(target: T, field: string, gate: SessionGate, reads: boolean[]): T {
+		Object.defineProperty(target, field, {
+			get() {
+				reads.push(gate.inside);
+				return gate.inside ? "authored" : "substitute";
+			},
+			enumerable: true,
+			configurable: true,
+		});
+		return target;
+	}
+
+	/** A message whose first text block's `text` is {@link twoFaced}. */
+	function twoFacedReply(model: Model<Api>, gate: SessionGate, reads: boolean[]): AssistantMessage {
+		const message = reply(model, "unused");
+		twoFaced(message.content[0]!, "text", gate, reads);
+		return message;
+	}
+
+	/** A producer whose authored iterator yields the built events and whose `result()` answers the
+	 *  built message, both built per call. */
+	function producing(build: (model: Model<Api>) => Built, produced: Built[] = []): CustomStreamSimpleFn {
+		return model => {
+			const output = new AssistantMessageEventStream();
+			const built = build(model);
+			produced.push(built);
+			output.result = async () => built.message;
+			output[Symbol.asyncIterator] = async function* () {
+				yield* built.events;
+			};
+			return output;
+		};
+	}
+
+	test.each(routes)("%s: a terminal event's message is the one read inside", async (_name, route) => {
+		const gate = sessionGate();
+		const reads: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = twoFacedReply(model, gate, reads);
+				return { message, events: [{ type: "done", reason: "stop", message }] };
+			}),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const message = await route(modelFor());
+		await gate.released();
+		gate.retired = true;
+
+		expect(JSON.stringify(message)).toContain('"text":"authored"');
+		expect(JSON.stringify(message)).not.toContain("substitute");
+		expect(reads.length).toBeGreaterThan(0);
+		expect(reads.every(inside => inside)).toBe(true);
+	});
+
+	test.each(routes)("%s: a result reported with no terminal event is the one read inside", async (_name, route) => {
+		const gate = sessionGate();
+		const reads: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => ({ message: twoFacedReply(model, gate, reads), events: [] })),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const message = await route(modelFor());
+		await gate.released();
+		gate.retired = true;
+
+		expect(JSON.stringify(message)).toContain('"text":"authored"');
+		expect(JSON.stringify(message)).not.toContain("substitute");
+		expect(reads.length).toBeGreaterThan(0);
+		expect(reads.every(inside => inside)).toBe(true);
+	});
+
+	test("each delta event, its partial included, is the one read inside", async () => {
+		const gate = sessionGate();
+		const reads: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = twoFacedReply(model, gate, reads);
+				const delta = twoFaced(
+					{ type: "text_delta", contentIndex: 0, delta: "unused", partial: message } as AssistantMessageEvent,
+					"delta",
+					gate,
+					reads,
+				);
+				return { message, events: [delta, { type: "done", reason: "stop", message }] };
+			}),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const response = getCustomApi(API)!.streamSimple(modelFor(), context());
+		await gate.released();
+		gate.retired = true;
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of response) events.push(event);
+		const message = await response.result();
+
+		expect(JSON.parse(JSON.stringify({ events, message }))).toMatchObject({
+			events: [
+				{ type: "text_delta", delta: "authored", partial: { content: [{ type: "text", text: "authored" }] } },
+				{ type: "done", message: { content: [{ type: "text", text: "authored" }] } },
+			],
+			message: { content: [{ type: "text", text: "authored" }] },
+		});
+		expect(reads.length).toBeGreaterThan(0);
+		expect(reads.every(inside => inside)).toBe(true);
+	});
+
+	test("an error event's message is the one read inside", async () => {
+		const gate = sessionGate();
+		const reads: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = twoFaced(reply(model, "unused", "error"), "errorMessage", gate, reads);
+				return { message, events: [{ type: "error", reason: "error", error: message }] };
+			}),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const response = getCustomApi(API)!.streamSimple(modelFor(), context());
+		await gate.released();
+		gate.retired = true;
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of response) events.push(event);
+		const message = await response.result();
+
+		expect(events).toHaveLength(1);
+		expect(JSON.stringify({ events, message })).not.toContain("substitute");
+		expect(message.errorMessage).toBe("authored");
+		expect(reads.length).toBeGreaterThan(0);
+		expect(reads.every(inside => inside)).toBe(true);
+	});
+
+	test("a tool call's streamed argument JSON, keyed by a symbol, is copied with its block", async () => {
+		const gate = sessionGate();
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = reply(model, "x");
+				const toolCall: ToolCall = { type: "toolCall", id: "call", name: "tool", arguments: { a: 1 } };
+				setStreamingPartialJson(toolCall, '{"a":1');
+				message.content = [toolCall];
+				return {
+					message,
+					events: [
+						{ type: "toolcall_delta", contentIndex: 0, delta: '{"a":1', partial: message },
+						{ type: "toolcall_end", contentIndex: 0, toolCall, partial: message },
+						{ type: "done", reason: "toolUse", message },
+					],
+				};
+			}),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of getCustomApi(API)!.streamSimple(modelFor(), context())) events.push(event);
+
+		const [delta, end] = events;
+		if (delta?.type !== "toolcall_delta" || end?.type !== "toolcall_end") throw new Error("events out of order");
+		expect(getStreamingPartialJson(delta.partial.content[0] as ToolCall)).toBe('{"a":1');
+		// One event's copy keeps that event's aliases: the tool call it ends is the block in its partial.
+		expect(end.toolCall).toBe(end.partial.content[0] as ToolCall);
+		expect(end.toolCall.arguments).toEqual({ a: 1 });
+	});
+
+	test.each([
+		[
+			"an event's message",
+			(message: AssistantMessage): AssistantMessageEvent[] => [{ type: "done", reason: "stop", message }],
+			'Custom API "iteration-admission-api": events[0].message.content[0].text is a function, but it must be data.',
+		],
+		[
+			"a reported result",
+			(): AssistantMessageEvent[] => [],
+			'Custom API "iteration-admission-api": result().content[0].text is a function, but it must be data.',
+		],
+	] as const)("a function where data belongs in %s is refused, naming where", async (_n, events, expected) => {
+		const gate = sessionGate();
+		const called: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = reply(model, "x");
+				// A function where the block's text belongs, which the type cannot express.
+				Reflect.set(message.content[0]!, "text", () => called.push(true));
+				return { message, events: events(message) };
+			}),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const outcome = await settle(getCustomApi(API)!.streamSimple(modelFor(), context()).result());
+
+		expect(outcome.ok).toBe(false);
+		if (!outcome.ok) expect((outcome.error as Error).message).toStartWith(expected);
+		expect(called).toEqual([]);
+	});
+
+	test("an event or content block of a type no variant has is copied as data", async () => {
+		const gate = sessionGate();
+		const produced: Built[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = reply(model, "x");
+				// Shapes outside the types, which the host forwarded before and still forwards.
+				const block = { type: "custom_block", detail: { k: "v" } };
+				message.content.push(block as unknown as AssistantMessage["content"][number]);
+				const progress = { type: "custom_progress", detail: { n: 1 } };
+				return {
+					message,
+					events: [progress as unknown as AssistantMessageEvent, { type: "done", reason: "stop", message }],
+				};
+			}, produced),
+			SOURCE,
+			undefined,
+			gate,
+		);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of getCustomApi(API)!.streamSimple(modelFor(), context())) events.push(event);
+
+		const [progress, done] = events;
+		const authored = produced[0]!.events[0]!;
+		expect(progress).toEqual(authored);
+		expect(progress).not.toBe(authored);
+		expect(Reflect.get(progress!, "detail")).not.toBe(Reflect.get(authored, "detail"));
+		if (done?.type !== "done") throw new Error("expected the terminal event");
+		// A block outside the content types, so read as what it is to the type system: unknown.
+		const block: unknown = done.message.content[1];
+		expect(block).toEqual({ type: "custom_block", detail: { k: "v" } });
+		expect(block).not.toBe(produced[0]!.message.content[1]);
+	});
+
+	test("a host registration's events and result reach the caller as the producer's own", async () => {
+		const produced: Built[] = [];
+		const reads: boolean[] = [];
+		registerCustomApi(
+			API,
+			producing(model => {
+				const message = twoFacedReply(model, sessionGate(), reads);
+				const delta: AssistantMessageEvent = { type: "text_delta", contentIndex: 0, delta: "d", partial: message };
+				return { message, events: [delta, { type: "done", reason: "stop", message }] };
+			}, produced),
+			SOURCE,
+		);
+
+		const response = getCustomApi(API)!.streamSimple(modelFor(), context());
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of response) events.push(event);
+		const message = await response.result();
+
+		expect(produced).toHaveLength(1);
+		// The very objects the producer yielded and reported, which the registry never read.
+		expect(events).toHaveLength(2);
+		expect(events[0]).toBe(produced[0]!.events[0]!);
+		expect(events[1]).toBe(produced[0]!.events[1]!);
+		expect(message).toBe(produced[0]!.message);
+		expect(reads).toEqual([]);
 	});
 });

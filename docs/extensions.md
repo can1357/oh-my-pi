@@ -215,12 +215,14 @@ distinct from the built-in one so processes without the extension (older session
 
 ### What the host keeps, and when
 
-Everything crossing the boundary out of your extension is live until the host has copied it:
-the properties you expose, the callbacks you register, the arguments you pass, and the values
-you return. Each of those is your code — any of them may be a getter — so the host reads each
-one **once**, inside the session that owns it, and uses what it got. It never validates one
-read and then reads the same name again, and it never reads a value you returned after the call
-that returned it. Two consequences worth knowing before you write a provider.
+Everything crossing the boundary between your extension and the host is live until the host has
+copied it, **in both directions**: the properties you expose, the callbacks you register, the
+values you return, the events and results your streams carry — and the objects the host hands
+**in** to your callbacks, because installing a getter on one of those changes what the host
+reads from its own record afterwards. So the host hands you a copy and takes a copy of what
+comes back, each read **once**, inside the session that owns the call. It never validates one
+read and then reads the same name again, and it never reads a value you touched after the call
+that produced it. Two consequences worth knowing before you write a provider.
 
 **What the host keeps at admission is the data and the callbacks; change either by registering
 again.** `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied,
@@ -241,9 +243,17 @@ run during request construction or credential storage, long after the call, and 
 has gone cannot answer for them. Compute the value before you hand it over.
 
 What you return is copied the same way your registration is, inside the call that returned it:
-a `UsageReport`, and the credentials from `login` and `refreshToken`. Each field the host knows
-is read once, and the record it stores is the one you answered with rather than one assembled
-from several later reads of the same getter.
+a `UsageReport`, the credentials from `login` and `refreshToken`, and the events, deltas and
+result a custom stream carries. Each field the host knows is read once, and the record it keeps
+is the one you answered with rather than one assembled from several later reads of the same
+getter. An event or a content block of a type no known variant covers is copied as data — its
+own enumerable fields — which is what the host forwarded before.
+
+The objects handed **to** your callbacks are copies as well: the credential that `refreshToken`,
+`getApiKey` and `modifyModels` receive, the `credential` in a `supports` or `fetchUsage` params
+object, the `headers` that `parseRateLimitHeaders` receives, and the fetch context's `logger`,
+which forwards to the host's. Read them and change them freely — changing them changes nothing
+the host keeps. Return what you want it to keep.
 
 Several sessions can register the same provider name; a subagent that rebinds its parent's
 extensions does. The registration in force is the most recent one whose session is still alive,

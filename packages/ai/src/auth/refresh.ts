@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
-import { AdmittedSignal, callThroughGate, copyOAuthCredentials } from "./provider-gate";
+import { AdmittedSignal, callThroughGate, copyOAuthCredentials, handOAuthCredentials } from "./provider-gate";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -101,20 +101,33 @@ type OrganizationScope = Pick<
  * Organization-scoped identity after a refresh: refreshed values win; stored
  * org/residency/inference scope carries over only while the organization is
  * unchanged. The WorkOS selection always falls back to the stored one.
+ *
+ * Each field of both records is read once and the value read is the one used:
+ * a record a provider answered with may be built from getters, and a second
+ * read of `orgId` deciding "same organization" could disagree with the read
+ * that is stored — one organization's id beside another's region.
  */
 export function mergeRefreshedOrganizationScope(
 	current: OrganizationScope,
 	refreshed: OrganizationScope,
 ): OrganizationScope {
+	const { orgId, region, inferenceRegion, activeOrganizationId, orgName } = refreshed;
+	const {
+		orgId: currentOrgId,
+		region: currentRegion,
+		inferenceRegion: currentInferenceRegion,
+		activeOrganizationId: currentActiveOrganizationId,
+		orgName: currentOrgName,
+	} = current;
 	const sameOrg =
-		(refreshed.orgId === undefined || refreshed.orgId === current.orgId) &&
-		(refreshed.activeOrganizationId === undefined || refreshed.activeOrganizationId === current.activeOrganizationId);
+		(orgId === undefined || orgId === currentOrgId) &&
+		(activeOrganizationId === undefined || activeOrganizationId === currentActiveOrganizationId);
 	return {
-		orgId: refreshed.orgId ?? (sameOrg ? current.orgId : undefined),
-		region: refreshed.region ?? (sameOrg ? current.region : undefined),
-		inferenceRegion: refreshed.inferenceRegion ?? (sameOrg ? current.inferenceRegion : undefined),
-		activeOrganizationId: refreshed.activeOrganizationId ?? current.activeOrganizationId,
-		orgName: refreshed.orgName ?? (sameOrg ? current.orgName : undefined),
+		orgId: orgId ?? (sameOrg ? currentOrgId : undefined),
+		region: region ?? (sameOrg ? currentRegion : undefined),
+		inferenceRegion: inferenceRegion ?? (sameOrg ? currentInferenceRegion : undefined),
+		activeOrganizationId: activeOrganizationId ?? currentActiveOrganizationId,
+		orgName: orgName ?? (sameOrg ? currentOrgName : undefined),
 	};
 }
 
@@ -1047,8 +1060,13 @@ export class OAuthRefresher {
 								provider,
 							});
 						}
+						// Handed a copy, never `credential`: that is the host's own record — the pool's
+						// entry, or the row a leased refresh merges the answer into — and a getter or
+						// assignment the author put on it was read by the host after the call: a row was
+						// persisted holding the author's substitute organization beside the stored one's
+						// region. A host registration is handed the record itself, as it always has been.
 						const answered: OAuthCredentials = await Reflect.apply(refreshToken, custom, [
-							credential,
+							gate ? handOAuthCredentials(credential) : credential,
 							admitted.admit(),
 						]);
 						// Copied here, inside the admission, and every record built below — the

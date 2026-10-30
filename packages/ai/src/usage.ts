@@ -243,6 +243,8 @@ interface ReportSite {
 	readonly provider: string;
 	/** The path walked to the value, the provider method whose result it is first. */
 	readonly path: (string | number)[];
+	/** What the refusal tells the reader to do instead. */
+	readonly advice: string;
 }
 
 function renderReportPath(path: readonly (string | number)[]): string {
@@ -264,7 +266,7 @@ function copyReportValue(
 ): unknown {
 	if (typeof value === "function") {
 		throw new Error(
-			`Usage provider ${site.provider}: ${renderReportPath(site.path)} is a function, but it must be data. Compute the value before returning it.`,
+			`Usage provider ${site.provider}: ${renderReportPath(site.path)} is a function, but it must be data. ${site.advice}`,
 		);
 	}
 	if (typeof value !== "object" || value === null) return value;
@@ -336,9 +338,65 @@ export function copyUsageReport(
 	return copyReportValue(
 		report,
 		USAGE_REPORT,
-		{ provider, path: [`${method}() result`] },
+		{ provider, path: [`${method}() result`], advice: "Compute the value before returning it." },
 		new Map(),
 	) as UsageReport | null;
+}
+
+const USAGE_CREDENTIAL = fieldsOf<UsageCredential>({
+	type: DATA,
+	apiKey: DATA,
+	accessToken: DATA,
+	refreshToken: DATA,
+	expiresAt: DATA,
+	accountId: DATA,
+	projectId: DATA,
+	email: DATA,
+	orgId: DATA,
+	orgName: DATA,
+	enterpriseUrl: DATA,
+	region: DATA,
+	inferenceRegion: DATA,
+	activeOrganizationId: DATA,
+	metadata: DATA,
+	apiEndpoint: DATA,
+});
+
+/**
+ * The copy of a usage credential a session's provider is handed — by `supports` and by
+ * `fetchUsage` — in place of the host's.
+ *
+ * The host keeps the credential it puts in a request: after the call it attributes the report to
+ * the credential's organization, keys the cache by its identity, and hands its bearer to a
+ * completion probe. Handed that object, an author's getter or assignment on it would decide all
+ * of those, read outside the session's admission. So the provider gets this copy and the host
+ * never reads it again. Copied by its schema, as {@link copyUsageReport} copies a report; the
+ * credential is the host's data, so a function in it would be the host's own mistake.
+ */
+export function handUsageCredential(credential: UsageCredential, provider: string): UsageCredential {
+	return copyReportValue(
+		credential,
+		USAGE_CREDENTIAL,
+		{ provider, path: ["credential"], advice: "A usage credential is handed to a provider as data." },
+		new Map(),
+	) as UsageCredential;
+}
+
+/**
+ * The logger a session's provider is handed in its fetch context, in place of the storage's.
+ *
+ * The storage's logger is a capability the host keeps calling: after the provider's call it logs
+ * a failed usage-path refresh, and it is handed on to report deduplication. An author handed that
+ * object could reassign its methods, and every later host log call would run the author's code,
+ * with host arguments, outside the session's admission and after its retirement. This one is the
+ * author's own object: each method calls the storage's logger at the moment it is invoked, and
+ * nothing else of the storage's logger is copied, so a reassignment reaches only this object.
+ */
+export function handUsageLogger(logger: UsageLogger): UsageLogger {
+	return {
+		debug: (message, meta) => logger.debug(message, meta),
+		warn: (message, meta) => logger.warn(message, meta),
+	};
 }
 
 /**

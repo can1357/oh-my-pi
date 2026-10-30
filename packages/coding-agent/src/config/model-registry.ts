@@ -65,6 +65,7 @@ import { redactUrlForLog } from "../mcp/json-rpc";
 import {
 	AdmittedSignal,
 	callThroughGate,
+	handOAuthCredentials,
 	type GatedRegistration,
 	type ProviderCallGate,
 	selectLiveRegistration,
@@ -1644,8 +1645,13 @@ export class ModelRegistry {
 				// full catalog on every projection costs more than it can fix.
 				projected = callThroughGate(gate, () => {
 					// The function captured when this registration was admitted, applied on the
-					// block it was written on.
-					const authored = Reflect.apply(modifyModels, oauth, [snapshot, credential]);
+					// block it was written on. A session's hook is handed a copy of the credential:
+					// `getOAuth` returns the credential pool's own entry, which every other reader of
+					// the credential reads afterwards. A host registration is handed the entry itself.
+					const authored = Reflect.apply(modifyModels, oauth, [
+						snapshot,
+						gate ? handOAuthCredentials(credential) : credential,
+					]);
 					if (authored === undefined) return before;
 					const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
 					const site = authorDataSite(providerName, "oauth.modifyModels() result", RETURNING_ADVICE);

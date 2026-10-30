@@ -4,7 +4,7 @@ import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import { copyUsageReport, resolveUsedFraction } from "../usage";
+import { copyUsageReport, handUsageCredential, handUsageLogger, resolveUsedFraction } from "../usage";
 import type {
 	ClientUsageReport,
 	ClientUsageSummary,
@@ -288,8 +288,9 @@ export class UsageService implements UsageApi {
 	 * costs that provider alone.
 	 *
 	 * `signal` is the request's bridge when the request carries one. The author sees the admitted
-	 * signal here as it does at every other call: the bridge must exist before any author code is
-	 * handed a request's signal, and this check is the first call on the fetch path that is.
+	 * signal here as it does at every other call. The bridge must exist before this check, which
+	 * is the first call to the USAGE provider on that path — the author's `cacheVersion` getter
+	 * and a near-expiry credential refresh can both run before it, each inside its own gate.
 	 */
 	#supports(
 		entry: UsageProviderRegistration,
@@ -302,8 +303,14 @@ export class UsageService implements UsageApi {
 				const usageProvider = entry.provider;
 				const supports = usageProvider.supports;
 				if (!supports) return true;
+				// A session's provider is handed its own copy of the credential: the host keeps the
+				// request, fetches it next and keys the cache by it, so a getter or assignment on the
+				// host's credential would decide those after this call.
+				const handed = entry.gate
+					? { ...request, credential: handUsageCredential(request.credential, provider) }
+					: request;
 				const admitted = signal?.admit();
-				return Reflect.apply(supports, usageProvider, [admitted ? { ...request, signal: admitted } : request]);
+				return Reflect.apply(supports, usageProvider, [admitted ? { ...handed, signal: admitted } : handed]);
 			});
 		} catch (error) {
 			logger.debug("Usage provider support check failed; skipping provider", { provider, error: String(error) });
@@ -436,12 +443,15 @@ export class UsageService implements UsageApi {
 		const entry = runtime ?? this.providerEntryFor(request.provider);
 		if (!entry) return { report: null, runtime };
 
-		// Built before the support check, which is the first author call handed THIS REQUEST'S
-		// signal — not the first author code the path reaches: `report()` evaluates the author's
-		// `cacheVersion` getter while building the cache key, inside its gate and with no signal
-		// of this request. One bridge per request, admitted inside each gated call: the timeout
-		// fires on the host's timer, long after a quick fetch is over, so the signal the provider
-		// is handed follows the caller's only while this request runs.
+		// Built before the support check, which is the first call this path makes to the USAGE
+		// provider. It is not the first author code the path reaches, and this comment has been
+		// too strong twice: `report()` evaluates the author's `cacheVersion` getter while
+		// building the cache key, and the block above refreshes a near-expiry credential, which
+		// hands a non-leased `refreshToken` — an OAuth provider's, possibly the same
+		// extension's — this request's timeout signal. Both run inside their own gates, and both
+		// precede this. One bridge per request, admitted inside each gated call: the timeout
+		// fires on the host's timer, long after a quick fetch is over, so the signal the usage
+		// provider is handed follows the caller's only while this request runs.
 		const signal = new AdmittedSignal(entry.gate, params.signal);
 		if (!this.#supports(entry, request.provider, params, signal)) {
 			signal.release();
@@ -452,13 +462,20 @@ export class UsageService implements UsageApi {
 			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
 				this.#deps.cache.reportKey(request),
 			)?.value;
+			// A session's provider gets its own logger: the storage's is one the host keeps calling
+			// after this call, so a method reassigned on it would run the author's code in every
+			// later host log line, outside the session's admission.
 			const context: UsageFetchContext = {
 				fetch: this.fetch,
-				logger: this.logger,
+				logger: entry.gate ? handUsageLogger(this.logger) : this.logger,
 				...(previousReport ? { previousReport } : {}),
 			};
 			const report = await callThroughGate(entry.gate, async () => {
-				const answered = await entry.provider.fetchUsage({ ...params, signal: signal.admit() }, context);
+				// And its own copy of the credential, which the host reads below to attribute the
+				// report and keeps in the request it caches under.
+				const handed: UsageFetchParams = { ...params, signal: signal.admit() };
+				if (entry.gate) handed.credential = handUsageCredential(params.credential, request.provider);
+				const answered = await entry.provider.fetchUsage(handed, context);
 				// Copied where it comes back, as the session's work: what follows reads and extends
 				// only the copy, never the author's report.
 				return entry.gate ? copyUsageReport(answered, request.provider, "fetchUsage") : answered;
@@ -721,8 +738,11 @@ export class UsageService implements UsageApi {
 				const usageProvider = entry.provider;
 				const parse = usageProvider.parseRateLimitHeaders;
 				if (!parse) return undefined;
+				// A session's parser is handed its own copy of the headers: the caller's record is the
+				// live response's, which the agent session hands on to its response hooks after this.
+				// It is a plain record (`normalizeProviderResponse` builds it), so a spread copies it.
 				const parsed = Reflect.apply(parse, usageProvider, [
-					headers,
+					entry.gate ? { ...headers } : headers,
 					now,
 					{ responseStatus: options?.responseStatus },
 				]);

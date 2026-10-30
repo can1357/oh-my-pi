@@ -1,5 +1,11 @@
 import type { Provider } from "../types";
-import { copyUsageReport, isWithinUsageReserve, resolveUsedFraction } from "../usage";
+import {
+	copyUsageReport,
+	handUsageCredential,
+	handUsageLogger,
+	isWithinUsageReserve,
+	resolveUsedFraction,
+} from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -49,6 +55,11 @@ type DeclinedUsageProbe = "unsupported" | "unvalidated";
  * the caller reads only the copy. A throw, including the gate's refusal once the owner has retired
  * and a report holding a function, fails this probe only: the caller records it as one
  * credential's `ok: false`.
+ *
+ * A session's provider is handed its own copies of what the caller keeps: the credential, whose
+ * bearer the completion probe uses next, and the context, which is one object `check()` hands to
+ * every row — an assignment to it would otherwise reach the next row's provider, another
+ * session's or the host's own. A host provider is handed the caller's objects, as it always was.
  */
 function probeUsage(
 	registration: UsageProviderRegistration,
@@ -58,12 +69,21 @@ function probeUsage(
 	signal: AdmittedSignal,
 ): Promise<DeclinedUsageProbe | UsageReport | null> {
 	return callThroughGate(registration.gate, async () => {
+		const gated = registration.gate !== undefined;
 		const provider = registration.provider;
 		const supports = provider.supports;
-		if (supports && !Reflect.apply(supports, provider, [request])) return "unsupported";
+		if (supports) {
+			const handedRequest = gated
+				? { ...request, credential: handUsageCredential(request.credential, request.provider) }
+				: request;
+			if (!Reflect.apply(supports, provider, [handedRequest])) return "unsupported";
+		}
 		if (provider.validatesCredentials === false) return "unvalidated";
-		const report = await provider.fetchUsage({ ...params, signal: signal.admit() }, ctx);
-		return registration.gate ? copyUsageReport(report, request.provider, "fetchUsage") : report;
+		const handed: UsageFetchParams = { ...params, signal: signal.admit() };
+		if (gated) handed.credential = handUsageCredential(params.credential, request.provider);
+		const context = gated ? { ...ctx, logger: ctx.logger && handUsageLogger(ctx.logger) } : ctx;
+		const report = await provider.fetchUsage(handed, context);
+		return gated ? copyUsageReport(report, request.provider, "fetchUsage") : report;
 	});
 }
 
