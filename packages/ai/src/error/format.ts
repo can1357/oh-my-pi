@@ -4,6 +4,7 @@ import {
 	type RawHttpRequestDump,
 	rewriteClinePassError,
 	rewriteCopilotError,
+	rewriteMuseCodeError,
 } from "../utils/http-inspector";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
@@ -41,6 +42,9 @@ export async function formatMessage(error: unknown, opts: FormatMessageOptions =
 	}
 	if (opts.provider === "cline-pass") {
 		message = rewriteClinePassError(message, opts.provider);
+	}
+	if (opts.provider === "muse-code") {
+		message = rewriteMuseCodeError(message, opts.provider);
 	}
 	if (opts.provider === "ollama") {
 		message = rewriteOllamaToolCallJsonError(message);

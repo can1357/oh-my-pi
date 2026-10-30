@@ -259,6 +259,25 @@ export function rewriteClinePassError(errorMessage: string, provider: string): s
 	return errorMessage;
 }
 
+const MUSE_CODE_REMEDIATION =
+	"Muse Code subscription keys are valid only for the Muse Code client. In omp, configure a pay-as-you-go Meta Model API key on the meta provider.";
+const MUSE_CODE_ATTESTATION_DENIAL_PATTERN = /client_attestation_denied|billed to a Muse Code subscription/i;
+
+/**
+ * Prepend remediation to a Muse Code subscription attestation denial. Gated to
+ * the muse-code provider: these markers only mean "wrong client" for keys
+ * minted by a Muse Code subscription. The provider text and its
+ * `(type=… param=…)` suffix stay intact — account-policy classification reads
+ * them. A bare `permission_error` is not a marker: unrelated model and account
+ * denials must not get the client guidance.
+ */
+export function rewriteMuseCodeError(errorMessage: string, provider: string): string {
+	if (provider !== "muse-code") return errorMessage;
+	if (!MUSE_CODE_ATTESTATION_DENIAL_PATTERN.test(errorMessage)) return errorMessage;
+	if (errorMessage.includes(MUSE_CODE_REMEDIATION)) return errorMessage;
+	return `${MUSE_CODE_REMEDIATION}\n${errorMessage}`;
+}
+
 function sanitizeDump(dump: RawHttpRequestDump): RawHttpRequestDump {
 	return {
 		...dump,

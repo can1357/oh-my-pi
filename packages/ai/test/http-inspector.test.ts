@@ -9,8 +9,10 @@ import {
 	pruneHttpRequestDumps,
 	type RawHttpRequestDump,
 	rewriteClinePassError,
+	rewriteMuseCodeError,
 	shouldDumpRejectedRequest,
 } from "@oh-my-pi/pi-ai/utils/http-inspector";
+import { formatMessage } from "@oh-my-pi/pi-ai/error";
 
 class HttpError extends Error {
 	constructor(
@@ -26,6 +28,8 @@ const occurrences = (haystack: string, needle: string): number => haystack.split
 const MUSE_DENIAL_BODY =
 	"This API key is billed to a Muse Code subscription. Muse Code subscriptions cover requests from the Muse Code client only. Use it in Muse Code, or use a pay-as-you-go API key for other clients.";
 const MUSE_DENIAL_SUFFIX = " (type=permission_error param=client_attestation_denied)";
+const MUSE_REMEDIATION =
+	"Muse Code subscription keys are valid only for the Muse Code client. In omp, configure a pay-as-you-go Meta Model API key on the meta provider.";
 const MUSE_DENIAL_PAYLOAD = {
 	error: {
 		message: MUSE_DENIAL_BODY,
@@ -225,6 +229,56 @@ describe("finalizeErrorMessage", () => {
 		const message = await finalizeErrorMessage(new Error("500 boom"), undefined, captured);
 
 		expect(message).toBe("500 boom\nupstream exploded");
+	});
+});
+
+describe("rewriteMuseCodeError", () => {
+	const denial = `403 ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`;
+
+	it("prepends exactly one remediation line to a subscription attestation denial, keeping body and suffix", () => {
+		const rewritten = rewriteMuseCodeError(denial, "muse-code");
+
+		expect(occurrences(rewritten, MUSE_REMEDIATION)).toBe(1);
+		expect(occurrences(rewritten, MUSE_DENIAL_BODY)).toBe(1);
+		expect(rewritten.endsWith(MUSE_DENIAL_SUFFIX)).toBe(true);
+		expect(rewritten).toBe(`${MUSE_REMEDIATION}\n${denial}`);
+	});
+
+	it("prepends the remediation when only the billing phrase marks the denial", () => {
+		const phraseOnly = `403 ${MUSE_DENIAL_BODY}`;
+
+		expect(rewriteMuseCodeError(phraseOnly, "muse-code")).toBe(`${MUSE_REMEDIATION}\n${phraseOnly}`);
+	});
+
+	it("gives no pay-as-you-go guidance for an unrelated muse-code permission denial", () => {
+		const unrelated =
+			"403 You don't have permission to use this model (type=permission_error param=model_not_allowed)";
+
+		expect(rewriteMuseCodeError(unrelated, "muse-code")).toBe(unrelated);
+	});
+
+	it("leaves other providers byte-identical", () => {
+		expect(rewriteMuseCodeError(denial, "anthropic")).toBe(denial);
+	});
+
+	it("carries the remediation line through the formatMessage dispatch", async () => {
+		const muse = await formatMessage(new Error(denial), { provider: "muse-code" });
+		const other = await formatMessage(new Error(denial), { provider: "anthropic" });
+
+		expect(muse).toBe(`${MUSE_REMEDIATION}\n${denial}`);
+		expect(other).toBe(denial);
+	});
+
+	it("keeps the remediation line beside the single captured body and its suffix", async () => {
+		const message = await formatMessage(new Error(`403 ${MUSE_DENIAL_BODY}`), {
+			provider: "muse-code",
+			rawRequestDump: { ...dump, provider: "muse-code", api: "openai-completions" },
+			capturedErrorResponse: MUSE_DENIAL_RESPONSE,
+		});
+
+		expect(occurrences(message, MUSE_REMEDIATION)).toBe(1);
+		expect(occurrences(message, MUSE_DENIAL_BODY)).toBe(1);
+		expect(message.endsWith(MUSE_DENIAL_SUFFIX)).toBe(true);
 	});
 });
 
