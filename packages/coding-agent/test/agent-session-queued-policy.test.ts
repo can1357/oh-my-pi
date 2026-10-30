@@ -948,6 +948,172 @@ describe("queued user delivery policy", () => {
 		expect(requests[0].systemPrompt?.join("\n")).not.toContain("commit-memory-1");
 	});
 
+	it("product policy replaces committed policy for a queued user before a tool rebuild", async () => {
+		let executions = 0;
+		let rebuilds = 0;
+		const work: AgentTool = {
+			name: "work",
+			label: "Work",
+			description: "Refresh the real session base",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				await session.refreshBaseSystemPrompt();
+				return { content: [{ type: "text", text: "base refreshed" }] };
+			},
+		};
+		const { requests, events, delivered } = setup(
+			[
+				{ content: ["committed task complete"] },
+				{ content: [{ type: "toolCall", name: "work", arguments: {} }] },
+				{ content: ["queued task complete"] },
+			],
+			async () => {
+				rebuilds++;
+				return { systemPrompt: BASE };
+			},
+			{ tools: [work] },
+		);
+		await session.prompt("committed task");
+		await session.steer("queued replacement");
+		await session.waitForIdle();
+		expect(events.map(event => event.prompt)).toEqual(["committed task", "queued replacement"]);
+		expect(requests.map(request => request.systemPrompt)).toEqual([
+			[...BASE, "policy:committed task", "independent policy"],
+			[...BASE, "policy:queued replacement", "independent policy"],
+			[...BASE, "policy:queued replacement", "independent policy"],
+		]);
+		expect(delivered.filter(message => message.role === "user")).toMatchObject([
+			{ content: [{ type: "text", text: "committed task" }] },
+			{ content: [{ type: "text", text: "queued replacement" }] },
+		]);
+		expect(executions).toBe(1);
+		expect(rebuilds).toBe(1);
+	});
+
+	for (const delivery of ["ordinary", "queued"] as const) {
+		it(`product policy retains committed policy after cancelled ${delivery} preparation`, async () => {
+			const { agent, requests, events, delivered, pausePreparation } = setup(
+				[{ content: ["first done"] }, { content: ["peer done"] }, { content: ["replacement done"] }],
+				async () => ({ systemPrompt: BASE }),
+			);
+			await session.prompt("committed task");
+			const committed = [...BASE, "policy:committed task", "independent policy"];
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			pausePreparation(async () => {
+				started.resolve();
+				await release.promise;
+			});
+			const pending = delivery === "ordinary" ? session.prompt("discarded preparation") : undefined;
+			if (delivery === "queued") await session.steer("discarded preparation");
+			await started.promise;
+			const abort = session.abort();
+			release.resolve();
+			await abort;
+			await pending;
+			expect(requests).toHaveLength(1);
+			expect(session.systemPrompt).toEqual(committed);
+			expect(
+				delivered.filter(message => message.role === "custom" && message.customType === "prepared-context"),
+			).toMatchObject([{ content: "context:committed task" }]);
+			if (delivery === "queued") {
+				expect(agent.peekSteeringQueue()).toMatchObject([
+					{ content: [{ type: "text", text: "discarded preparation" }] },
+				]);
+				// Explicitly discard cancelled input before testing an autonomous peer wake.
+				session.clearQueue({ forInterrupt: true });
+			}
+			pausePreparation(async () => {});
+			await session.refreshBaseSystemPrompt();
+			expect(
+				await session.deliverIrcMessage({
+					id: "cancelled-policy-peer",
+					from: "policy-peer",
+					to: "me",
+					body: "CANCELLED_PREPARATION_PROBE",
+					ts: Date.now(),
+				}),
+			).toBe("woken");
+			await session.waitForIdle();
+			expect(requests).toHaveLength(2);
+			expect(requests[1].systemPrompt).toEqual(committed);
+			expect(events).toHaveLength(2);
+			expect(
+				delivered.filter(message => message.role === "custom" && message.customType === "irc:incoming"),
+			).toMatchObject([
+				{ attribution: "agent", details: { from: "policy-peer", message: "CANCELLED_PREPARATION_PROBE" } },
+			]);
+			await session.prompt("successful replacement");
+			expect(requests).toHaveLength(3);
+			expect(requests[2].systemPrompt).toEqual([...BASE, "policy:successful replacement", "independent policy"]);
+			expect(events.map(event => event.prompt)).toEqual([
+				"committed task",
+				"discarded preparation",
+				"successful replacement",
+			]);
+		});
+	}
+
+	it("product policy retains committed policy when new preparation throws before commit", async () => {
+		const { requests, events, delivered, extensions } = setup(
+			[{ content: ["first done"] }, { content: ["peer done"] }, { content: ["replacement done"] }],
+			async () => ({ systemPrompt: BASE }),
+		);
+		await session.prompt("committed task");
+		const committed = [...BASE, "policy:committed task", "independent policy"];
+		const failure = new Error("extension result cannot be normalized");
+		const original = extensions[0].handlers.get("before_agent_start")!;
+		const broken = extension("broken-result", async event => {
+			events.push(structuredClone(event));
+			return {
+				systemPrompt: [...event.systemPrompt, "uncommitted policy"],
+				message: {
+					customType: "broken-result",
+					display: false,
+					get content() {
+						throw failure;
+					},
+				},
+			};
+		});
+		extensions[0].handlers.set("before_agent_start", broken.handlers.get("before_agent_start")!);
+		await expect(session.prompt("throwing preparation")).rejects.toBe(failure);
+		extensions[0].handlers.set("before_agent_start", original);
+		expect(requests).toHaveLength(1);
+		expect(session.systemPrompt).toEqual(committed);
+		expect(delivered.filter(message => message.role === "custom" && message.customType === "broken-result")).toEqual(
+			[],
+		);
+		await session.refreshBaseSystemPrompt();
+		expect(
+			await session.deliverIrcMessage({
+				id: "throwing-policy-peer",
+				from: "policy-peer",
+				to: "me",
+				body: "THROWING_PREPARATION_PROBE",
+				ts: Date.now(),
+			}),
+		).toBe("woken");
+		await session.waitForIdle();
+		expect(requests).toHaveLength(2);
+		expect(requests[1].systemPrompt).toEqual(committed);
+		expect(events).toHaveLength(2);
+		expect(
+			delivered.filter(message => message.role === "custom" && message.customType === "irc:incoming"),
+		).toMatchObject([
+			{ attribution: "agent", details: { from: "policy-peer", message: "THROWING_PREPARATION_PROBE" } },
+		]);
+		await session.prompt("successful replacement");
+		expect(requests).toHaveLength(3);
+		expect(requests[2].systemPrompt).toEqual([...BASE, "policy:successful replacement", "independent policy"]);
+		expect(events.map(event => event.prompt)).toEqual([
+			"committed task",
+			"throwing preparation",
+			"successful replacement",
+		]);
+	});
+
 	it.each(["memory lookup", "prompt rebuild", "extension hook", "extension hook after rebuild"] as const)(
 		"does not apply late policy after abort during %s",
 		async phase => {

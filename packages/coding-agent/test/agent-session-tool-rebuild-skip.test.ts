@@ -9,7 +9,7 @@ import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { type CustomMessage, convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -114,6 +114,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		deviceOnlyWrite?: boolean;
 		/** Scripted mock model responses; enables driving `session.prompt()`. */
 		responses?: MockResponseSource;
+		readExecute?: AgentTool["execute"];
 		/** Persisted history seeded into the agent, e.g. to model a resumed session. */
 		initialMessages?: AgentMessage[];
 		/**
@@ -124,6 +125,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		exposeXdevCatalog?: boolean;
 		/** Optional per-turn system prompt replacement returned by before_agent_start. */
 		beforeAgentStartSystemPrompt?: string[];
+		beforeAgentStart?: ExtensionRunner["emitBeforeAgentStart"];
 		/** Pre-loaded skills handed to the session's hint snapshot. */
 		skills?: Skill[];
 	}
@@ -137,6 +139,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		contexts: Message[][];
 		/** Provider-call system prompt snapshots, one per model request. */
 		systemPrompts: string[][];
+		providerTools: string[][];
 		/** Mutable registry shared with the session, for lifecycle-only mount fixtures. */
 		toolRegistry: Map<string, AgentTool>;
 		isDeviceOnlyWrite: () => boolean;
@@ -144,6 +147,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		isToolActive: (name: string) => boolean;
 	} {
 		const readTool = createBasicTool("read", "Read");
+		if (options.readExecute) readTool.execute = options.readExecute;
 		const initialMcp = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const writeTool = createBasicTool("write", "Write");
 		const toolRegistry = options.xdev?.tools ?? new Map<string, AgentTool>();
@@ -155,6 +159,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const mock = options.responses ? createMockModel({ responses: options.responses }) : undefined;
 		const contexts: Message[][] = [];
 		const systemPrompts: string[][] = [];
+		const providerTools: string[][] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -172,6 +177,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				? (model, context, streamOptions) => {
 						contexts.push([...context.messages]);
 						systemPrompts.push([...(context.systemPrompt ?? [])]);
+						providerTools.push((context.tools ?? []).map(tool => tool.name));
 						return mock.stream(model, context, streamOptions);
 					}
 				: undefined,
@@ -201,12 +207,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
-			extensionRunner: options.beforeAgentStartSystemPrompt
-				? ({
-						emitBeforeAgentStart: async () => ({ systemPrompt: options.beforeAgentStartSystemPrompt }),
-						emit: async () => undefined,
-					} as unknown as ExtensionRunner)
-				: undefined,
+			extensionRunner:
+				options.beforeAgentStartSystemPrompt || options.beforeAgentStart
+					? ({
+							emitBeforeAgentStart:
+								options.beforeAgentStart ??
+								(async () => ({ systemPrompt: options.beforeAgentStartSystemPrompt })),
+							emit: async () => undefined,
+							hasHandlers: () => false,
+						} as unknown as ExtensionRunner)
+					: undefined,
 			rebuildSystemPrompt: async (toolNames, _tools) => {
 				const base = await rebuildSystemPrompt(toolNames);
 				if (!options.exposeXdevCatalog) return { systemPrompt: [base] };
@@ -222,11 +232,219 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			session,
 			contexts,
 			systemPrompts,
+			providerTools,
 			toolRegistry,
 			isDeviceOnlyWrite: () => deviceOnlyWrite,
 			isPendingFullWriteDescription: () => pendingFullWriteDescription,
 			isToolActive: name => activeToolNames.has(name),
 		};
+	}
+
+	for (const path of ["ordinary", "idle-aside"] as const) {
+		it(`preserves append-only extension policy through ${path} tool refresh`, async () => {
+			const prefix = "BASE POLICY\nPreserve exact bytes.\n";
+			const suffix = "APPEND-ONLY EXTENSION POLICY";
+			const expected = [prefix, suffix];
+			let hookCalls = 0;
+			let rebuilds = 0;
+			let toolExecutions = 0;
+			const responses: MockResponseSource = [
+				...(path === "idle-aside" ? [{ content: ["initial user turn complete"] }] : []),
+				{ content: [{ type: "toolCall", name: "read", arguments: { value: "refresh" } }] },
+				{ content: ["tool continuation complete"] },
+				...(path === "idle-aside" ? [{ content: ["next user turn complete"] }] : []),
+			];
+			const { session, systemPrompts, providerTools } = newSession(
+				async () => {
+					rebuilds++;
+					return prefix;
+				},
+				{
+					responses,
+					readExecute: async () => {
+						toolExecutions++;
+						await session.refreshMCPTools([search, fetch]);
+						return { content: [{ type: "text", text: "real MCP roster refreshed" }] };
+					},
+					beforeAgentStart: async (_prompt, _images, systemPrompt) => {
+						hookCalls++;
+						return { systemPrompt: [...systemPrompt, suffix] };
+					},
+				},
+			);
+			const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+			const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+			await session.refreshMCPTools([search]);
+			await session.prompt("ordinary user input");
+			if (path === "idle-aside") {
+				expect(session.isStreaming).toBe(false);
+				await session.sendCustomMessage(
+					{ customType: "peer-message", content: "peer aside", display: true, attribution: "agent" },
+					{ deliverAs: "aside" },
+				);
+				await session.prompt("next ordinary user input");
+			}
+			expect(toolExecutions).toBe(1);
+			expect(rebuilds).toBe(2);
+			expect(systemPrompts).toHaveLength(path === "ordinary" ? 2 : 4);
+			expect(hookCalls).toBe(path === "ordinary" ? 1 : 2);
+			const first = path === "ordinary" ? 0 : 1;
+			expect(providerTools[first]).not.toContain(fetch.name);
+			expect(providerTools[first + 1]).toContain(fetch.name);
+			if (path === "idle-aside") expect(systemPrompts[3]).toEqual(expected);
+			for (const prompt of systemPrompts) {
+				expect(prompt[0]).toBe(prefix);
+				expect(prompt.filter(part => part === expected[1])).toHaveLength(1);
+				expect(prompt).toEqual(expected);
+			}
+		});
+	}
+
+	for (const route of ["idle IRC", "stranded IRC", "successful-stop IRC", "launch completion"] as const) {
+		it(`product policy survives ${route} delivery and a real tool refresh`, async () => {
+			const base = "DELIVERY BASE POLICY";
+			const suffix = "NEUTRAL PREPARED EXTENSION POLICY";
+			const started = Promise.withResolvers<void>();
+			let hooks = 0;
+			let rebuilds = 0;
+			let executions = 0;
+			const { session, contexts, systemPrompts, providerTools } = newSession(
+				async () => {
+					rebuilds++;
+					return base;
+				},
+				{
+					responses: [
+						{ content: ["prepared user turn complete"] },
+						...(route === "stranded IRC"
+							? [
+									() => {
+										started.resolve();
+										return { content: ["working"], delayMs: 60_000 };
+									},
+								]
+							: []),
+						{ content: [{ type: "toolCall", name: "read", arguments: { value: "refresh" } }] },
+						{ content: ["delivery handled"] },
+					],
+					beforeAgentStart: async (_prompt, _images, policy) => {
+						hooks++;
+						return { systemPrompt: [...policy, suffix] };
+					},
+					readExecute: async () => {
+						executions++;
+						await session.refreshMCPTools([search, fetch]);
+						return { content: [{ type: "text", text: "roster refreshed" }] };
+					},
+				},
+			);
+			const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+			const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+			const body = route === "launch completion" ? "policy-worker" : "PEER_DELIVERY_BODY";
+			const normalWindow: { coreStreaming: boolean; sessionStreaming: boolean; stopReasons: string[] }[] = [];
+			const normalDelivery =
+				route === "successful-stop IRC" ? Promise.withResolvers<"injected" | "woken">() : undefined;
+			const unsubscribe = normalDelivery
+				? session.agent.subscribe(event => {
+						if (event.type !== "agent_end" || normalWindow.length > 0) return;
+						// Core end follows its final poll, but the Session prompt still owns its in-flight bracket.
+						normalWindow.push({
+							coreStreaming: session.agent.state.isStreaming,
+							sessionStreaming: session.isStreaming,
+							stopReasons: event.messages.flatMap(message =>
+								message.role === "assistant" ? [message.stopReason] : [],
+							),
+						});
+						void session
+							.deliverIrcMessage({
+								id: "policy-peer-message",
+								from: "policy-peer",
+								to: "me",
+								body,
+								ts: Date.now(),
+							})
+							.then(normalDelivery.resolve, normalDelivery.reject);
+					})
+				: undefined;
+			await session.refreshMCPTools([search]);
+			await session.prompt("prepare neutral policy");
+			if (normalDelivery) {
+				expect(await normalDelivery.promise).toBe("injected");
+				expect(normalWindow).toEqual([{ coreStreaming: false, sessionStreaming: true, stopReasons: ["stop"] }]);
+			} else if (route === "launch completion") {
+				const owner = session.sessionId;
+				await session.queueLaunchCompletion({
+					event: "daemon-completed",
+					completionId: "policy-completion",
+					owner,
+					daemon: {
+						name: body,
+						id: "policy-daemon",
+						state: "exited",
+						owner,
+						createdAt: 1,
+						startedAt: 1,
+						exitedAt: 2,
+						exitCode: 0,
+						restartCount: 0,
+						outputBytes: 0,
+						persist: false,
+						detached: false,
+					},
+				});
+			} else {
+				const running = route === "stranded IRC" ? session.prompt("work before peer arrives") : undefined;
+				if (running) await started.promise;
+				expect(
+					await session.deliverIrcMessage({
+						id: "policy-peer-message",
+						from: "policy-peer",
+						to: "me",
+						body,
+						ts: Date.now(),
+					}),
+				).toBe(running ? "injected" : "woken");
+				if (running) {
+					// A user interrupt skips the last aside poll; real peer IRC is allowed to wake.
+					await session.abort({ reason: USER_INTERRUPT_LABEL });
+					await running.catch(() => {});
+				}
+			}
+			await session.waitForIdle();
+			unsubscribe?.();
+			if (normalDelivery)
+				expect(
+					session.agent.state.messages.flatMap(message =>
+						message.role === "assistant" ? [message.stopReason] : [],
+					),
+				).toEqual(["stop", "toolUse", "stop"]);
+			const records = session.agent.state.messages.filter(
+				message =>
+					message.role === "custom" &&
+					message.attribution === "agent" &&
+					typeof message.content === "string" &&
+					message.content.includes(body),
+			);
+			expect(records).toHaveLength(1);
+			if (route !== "launch completion")
+				expect(records[0]).toMatchObject({
+					customType: "irc:incoming",
+					details: { id: "policy-peer-message", from: "policy-peer", message: body },
+				});
+			else
+				expect(records[0]).toMatchObject({
+					details: { daemons: [{ id: "policy-daemon", owner: session.sessionId, exitCode: 0 }] },
+				});
+			for (const context of contexts.slice(-2))
+				expect(context.filter(message => JSON.stringify(message).includes(body))).toHaveLength(1);
+			expect(executions).toBe(1);
+			expect(rebuilds).toBe(2);
+			expect(hooks).toBe(route === "stranded IRC" ? 2 : 1);
+			expect(systemPrompts).toHaveLength(route === "stranded IRC" ? 4 : 3);
+			expect(providerTools.at(-2)).not.toContain(fetch.name);
+			expect(providerTools.at(-1)).toContain(fetch.name);
+			for (const policy of systemPrompts) expect(policy).toEqual([base, suffix]);
+		});
 	}
 
 	it("skips rebuild when an MCP refresh produces an identical tool set", async () => {
