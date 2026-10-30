@@ -37,7 +37,7 @@ import { generateCommitMessage } from "../utils/commit-message-generator";
 const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { armTeardown, hasUnfinishedWriter } from "./isolation-lease";
+import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -321,19 +321,27 @@ export async function retainIsolationWorkspace(
 	backend?: natives.IsoBackendKind,
 ): Promise<RetainedWorkspace> {
 	const baseDir = path.dirname(isolationDir);
-	// A recorded writer is still using this path as its cwd. Renaming the
-	// workspace out from under it gives its next write `ENOENT` and loses the
-	// work, which is the thing retention exists to prevent — and it does that
-	// without any publication having failed. The workspace is retained where
-	// it is instead: `clear` reclaims it once that writer's process is gone.
-	if (await hasUnfinishedWriter(baseDir)) {
-		logger.warn("isolation workspace retained in place: a recorded writer is still using this path", {
+	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
+	// Nothing renames a workspace somebody is in — the same rule deletion
+	// already follows. A recorded writer keeps its cwd, and so does a live
+	// lease that is not ours: moving the directory gave a second session
+	// `ENOENT` at its own cwd, which is the loss retention exists to prevent.
+	if ((await hasUnfinishedWriter(baseDir)) || (await hasLiveIsolationLease(baseDir))) {
+		logger.warn("isolation workspace retained in place: another session is still working in this path", {
 			isolationDir,
 		});
-		return { dir: isolationDir, sidecarOk: true };
+		// The sidecar still has to be here, or `clear` skips the native stop
+		// for a mount backend and traverses a live mount later.
+		let inPlaceSidecarOk = !needsSidecar;
+		if (needsSidecar && backend !== undefined) {
+			inPlaceSidecarOk = await writeRetainedBackend(baseDir, backend).then(
+				() => true,
+				() => false,
+			);
+		}
+		return { dir: isolationDir, sidecarOk: inPlaceSidecarOk };
 	}
 	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
-	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
 	let sidecarOk = !needsSidecar;
 	if (needsSidecar && backend !== undefined) {
 		try {

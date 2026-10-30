@@ -26,6 +26,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import {
 	decideIsolationReclaim,
+	describeSandboxLockFailure,
 	ISOLATION_OWNER_FILE,
 	readRetainedMountBackend,
 	resolveSandboxIdentity,
@@ -245,7 +246,9 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					// lock, ask again — unless `--all` was asked for, which
 					// deletes whatever is there.
 					const sandbox = await resolveSandboxIdentity(target.path);
-					const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT);
+					const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT).catch(async (error: unknown) => {
+						throw await describeSandboxLockFailure(sandbox, "remove", error);
+					});
 					try {
 						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) {
 							results.push({ path: target.path, ok: true, skipped: true });

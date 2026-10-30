@@ -31,6 +31,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
+	describeSandboxLockFailure,
 	isProcessStillLive,
 	type ProcessIdentity,
 	readIsolationClaim,
@@ -231,7 +232,9 @@ export async function leaseIsolationWorkspace(
 	}
 	const sandbox = found.baseDir;
 	const leaseFile = path.join(sandbox, ISOLATION_LEASE_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT);
+	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT).catch(async (error: unknown) => {
+		throw await describeSandboxLockFailure(sandbox, "lease", error);
+	});
 	try {
 		const claim = await readIsolationClaim(sandbox);
 		if (claim.kind !== "claimed") {
@@ -308,7 +311,15 @@ export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
 /** Whether every unfinished-writer record at `baseDir` belongs to this process. */
 async function ownsEveryUnfinishedWriter(baseDir: string): Promise<boolean> {
 	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
-	const entries = await fs.readdir(dir).catch(() => [] as string[]);
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch (error) {
+		// A failure to look is not an absence. Not knowing whose records these
+		// are means they may be a foreign writer's, and this process stays.
+		if (isEnoent(error)) return true;
+		return false;
+	}
 	for (const entry of entries) {
 		const holder = await readProcessIdentity(path.join(dir, entry));
 		if (holder === undefined) continue;
@@ -412,7 +423,14 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// let a teardown delete the workspace its own child was still writing
 		// in; the run's result no longer depends on that exclusion, because the
 		// capture at release has already happened by the time this runs.
-		if (await hasLiveIsolationLease(baseDir)) return;
+		if (await hasLiveIsolationLease(baseDir)) {
+			// Somebody else arrived after a writer record let this process
+			// unreference its wait. The work is this process's to do, so the
+			// references come back: exiting now leaves it uncaptured.
+			workspace.poll?.ref?.();
+			workspace.watcher?.ref?.();
+			return;
+		}
 		// A writer that gave up its lease but has not finished is still a user:
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.

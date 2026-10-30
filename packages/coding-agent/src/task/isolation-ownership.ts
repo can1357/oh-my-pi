@@ -396,3 +396,36 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * Explain a sandbox lock this caller could not take.
+ *
+ * The holder is knowable — the marker names it — and a caller that has just
+ * waited a minute should be told who to look for rather than an attempt count.
+ * Descriptor exhaustion is the one case where nothing can be said about the
+ * holder, and it says that instead of guessing.
+ */
+export async function describeSandboxLockFailure(baseDir: string, purpose: string, error: unknown): Promise<Error> {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	const text = error instanceof Error ? error.message : String(error);
+	if (code === "EMFILE" || code === "ENFILE" || /EMFILE|ENFILE|too many open files/i.test(text)) {
+		return new Error(
+			`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code ?? "reported by the lock"}). ` +
+				"The lock could not be opened at all, so whether anything holds the workspace is unknown; raise " +
+				"the open-file limit (`ulimit -n`) or reduce how many sessions run at once.",
+			{ cause: error },
+		);
+	}
+	const claim = await readIsolationClaim(baseDir).catch(() => undefined);
+	const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
+	const held =
+		owner === undefined || owner === "unreadable" ? "its owner is not readable" : `it is held by pid ${owner.pid}`;
+	const state = claim === undefined ? "unknown" : claim.kind;
+	const waited = Math.round((SANDBOX_LOCK_WAIT.retries * SANDBOX_LOCK_WAIT.retryDelayMs) / 1000);
+	return new Error(
+		`Could not ${purpose} isolation workspace ${baseDir} (${state}; ${held}): another run has held it for ${waited}s. ` +
+			"A workspace is held while its task's patch is being saved, while it is being built, and while it is " +
+			"being removed; the hold ends when that finishes. Retry, or run `omp worktree list` to see what owns it.",
+		{ cause: error },
+	);
+}

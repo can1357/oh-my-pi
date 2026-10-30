@@ -4511,7 +4511,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let writerRecordGeneration = 0;
 		const recordWriter = (generation: number): Promise<() => Promise<void>> => {
 			if (generation !== writerRecordGeneration) return Promise.resolve(async () => {});
-			writerRecord ??= markUnfinishedWriter(sessionManager.getCwd());
+			// A rejection is not cached: re-awaiting a settled rejection is not a
+			// retry, and the "five attempts" around this made exactly one real
+			// one. A failure drops the memo so the next call tries again.
+			writerRecord ??= markUnfinishedWriter(sessionManager.getCwd()).catch((error: unknown) => {
+				writerRecord = undefined;
+				throw error;
+			});
 			return writerRecord;
 		};
 		const clearWriterRecord = async (): Promise<void> => {
@@ -4536,14 +4542,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// finish — the sandbox is then pinned for this process's life even
 			// though the writer is long done — so keep trying in the
 			// background, unreferenced, until it goes or the process does.
+			// One attempt at a time: an interval that starts work without
+			// awaiting the previous attempt had three clears in flight at once.
+			let clearing = false;
 			const slowRetry = setInterval(() => {
+				if (clearing) return;
+				clearing = true;
 				void clear().then(
 					() => {
 						clearInterval(slowRetry);
 						writerRecord = undefined;
 						writerRecordGeneration += 1;
+						clearing = false;
 					},
-					() => undefined,
+					() => {
+						clearing = false;
+					},
 				);
 			}, 5_000);
 			slowRetry.unref?.();
@@ -4587,9 +4601,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.warn("keeping this session's unfinished-writer record: disposal abandoned a shutdown handler", {
 						id: resolvedAgentId,
 					});
-					await recordWriter(writerRecordGeneration).catch(error => {
-						logger.warn("could not record this session as an unfinished writer", { error: String(error) });
-					});
+					// The lease goes only once the record is on disk, here as at
+					// the grace: catching the failure and dropping it anyway is
+					// how a late write ends up with `ENOENT` and no capture.
+					let published = false;
+					for (let attempt = 0; attempt < 5 && !published; attempt += 1) {
+						try {
+							await recordWriter(writerRecordGeneration);
+							published = true;
+						} catch (error) {
+							logger.warn("could not record this session as an unfinished writer; retrying", {
+								attempt,
+								error: String(error),
+							});
+							await scheduler.wait(200);
+						}
+					}
+					if (!published) {
+						logger.warn("keeping this session's workspace lease: its writer record could not be published", {
+							id: resolvedAgentId,
+						});
+						return;
+					}
 				} else {
 					await clearWriterRecord();
 				}

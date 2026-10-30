@@ -21,6 +21,7 @@ import {
 } from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
+	describeSandboxLockFailure,
 	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
@@ -644,7 +645,7 @@ function errorMessage(err: unknown): string {
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	// 128 bits from the system's cryptographic source, not a timestamp and a
+	// 122 random bits from the system's cryptographic source, not a timestamp and a
 	// counter. A timestamp-and-counter mint is a prediction two processes can
 	// make identically — same clock, same entropy, same name, and the second
 	// materialisation destroyed the first's output — and `mkdir` can only say
@@ -654,7 +655,9 @@ function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	// property a surviving descendant needs is that the name was never handed
 	// out before, which only an unguessably large draw gives. `mkdir` with
 	// `EEXIST` below stays as the last guard, not as the mechanism.
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${crypto.randomUUID().replaceAll("-", "")}`;
+	const mint = crypto.randomUUID().replaceAll("-", "");
+	if (mint.length !== 32) throw new Error(`randomUUID returned ${mint.length} hex characters, expected 32`);
+	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${mint}`;
 }
 
 /**
@@ -889,44 +892,12 @@ async function settleAbandonedStop(
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
  */
-/**
- * Take the sandbox lock, and explain the wait when it cannot be taken.
- *
- * The holder is a teardown saving a task's work, a materialisation building
- * one, or a reclamation removing one; "Failed to acquire lock after 600
- * attempts" tells the caller none of that and leaves it nothing to do.
- */
+/** Take the sandbox lock, and explain the wait when it cannot be taken. */
 async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ release: () => void }> {
 	try {
 		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
 	} catch (error) {
-		// Classified from what the layer actually returns: the native lock
-		// reports descriptor exhaustion as a `GenericFailure` whose message
-		// carries the reason, so matching only on `error.code` never fired and
-		// the caller was told another run had held the sandbox for a minute.
-		const code = (error as NodeJS.ErrnoException | undefined)?.code;
-		const text = error instanceof Error ? error.message : String(error);
-		if (code === "EMFILE" || code === "ENFILE" || /EMFILE|ENFILE|too many open files/i.test(text)) {
-			throw new Error(
-				`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code}). ` +
-					"The lock could not be opened at all, so whether anything holds the workspace is unknown; raise " +
-					"the open-file limit (`ulimit -n`) or reduce how many sessions run at once.",
-				{ cause: error },
-			);
-		}
-		const claim = await readIsolationClaim(baseDir).catch(() => undefined);
-		const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
-		const held =
-			owner === undefined || owner === "unreadable" ? "its owner is not readable" : `it is held by pid ${owner.pid}`;
-		const state = claim === undefined ? "unknown" : claim.kind;
-		throw new Error(
-			`Could not ${purpose} isolation workspace ${baseDir} (${state}; ${held}): another run has held it for ` +
-				`${Math.round((SANDBOX_LOCK_WAIT.retries * SANDBOX_LOCK_WAIT.retryDelayMs) / 1000)}s. ` +
-				"A workspace is held while its task's patch is being saved, while it is being built, and while it " +
-				"is being removed; the hold ends when that finishes. Retry, or run `omp worktree list` to see what " +
-				"owns it.",
-			{ cause: error },
-		);
+		throw await describeSandboxLockFailure(baseDir, purpose, error);
 	}
 }
 
