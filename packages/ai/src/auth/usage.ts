@@ -286,13 +286,24 @@ export class UsageService implements UsageApi {
 	 * run through the owner's gate inside one guard, with the provider as the receiver. `undefined`
 	 * means the provider gave no answer — it threw, or its owner retired after selection — which
 	 * costs that provider alone.
+	 *
+	 * `signal` is the request's bridge when the request carries one. The author sees the admitted
+	 * signal here as it does at every other call: the bridge must exist before ANY author code can
+	 * see a request's signal, and this check is the first author code the fetch path reaches.
 	 */
-	#supports(entry: UsageProviderRegistration, provider: Provider, request: UsageFetchParams): boolean | undefined {
+	#supports(
+		entry: UsageProviderRegistration,
+		provider: Provider,
+		request: UsageFetchParams,
+		signal?: AdmittedSignal,
+	): boolean | undefined {
 		try {
 			return callThroughGate(entry.gate, () => {
 				const usageProvider = entry.provider;
 				const supports = usageProvider.supports;
-				return !supports || Reflect.apply(supports, usageProvider, [request]);
+				if (!supports) return true;
+				const admitted = signal?.admit();
+				return Reflect.apply(supports, usageProvider, [admitted ? { ...request, signal: admitted } : request]);
 			});
 		} catch (error) {
 			logger.debug("Usage provider support check failed; skipping provider", { provider, error: String(error) });
@@ -423,11 +434,18 @@ export class UsageService implements UsageApi {
 		// one failed fetch, caught below like any other.
 		const runtime = this.#liveRuntimeEntry(request.provider);
 		const entry = runtime ?? this.providerEntryFor(request.provider);
-		if (!entry || !this.#supports(entry, request.provider, params)) return { report: null, runtime };
+		if (!entry) return { report: null, runtime };
 
-		// The timeout fires on the host's timer, long after a quick fetch is over: the signal the
-		// provider is handed follows it only while the fetch runs.
+		// Built before the support check, because that check is the first author code this path
+		// reaches and it is handed the request. One bridge per request, admitted inside each
+		// gated call: the timeout fires on the host's timer, long after a quick fetch is over, so
+		// the signal the provider is handed follows the caller's only while this request runs.
 		const signal = new AdmittedSignal(entry.gate, params.signal);
+		if (!this.#supports(entry, request.provider, params, signal)) {
+			signal.release();
+			return { report: null, runtime };
+		}
+
 		try {
 			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
 				this.#deps.cache.reportKey(request),

@@ -703,6 +703,47 @@ describe("the timeout signal the usage service hands fetchUsage", () => {
 		expect(handed).toEqual([timeouts[0]!.signal]);
 		expect(handed[0]).toBe(timeouts[0]!.signal);
 	});
+	// `supports` is the first author code this path reaches, and it is handed the request. The
+	// bridge therefore has to exist before it, not after: built later, this one call saw the raw
+	// timeout signal and a listener left on it outlived the session that registered the provider.
+	test("the support check is handed the bridged signal, and its listener dies with the session", async () => {
+		const timeouts = recordSignalsFrom("timeout");
+		const gate = sessionGate();
+		const storage = await usageStorage(TIMEOUT_MS);
+		const seenBySupports: AbortSignal[] = [];
+		const ran: Ran[] = [];
+		storage.usage.setProvider(
+			PROVIDER,
+			{
+				id: PROVIDER,
+				supports: params => {
+					if (params.signal) {
+						seenBySupports.push(params.signal);
+						params.signal.addEventListener(
+							"abort",
+							() => ran.push({ inside: gate.inside, retired: gate.retired }),
+							{ once: true },
+						);
+					}
+					return true;
+				},
+				fetchUsage: async () => report(),
+			},
+			undefined,
+			gate,
+		);
+
+		await storage.usage.reports({ provider: PROVIDER });
+		expect(timeouts).toHaveLength(1);
+		expect(seenBySupports).toHaveLength(1);
+		// Not the host's own timeout signal: the one its session answers for.
+		expect(seenBySupports[0]).not.toBe(timeouts[0]!.signal);
+
+		// The call is over and the session has gone; the host's timer fires on its own schedule.
+		gate.retired = true;
+		await abortOf(timeouts[0]!.signal);
+		expect(ran).toEqual([]);
+	});
 });
 
 describe("a refresh that outlasts the host's wait", () => {
