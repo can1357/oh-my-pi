@@ -3,7 +3,11 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CostEstimatorContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-export";
+import {
+	allowTelemetryReceiverForTests,
+	initTelemetryExport,
+	isTelemetryExportEnabled,
+} from "@oh-my-pi/pi-coding-agent/telemetry-export";
 import { estimateProviderCost } from "@oh-my-pi/pi-coding-agent/telemetry-export-otlp";
 import { cfgTelemetryOtlpExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -49,6 +53,8 @@ afterEach(() => {
  * loads `@oh-my-pi/pi-utils`, which fills every unset variable from `~/.env`,
  * `~/.omp/.env` and the agent dir's `.env`, so a kill-switch removed above would come
  * back from the developer's own dotenv files and silence the signal the probe expects.
+ * The probe is marked as a test child, as `ci-test-ts` marks it, so a local run takes
+ * the same export gate as CI does instead of passing for a production process.
  */
 function probeEnv(home: TempDir): Record<string, string | undefined> {
 	return {
@@ -56,6 +62,7 @@ function probeEnv(home: TempDir): Record<string, string | undefined> {
 		HOME: home.path(),
 		USERPROFILE: home.path(),
 		PI_CODING_AGENT_DIR: path.join(home.path(), ".omp", "agent"),
+		PI_TEST_RUNTIME: "1",
 	};
 }
 
@@ -68,11 +75,18 @@ describe("initTelemetryExport gating", () => {
 	it("never exports from a test process to a collector off this machine", async () => {
 		// What a developer's shell or `~/.omp/agent/.env` sets: an in-process
 		// `runRootCommand` would otherwise register real exporters aimed at it.
-		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "https://collector.example.invalid";
-		process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://10.0.0.1:4318/v1/logs";
-		process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://localhost.example.invalid:4318/v1/metrics";
+		const collectors = {
+			OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example.invalid",
+			OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://10.0.0.1:4318/v1/logs",
+			OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://localhost.example.invalid:4318/v1/metrics",
+		};
+		Object.assign(process.env, collectors);
 		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
+		// Nor can a test declare one of them as a receiver of its own.
+		for (const endpoint of Object.values(collectors)) {
+			expect(() => allowTelemetryReceiverForTests(endpoint)).toThrow("must be on loopback");
+		}
 	});
 
 	it("keeps OTLP export disabled when the user opts out despite configured endpoints", async () => {
@@ -97,6 +111,8 @@ describe("initTelemetryExport gating", () => {
 	});
 
 	it("declines unsupported OTLP protocols instead of misrouting spans", async () => {
+		// Declared as the test's own receiver, so only the protocol can decline it.
+		using _receiver = allowTelemetryReceiverForTests("http://localhost:4317");
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317";
 		process.env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
 		await initTelemetryExport(true);
@@ -181,6 +197,78 @@ describe("initTelemetryExport signals export path", () => {
 			traces: 0,
 			"logs and metrics": 0,
 			"resource attributes": 0,
+		});
+	}, 20_000);
+});
+
+describe("initTelemetryExport with an inherited loopback collector", () => {
+	/**
+	 * Run the inherited-collector probe with `OTEL_EXPORTER_OTLP_ENDPOINT` naming a
+	 * loopback collector this test serves, a stand-in for a developer's own collector.
+	 * Reports what the probe observed and the path of every request the collector got.
+	 */
+	async function runInheritedCollectorProbe(testChild: boolean, ...args: string[]) {
+		const collected = new Set<string>();
+		const collector = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(req) {
+				await req.arrayBuffer();
+				collected.add(new URL(req.url).pathname);
+				return new Response('{"partialSuccess":{}}', {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			},
+		});
+		using home = TempDir.createSync("@omp-otel-probe-home-");
+		try {
+			const probe = fileURLToPath(new URL("./otel-inherited-probe.ts", import.meta.url));
+			const proc = Bun.spawn([process.execPath, probe, ...args], {
+				env: {
+					...probeEnv(home),
+					// The probe is no test entrypoint, so without the marker it runs as production.
+					PI_TEST_RUNTIME: testChild ? "1" : undefined,
+					OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}`,
+				},
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+			});
+			const [output, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			const line = output.split("\n").find(entry => entry.startsWith("PROBE: "));
+			return {
+				exitCode,
+				observed: line && JSON.parse(line.slice("PROBE: ".length)),
+				collected: [...collected].sort(),
+			};
+		} finally {
+			await collector.stop(true);
+		}
+	}
+
+	it("exports nothing to it from a test process that declared no receiver", async () => {
+		expect(await runInheritedCollectorProbe(true)).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: true, enabled: false, ownReceived: [] },
+			collected: [],
+		});
+	}, 20_000);
+
+	it("exports every signal to it from a production process", async () => {
+		expect(await runInheritedCollectorProbe(false)).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: false, enabled: true, ownReceived: [] },
+			collected: ["/v1/logs", "/v1/metrics", "/v1/traces"],
+		});
+	}, 20_000);
+
+	it("exports from a test process only to the receiver it declared", async () => {
+		// Traces go to the probe's own receiver; logs and metrics still name the collector.
+		expect(await runInheritedCollectorProbe(true, "own-receiver")).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: true, enabled: true, ownReceived: ["/v1/traces"] },
+			collected: [],
 		});
 	}, 20_000);
 });

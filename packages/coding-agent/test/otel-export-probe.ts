@@ -4,14 +4,15 @@
  * TracerProvider singleton that initTelemetryExport() registers never leaks
  * into the test runner.
  *
- * Stands up a loopback OTLP/proto receiver, points the standard env vars at it,
- * registers the provider, emits a span through the same tracer name the agent
- * core uses, flushes, and exits 0 only if the receiver got a non-empty
- * protobuf POST at /v1/traces carrying the headers configured through
- * OTEL_EXPORTER_OTLP[_TRACES]_HEADERS.
+ * Stands up a loopback OTLP/proto receiver, declares it as the test's own,
+ * points the standard env vars at it, registers the provider, emits a span
+ * through the same tracer name the agent core uses, flushes, and exits 0 only
+ * if the receiver got a non-empty protobuf POST at /v1/traces carrying the
+ * headers configured through OTEL_EXPORTER_OTLP[_TRACES]_HEADERS.
  */
 
 import {
+	allowTelemetryReceiverForTests,
 	flushTelemetryExport,
 	initTelemetryExport,
 	isTelemetryExportEnabled,
@@ -40,6 +41,7 @@ const server = Bun.serve({
 	},
 });
 
+allowTelemetryReceiverForTests(`http://localhost:${server.port}`);
 process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `http://localhost:${server.port}/v1/traces`;
 process.env.OTEL_TRACES_EXPORTER = "OTLP";
 process.env.OTEL_SERVICE_NAME = "oh-my-pi-export-probe";

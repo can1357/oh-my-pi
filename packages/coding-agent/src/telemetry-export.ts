@@ -12,6 +12,9 @@
  * Only the `http/protobuf` transport is supported — an
  * `OTEL_EXPORTER_OTLP*_PROTOCOL` of `grpc` or `http/json` declines rather than
  * misrouting protobuf payloads.
+ *
+ * Under the test runtime a signal exports only to a receiver the test declared
+ * through {@link allowTelemetryReceiverForTests}.
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
@@ -41,6 +44,8 @@ interface OtlpExportModule {
 
 let otlp: OtlpExportModule | undefined;
 let initPromise: Promise<void> | undefined;
+/** Origins this test process declared through {@link allowTelemetryReceiverForTests}. */
+const testReceiverOrigins = new Set<string>();
 
 /**
  * Whether {@link initTelemetryExport} registered any real OTLP signal provider.
@@ -71,7 +76,8 @@ export function createTelemetryExportConfig(
 /**
  * Register global trace/log/meter providers when enabled and OTLP endpoints are
  * configured through env. Idempotent, and a no-op when disabled, no signal has
- * an endpoint, or the OTEL kill-switch is engaged.
+ * an endpoint, the OTEL kill-switch is engaged, or, under the test runtime, no
+ * signal's endpoint is a receiver the test declared.
  *
  * @param exportEnabled `telemetry.otlpExportEnabled`; required so every caller
  *   decides whether the user's opt-out applies.
@@ -100,6 +106,33 @@ export async function initTelemetryExport(exportEnabled: boolean): Promise<void>
  */
 export async function flushTelemetryExport(): Promise<void> {
 	if (otlp) await otlp.flushTelemetryExport();
+}
+
+/**
+ * Let this test process export OTLP telemetry to a loopback receiver it serves itself.
+ *
+ * Under the test runtime a signal exports only to an endpoint whose origin was declared
+ * here. A test inherits the developer's `OTEL_*` endpoints from the shell and from the
+ * dotenv files `@oh-my-pi/pi-utils` loads, and they name the developer's own collector,
+ * which listens on loopback as readily as a test's receiver does; so no address is
+ * consent by itself. The declaration lives in this process: a child does not inherit it.
+ *
+ * @param receiver URL of the receiver; only its origin counts.
+ * @returns a handle that withdraws the declaration when disposed.
+ * @throws outside the test runtime, and for a receiver that is not on loopback.
+ */
+export function allowTelemetryReceiverForTests(receiver: string | URL): Disposable {
+	if (!isBunTestRuntime()) throw new Error("allowTelemetryReceiverForTests is test-only");
+	const { origin, hostname } = new URL(receiver);
+	if (!isLoopbackHostname(hostname)) {
+		throw new Error(`A test's telemetry receiver must be on loopback, not ${origin}`);
+	}
+	testReceiverOrigins.add(origin);
+	return {
+		[Symbol.dispose]() {
+			testReceiverOrigins.delete(origin);
+		},
+	};
 }
 
 function resolveSignalConfig(): TelemetrySignalConfig {
@@ -144,12 +177,14 @@ function signalEnabled(
 		if (hasSelection && !hasOtlp) return false;
 	}
 	if (!endpoint) return false;
-	// A test process inherits the developer's OTEL endpoint, from the shell and from
-	// the dotenv files `@oh-my-pi/pi-utils` loads, and every in-process
-	// `runRootCommand` would ship its spans, logs and metrics there. Under test only a
-	// loopback receiver the test serves itself may be the target.
-	if (isBunTestRuntime() && !isLoopbackEndpoint(endpoint)) {
-		logger.debug(`OTEL ${signal} export disabled: a test process exports only to loopback`, { endpoint });
+	// Under test, every in-process `runRootCommand` would ship its spans, logs and
+	// metrics to whatever collector the inherited `OTEL_*` endpoints name. Only a
+	// receiver the test declared may be the target. An inherited endpoint is the
+	// common case here, not a misconfiguration, so declining it does not warn.
+	if (isBunTestRuntime() && !isDeclaredTestReceiver(endpoint)) {
+		logger.debug(`OTEL ${signal} export disabled: a test process exports only to a receiver it declared`, {
+			endpoint,
+		});
 		return false;
 	}
 
@@ -163,12 +198,16 @@ function signalEnabled(
 	return true;
 }
 
-function isLoopbackEndpoint(endpoint: string): boolean {
-	let hostname: string;
+function isDeclaredTestReceiver(endpoint: string): boolean {
+	let origin: string;
 	try {
-		hostname = new URL(endpoint).hostname;
+		origin = new URL(endpoint).origin;
 	} catch {
 		return false;
 	}
+	return testReceiverOrigins.has(origin);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
