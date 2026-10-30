@@ -196,6 +196,90 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		]);
 	});
 
+	it("releases a queued refresh when the DA1 sentinel that ends a cycle never arrives", () => {
+		// The sentinel is what lets the next query start. A terminal that never
+		// answers it — or a layer that drops the reply — used to leave every
+		// later appearance change queued for the life of the process, with the
+		// last colour latched and an explicit refresh accepted but never sent.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		expect(terminal.appearance).toBe("dark");
+
+		// A refresh goes out and the terminal answers it — but its sentinel is
+		// lost, so the cycle never ends. A notification queues behind it.
+		const started = queryCount();
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		expect(queryCount()).toBe(started + 1);
+		process.stdin.emit("data", "\x1b[?997;2n");
+		vi.advanceTimersByTime(100);
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		const stuck = queryCount();
+
+		// Nothing the terminal says now reaches the queued request: it is the
+		// sentinel, not a reply, that the cycle is still waiting for.
+		vi.advanceTimersByTime(4_000);
+		expect(queryCount()).toBe(stuck);
+		expect(terminal.appearance).toBe("dark");
+
+		// The cycle gives up on its own and the queued query runs.
+		vi.advanceTimersByTime(1_000);
+		expect(queryCount()).toBeGreaterThan(stuck);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(terminal.appearance).toBe("light");
+
+		terminal.stop();
+	});
+
+	it("gives a late DA1 sentinel to the cycle that gave up, not to the query that replaced it", () => {
+		// Recovery must not cost the protection the queue exists for: the FIFO
+		// is positional, so a sentinel that is merely late has to be matched to
+		// the cycle that asked for it. Attributing it to the replacement query
+		// would end that query as unanswered and strip the request identity its
+		// caller is waiting on.
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ kind: "report", appearance, token });
+		});
+		terminal.onAppearanceChange((appearance, token) => {
+			events.push({ kind: "change", appearance, token });
+		});
+		events.length = 0;
+
+		expect(terminal.refreshAppearance?.(41)).toBe(41);
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+		expect(queryCount()).toBe(2);
+
+		// The first cycle gives up; the queued refresh becomes the live query.
+		vi.advanceTimersByTime(5_000);
+		expect(queryCount()).toBe(3);
+
+		// The abandoned cycle's sentinel finally arrives. It belongs to that
+		// cycle, so the live query is untouched.
+		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(queryCount()).toBe(3);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		terminal.stop();
+
+		expect(events).toEqual([
+			{ kind: "report", appearance: "light", token: requestToken },
+			{ kind: "change", appearance: "light", token: requestToken },
+		]);
+	});
+
 	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
 		const { terminal } = setupTerminal();
 		const reports: Array<{ reported: string; current: string | undefined }> = [];

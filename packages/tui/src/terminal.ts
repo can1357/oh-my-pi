@@ -48,6 +48,18 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+/**
+ * How long an OSC 11 cycle waits for the DA1 sentinel that ends it. The
+ * sentinel is what releases the next query — a Mode 2031 notification, an
+ * explicit refresh — so a terminal that never answers it (or a layer that
+ * drops the reply) would otherwise leave every later appearance change queued
+ * for the life of the process, with the last colour latched.
+ *
+ * Far longer than any DA1 round trip, including a slow ssh link, because
+ * abandoning early costs a redundant query while abandoning late only delays
+ * a theme change nobody has asked for twice.
+ */
+const OSC11_SENTINEL_TIMEOUT_MS = 5_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 
@@ -828,7 +840,15 @@ type Da1SentinelOwner =
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" }
-	| { kind: "drain"; answered: () => void };
+	| { kind: "drain"; answered: () => void }
+	/**
+	 * A probe that gave up waiting for its sentinel. The slot stays in the FIFO
+	 * with nothing left to resolve, because the FIFO is positional: dropping it
+	 * would hand a reply that is merely late to the next probe's sentinel, and
+	 * that probe would resolve as unanswered. Here the late reply is matched to
+	 * the cycle that asked for it and discarded.
+	 */
+	| { kind: "abandoned" };
 
 let nextOsc99ProbeId = 1;
 
@@ -999,6 +1019,8 @@ export class ProcessTerminal implements Terminal {
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
+	/** Deadline for the DA1 sentinel of the OSC 11 cycle currently outstanding. */
+	#osc11SentinelTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1640,23 +1662,20 @@ export class ProcessTerminal implements Terminal {
 				}
 				switch (owner.kind) {
 					case "osc11": {
+						this.#clearOsc11SentinelDeadline();
 						if (this.#osc11Pending) {
 							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
 							this.#osc11Pending = false;
 							this.#osc11ActiveToken = undefined;
 							this.#osc11ResponseBuffer = "";
 						}
-						// Start a queued OSC 11 query once the prior cycle is fully drained.
-						if (
-							this.#osc11QueuedQuery !== undefined &&
-							!this.#osc11Pending &&
-							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
-							!this.#dead
-						) {
-							const query = this.#osc11QueuedQuery;
-							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.cache, query.token);
-						}
+						this.#startQueuedOsc11Query();
+						break;
+					}
+					case "abandoned": {
+						// The reply this slot was waiting for, arriving after its cycle
+						// gave up. Matched here so it cannot be read as an answer to a
+						// later probe; nothing else to do with it.
 						break;
 					}
 					case "privateMode": {
@@ -1856,6 +1875,18 @@ export class ProcessTerminal implements Terminal {
 			// Someone is at the keyboard, which settles the audience question
 			// ahead of any probe: a pane held at the no-audience cadence returns
 			// to full speed on the first keystroke instead of at the next poll.
+			//
+			// Every non-empty chunk counts, terminal reports included, and that
+			// is deliberate. Telling a report from a keystroke here would mean a
+			// second escape-sequence parser ahead of StdinBuffer's reassembly,
+			// which would misread any sequence split across reads — real cost
+			// against a cost nobody has measured, because the reports that reach
+			// a detached pane are not periodic: startup probes run once, DEC 2048
+			// and CPR reports follow a resize (itself proof of a client), and TSP
+			// acks only arrive where the renderer is credit-paced and this floor
+			// never applies. A worst case of one demoted probe and one poll gap
+			// of full-rate frames is the right price for never hiding a keystroke.
+			// Revisit if an unsolicited report ever arrives on a cadence.
 			if (data) this.#invalidateAudience();
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
@@ -1911,9 +1942,61 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#startDirectOsc11Query(): void {
-		this.#da1SentinelOwners.push({ kind: "osc11" });
+		const owner: Da1SentinelOwner = { kind: "osc11" };
+		this.#da1SentinelOwners.push(owner);
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+		this.#clearOsc11SentinelDeadline();
+		this.#osc11SentinelTimer = setTimeout(() => {
+			this.#osc11SentinelTimer = undefined;
+			this.#abandonOsc11Sentinel(owner);
+		}, OSC11_SENTINEL_TIMEOUT_MS);
+	}
+
+	#clearOsc11SentinelDeadline(): void {
+		if (!this.#osc11SentinelTimer) return;
+		clearTimeout(this.#osc11SentinelTimer);
+		this.#osc11SentinelTimer = undefined;
+	}
+
+	/**
+	 * Give up on a DA1 sentinel that never came, without letting the cycle hold
+	 * the appearance pipeline shut.
+	 *
+	 * The FIFO slot is kept and neutered rather than removed: the next reply
+	 * still belongs to this cycle positionally, so removing the slot would hand
+	 * it to a replacement query's sentinel and resolve that query as unanswered.
+	 * Everything else the cycle holds is released, including a half-finished
+	 * one whose OSC 11 reply never arrived either, so the queued request — the
+	 * notification or explicit refresh waiting behind it — runs now.
+	 */
+	#abandonOsc11Sentinel(owner: Da1SentinelOwner): void {
+		const index = this.#da1SentinelOwners.indexOf(owner);
+		if (index < 0 || this.#dead) return;
+		this.#da1SentinelOwners[index] = { kind: "abandoned" };
+		this.#osc11Pending = false;
+		this.#osc11ActiveToken = undefined;
+		this.#osc11ResponseBuffer = "";
+		if (this.#osc11CacheRefreshTimer) {
+			clearTimeout(this.#osc11CacheRefreshTimer);
+			this.#osc11CacheRefreshTimer = undefined;
+		}
+		this.#startQueuedOsc11Query();
+	}
+
+	/** Run the request parked behind the cycle that just ended, if there is one. */
+	#startQueuedOsc11Query(): void {
+		const query = this.#osc11QueuedQuery;
+		if (
+			query === undefined ||
+			this.#osc11Pending ||
+			this.#da1SentinelOwners.some(o => o.kind === "osc11") ||
+			this.#dead
+		) {
+			return;
+		}
+		this.#osc11QueuedQuery = undefined;
+		this.#startOsc11Query(query.cache, query.token);
 	}
 
 	#shouldQueryOsc99Support(): boolean {
@@ -2512,6 +2595,7 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
 		}
+		this.#clearOsc11SentinelDeadline();
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
@@ -2849,19 +2933,21 @@ export class ProcessTerminal implements Terminal {
 				// re-probe the invalidation asked for, so nothing would correct
 				// it until the next poll. Demote it to unknown, which is the full
 				// frame rate a pane someone is typing into deserves, and let the
-				// next probe — one ordinary gap from now, never a child spawned
-				// behind the one that just returned — settle it. A stale `true`
-				// or `undefined` withholds nothing and is kept as it is.
-				if (attached === false && generation !== this.#audienceGeneration) {
-					this.#audience = undefined;
-					this.#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
-					this.#audienceProbedAtMs = endedAtMs;
-					return;
-				}
-				this.#audience = attached;
+				// next probe settle it. A stale `true` or `undefined` withholds
+				// nothing and is kept as it is.
+				//
+				// Only the verdict is void. What the probe cost on this host is
+				// an honest measurement whatever the answer turned out to be, so
+				// the demoted cycle still pays for its own gap at the same duty —
+				// discarding that would poll a slow host several times harder
+				// than the fresh path ever does, and would spawn a child straight
+				// behind the one that just returned.
+				const stale = attached === false && generation !== this.#audienceGeneration;
+				this.#audience = stale ? undefined : attached;
 				// Poll at the duty-derived cadence only while frames are actually
-				// being withheld, because that is the only state an attach has to
-				// be noticed quickly in. Watched or unknown, the longest gap is
+				// being withheld, or while a withheld answer has just been
+				// demoted, because those are the only states an attach has to be
+				// noticed quickly in. Watched or unknown, the longest gap is
 				// right: a detach noticed late costs a few seconds of animation
 				// nobody sees, and an unanswerable pane (a `TMUX_PANE` the server
 				// no longer has) must not spawn a doomed child every two seconds.

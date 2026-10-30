@@ -119,4 +119,38 @@ describe("audience probe races", () => {
 		await advance(0);
 		expect(h.terminal.hasAudience).toBe(false);
 	});
+
+	it("makes a demoted probe pay for its own gap at the cost it measured", async () => {
+		// Demotion voids the verdict, not the measurement. The gap after a probe
+		// is a multiple of what that probe cost on this host (AUDIENCE_PROBE_DUTY),
+		// so a slow host polls no harder for having been interrupted — resetting
+		// the gap to the floor would poll a 100 ms probe five times as often as
+		// the uninterrupted path does.
+		const probeCostMs = 100;
+		const { answers, h } = setup();
+
+		void h.terminal.hasAudience;
+		expect(answers).toHaveLength(1);
+
+		// The keystroke lands while the probe is out, so its answer is demoted.
+		await advance(probeCostMs / 2);
+		process.stdin.emit("data", "X");
+		await advance(probeCostMs / 2);
+		answers[0]!(false);
+		await advance(0);
+		expect(h.terminal.hasAudience).toBeUndefined();
+
+		// Well past the floor a demotion used to reset the gap to, and still no
+		// second child: this probe cost 100 ms, so it owes ~10 s of quiet.
+		await advance(PROBE_INTERVAL_MS * 2);
+		void h.terminal.hasAudience;
+		expect(answers).toHaveLength(1);
+
+		// The cost-derived gap does come round, so the pane is not left unknown.
+		for (let step = 0; step < 20 && answers.length < 2; step++) {
+			await advance(1_000);
+			void h.terminal.hasAudience;
+		}
+		expect(answers).toHaveLength(2);
+	});
 });
