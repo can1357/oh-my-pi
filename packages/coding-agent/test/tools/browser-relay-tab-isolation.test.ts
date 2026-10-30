@@ -4,7 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	buildHeadlessLaunchArgs,
+	DEFAULT_VIEWPORT,
+	ensureChromiumExecutable,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { unpackedExtensionId } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
@@ -113,7 +117,15 @@ async function launchRelayFixture(
 			headless: true,
 			pipe: true,
 			enableExtensions: [extensionDir],
-			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
+			// The product's own argv, sandbox flags included: on a host that forbids unprivileged
+			// user namespaces Chrome aborts at startup without them, though `chromiumAvailable`
+			// (which launches with `--no-sandbox`) reported it usable.
+			args: [
+				...buildHeadlessLaunchArgs(DEFAULT_VIEWPORT),
+				"--no-first-run",
+				"--no-default-browser-check",
+				"--use-mock-keychain",
+			],
 		});
 		browsers.push(browser);
 		const extensionId = await unpackedExtensionId(extensionDir);

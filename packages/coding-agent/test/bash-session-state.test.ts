@@ -15,9 +15,13 @@ import { Settings } from "../src/config/settings";
 import { releaseShellSessions } from "../src/exec/bash-executor";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
+import { withoutAmbientShellPrefix } from "./helpers/ambient-shell-prefix";
 
 let cwd: string;
 let manager: AsyncJobManager;
+
+// A prefix runs before every call, so one that resets shell options would undo the state these cases keep.
+withoutAmbientShellPrefix();
 
 beforeEach(async () => {
 	cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-session-state-"));

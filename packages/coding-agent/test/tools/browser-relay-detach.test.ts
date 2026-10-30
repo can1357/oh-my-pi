@@ -4,7 +4,11 @@ import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrit
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	buildHeadlessLaunchArgs,
+	DEFAULT_VIEWPORT,
+	ensureChromiumExecutable,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -247,7 +251,14 @@ describe("relay tabs Chrome detaches omp from", () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		const executablePath = await ensureChromiumExecutable();
 		if (!executablePath) throw new Error("Chromium executable missing");
-		chromium = await puppeteer.launch({ executablePath, headless: true, args: ["--no-first-run"] });
+		// The product's own argv, sandbox flags included: on a host that forbids unprivileged
+		// user namespaces Chrome aborts at startup without them, though `chromiumAvailable`
+		// (which launches with `--no-sandbox`) reported it usable.
+		chromium = await puppeteer.launch({
+			executablePath,
+			headless: true,
+			args: [...buildHeadlessLaunchArgs(DEFAULT_VIEWPORT), "--no-first-run"],
+		});
 		site = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,

@@ -563,9 +563,29 @@ describe("update-cli package manager commands", () => {
 	it.skipIf(!miseBinary)("overrides per-tool release age during actual mise upgrade resolution", async () => {
 		if (!miseBinary) throw new Error("mise binary unavailable");
 		const root = await makeTempDir();
+		// The asset names a real release publishes (scripts/ci-release-build-binaries.ts).
+		// mise skips a release with no asset for the running platform, so a fixture without
+		// them leaves mise nothing to resolve: the blocked check would pass without testing
+		// the release-age gate, and the allowed one would fail.
+		const assets = [
+			"omp-darwin-arm64",
+			"omp-darwin-x64",
+			"omp-linux-x64",
+			"omp-linux-arm64",
+			"omp-linux-musl-x64",
+			"omp-linux-musl-arm64",
+			"omp-windows-x64.exe",
+			"omp-windows-arm64.exe",
+		].map(name => ({
+			name,
+			size: 1,
+			content_type: "application/octet-stream",
+			url: `http://127.0.0.1:9/assets/${name}`,
+			browser_download_url: `http://127.0.0.1:9/download/${name}`,
+		}));
 		const releases = [
-			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets: [] },
-			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets: [] },
+			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets },
+			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets },
 		];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",

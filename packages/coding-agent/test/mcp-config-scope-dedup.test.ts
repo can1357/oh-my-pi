@@ -18,6 +18,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -33,9 +34,14 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 	let projectDir = "";
 	let userAgentDir = "";
 	let originalHome: string | undefined;
+	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
 		originalHome = process.env.HOME;
+		// `CLAUDE_CONFIG_DIR` outranks the temporary home, so a shell that exports it would add
+		// the MCP servers of that directory's installed Claude plugins to every result here.
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		restoreEnvValue("CLAUDE_CONFIG_DIR", undefined);
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-home-"));
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-project-"));
 		userAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-agent-"));
@@ -59,6 +65,7 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		}
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		await removeWithRetries(tempHome);
 		await removeWithRetries(projectDir);
 		await removeWithRetries(userAgentDir);
