@@ -2,11 +2,11 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-	ARTIFACT_STAGING_SUFFIX as STAGING_SUFFIX,
 	type ArtifactCopyOutcome,
 	copySessionArtifacts,
 	whenArtifactCopiesSettle,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ARTIFACT_STAGING_SUFFIX as STAGING_SUFFIX } from "@oh-my-pi/pi-coding-agent/session/artifact-staging";
 import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -256,10 +256,16 @@ describe("copying a session's artifacts to another session", () => {
 		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
 		fs.mkdirSync(sourceArtifacts, { recursive: true });
 		fs.writeFileSync(path.join(sourceArtifacts, "1.bash.log"), "fresh");
-		// One left by a copier that was killed: nothing holds its lease, and the
-		// marker inside says the tree was a copy's.
+		// One left by a copier that was killed with nothing in it but its
+		// marker: nothing holds its lease, and there is nothing to lose by
+		// taking it away.
 		const abandoned = markedStaging(`${destinationArtifacts}.abandoned${STAGING_SUFFIX}`);
-		fs.writeFileSync(path.join(abandoned, "0.bash.log"), "never published");
+		// And one left by a copier that was killed with a file in it. The
+		// marker says the *tree* was a copy's; it says nothing about an object
+		// this process never placed, and this process has no record of what
+		// that copy created. So the tree stays, whole.
+		const abandonedWithFile = markedStaging(`${destinationArtifacts}.unfinished${STAGING_SUFFIX}`);
+		fs.writeFileSync(path.join(abandonedWithFile, "0.bash.log"), "never published");
 		// A directory of somebody else's that merely wears the name: no marker,
 		// so nothing here may remove it.
 		const impostor = `${destinationArtifacts}.user-owned${STAGING_SUFFIX}`;
@@ -283,6 +289,7 @@ describe("copying a session's artifacts to another session", () => {
 		}
 
 		expect(fs.existsSync(abandoned)).toBe(false);
+		expect(fs.readFileSync(path.join(abandonedWithFile, "0.bash.log"), "utf8")).toBe("never published");
 		expect(fs.existsSync(live)).toBe(true);
 		expect(fs.readFileSync(path.join(impostor, "notes.md"), "utf8")).toBe("only copy");
 		expect(fs.readFileSync(path.join(forged, "notes.md"), "utf8")).toBe("also only copy");
@@ -418,6 +425,40 @@ describe("copying a session's artifacts to another session", () => {
 		expect(outcome.discarded).toBe(true);
 		expect(fs.readdirSync(outside).sort()).toEqual(["deep", "only-copy"]);
 		expect(fs.readFileSync(path.join(outside, "deep", "precious"), "utf8")).toBe("and this");
+	});
+
+	it("keeps a foreign file a copy spared, through the next copy's sweep", async () => {
+		using tempDir = TempDir.createSync("@omp-artifact-copy-");
+		const sourceArtifacts = path.join(tempDir.path(), SOURCE);
+		const destinationArtifacts = path.join(tempDir.path(), DESTINATION);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "0.bash.log"), "COPIED");
+		let foreign = "";
+
+		await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${destinationArtifacts}.jsonl`, {
+			stillTheSource: async () => {
+				// Somebody else's file, in the staging tree. The copy that owns
+				// the tree has a record of what it created, recognises this as
+				// not its own, and leaves it — which also leaves the tree.
+				const staging = path.join(tempDir.path(), stagingLeftovers(tempDir.path())[0] as string);
+				foreign = path.join(staging, "somebody-elses");
+				fs.writeFileSync(foreign, "THEIR ONLY COPY");
+				return false;
+			},
+		});
+		expect(fs.readFileSync(foreign, "utf8")).toBe("THEIR ONLY COPY");
+
+		// The next copy sweeps abandoned staging trees before it starts, and
+		// this one is marked and unleased. It has no record of what that copy
+		// created, so it may take the tree only if there is nothing in it but
+		// the marker — and there is this.
+		const second = path.join(tempDir.path(), "2026-01-01T00-00-02-000Z_second");
+		await copySessionArtifacts(`${sourceArtifacts}.jsonl`, `${second}.jsonl`);
+
+		expect(fs.readFileSync(foreign, "utf8")).toBe("THEIR ONLY COPY");
+		expect(fs.existsSync(path.dirname(foreign))).toBe(true);
+		// And the sweep refusing costs the second copy nothing.
+		expect(fs.readFileSync(path.join(second, "0.bash.log"), "utf8")).toBe("COPIED");
 	});
 
 	it("leaves an empty directory that took the staging name, and removes its own tree", async () => {

@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
-import { ARTIFACT_STAGING_SUFFIX } from "../session/session-manager";
+import { ARTIFACT_STAGING_SUFFIX } from "../session/artifact-staging";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */

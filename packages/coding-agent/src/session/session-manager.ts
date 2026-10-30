@@ -28,6 +28,7 @@ import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
+import { ARTIFACT_STAGING_MARKER, ARTIFACT_STAGING_SUFFIX } from "./artifact-staging";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -546,11 +547,6 @@ async function isChildOf(child: PinnedDirectory, parent: PinnedDirectory): Promi
 /** Where a session leaves the artifact claims its transcript has already spent. */
 export const RESERVED_CLAIMS_FILE = ".omp-reserved";
 
-/** Suffix of the directories an artifact copy builds itself in. */
-export const ARTIFACT_STAGING_SUFFIX = ".staging";
-/** Name of the marker a copy writes into its staging tree to prove the tree is its own. */
-const ARTIFACT_STAGING_MARKER = ".omp-staging";
-
 /** A staging directory this copy created, with the identity it had when it was made. */
 interface ArtifactStaging {
 	path: string;
@@ -818,8 +814,8 @@ async function stagingIsStillOurs(staging: ArtifactStaging, what: string): Promi
  * checked against the identity it was created with — a directory shadowed by a
  * mount, or a file replaced by somebody else's, is a different object and is
  * left where it is. A sweeper clearing up after a process that is gone has no
- * such record and keeps to its own filesystem, never following a symlink and
- * never crossing a device.
+ * such record, and so removes nothing from inside the tree: it takes the tree
+ * away only when there is nothing in it but the marker.
  */
 async function removeArtifactStaging(staging: ArtifactStaging, created?: Map<string, ObjectIdentity>): Promise<void> {
 	// The root goes the way every object inside it goes: moved, whole, into a
@@ -870,13 +866,23 @@ async function emptyPinnedDirectory(
 		// of its own inside it. It leaves with the tree, from inside the
 		// directory the tree is moved into.
 		if (!stagedUnder && entry.name === ARTIFACT_STAGING_MARKER) continue;
-		// With a record of what this copy made, nothing else in the tree is
-		// this copy's to remove — not a file somebody else put there, not a
-		// directory it never created. Without one the tree belongs to a copier
-		// that is gone, and the only things it may still not touch are what it
-		// cannot account for: another filesystem, or anything mounted.
-		const ours = record !== undefined;
-		if (created && !ours) {
+		// Only what this copy recorded creating is this copy's to remove.
+		//
+		// Without that record there is no such thing: a sweeper arriving at an
+		// abandoned tree knows the *tree* was a copy's, which the marker says,
+		// and knows nothing at all about an object it never placed. Reading
+		// the one claim as the other is how a sweep comes to delete a file
+		// somebody else put there — the tree is left whole instead, and said
+		// so, which costs the disk the copy was going to free and loses
+		// nothing.
+		if (!created) {
+			logger.warn("An abandoned session artifact staging tree is not this process's to empty; left whole", {
+				dir: dir.path,
+				entries: entries.length,
+			});
+			return;
+		}
+		if (record === undefined) {
 			logger.warn("A session artifact staging entry was not created by this copy; left alone", { path: staged });
 			continue;
 		}
@@ -901,21 +907,18 @@ async function emptyPinnedDirectory(
 async function removeIfStillOurs(
 	dir: PinnedDirectory,
 	name: string,
-	record: ObjectIdentity | undefined,
+	record: ObjectIdentity,
 	staged: string,
 ): Promise<void> {
 	const at = `${dir.at}/${name}`;
 	// First, that the name still reaches the object this copy created: a file
 	// unlinked and recreated there can wear the same inode, and only the
-	// change time and link count separate it from this copy's own. A sweeper
-	// clearing up after a process that is gone has no record to check against
-	// and takes what it finds — inside a tree it has already proved is an
-	// abandoned staging tree of its own filesystem.
+	// change time and link count separate it from this copy's own.
 	const before = await fs.promises
 		.lstat(at, { bigint: true })
 		.then(identityOf)
 		.catch(() => undefined);
-	if (!before || (record && !thisCopysToRemove(before, record))) {
+	if (!before || !thisCopysToRemove(before, record)) {
 		if (before) {
 			logger.warn("A session artifact staging entry is not the object that was created; left alone", {
 				path: staged,
@@ -1015,7 +1018,7 @@ async function moveIntoAside(
 async function removeDirectoryIfStillOurs(
 	parent: PinnedDirectory,
 	name: string,
-	record: ObjectIdentity | undefined,
+	record: ObjectIdentity,
 	staged: string,
 	created: Map<string, ObjectIdentity> | undefined,
 ): Promise<void> {
@@ -1024,7 +1027,7 @@ async function removeDirectoryIfStillOurs(
 		.lstat(at, { bigint: true })
 		.then(identityOf)
 		.catch(() => undefined);
-	if (!before?.directory || (record && !sameNode(before, record))) {
+	if (!before?.directory || !sameNode(before, record)) {
 		if (before) {
 			logger.warn("A session artifact staging entry is not the directory that was created; left alone", {
 				path: staged,
