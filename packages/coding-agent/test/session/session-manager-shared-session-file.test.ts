@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -205,6 +205,51 @@ function sessionFilesIn(dir: string): string[] {
 		.filter(name => name.endsWith(".jsonl"))
 		.map(name => path.join(dir, name))
 		.sort();
+}
+
+/**
+ * A real {@link AgentSession} over a session this process owns, as a resume
+ * leaves it: written once, so the ownership claim is held.
+ */
+async function liveSession(
+	dir: TempDir,
+	firstTurn: string,
+	settings?: Record<string, unknown>,
+): Promise<{
+	sessionManager: SessionManager;
+	session: AgentSession;
+	sessionFile: string;
+	sessionId: string;
+	[Symbol.asyncDispose](): Promise<void>;
+}> {
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorage.keys.setRuntime("anthropic", "test-key");
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected the bundled anthropic model");
+	const sessionManager = SessionManager.create(dir.path(), dir.path(), new FileSessionStorage());
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+		sessionManager,
+		settings: Settings.isolated({ "compaction.enabled": false, ...settings }),
+		modelRegistry: new ModelRegistry(authStorage),
+		allowSessionModelFallback: true,
+	});
+	await sessionManager.ensureOnDisk();
+	sessionManager.appendMessage(userTurn(firstTurn));
+	// The write is what takes this process's claim on the session.
+	await sessionManager.flush();
+	const sessionFile = sessionManager.getSessionFile();
+	if (!sessionFile) throw new Error("Expected a session file");
+	return {
+		sessionManager,
+		session,
+		sessionFile,
+		sessionId: sessionManager.getSessionId(),
+		async [Symbol.asyncDispose]() {
+			await session.dispose();
+			authStorage.close();
+		},
+	};
 }
 
 describe("SessionManager on a session file another omp process writes", () => {
@@ -651,6 +696,90 @@ describe("SessionManager on a session file another omp process writes", () => {
 		expect(fs.readFileSync(path.join(artifacts, "1.bash.log"), "utf8")).toBe("someone else's artifact");
 	}, 30_000);
 
+	it("refuses, and copies nothing, when the file is taken over while the claim is being taken", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const requested = await createSession(tempDir);
+		const requestedId = await readSessionHeaderId(requested);
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const replacementId = await readSessionHeaderId(replacement);
+		if (!requestedId || !replacementId) throw new Error("Expected session headers");
+		const artifacts = requested.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "1.bash.log"), "someone else's artifact");
+
+		/** Replaces the journal in the window the storage itself reads it in. */
+		class ReplacingStorage extends FileSessionStorage {
+			#armed = true;
+
+			override claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+				if (this.#armed) {
+					this.#armed = false;
+					fs.renameSync(replacement, requested);
+				}
+				return super.claimSession(sessionId, sessionPath);
+			}
+		}
+		const manager = await SessionManager.open(requested, tempDir.path(), new ReplacingStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const before = sessionFilesIn(tempDir.path());
+
+		// The claim is refused because the path holds another session now, not
+		// because a live process owns this one — and only one of those two is a
+		// session whose artifacts this resume may take.
+		await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(SessionSourceReplacedError);
+
+		await manager.close();
+		// No fork was written; the replacement's own path is gone because it was
+		// renamed onto this one.
+		expect(sessionFilesIn(tempDir.path()).filter(file => !before.includes(file))).toEqual([]);
+		expect(fs.readFileSync(path.join(artifacts, "1.bash.log"), "utf8")).toBe("someone else's artifact");
+	}, 30_000);
+
+	it("refuses, and takes its copy back, when the file is taken over while the artifacts are copied", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const requested = await createSession(tempDir);
+		const requestedId = await readSessionHeaderId(requested);
+		if (!requestedId) throw new Error("Expected a session header");
+		// A stale copy: the resume guard forks it whoever holds the lease, so
+		// this is the path that reaches the artifact copy without a claim.
+		await markSessionMoved(requested, "another-machine");
+		const replacement = await createSession(tempDir, "someone else's conversation");
+		const artifacts = requested.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "1.bash.log"), "this session's artifact");
+
+		const manager = await SessionManager.open(requested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const before = sessionFilesIn(tempDir.path());
+		// The journal is taken over while the copy of its artifacts is running.
+		const realpath = fs.promises.realpath;
+		// `realpath` is overloaded on its encoding option; this stands in for the
+		// one call shape the copy uses.
+		const raceOnRealpath = (async (target: fs.PathLike) => {
+			if (target === requested) {
+				fs.renameSync(replacement, requested);
+				fs.writeFileSync(path.join(artifacts, "1.bash.log"), "someone else's artifact");
+			}
+			return realpath(target);
+		}) as typeof fs.promises.realpath;
+		const spy = spyOn(fs.promises, "realpath").mockImplementation(raceOnRealpath);
+		try {
+			await expect(adoptResumedSession(manager, tempDir.path())).rejects.toThrow(SessionSourceReplacedError);
+		} finally {
+			spy.mockRestore();
+		}
+
+		await manager.close();
+		// No fork, and nothing of the replacement's reached one.
+		expect(sessionFilesIn(tempDir.path()).filter(file => !before.includes(file))).toEqual([]);
+		for (const file of sessionFilesIn(tempDir.path())) {
+			if (file === requested) continue;
+			expect(fs.existsSync(file.slice(0, -".jsonl".length))).toBe(false);
+		}
+	}, 30_000);
+
 	it("refuses a departed copy whose file another session took over, instead of resuming that one", async () => {
 		using tempDir = TempDir.createSync("@omp-shared-session-file-");
 		const requested = await createSession(tempDir);
@@ -782,6 +911,123 @@ describe("SessionManager on a session file another omp process writes", () => {
 			}
 		} finally {
 			authStorage.close();
+		}
+	}, 30_000);
+
+	it("keeps the session it lives in when a switch started inside another one is cancelled", async () => {
+		using sourceDir = TempDir.createSync("@omp-switch-overlap-source-");
+		using middleDir = TempDir.createSync("@omp-switch-overlap-middle-");
+		using targetDir = TempDir.createSync("@omp-switch-overlap-target-");
+		await using live = await liveSession(sourceDir, "source");
+		const { sessionManager, session, sessionFile: sourceFile, sessionId: sourceId } = live;
+		const middle = await createSession(middleDir, "middle");
+		const target = await createSession(targetDir, "target");
+
+		const reachedCwdPrompt = Promise.withResolvers<void>();
+		const answerCwdPrompt = Promise.withResolvers<boolean>();
+		// The outer switch stops at its working-directory prompt, after it has
+		// taken the middle session.
+		const outer = session.switchSession(middle, {
+			onCwdChange: async () => {
+				reachedCwdPrompt.resolve();
+				return answerCwdPrompt.promise;
+			},
+		});
+		try {
+			await reachedCwdPrompt.promise;
+			// A second switch runs to completion inside the first one's window.
+			expect(await session.switchSession(target, { onCwdChange: async () => false })).toBe(false);
+			// The inner switch must not have ended the outer one's hold on the
+			// session this process is still living in.
+			const duringLease = tryAcquireSessionLease(sourceId);
+			expect(duringLease).toBeNull();
+			duringLease?.release();
+		} finally {
+			answerCwdPrompt.resolve(false);
+		}
+		expect(await outer).toBe(false);
+		expect(sessionManager.getSessionId()).toBe(sourceId);
+
+		const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
+		try {
+			expect(opened.sessionId).not.toBe(sourceId);
+		} finally {
+			await other.close();
+		}
+	}, 30_000);
+
+	it("does not answer for a session a close gave up, even when a switch then rolls back", async () => {
+		using sourceDir = TempDir.createSync("@omp-switch-close-source-");
+		using targetDir = TempDir.createSync("@omp-switch-close-target-");
+		await using live = await liveSession(sourceDir, "source");
+		const { sessionManager, session, sessionFile: sourceFile, sessionId: sourceId } = live;
+		const target = await createSession(targetDir, "target");
+
+		const reachedCwdPrompt = Promise.withResolvers<void>();
+		const answerCwdPrompt = Promise.withResolvers<boolean>();
+		const switching = session.switchSession(target, {
+			onCwdChange: async () => {
+				reachedCwdPrompt.resolve();
+				return answerCwdPrompt.promise;
+			},
+		});
+		await reachedCwdPrompt.promise;
+		// The manager is closed mid-switch: every claim it held is given back,
+		// including the one the switch's snapshot kept.
+		await sessionManager.close();
+		answerCwdPrompt.resolve(false);
+		expect(await switching).toBe(false);
+
+		// Another process takes the source, as it may: this one gave it up.
+		const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
+		try {
+			expect(opened.sessionId).toBe(sourceId);
+			expect(opened.sessionFile).toBe(sourceFile);
+			// The rolled-back manager must not mistake its released claim for
+			// ownership and append into the file the other process now owns.
+			sessionManager.appendMessage(userTurn("after close and rollback"));
+			await sessionManager.flush();
+			expect(sessionManager.getSessionFile()).not.toBe(sourceFile);
+			expect(sessionManager.getSessionId()).not.toBe(sourceId);
+			expect(await userTurnsIn(sourceFile, sourceDir.path())).not.toContain("after close and rollback");
+		} finally {
+			await other.close();
+		}
+	}, 30_000);
+
+	it("keeps the session it lives in when a host callback throws after the switch is otherwise done", async () => {
+		using sourceDir = TempDir.createSync("@omp-switch-callback-source-");
+		using targetDir = TempDir.createSync("@omp-switch-callback-target-");
+		await using live = await liveSession(sourceDir, "source", { "retry.modelFallback": true });
+		const { sessionManager, session, sessionFile: sourceFile, sessionId: sourceId } = live;
+		// A target whose saved model is gone, so the switch ends in a fallback
+		// the host is told about — and this host throws from that callback.
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path(), new FileSessionStorage());
+		await targetManager.ensureOnDisk();
+		targetManager.appendMessage(userTurn("target"));
+		targetManager.appendModelChange("nonexistent-provider/nonexistent-model");
+		const target = targetManager.getSessionFile();
+		if (!target) throw new Error("Expected a target session file");
+		await targetManager.close();
+
+		await expect(
+			session.switchSession(target, {
+				onCwdChange: async () => true,
+				onModelFallback: () => {
+					throw new Error("host fallback callback failed");
+				},
+			}),
+		).rejects.toThrow("host fallback callback failed");
+		expect(sessionManager.getSessionId()).toBe(sourceId);
+
+		// The switch rolled back, so this process still lives in the source and
+		// still owns it: a failure after ownership was given up would leave the
+		// restored session free for anyone.
+		const { other, opened } = await OtherProcess.adopt(sourceDir, sourceFile);
+		try {
+			expect(opened.sessionId).not.toBe(sourceId);
+		} finally {
+			await other.close();
 		}
 	}, 30_000);
 });

@@ -710,11 +710,14 @@ function resumeForkNotice(forkedFrom: ResumedSessionFork, movedTo: string | unde
  * is in fact still running. Claiming at the resume keeps the owner's id with
  * the owner and makes the second process a copy from the start.
  *
- * Nothing here re-reads the file. Every fork carries the transcript that was
- * loaded, and the one case where the file no longer holds that transcript —
- * a different session's journal moved onto the path — refuses with
- * {@link SessionSourceReplacedError} instead of continuing somebody else's
- * conversation under this one's name.
+ * The transcript is never loaded twice: every fork carries the entries this
+ * process already read, so a resume can no longer end up in whatever the path
+ * holds now. The path itself is still read — the ownership claim checks the
+ * journal's header, and the artifact copy resolves and walks the live source —
+ * and the one case where it stops holding the transcript that was loaded, a
+ * different session's journal moved onto it, refuses with
+ * {@link SessionSourceReplacedError} rather than continuing somebody else's
+ * conversation, or its files, under this one's name.
  *
  * The fork lands in `sessionDir`, default: beside the file it came from.
  */

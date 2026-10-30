@@ -9,7 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir, toError } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -1849,6 +1849,12 @@ export async function runRootCommand(
 ): Promise<void> {
 	logger.startTiming();
 	startStartupWatchdog();
+	// The session a resume adopted, and its ownership claim, until a live
+	// AgentSession takes it over. Startup can fail anywhere after the resume —
+	// a trusted extension that will not load, a session that cannot be built —
+	// and an embedder that keeps the process after this rejects would otherwise
+	// keep that session reserved for a process that is not using it.
+	let resumedSessionManager: SessionManager | undefined;
 	try {
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
@@ -2331,6 +2337,10 @@ export async function runRootCommand(
 			}
 		}
 
+		// From here on this manager — and the session ownership its resume took —
+		// belongs to startup until a live session takes it over.
+		resumedSessionManager = sessionManager;
+
 		for (const continuation of resumedContinuations) {
 			const notice = formatSessionContinuationNotice(continuation);
 			if (isInteractive) notifs.push({ kind: "warn", message: notice });
@@ -2436,6 +2446,9 @@ export async function runRootCommand(
 		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
+			// The session owns the manager it was handed, including closing it, so
+			// startup stops answering for it.
+			if (options.sessionManager === resumedSessionManager) resumedSessionManager = undefined;
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
 			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
@@ -2476,6 +2489,7 @@ export async function runRootCommand(
 			if (sessionManager) {
 				await sessionManager.close();
 				sessionManager = undefined;
+				resumedSessionManager = undefined;
 			}
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
@@ -2641,15 +2655,15 @@ export async function runRootCommand(
 			try {
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
+				// Whatever happens next, this manager is not the one a live session
+				// will own; the outer handler gives its ownership back on the way
+				// out, and the retry below gives it back here.
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
-					// The session never reached a live AgentSession, so nothing will
-					// close it: the resume's ownership claim has to be given back
-					// here or it outlives the failure.
-					await sessionManager?.close();
 					throw error;
 				}
 				await sessionManager.close();
 				sessionManager = undefined;
+				resumedSessionManager = undefined;
 				parsedArgs.continue = false;
 				// The failed SDK attempt consumed this queue; the fresh attempt clears
 				// source registrations again before applying it.
@@ -2927,6 +2941,20 @@ export async function runRootCommand(
 	} catch (error) {
 		stopPendingStartupComposer();
 		stopStartupWatchdog();
+		// Nothing will ever own the session this resume adopted, so its
+		// ownership goes back here: a host that keeps the process alive after
+		// this rejects must not hold a session it is not running.
+		if (resumedSessionManager) {
+			const abandoned = resumedSessionManager;
+			resumedSessionManager = undefined;
+			try {
+				await abandoned.close();
+			} catch (closeError) {
+				logger.warn("Failed to release the resumed session after a startup failure", {
+					error: toError(closeError).message,
+				});
+			}
+		}
 		throw error;
 	}
 }

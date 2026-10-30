@@ -305,6 +305,54 @@ describe("ACP lazy startup", () => {
 		expect(leaseFreeInAcpMode).toBe(true);
 	});
 
+	it("hands back the ownership of a resumed session when startup fails before the session is built", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-startup-failure-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		// A trusted extension that does not exist: startup fails after the
+		// resume has taken the session, and before any session is built.
+		const launchCwd = process.cwd();
+		try {
+			await expect(
+				runRootCommand(
+					{
+						mode: "rpc",
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						invalidFlagValues: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						resume: sessionFile,
+						sessionDir: resumeDir.path(),
+						trustedExtensions: [path.join(resumeDir.path(), "missing-extension.ts")],
+					},
+					[],
+					{ discoverAuthStorage: async () => startupAuthStorage, settings: Settings.isolated() },
+				),
+			).rejects.toThrow();
+		} finally {
+			process.chdir(launchCwd);
+		}
+
+		// The process is still alive — an embedder's would be too — and must not
+		// be holding a session it never ran.
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		lease?.release();
+	});
+
 	it("honors explicit host-defaulted and todo settings for protocol hosts", async () => {
 		// Regression for #3207: in RPC/ACP startup, runtime overrides applied via
 		// `applyDefaultSettingOverrides` previously clobbered any explicitly

@@ -13296,11 +13296,6 @@ export class AgentSession implements SettingsScope {
 				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
-			// Past the last step a failure could still roll back, so the session
-			// this one came from is no longer ours: give up its ownership claim,
-			// held through every step above so a rollback could take it straight
-			// back instead of racing a second process for it.
-			this.sessionManager.commitSessionSwitch();
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// Keep the old reservations during rollback; the target is committed now,
 			// so the snapshotted old queues can no longer be restored.
@@ -13315,6 +13310,12 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// Last, because everything above can still throw into the rollback
+			// below — including a host's `onModelFallback`. Until this runs, the
+			// session this switch came from is still owned by this process, so a
+			// rollback takes it straight back instead of racing a second process
+			// for it; after it, no path may roll back.
+			this.sessionManager.commitSessionSwitch(previousSessionState);
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

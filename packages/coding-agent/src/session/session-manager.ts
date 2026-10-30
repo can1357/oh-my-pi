@@ -191,6 +191,14 @@ export interface ArtifactCopyTally {
 	largest: { name: string; bytes: number }[];
 }
 
+/** What one copy has produced so far: its tally inputs, and every path it wrote. */
+interface ArtifactCopyProgress {
+	/** Files reproduced, at every depth. */
+	entries: number;
+	/** Destination paths this copy created, so they can all be taken back. */
+	created: string[];
+}
+
 /**
  * Reproduce one entry of an artifacts directory at `to`, and return the bytes
  * it cost. Never overwrites: an entry already at the destination (a session
@@ -202,7 +210,9 @@ export interface ArtifactCopyTally {
  * else already at that name — a file, or a symlink, which `mkdir -p` would
  * accept and then write *through*, landing the subtree outside the destination
  * artifacts directory — keeps the destination's version, exactly as a
- * colliding file does.
+ * colliding file does. That check cannot be the only one: the entry it
+ * inspected can be replaced before the subtree is written, so what the copy
+ * actually produced is audited against the destination root afterwards.
  *
  * An entry the source lost while the walk ran (its session reaped it, a tool
  * replaced it) is skipped with a debug line, so one vanished file cannot cost
@@ -213,7 +223,7 @@ async function reproduceArtifactEntry(
 	entry: fs.Dirent,
 	from: string,
 	to: string,
-	counted: { entries: number },
+	progress: ArtifactCopyProgress,
 ): Promise<number> {
 	const source = path.join(from, entry.name);
 	const destination = path.join(to, entry.name);
@@ -226,13 +236,14 @@ async function reproduceArtifactEntry(
 				});
 				return 0;
 			}
-			return await reproduceArtifactTree(source, destination, counted);
+			return await reproduceArtifactTree(source, destination, progress);
 		}
 		const bytes = entry.isFile() ? (await fs.promises.stat(source)).size : 0;
 		// `cp` of one entry, not a tree: it also carries symlinks and anything
 		// else a session's artifacts directory may hold.
 		await fs.promises.cp(source, destination, { force: false, errorOnExist: true });
-		if (entry.isFile()) counted.entries += 1;
+		progress.created.push(destination);
+		if (entry.isFile()) progress.entries += 1;
 		return bytes;
 	} catch (error) {
 		if (hasFsCode(error, "ERR_FS_CP_EEXIST")) {
@@ -256,12 +267,61 @@ async function destinationBlocksDirectory(destination: string): Promise<boolean>
 }
 
 /** Reproduce the artifacts directory `from` at `to`, and return the bytes it cost. */
-async function reproduceArtifactTree(from: string, to: string, counted: { entries: number }): Promise<number> {
+async function reproduceArtifactTree(from: string, to: string, progress: ArtifactCopyProgress): Promise<number> {
 	const entries = await fs.promises.readdir(from, { withFileTypes: true });
 	await fs.promises.mkdir(to, { recursive: true });
 	let bytes = 0;
-	for (const entry of entries) bytes += await reproduceArtifactEntry(entry, from, to, counted);
+	for (const entry of entries) bytes += await reproduceArtifactEntry(entry, from, to, progress);
 	return bytes;
+}
+
+/**
+ * Unlink everything a copy produced, youngest first. Directories are left:
+ * they hold nothing of this copy's once its files are gone, and one that was
+ * already at the destination is not this copy's to remove.
+ */
+async function undoArtifactCopy(created: readonly string[]): Promise<void> {
+	for (let index = created.length - 1; index >= 0; index--) {
+		const destination = created[index] as string;
+		try {
+			await fs.promises.unlink(destination);
+		} catch (error) {
+			if (!isEnoent(error)) logger.warn("Failed to take back a copied session artifact", { path: destination });
+		}
+	}
+}
+
+/**
+ * Every path the copy produced, resolved, that does not lie under `root`.
+ *
+ * The per-entry check refuses a destination that is already a symlink, but a
+ * directory can be swapped for one between that check and the write into it,
+ * and a resolution is the only thing that answers where the bytes actually
+ * landed. Resolution is per parent directory, so a tree costs one `realpath`
+ * per directory rather than one per file.
+ */
+async function artifactsWrittenOutside(root: string, created: readonly string[]): Promise<string[]> {
+	if (created.length === 0) return [];
+	let realRoot: string;
+	try {
+		realRoot = await fs.promises.realpath(root);
+	} catch {
+		return [...created];
+	}
+	const resolved = new Map<string, string | null>();
+	const escaped: string[] = [];
+	for (const destination of created) {
+		const parent = path.dirname(destination);
+		let realParent = resolved.get(parent);
+		if (realParent === undefined) {
+			realParent = await fs.promises.realpath(parent).catch(() => null);
+			resolved.set(parent, realParent);
+		}
+		if (realParent === null || !(realParent === realRoot || pathIsWithin(realRoot, realParent))) {
+			escaped.push(destination);
+		}
+	}
+	return escaped;
 }
 
 /**
@@ -269,6 +329,16 @@ async function reproduceArtifactTree(from: string, to: string, counted: { entrie
  * `/fork`. Never overwrites: a destination file written while the copy runs
  * (a session that already moved and kept working) wins over the source's copy.
  * Failures are logged, never thrown.
+ *
+ * Two post-conditions hold over what it produced, and either one takes the
+ * whole copy back rather than leaving part of it:
+ *
+ * - every byte landed under the destination's own artifacts directory, which a
+ *   symlink swapped in mid-walk would otherwise redirect out of it;
+ * - `stillTheSource` still accepts the source. A resume that forks copies the
+ *   artifacts of the session it loaded, and a journal replaced while the copy
+ *   runs would hand that fork another conversation's files under `artifact://`
+ *   ids its transcript already refers to.
  *
  * Returns what it cost and logs the same. A session forced off its file
  * duplicates its artifacts, and a session with large ones duplicates a lot;
@@ -278,6 +348,7 @@ async function reproduceArtifactTree(from: string, to: string, counted: { entrie
 export async function copySessionArtifacts(
 	sourceSessionFile: string,
 	destinationSessionFile: string,
+	options?: { stillTheSource?: () => Promise<boolean> },
 ): Promise<ArtifactCopyTally> {
 	const empty: ArtifactCopyTally = { entries: 0, bytes: 0, largest: [] };
 	// Artifacts sit beside the journal's real name: a session reached through a
@@ -290,13 +361,22 @@ export async function copySessionArtifacts(
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!sourceArtifactsDir || !destinationArtifactsDir) return empty;
 	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return empty;
-	const counted = { entries: 0 };
+	// The destination root gets the same rule as every directory inside it: a
+	// symlink there would send the whole copy somewhere else entirely.
+	if (await destinationBlocksDirectory(destinationArtifactsDir)) {
+		logger.warn("Session artifacts destination is not a directory; nothing was copied", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+		});
+		return empty;
+	}
+	const progress: ArtifactCopyProgress = { entries: 0, created: [] };
 	const perEntry: { name: string; bytes: number }[] = [];
 	try {
 		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
 			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
 			for (const entry of await fs.promises.readdir(sourceArtifactsDir, { withFileTypes: true })) {
-				const bytes = await reproduceArtifactEntry(entry, sourceArtifactsDir, destinationArtifactsDir, counted);
+				const bytes = await reproduceArtifactEntry(entry, sourceArtifactsDir, destinationArtifactsDir, progress);
 				perEntry.push({ name: entry.name, bytes });
 			}
 		}
@@ -309,8 +389,26 @@ export async function copySessionArtifacts(
 			});
 		}
 	}
+	const escaped = await artifactsWrittenOutside(destinationArtifactsDir, progress.created);
+	if (escaped.length > 0) {
+		logger.warn("Session artifacts landed outside the destination; taking the copy back", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			escaped: escaped.slice(0, ARTIFACT_COPY_LARGEST),
+		});
+		await undoArtifactCopy(progress.created);
+		return empty;
+	}
+	if (options?.stillTheSource && !(await options.stillTheSource())) {
+		logger.warn("Session artifacts stopped belonging to the session they were copied for; taking the copy back", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+		});
+		await undoArtifactCopy(progress.created);
+		return empty;
+	}
 	const tally: ArtifactCopyTally = {
-		entries: counted.entries,
+		entries: progress.entries,
 		bytes: perEntry.reduce((total, entry) => total + entry.bytes, 0),
 		largest: perEntry
 			.filter(entry => entry.bytes > 0)
@@ -889,11 +987,39 @@ interface SessionManagerStateSnapshot {
 	header: SessionHeader;
 	entries: SessionEntry[];
 	/**
-	 * The ownership claim held when the snapshot was taken, by reference. A
-	 * rollback reinstates it, so the session it names stays this process's for
-	 * the whole switch instead of being released and raced for again.
+	 * A holder of its own on the session's ownership lease, taken when the
+	 * snapshot was made. A rollback adopts it, so the session it names stays
+	 * this process's for the whole switch instead of being released and raced
+	 * for again; a commit releases it.
 	 */
-	sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	sessionClaim: SessionClaim | undefined;
+}
+
+/**
+ * One holder of a session's ownership lease. Releasing is idempotent and
+ * leaves the handle visibly unheld, so a handle whose lease was given up
+ * elsewhere (a {@link SessionManager.close} during a switch) can never be
+ * mistaken for ownership when a rollback adopts it.
+ */
+class SessionClaim {
+	readonly sessionId: string;
+	#release: (() => void) | undefined;
+
+	constructor(sessionId: string, release: (() => void) | undefined) {
+		this.sessionId = sessionId;
+		this.#release = release;
+	}
+
+	/** Whether this handle still holds the lease. */
+	get held(): boolean {
+		return this.#release !== undefined;
+	}
+
+	release(): void {
+		const release = this.#release;
+		this.#release = undefined;
+		release?.();
+	}
 }
 
 interface DiskQueueOptions {
@@ -1198,22 +1324,24 @@ export class SessionManager {
 	#persistenceNotices: SessionPersistenceNotice[] = [];
 	/**
 	 * This process's ownership claim on the session it last wrote (file storage
-	 * only), keyed by session id so every path to the journal meets it.
-	 * `release` is unset while another live process holds the session, and
-	 * after {@link close} gave the claim up.
+	 * only), keyed by session id so every path to the journal meets it. Unheld
+	 * while another live process owns the session, and after {@link close} gave
+	 * the claim up.
 	 */
-	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	#sessionClaim: SessionClaim | undefined;
 	/**
-	 * The claim held on the session this manager was switching *away* from,
-	 * kept alive across {@link setSessionFile} until the switch either commits
-	 * ({@link commitSessionSwitch}) or rolls back ({@link restoreState}).
+	 * One claim per state snapshot that may still be rolled back to, taken in
+	 * {@link captureState} and ended by {@link commitSessionSwitch} or
+	 * {@link restoreState}.
 	 *
-	 * Releasing it at the switch and taking it again on rollback is a race: a
-	 * second process can claim the source in that window, and both end up on
-	 * one session id. The switch keeps ownership of both files until it knows
-	 * which one it lives in.
+	 * Each is a holder of its own on the same lease, so overlapping switches
+	 * cannot end each other's: a switch keeps the session it came from until it
+	 * knows which one it lives in, and a second switch started inside the first
+	 * adds a holder rather than taking one away. Releasing at the switch and
+	 * claiming again on rollback would leave exactly the window this branch
+	 * exists to close.
 	 */
-	#supersededClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	#snapshotClaims = new Set<SessionClaim>();
 	/**
 	 * The background artifact copy a move or branch to `sessionFile` started (see
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
@@ -1312,12 +1440,28 @@ export class SessionManager {
 		const sessionFile = this.#sessionFile;
 		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
 		const current = this.#sessionClaim;
-		if (current?.sessionId === sessionId && current.release) return;
-		if (current && current.sessionId !== sessionId) current.release?.();
+		if (current?.sessionId === sessionId && current.held) return;
+		if (current && current.sessionId !== sessionId) current.release();
 		// The storage also checks that the path still holds this session: if
 		// another session was moved onto it, the claim fails and the next write
 		// moves this session to a sibling instead of appending into that journal.
-		this.#sessionClaim = { sessionId, release: this.#storage.claimSession(sessionId, sessionFile) ?? undefined };
+		this.#sessionClaim = new SessionClaim(sessionId, this.#storage.claimSession(sessionId, sessionFile) ?? undefined);
+	}
+
+	/**
+	 * A second holder of the current session's lease for a state snapshot, so a
+	 * rollback to it takes the session back without ever letting go of it.
+	 * `undefined` when this manager does not own the session to begin with.
+	 */
+	#retainOwnershipForSnapshot(): SessionClaim | undefined {
+		const claim = this.#sessionClaim;
+		const sessionFile = this.#sessionFile;
+		if (!claim?.held || !this.#persist || !sessionFile || !this.#storage.claimSession) return undefined;
+		const release = this.#storage.claimSession(claim.sessionId, sessionFile);
+		if (!release) return undefined;
+		const retained = new SessionClaim(claim.sessionId, release);
+		this.#snapshotClaims.add(retained);
+		return retained;
 	}
 
 	/**
@@ -1331,7 +1475,7 @@ export class SessionManager {
 		if (this.#released || this.#sessionFileRelocating) return false;
 		this.#claimSession();
 		const claim = this.#sessionClaim;
-		return claim !== undefined && claim.sessionId === this.#sessionId && claim.release === undefined;
+		return claim !== undefined && claim.sessionId === this.#sessionId && !claim.held;
 	}
 
 	/**
@@ -1461,35 +1605,47 @@ export class SessionManager {
 	 * rather than a free lease.
 	 *
 	 * The lease alone cannot answer this: `claimSession` refuses both a live
-	 * owner and a path that now holds a different session's journal. The
-	 * journal is asked first, because a session that is no longer at this path
-	 * may still be running somewhere else under the lease this would otherwise
-	 * take — and because a journal that was replaced is not a fork candidate at
-	 * all but a refusal (see {@link SessionSourceReplacedError}).
+	 * owner and a path that now holds a different session's journal, and it
+	 * re-reads the header itself when it is asked. The journal is read before
+	 * the claim, because a session that is no longer at this path may still be
+	 * running somewhere else under the lease this would otherwise take; and a
+	 * refused claim is read *again* afterwards, because a replacement that
+	 * lands in between is what the storage saw and what makes it refuse —
+	 * reported as a replacement rather than mistaken for a live owner.
 	 */
 	async #resumedSessionContention(staleCopy: boolean): Promise<ResumedSessionFork["reason"] | undefined> {
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile) return undefined;
+		await this.#refuseWhenSourceReplaced(sessionFile);
+		if (staleCopy) return "departed";
+		if (!this.#sessionOwnedElsewhere()) return undefined;
+		await this.#refuseWhenSourceReplaced(sessionFile);
+		return "owned-elsewhere";
+	}
+
+	/** Refuse a resume whose file stopped holding the session that was loaded from it. */
+	async #refuseWhenSourceReplaced(sessionFile: string): Promise<void> {
 		const onDisk = await readSessionHeaderId(sessionFile);
 		if (onDisk !== undefined && onDisk !== this.#sessionId) {
 			throw new SessionSourceReplacedError(sessionFile, this.#sessionId, onDisk);
 		}
-		if (staleCopy) return "departed";
-		return this.#sessionOwnedElsewhere() ? "owned-elsewhere" : undefined;
 	}
 
 	/**
-	 * Leave the session just loaded where it is — with the live process that
-	 * owns it, or as the stale copy of a conversation that moved away — and
-	 * carry on as a fork of it: a new id in a sibling file whose header points
-	 * back through `parentSession` only. No `continuationOf`, unlike
-	 * {@link #moveOffSessionFile}: the session left behind may still be running
-	 * under its own id, so a later resume of that file must land on it and not
-	 * follow this copy.
+	 * Take the artifacts of the session about to be forked, then leave that
+	 * session where it is — with the live process that owns it, or as the stale
+	 * copy of a conversation that moved away — and carry on as a fork of it: a
+	 * new id in a sibling file whose header points back through `parentSession`
+	 * only. No `continuationOf`, unlike {@link #moveOffSessionFile}: the session
+	 * left behind may still be running under its own id, so a later resume of
+	 * that file must land on it and not follow this copy.
 	 *
 	 * The fork carries the transcript that was loaded, never a re-read of the
-	 * file. The caller has already established that the file still holds this
-	 * session, so its artifacts are this session's to copy.
+	 * file. Its artifacts are copied *before* anything here is mutated, and the
+	 * journal is read again once the copy has finished: a resume that cannot
+	 * prove the files it took belong to the session it loaded refuses instead
+	 * of starting on them, and the copy is taken back. The alternative is a
+	 * fork whose `artifact://` ids silently resolve into another conversation.
 	 *
 	 * An unfinished tool call at the tip is paired with a result that says the
 	 * outcome is unknown, as an explicit fork does: the session this forked
@@ -1500,16 +1656,21 @@ export class SessionManager {
 	 * published the loaded id, so nothing outside ever sees this process answer
 	 * to the owner's session. Returns what was left behind.
 	 */
-	#adoptLoadedSessionAsFork(reason: ResumedSessionFork["reason"], sessionDir?: string): ResumedSessionFork {
+	async #adoptLoadedSessionAsFork(
+		reason: ResumedSessionFork["reason"],
+		sessionDir?: string,
+	): Promise<ResumedSessionFork> {
 		const from = this.#sessionFile as string;
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
-		this.#sessionId = mintSessionId();
+		const forkSessionId = mintSessionId();
+		const to = path.join(sessionDir ?? path.dirname(from), `${fileSafeTimestamp(timestamp)}_${forkSessionId}.jsonl`);
+		const artifacts = await copySessionArtifacts(from, to, {
+			stillTheSource: async () => (await readSessionHeaderId(from)) === previousSessionId,
+		});
+		await this.#refuseWhenSourceReplaced(from);
+		this.#sessionId = forkSessionId;
 		this.#taskSiblingCandidate = undefined;
-		const to = path.join(
-			sessionDir ?? path.dirname(from),
-			`${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`,
-		);
 		const {
 			type: _type,
 			id: _id,
@@ -1536,14 +1697,14 @@ export class SessionManager {
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
-		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
+		this.#pendingArtifactCopy = { sessionFile: to, done: Promise.resolve(artifacts) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
 		logger.info(
 			reason === "owned-elsewhere"
 				? "Resumed a session another omp process owns; continuing in a fork"
 				: "Resumed a copy of a session that moved away; continuing in a fork",
-			{ source: from, sessionId: previousSessionId, fork: to },
+			{ source: from, sessionId: previousSessionId, fork: to, artifacts: artifacts.entries },
 		);
 		return { reason, sessionId: previousSessionId, sessionFile: from };
 	}
@@ -2549,22 +2710,23 @@ export class SessionManager {
 			// a rollback observe the move it is undoing.
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
-			// By reference and never released here: a rollback puts this very
-			// claim back, so the session being left is still this process's for
-			// the whole switch.
-			sessionClaim: this.#sessionClaim,
+			// A holder of its own, so a rollback to this snapshot takes the
+			// session back without this manager ever letting go of it — and so a
+			// switch started inside another cannot end the outer one's claim.
+			sessionClaim: this.#retainOwnershipForSnapshot(),
 		};
 	}
 
 	/**
-	 * The switch that {@link setSessionFile} started is final: give up the
-	 * claim on the session left behind. Until this is called a rollback through
-	 * {@link restoreState} can still take that session back, so no other
-	 * process may have it.
+	 * The switch `snapshot` was captured for is final: give up the claim it
+	 * retained on the session left behind. Until this is called a rollback
+	 * through {@link restoreState} can still take that session back, so no
+	 * other process may have it. A snapshot that was already rolled back or
+	 * committed is left alone, so a caller may always end its transaction.
 	 */
-	commitSessionSwitch(): void {
-		if (this.#supersededClaim !== this.#sessionClaim) this.#supersededClaim?.release?.();
-		this.#supersededClaim = undefined;
+	commitSessionSwitch(snapshot: SessionManagerStateSnapshot): void {
+		const retained = snapshot.sessionClaim;
+		if (retained && this.#snapshotClaims.delete(retained)) retained.release();
 	}
 
 	/**
@@ -2579,7 +2741,9 @@ export class SessionManager {
 		clone.#suppressBreadcrumb = true;
 		// A clone is a second manager over the same session, not a transfer of
 		// ownership: it takes no claim here and claims on its own first write.
-		clone.restoreState({ ...this.captureState(), sessionClaim: undefined });
+		const snapshot = this.captureState();
+		this.commitSessionSwitch(snapshot);
+		clone.restoreState({ ...snapshot, sessionClaim: undefined });
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#expectedDiskSize = null;
@@ -2595,13 +2759,16 @@ export class SessionManager {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		// Ownership rolls back with everything else: the claim taken on the
-		// session being switched to is dropped, and the one held on the session
-		// this manager is returning to — never released, only set aside — is
-		// reinstated. Reacquiring it here instead would leave a window in which
-		// another process could take the session this one still lives in.
-		if (this.#sessionClaim && this.#sessionClaim !== snapshot.sessionClaim) this.#sessionClaim.release?.();
-		this.#sessionClaim = snapshot.sessionClaim;
-		this.#supersededClaim = undefined;
+		// session being switched to is dropped, and the holder this snapshot
+		// kept on the session this manager is returning to is adopted.
+		// Reacquiring it here instead would leave a window in which another
+		// process could take the session this one still lives in — and a holder
+		// released meanwhile (a `close()` during the switch) is unheld, so it is
+		// never mistaken for ownership.
+		const retained = snapshot.sessionClaim;
+		if (retained) this.#snapshotClaims.delete(retained);
+		if (this.#sessionClaim && this.#sessionClaim !== retained) this.#sessionClaim.release();
+		this.#sessionClaim = retained?.held ? retained : undefined;
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
@@ -2690,12 +2857,12 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
-		// A switch does not give the previous file up yet: the claim on it is
-		// held aside until the switch commits or rolls back (see
-		// {@link #supersededClaim}). Opening claims nothing of its own: the
-		// first write does, so inspecting a session never counts as owning it.
-		if (this.#supersededClaim && this.#supersededClaim !== this.#sessionClaim) this.#supersededClaim.release?.();
-		this.#supersededClaim = this.#sessionClaim;
+		// The previous session is not given up here: the snapshot a caller took
+		// before this switch holds a claim of its own on it (see
+		// {@link captureState}), so it stays this process's until that switch
+		// commits or rolls back. Opening claims nothing by itself: the first
+		// write does, so inspecting a session never counts as owning it.
+		this.#sessionClaim?.release();
 		this.#sessionClaim = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
@@ -2780,7 +2947,7 @@ export class SessionManager {
 		// this is where this process takes its ownership claim.
 		if (options?.forkIfContested && this.#persist) {
 			const reason = await this.#resumedSessionContention(false);
-			if (reason) return { forkedFrom: this.#adoptLoadedSessionAsFork(reason) };
+			if (reason) return { forkedFrom: await this.#adoptLoadedSessionAsFork(reason) };
 		}
 		return {};
 	}
@@ -2820,7 +2987,7 @@ export class SessionManager {
 	}): Promise<ResumedSessionFork | undefined> {
 		if (!this.#persist || !this.#sessionFile) return undefined;
 		const reason = await this.#resumedSessionContention(options?.staleCopy === true);
-		return reason ? this.#adoptLoadedSessionAsFork(reason, options?.sessionDir) : undefined;
+		return reason ? await this.#adoptLoadedSessionAsFork(reason, options?.sessionDir) : undefined;
 	}
 
 	/**
@@ -2958,7 +3125,7 @@ export class SessionManager {
 			// even when the path stays the same.
 			await assertSourceIsOurs(this.#sessionFile);
 			this.#claimSession();
-			if (this.#sessionClaim?.release === undefined) {
+			if (!this.#sessionClaim?.held) {
 				throw new SessionMoveRefusedError(
 					`Cannot move session "${this.#sessionFile}": another live omp process writes it. Nothing was moved.`,
 				);
@@ -3326,12 +3493,13 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		// Closing gives up this process's ownership claim; a later write reclaims it.
-		// A switch that never reached its commit or its rollback gives up both.
-		this.commitSessionSwitch();
-		const claim = this.#sessionClaim;
-		claim?.release?.();
-		if (claim) claim.release = undefined;
+		// Closing gives up every ownership claim this manager holds, including
+		// the one a switch snapshot still kept: a rollback after this finds that
+		// holder unheld and reclaims on the next write instead of writing into a
+		// session another process may have taken meanwhile.
+		for (const retained of this.#snapshotClaims) retained.release();
+		this.#snapshotClaims.clear();
+		this.#sessionClaim?.release();
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
