@@ -23,6 +23,7 @@
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 - Gateway rows discovered from `/v1/models` now keep the `reasoning_effort_map` and `reasoning_required` facts they advertise: a route that serves only low/high/max routes `medium` to `high` instead of the nearest lower tier, and a thinking-off request still sends a tier the route accepts ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
 - Computer-use scripts can wait for a window opened by an action and read it in the same call with a window filter's optional `wait` ([#17391](https://github.com/can1357/oh-my-pi/pull/17391) by [@will-bogusz](https://github.com/will-bogusz))
+- `omp gc --restore <session id or archive path>` brings an archived session back to its own path with its artifacts, names what restoring cannot bring back, refuses an ambiguous id prefix, and exits non-zero when the artifacts did not come back ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -35,11 +36,6 @@
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).
 - Fixed `read` showing a zip, tar, asar or ISO archive's old contents after a same-size rewrite within milliseconds of its previous write, on filesystems with coarse timestamps such as Linux ext4 ([#17389](https://github.com/can1357/oh-my-pi/pull/17389) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `fill` in Chrome replaces the text of rich-text editors such as Slate (Discord) and Lexical instead of leaving the old text in place or breaking the editor, and an empty fill clears them ([#17417](https://github.com/can1357/oh-my-pi/pull/17417) by [@will-bogusz](https://github.com/will-bogusz))
-- `omp gc --restore <session id or archive path>` brings an archived session back to its own path with its artifacts, names what restoring cannot bring back, refuses an ambiguous id prefix, and exits non-zero when the artifacts did not come back ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
-- `omp gc --restore <session id or archive path>` brings an archived session back to its own path with its artifacts, names what restoring cannot bring back, refuses an ambiguous id prefix, and exits non-zero when the artifacts did not come back ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
-
-### Fixed
-
 - A session archived by `omp gc --archive` resumes and exports again: `omp --resume <id>` finds it and brings it back, and `omp --export=<file>.jsonl.gz` reads it ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --archive` no longer deletes the prompt history, session title, recap and usage-stats rows of a session it copies into the archive ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --archive` proves each archive readable before reporting it archived, archives a symlinked transcript by content and leaves both the link and the file it points at alone, and skips a session a live process owns — including one whose subagent transcript is owned through a symlinked artifact directory ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
