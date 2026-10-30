@@ -10,6 +10,7 @@ import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
+import { withCommitTrailers } from "../utils/commit-trailers";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
@@ -503,7 +504,7 @@ export async function applyNestedPatches(
 				}
 				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
 				await repository.stageFiles(touchedFiles);
-				await repository.commitCreate(msg, {});
+				await repository.commitCreate(withCommitTrailers(msg), {});
 			}
 		} finally {
 			if (stashed) {
@@ -839,7 +840,7 @@ async function commitPatch(
 	baselineWip?: BaselineWipContext,
 ): Promise<string> {
 	const tree = await patchTree(repoDir, parentSha, taskId, patchText, baselineWip);
-	return vcs.requireGit(repoDir).commitTree(tree, [parentSha], message, author);
+	return vcs.requireGit(repoDir).commitTree(tree, [parentSha], withCommitTrailers(message), author);
 }
 
 interface FilteredAgentReplayOptions {

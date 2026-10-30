@@ -320,6 +320,35 @@ describe("init_experiment", () => {
 		expect(message).toContain("autoresearch: harness setup");
 	});
 
+	it("gives the harness commit the configured trailers", async () => {
+		const { dir } = freshRepo();
+		await checkoutBranch(dir, "autoresearch/trailer-test");
+		await writeHarnessStub(dir);
+		const runtime = createSessionRuntime();
+		const tool = createInitExperimentTool({
+			dashboard: dashboardStub(),
+			getRuntime: () => runtime,
+			pi: createPiHarness().api,
+		});
+		const previous = process.env.PI_COMMIT_TRAILERS;
+		process.env.PI_COMMIT_TRAILERS = "Omp-Session: 01a13dca-e979-7264-af32-f654ef57a6f5";
+		try {
+			await tool.execute(
+				"call-1",
+				{ name: "x", primary_metric: "m", goal: "speed" },
+				undefined,
+				undefined,
+				createCtx(dir),
+			);
+		} finally {
+			if (previous === undefined) delete process.env.PI_COMMIT_TRAILERS;
+			else process.env.PI_COMMIT_TRAILERS = previous;
+		}
+		const format = "--format=%(trailers:key=Omp-Session,valueonly)";
+		const trailer = (await $`git log -1 ${format}`.cwd(dir).text()).trim();
+		expect(trailer).toBe("01a13dca-e979-7264-af32-f654ef57a6f5");
+	});
+
 	it("does not auto-commit when not on an autoresearch branch", async () => {
 		const { dir, baselineCommit: initialBaseline } = freshRepo();
 		await writeHarnessStub(dir);

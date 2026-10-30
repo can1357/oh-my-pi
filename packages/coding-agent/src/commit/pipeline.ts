@@ -11,6 +11,7 @@ import { type GeneratedGitCommit, generateGitCommit } from "./conventional/servi
 import { abortOnGitFailure, pushOrAbort } from "./execute";
 import { resolvePrimaryModel } from "./model-selection";
 import type { CommitCommandArgs } from "./types";
+import { withCommitTrailers } from "../utils/commit-trailers";
 
 /** Execute the agentic commit flow or the exact deterministic legacy flow. */
 export async function runCommitCommand(args: CommitCommandArgs): Promise<{ usedFallback: boolean }> {
@@ -58,7 +59,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 	if (!args.noChangelog) await updateChangelog(cwd, args);
 	try {
-		await vcs.requireGit(cwd).commitCreate(commitMessage, {});
+		await vcs.requireGit(cwd).commitCreate(withCommitTrailers(commitMessage), {});
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;

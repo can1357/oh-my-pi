@@ -21,6 +21,7 @@ import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" 
 import type { CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
 import { computeDependencyOrder } from "./topo-sort";
 import { detectTrivialChange } from "./trivial";
+import { withCommitTrailers } from "../../utils/commit-trailers";
 
 interface CommitExecutionContext {
 	cwd: string;
@@ -266,7 +267,7 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	}
 	process.stdout.write("● Creating commit...\n");
 	try {
-		await repo.commitCreate(commitMessage, {});
+		await repo.commitCreate(withCommitTrailers(commitMessage), {});
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
@@ -335,7 +336,7 @@ async function runSplitCommit(
 		};
 		const message = formatCommitMessage(analysis, commit.summary);
 		try {
-			await repo.commitCreate(message, {});
+			await repo.commitCreate(withCommitTrailers(message), {});
 		} catch (error) {
 			if (vcs.isVcsError(error)) {
 				const stagedNow = await repo.changedFiles({ cached: true });
