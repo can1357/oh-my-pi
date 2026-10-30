@@ -71,6 +71,8 @@
 - `omp gc --archive` no longer finishes a move through an archive name that only points elsewhere, which left the archive naming a file the same run removed and the session undiscoverable ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - A migrated version 1 transcript that gives one entry another entry's name is refused instead of reading as the same session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - Archiving over an archive that holds a different session now names the command that recovers it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore` aborts with both copies whole when a subagent session joins or leaves the artifact tree while it is being carried home, instead of deleting an archive whose tree is no longer the one it leased ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- The refusals name routes that work: keeping the live transcript means moving both halves of the archive out yourself, not restoring by an id that no longer matches, and keeping an archived session means moving its transcript *and* its artifact directory out of the archive directory ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

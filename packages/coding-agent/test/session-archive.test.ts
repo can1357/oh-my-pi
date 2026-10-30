@@ -1880,3 +1880,73 @@ test("archiving over a different archived session names the way back", async () 
 	expect(errors).toContain("--agent-dir");
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
+
+test("a child that joins while the tree is being copied stops the archive going", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "UNIQUE ORIGINAL");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND");
+	await archiveEverything();
+	const lateId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const late: { lease: { release(): void } | null } = { lease: null };
+
+	// A subagent session joins the tree while the copy is running — after
+	// every count a restore could take before it starts — and holds its own
+	// lease. The tree being moved is no longer the one that was leased.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		await realLink(source, destination);
+		if (late.lease === null && String(destination).endsWith("a.log")) {
+			await Bun.write(path.join(liveArtifacts, "late.jsonl"), sessionBody(lateId, "LATE CHILD", root));
+			late.lease = tryAcquireSessionLease(lateId);
+		}
+	});
+	let restored: RestoredSession | undefined;
+	try {
+		restored = await restoreArchivedSession(archiveFile, root);
+	} finally {
+		link.mockRestore();
+		late.lease?.release();
+	}
+
+	expect(restored?.artifactsRestored).toBe(false);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("UNIQUE ORIGINAL");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("the divergent-transcript refusal does not send anyone down a route that fails", async () => {
+	await archiveEverything();
+	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	await Bun.write(sessionFile, sessionBody(other, "ANOTHER SESSION", root));
+
+	const refusal = await restoreArchivedSession(archiveFile, root).then(
+		() => "",
+		(error: unknown) => (error instanceof Error ? error.message : String(error)),
+	);
+
+	// Keeping the archived one is a command; keeping the live one is not, and
+	// the message must not offer `--restore` for it, because by then there is
+	// no archive left to match.
+	expect(refusal).toContain("different session file");
+	expect(refusal).toContain(`move ${sessionFile}`);
+	expect(refusal).toContain("no archived session matches");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("archiving over a different archived session names both halves to move", async () => {
+	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
+	await Bun.write(archiveFile, Bun.gzipSync(Buffer.from(sessionBody(other, "ANOTHER SESSION", root))));
+	await Bun.write(path.join(archivedArtifacts, "other.log"), "OTHER ARTIFACT");
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+
+	const errors = (await archiveEverything()).archive?.errors.join("\n") ?? "";
+
+	// Moving the transcript alone leaves the other session's artifact tree in
+	// the way, so the message has to name it too.
+	expect(errors).toContain(archiveFile);
+	expect(errors).toContain(archivedArtifacts);
+	expect(errors).toContain("Moving the transcript alone is not enough");
+});

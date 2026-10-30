@@ -786,12 +786,23 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
  * entry at a time, each only once that entry has been shown to have an
  * independent live copy still carrying its content. See
  * {@link removeArchiveTreeOnceCarried}.
+ *
+ * `confirm` runs between the two, with the copy done and nothing deleted
+ * yet. It is where the caller says the tree is still the one it leased;
+ * throwing there leaves both copies whole.
  */
-async function copyTreeDereferenced(source: string, destination: string): Promise<void> {
+async function copyTreeDereferenced(source: string, destination: string, confirm: () => Promise<void>): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
 	await copyEntryDereferenced(source, destination, archiveRoot);
+	await confirm();
 	await removeArchiveTreeOnceCarried(source, destination, archiveRoot);
+}
+
+/** The owner set as one comparable value, so a membership change is visible. */
+async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Promise<string> {
+	const ids = (await owners()).filter((id): id is string => id !== undefined);
+	return [...new Set(ids)].sort().join("\n");
 }
 
 /**
@@ -1029,10 +1040,13 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 			if ((await statIfPresent(archiveFile)) && !(await archiveIsPrefixOfLive(archiveFile, sessionPath))) {
 				throw new Error(
 					`Refusing to restore over a different session file: ${sessionPath} is not this archive carried on. ` +
-						`Keep whichever of the two you want at that path and move the other aside — the live transcript, ` +
-						`or the archive at ${archiveFile} — then run \`omp gc --restore ${target} --apply\` ` +
-						`(add \`--agent-dir <dir>\` when it is not the default one). ` +
-						`Nothing is removed until you do, and without \`--apply\` the command only reports.`,
+						`To keep the archived one, move ${sessionPath} and its artifact directory ${liveArtifacts} aside, ` +
+						`then run \`omp gc --restore ${target} --apply\` ` +
+						`(add \`--agent-dir <dir>\` when it is not the default one; without \`--apply\` it only reports). ` +
+						`To keep the live one, move both halves of the archive out of the archive directory and keep them ` +
+						`yourself — the transcript ${archiveFile} and its artifact directory ${archiveArtifacts}; ` +
+						`there is nothing for \`--restore\` to do once they are gone, and restoring by id would report ` +
+						`that no archived session matches. Nothing is removed until you choose.`,
 				);
 			}
 			bytes = (await fs.stat(sessionPath)).size;
@@ -1043,13 +1057,27 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const notRestored: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
-		// The owners are counted again with nothing left to do but move the
-		// tree: a subagent that joined it since the first count owns files this
-		// is about to carry.
+		// The owner set is sampled with nothing left to do but move the tree,
+		// and sampled again with nothing left but to delete the archive. A
+		// second take narrows the window it does not close: a subagent can join
+		// while the copy runs, and its files are then part of what the deletion
+		// would take. There is no way to hold a directory against new members,
+		// so a membership that changed aborts the move with both copies intact
+		// rather than finishing against a tree that is no longer the one that
+		// was leased.
 		if (!(await leases.refresh())) throw noOwners();
+		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, async () => {
+					if (!(await leases.refresh())) throw noOwners();
+					if ((await ownerSignature(owners)) !== leasedOwners) {
+						throw new Error(
+							`the subagent sessions below ${archiveArtifacts} changed while it was being restored, ` +
+								`so the archive was left as it is; run \`omp gc --restore ${target} --apply\` again`,
+						);
+					}
+				});
 				artifactsRestored = true;
 			} catch (error) {
 				notRestored.push(

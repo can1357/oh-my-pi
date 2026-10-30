@@ -1421,17 +1421,18 @@ async function moveSessionWithArtifacts(
 	const destArtifacts = sessionArtifactsPath(destSession);
 	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
 	const alreadyArchived = (await pathExists(destSession)) && (await archiveAlreadyHolds(sourceSession, destSession));
-	if (await pathExists(destSession)) {
-		if (!alreadyArchived) {
-			const stem = path.basename(destSession, ".jsonl.gz");
-			throw new Error(
-				`the archive at ${destSession} holds a different session, so ${sourceSession} was left where it is. ` +
-					`Bring the archived one home with \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
-					`— add \`--agent-dir <dir>\` when it is not the default one — and archive again; ` +
-					`or move ${destSession} out of the archive directory yourself, keeping it, and archive again. ` +
-					`Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
-			);
-		}
+	if ((await pathExists(destSession)) && !alreadyArchived) {
+		const stem = path.basename(destSession, ".jsonl.gz");
+		throw new Error(
+			`the archive at ${destSession} holds a different session, so ${sourceSession} was left where it is. ` +
+				`Bring the archived one home with \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
+				`— add \`--agent-dir <dir>\` when it is not the default one — and archive again; ` +
+				`or keep it yourself by moving both halves out of the archive directory, the transcript ${destSession} ` +
+				`and its artifact directory ${destArtifacts}, and archive again. Moving the transcript alone is not enough: ` +
+				`the artifact directory left behind holds the other session's subagent transcripts and tool output, ` +
+				`and archiving refuses rather than mixing them with this one's. ` +
+				`Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
+		);
 	}
 
 	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
