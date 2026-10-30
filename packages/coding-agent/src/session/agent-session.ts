@@ -5088,7 +5088,7 @@ export class AgentSession implements SettingsScope {
 					return;
 				}
 			}
-			if (!requestBodyTimeoutTerminal && this.#recovery.handleClassifierRefusalContinuation(msg)) {
+			if (!requestBodyTimeoutTerminal && (await this.#recovery.handleClassifierRefusalContinuation(msg))) {
 				// Carry useful text or a neutral retry reminder so the next request
 				// sees neither the failed assistant nor its refusal metadata.
 				maintenanceRoute("classifier-refusal-continued");

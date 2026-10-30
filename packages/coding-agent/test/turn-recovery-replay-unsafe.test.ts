@@ -1391,14 +1391,17 @@ describe("TurnRecovery classifier-refusal continuation", () => {
 	let tempDir: TempDir;
 	let modelRegistry: ModelRegistry;
 
+	let authStorage: AuthStorage;
+
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-refusal-");
-		const authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
+		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: Settings.isolated() });
 	});
 
 	afterAll(() => {
+		authStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -1420,14 +1423,14 @@ describe("TurnRecovery classifier-refusal continuation", () => {
 		return host;
 	}
 
-	it("stays saturated after the cap until the next prompt", () => {
+	it("stays saturated after the cap until the next prompt", async () => {
 		const recovery = new TurnRecovery(createHostWithContinuation({ "retry.maxClassifierRefusalContinuations": 1 }));
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
 		// Another owner continuing the same prompt must not re-arm the budget.
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
 		recovery.resetForNewPrompt();
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
 	});
 
 	it("does not continue a refusal after the user cancelled a retry wait", async () => {
@@ -1442,8 +1445,26 @@ describe("TurnRecovery classifier-refusal continuation", () => {
 			queueMicrotask(() => recovery.abortRetry());
 		};
 		expect(await recovery.handleRetryableError(failed)).toBe(false);
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(false);
 		recovery.resetForNewPrompt();
-		expect(recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+		expect(await recovery.handleClassifierRefusalContinuation(refusal())).toBe(true);
+	});
+
+	it("drops a refusal the retry saga already persisted before appending the reminder", async () => {
+		const failed = refusal();
+		const host = createHostWithContinuation({}, [failed]);
+		const branched: string[] = [];
+		const discarded: string[] = [];
+		Object.assign(host.sessionManager, {
+			getBranchView: () => [{ id: "refused-entry", parentId: "parent-entry", type: "message", message: failed }],
+			branch: (id: string) => branched.push(id),
+			discardEntryDurably: async (id: string) => {
+				discarded.push(id);
+			},
+		});
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleClassifierRefusalContinuation(failed)).toBe(true);
+		expect(branched).toEqual(["parent-entry"]);
+		expect(discarded).toEqual(["refused-entry"]);
 	});
 });

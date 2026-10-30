@@ -720,7 +720,7 @@ export class TurnRecovery {
 	 * a hidden developer reminder; empty and thinking-only refusals receive a
 	 * neutral retry reminder. Tool and media output remain terminal.
 	 */
-	handleClassifierRefusalContinuation(message: AssistantMessage): boolean {
+	async handleClassifierRefusalContinuation(message: AssistantMessage): Promise<boolean> {
 		if (!this.isClassifierRefusal(message)) return false;
 		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 		const retrySettings = cfgRetry.get(this.#host.settings);
@@ -786,7 +786,9 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		this.removeAssistantMessageFromActiveContext(message, "classifier-refusal-continue");
+		// A retry saga can have persisted the refused turn; drop it from the branch too,
+		// so the reminder is appended to the refusal's parent and reloads never see it.
+		await this.#dropAssistantTurnDurably(message);
 		this.#host.agent.appendMessage(reminder);
 		this.#host.sessionManager.appendMessage(reminder);
 		this.#host.scheduleAgentContinue({
