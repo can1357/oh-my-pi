@@ -9,6 +9,7 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
+- Fixed `omp commit` aborting on Windows when split commits include generated changelog entries ([#17446](https://github.com/can1357/oh-my-pi/issues/17446)).
 
 ## [18.14.0] - 2026-10-29
 

@@ -225,7 +225,7 @@ async function completeAgentCommitState(
 				process.stdout.write(`  ├─ ${message}\n`);
 			},
 		});
-		updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath));
+		updatedChangelogFiles = updated.map(filePath => gitRelativePath(ctx.cwd, filePath));
 		if (updated.length > 0) {
 			for (const filePath of updated) {
 				process.stdout.write(`  └─ ${filePath}\n`);
@@ -251,6 +251,15 @@ async function completeAgentCommitState(
 	}
 
 	throw new Error("Commit agent did not provide a proposal.");
+}
+
+/** Convert an absolute changelog path to a slash-separated Git path. */
+export function gitRelativePath(
+	cwd: string,
+	filePath: string,
+	paths: Pick<typeof path, "relative" | "sep"> = path,
+): string {
+	return paths.relative(cwd, filePath).split(paths.sep).join("/");
 }
 
 async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
