@@ -573,6 +573,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "get_session_lease",
+				"doc": "Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.",
+				"params": "GetSessionLeaseParams",
+				"result": "GetSessionLeaseResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "export_html",
 				"doc": "Export the session as HTML; returns the written path.",
 				"params": "ExportHtmlParams",
@@ -6737,6 +6748,41 @@
 			},
 			"required": [
 				"command"
+			]
+		},
+		"GetSessionLeaseParams": {
+			"type": "object",
+			"properties": {
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"sessionIds"
+			]
+		},
+		"GetSessionLeaseResult": {
+			"type": "object",
+			"properties": {
+				"held": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"unknown": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"required": [
+				"held",
+				"unknown"
 			]
 		},
 		"ExportHtmlParams": {
