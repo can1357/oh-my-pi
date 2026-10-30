@@ -1043,6 +1043,11 @@ const CHILD_NO_PROGRAM: libc::c_int = 126;
 #[cfg(target_os = "linux")]
 const CHILD_NO_SETUP: libc::c_int = 124;
 
+/// How much of a signal set the kernel takes: 64 signals in eight bytes,
+/// whatever size the library's own `sigset_t` is.
+#[cfg(target_os = "linux")]
+const KERNEL_SIGSET_BYTES: usize = 8;
+
 /// `clone3`'s argument block, as much of it as this uses.
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -1122,9 +1127,9 @@ static CAN_HOLD_A_CHILD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
 /// is left as it is, which is the pre-exec contract `posix_spawn` was
 /// keeping here: a handler of this process's that ran between the clone
 /// and the `execve` wrote into the answer and turned a loadable locale
-/// into a refusal. A disposition the child cannot *read* is left blocked
-/// instead, which closes the same window without having to know why the
-/// read failed.
+/// into a refusal. A disposition the child can neither read nor set is
+/// left blocked instead, which closes the same window without having to
+/// know what was there.
 #[cfg(target_os = "linux")]
 fn start_locale_utility(
 	program: &std::ffi::CStr,
@@ -1186,56 +1191,106 @@ fn start_locale_utility(
 			// under `posix_spawn` and died on signal 13 when this reset it.
 			//
 			// A disposition that cannot be read is the awkward case, and
-			// two readings of it were both wrong. Skipping every failed
-			// read let a handler live where a filter denied one
-			// application signal. Skipping a *range* instead — the
-			// numbers below the library's own minimum — assumed that
-			// minimum is where unreadable numbers stop, and it is not: a
-			// library that allocates realtime signals moves its minimum
-			// up (34 to 54 over twenty allocations on glibc 2.39) while
-			// refusing only the fixed numbers it keeps, so 34 to 53 took
-			// handlers and an inherited one on 34 ran before the
-			// `execve`.
+			// three readings of it were wrong before this one. Skipping
+			// every failed read let a handler live where a filter denied
+			// one application signal. Skipping the numbers below the
+			// library's own minimum took that minimum for the end of the
+			// unreadable ones, and it is not: a library that allocates
+			// realtime signals moves the minimum up (34 to 54 over twenty
+			// allocations on glibc 2.39) while only the fixed numbers it
+			// keeps are refused, so 34 to 53 took handlers and an
+			// inherited one on 34 ran before the `execve`. Taking a
+			// refused `sigaddset` for "the library keeps this" was the
+			// third: a `sigaddset` made to fail for `SIGUSR1` let that
+			// handler run in 77 children, because a call that fails says
+			// only that it failed.
 			//
-			// So the test is what the calls themselves answer. A number
-			// whose disposition will not be read is left *blocked* in the
-			// mask the utility starts with: a blocked signal cannot be
-			// delivered before the `execve`, which is the whole hazard,
-			// and the `execve` drops whatever handler was there. A number
-			// the library will not even let a set *name* — `sigaddset`
-			// refuses exactly the ones it keeps for itself, 32 and 33 on
-			// glibc 2.39 and 32 to 34 on musl — is one it never delivers
-			// to an application, so nothing of this process's can be
-			// waiting on it either. Neither case has to be told apart
-			// from a filter's denial, and neither refuses the query.
+			// So nothing here is a classification. Each step is tried and
+			// its result is checked, and the next is only reached because
+			// the one before it was refused:
+			//
+			// * the disposition is read, and a *caught* one is put back
+			//   to default — an ignored one is left alone;
+			// * a disposition that cannot be read is set to default
+			//   anyway, which ends any handler on it without knowing what
+			//   was there;
+			// * a signal that can be neither read nor set is kept
+			//   *blocked* in the mask the utility starts with, because a
+			//   blocked signal cannot be delivered before the `execve`,
+			//   and the `execve` drops the handler;
+			// * and a signal that cannot be blocked either ends the
+			//   child, because nothing is left to make it safe.
+			//
+			// The numbers the library keeps for itself — 32 and 33 on
+			// glibc 2.39, 32 to 34 on musl — reach the third step: they
+			// can be neither read nor set, and `sigaddset` will not name
+			// them, so the bit goes in directly and the mask is restored
+			// through the kernel's own call, which does not take them
+			// back out as `pthread_sigmask` does. They are then blocked
+			// in the utility, where the library never delivered them to
+			// an application anyway.
 			let mut starts_with = held;
 			for signal in 1..=libc::SIGRTMAX() {
 				if signal == libc::SIGKILL || signal == libc::SIGSTOP {
 					continue;
 				}
-				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
-				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) != 0 {
-					libc::sigaddset(&raw mut starts_with, signal);
-					continue;
-				}
-				let current = current.assume_init();
-				if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
-					continue;
-				}
 				let mut default = std::mem::MaybeUninit::<libc::sigaction>::zeroed().assume_init();
 				default.sa_sigaction = libc::SIG_DFL;
-				if libc::sigemptyset(&raw mut default.sa_mask) != 0
-					|| libc::sigaction(signal, &raw const default, std::ptr::null_mut()) != 0
-				{
+				if libc::sigemptyset(&raw mut default.sa_mask) != 0 {
 					libc::_exit(CHILD_NO_SETUP);
 				}
+				let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+				if libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()) == 0 {
+					let current = current.assume_init();
+					if current.sa_sigaction == libc::SIG_IGN || current.sa_sigaction == libc::SIG_DFL {
+						continue;
+					}
+					if libc::sigaction(signal, &raw const default, std::ptr::null_mut()) != 0 {
+						libc::_exit(CHILD_NO_SETUP);
+					}
+					continue;
+				}
+				if libc::sigaction(signal, &raw const default, std::ptr::null_mut()) == 0 {
+					continue;
+				}
+				// `sigaddset` first, and the bit itself where the library
+				// refuses the number: the first word of a signal set is
+				// the kernel's own mask, signal `n` in bit `n - 1`.
+				if libc::sigaddset(&raw mut starts_with, signal) != 0 {
+					let word = (&raw mut starts_with).cast::<u64>();
+					word.write_unaligned(word.read_unaligned() | 1u64 << (signal - 1));
+				}
 			}
-			// The mask this thread had, plus whatever could not be read.
-			// Nothing can carry the number this call returns out of a
-			// child, so the setup status is all the caller is told —
-			// which is why "the return value is reported on every failure"
-			// is not something this code claims.
-			if libc::pthread_sigmask(libc::SIG_SETMASK, &raw const starts_with, std::ptr::null_mut()) != 0 {
+			// The mask this thread had, plus whatever could be neither
+			// read nor set, put on through the kernel rather than through
+			// `pthread_sigmask`, which removes the library's own numbers
+			// from a set before passing it on. Nothing can carry the
+			// number a call returns out of a child, so the setup status is
+			// all the caller is told — which is why "the return value is
+			// reported on every failure" is not something this code
+			// claims.
+			let mut on: libc::sigset_t = std::mem::zeroed();
+			if libc::syscall(
+				libc::SYS_rt_sigprocmask,
+				libc::SIG_SETMASK,
+				&raw const starts_with,
+				std::ptr::null_mut::<libc::sigset_t>(),
+				KERNEL_SIGSET_BYTES,
+			) != 0 || libc::syscall(
+				libc::SYS_rt_sigprocmask,
+				libc::SIG_SETMASK,
+				std::ptr::null::<libc::sigset_t>(),
+				&raw mut on,
+				KERNEL_SIGSET_BYTES,
+			) != 0
+			{
+				libc::_exit(CHILD_NO_SETUP);
+			}
+			// Every signal that had to be blocked is blocked. `SIGKILL`
+			// and `SIGSTOP` never are, and were never put in.
+			let wanted = (&raw const starts_with).cast::<u64>().read_unaligned();
+			let held_now = (&raw const on).cast::<u64>().read_unaligned();
+			if wanted & !held_now != 0 {
 				libc::_exit(CHILD_NO_SETUP);
 			}
 			if libc::setpgid(0, 0) != 0 {
