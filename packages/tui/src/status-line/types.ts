@@ -206,6 +206,12 @@ export interface SegmentContext {
 			expiring?: StatusResetExpiry;
 		};
 	} | null;
+	/** Provider-reported subscription windows for the advisor's own account,
+	 *  keyed to the advisor model's provider/identity (not the primary's). */
+	advisorUsage: {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
+	} | null;
 }
 
 /** How close an account's saved resets are to expiring, when it is worth a warning. */
