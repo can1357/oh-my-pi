@@ -3,6 +3,42 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::task;
+
+/// Options for checking source syntax without generating a summary.
+#[napi(object)]
+pub struct ParseStatusOptions {
+	/// Source code to parse; empty input is not parsed.
+	pub code: String,
+	/// Language alias; a non-blank value overrides path-based detection.
+	pub lang: Option<String>,
+	/// File path used to infer language when `lang` is omitted or blank.
+	pub path: Option<String>,
+}
+
+#[napi(object)]
+pub struct ParseStatus {
+	/// Canonical language name only when parsing succeeded.
+	pub language: Option<String>,
+	/// True when non-empty source parses without syntax errors.
+	pub parsed:   bool,
+}
+
+/// Check syntax through the shared parse cache without constructing a summary.
+#[napi]
+pub fn parse_code_status(options: ParseStatusOptions) -> Result<ParseStatus> {
+	let language = pi_ast::summary::parse_code_status(
+		&options.code,
+		options.lang.as_deref(),
+		options.path.as_deref(),
+	)
+	.map_err(|error| Error::from_reason(error.to_string()))?;
+	Ok(ParseStatus {
+		language: language.map(|language| language.canonical_name().to_string()),
+		parsed:   language.is_some(),
+	})
+}
+
 #[napi(object)]
 pub struct SummaryOptions {
 	/// Source code to summarize.
@@ -72,8 +108,7 @@ impl From<pi_ast::summary::SummaryResult> for SummaryResult {
 	}
 }
 
-#[napi]
-pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
+fn summarize(options: SummaryOptions) -> Result<SummaryResult> {
 	pi_ast::summary::summarize_code(pi_ast::summary::SummaryOptions {
 		code:               options.code,
 		lang:               options.lang,
@@ -85,4 +120,22 @@ pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
 	})
 	.map(Into::into)
 	.map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Summarize source structure synchronously on the calling thread.
+///
+/// Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+/// the JS thread for the whole call.
+#[napi]
+pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
+	summarize(options)
+}
+
+/// Summarize source structure on libuv's thread pool.
+///
+/// Same result as [`summarize_code`], but the parse and summary run off the
+/// JS thread; only argument and result marshalling happen on it.
+#[napi]
+pub fn summarize_code_async(options: SummaryOptions) -> task::Promise<SummaryResult> {
+	task::blocking("summarize_code", (), move |_| summarize(options))
 }

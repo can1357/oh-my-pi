@@ -7,6 +7,7 @@ import {
 	isRustAnalyzerClient,
 	type LspServerStatus,
 	notifySaved,
+	refreshOpenFiles,
 	sendNotification,
 	sendRequest,
 	shutdownClientInstance,
@@ -280,7 +281,6 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	try {
 		const params = reloadConfigurationParams(client.config);
 		await sendNotification(client, "workspace/didChangeConfiguration", params, signal);
-		return `Reloaded ${serverName}`;
 	} catch {
 		throwIfAborted(signal);
 		// The reload notification could not be delivered — the connection is
@@ -300,4 +300,6 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 		}
 		return `Restarted ${serverName}`;
 	}
+	await refreshOpenFiles(client, signal);
+	return `Reloaded ${serverName}`;
 }

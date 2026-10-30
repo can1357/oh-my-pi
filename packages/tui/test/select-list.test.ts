@@ -61,6 +61,15 @@ describe("SelectList", () => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 	});
 
+	it("re-sanitizes a reused item object whose label changed", () => {
+		const item = { value: "test", label: "before", description: "desc" };
+		const list = new SelectList([item], 5, testTheme);
+		expect(list.render(80)[0]).toContain("before");
+		item.label = "after";
+		list.setItems([item]);
+		expect(list.render(80)[0]).toContain("after");
+	});
+
 	it("normalizes multiline descriptions to single line", () => {
 		const items = [
 			{

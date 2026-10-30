@@ -5,14 +5,14 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
-import { concreteThinkingLevel, toReasoningEffort } from "../thinking";
+import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 
 const COMMIT_SYSTEM_PROMPT = prompt.render(commitSystemPrompt);
 const MAX_DIFF_CHARS = 4000;
@@ -62,7 +62,7 @@ function getSmolModelCandidates(
 	});
 	addCandidate(configuredSmol.model, concreteThinkingLevel(configuredSmol.thinkingLevel));
 
-	for (const pattern of MODEL_PRIO.smol) {
+	for (const pattern of roleDefaultModels().smol) {
 		const needle = pattern.toLowerCase();
 		addCandidate(availableModels.find(m => m.id.toLowerCase() === needle));
 		addCandidate(availableModels.find(m => m.id.toLowerCase().includes(needle)));
@@ -106,20 +106,22 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
-			const response = await retryTransientCompletion(() =>
-				completeSimple(
-					candidate.model,
-					{
-						systemPrompt: [COMMIT_SYSTEM_PROMPT],
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-					},
-					{
-						apiKey: registry.resolver(candidate.model, sessionId),
-						sessionId,
-						maxTokens,
-						reasoning: toReasoningEffort(candidate.thinkingLevel),
-					},
-				),
+			const response = await retryTransientCompletion(
+				() =>
+					completeSimple(
+						candidate.model,
+						{
+							systemPrompt: [COMMIT_SYSTEM_PROMPT],
+							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						},
+						{
+							apiKey: registry.resolver(candidate.model, sessionId),
+							sessionId,
+							maxTokens,
+							reasoning: toReasoningEffort(candidate.thinkingLevel),
+						},
+					),
+				{ provider: candidate.model.provider },
 			);
 
 			if (response.stopReason === "error") {

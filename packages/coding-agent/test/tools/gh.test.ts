@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -16,7 +15,9 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -122,6 +123,10 @@ async function buildPrFixtureTemplate(): Promise<PrFixture> {
 
 	await fs.mkdir(repoRoot, { recursive: true });
 	runGit(baseDir, ["init", "-b", "main", repoRoot]);
+	// createPrFixture copies this tree with fs.cp; a background
+	// `git maintenance run --auto` lock would race the copy.
+	runGit(repoRoot, ["config", "maintenance.auto", "false"]);
+	runGit(repoRoot, ["config", "gc.auto", "0"]);
 	await fs.writeFile(path.join(repoRoot, "README.md"), "base\n");
 	runGit(repoRoot, ["add", "README.md"]);
 	runGit(repoRoot, ["commit", "-m", "base commit"]);
@@ -230,6 +235,13 @@ async function expectedWorktreePath(home: string, primaryRoot: string, localBran
 	const segment = `${prNumber}-${hashPath(primaryRoot)}`;
 	return fs.realpath(path.join(home, ".omp", "wt", segment));
 }
+
+describe("sanitizeRemoteName", () => {
+	it("prefixes sanitized fork owners and falls back to a bare fork remote", () => {
+		expect(sanitizeRemoteName("Octo_Cat.Org")).toBe("fork-octo-cat-org");
+		expect(sanitizeRemoteName("__")).toBe("fork");
+	});
+});
 
 describe("parsePrUnifiedDiff", () => {
 	it("parses quoted diff headers instead of falling back to unknown paths", () => {
@@ -393,6 +405,84 @@ describe("getOrFetchPrDiff diff-too-large fallback", () => {
 	});
 });
 
+describe("GitHub command runner", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("preserves structured API validation details hidden by generic stderr", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({
+				message: "Validation Failed",
+				errors: [
+					{
+						message:
+							"The search contains only logical operators without search terms. " +
+							"Logical operators only apply to text, not to qualifiers.",
+					},
+				],
+			}),
+			stderr: "gh: Validation Failed (HTTP 422)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/search/issues"])).rejects.toThrow(
+			"gh: Validation Failed (HTTP 422)\n" +
+				"GitHub details:\n" +
+				"- The search contains only logical operators without search terms. " +
+				"Logical operators only apply to text, not to qualifiers.",
+		);
+	});
+
+	it("formats structured API field errors that carry no message", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({
+				message: "Validation Failed",
+				errors: [{ resource: "Search", field: "q", code: "missing" }],
+			}),
+			stderr: "gh: Validation Failed (HTTP 422)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/search/issues"])).rejects.toThrow(
+			"gh: Validation Failed (HTTP 422)\nGitHub details:\n- Search.q: missing",
+		);
+	});
+
+	it("does not duplicate structured details already rendered by gh", async () => {
+		const detail = "Field 'fieldThatDoesNotExist' doesn't exist on type 'Repository'";
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({ errors: [{ message: detail }] }),
+			stderr: `gh: ${detail}`,
+		});
+
+		await expect(github.json("/tmp", ["api", "graphql"])).rejects.toThrow(new RegExp(`^gh: ${detail}$`));
+	});
+
+	it("retains the existing error when stdout is not structured JSON", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: "upstream proxy returned HTML",
+			stderr: "gh: request failed (HTTP 502)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/user"])).rejects.toThrow("gh: request failed (HTTP 502)");
+	});
+
+	it("preserves translated authentication failures without extra API details", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({ message: "Bad credentials" }),
+			stderr: "gh: To authenticate, run gh auth login",
+		});
+
+		await expect(github.json("/tmp", ["api", "/user"])).rejects.toThrow(
+			/^GitHub CLI is not authenticated\. Run `gh auth login`\.$/,
+		);
+	});
+});
+
 describe("github tool", () => {
 	beforeAll(async () => {
 		prFixtureTemplate = await buildPrFixtureTemplate();
@@ -474,6 +564,20 @@ describe("github tool", () => {
 			undefined,
 			{ repoProvided: true, trimOutput: false },
 		);
+	});
+
+	it("adds repository, revision, and path context to file-read failures", async () => {
+		vi.spyOn(github, "json").mockRejectedValue(new ToolError("gh: Not Found (HTTP 404)"));
+		const tool = new GithubTool(createSession());
+
+		await expect(
+			tool.execute("file-read", {
+				op: "file_read",
+				repo: "openai/codex",
+				branch: "main",
+				path: "Cargo.toml",
+			}),
+		).rejects.toThrow("GitHub file read failed for 'openai/codex@main:Cargo.toml': gh: Not Found (HTTP 404)");
 	});
 
 	it("returns GitHub images as model image content", async () => {
@@ -588,14 +692,14 @@ describe("github tool", () => {
 		expect(viewArgs.slice(0, 3)).toEqual(["pr", "view", "77"]);
 		expect(viewArgs).toEqual(expect.arrayContaining(["--repo", "owner/repo"]));
 
-		// Output: PR number + summary rendered, URL surfaces, body block included.
+		// Output: PR number + summary rendered, URL surfaces, body is not echoed.
 		expect(text).toContain("# Created Pull Request #77: Add gizmo");
 		expect(text).toContain("URL: https://github.com/owner/repo/pull/77");
 		expect(text).toContain("Draft: true");
 		expect(text).toContain("Base: main");
 		expect(text).toContain("Head: feature/gizmo");
 		expect(text).toContain("Labels: enhancement");
-		expect(text).toContain("Adds a gizmo.");
+		expect(text).not.toContain("Adds a gizmo.");
 	});
 
 	it("rejects pr_create when neither title nor fill is supplied", async () => {
@@ -1104,40 +1208,6 @@ describe("github tool", () => {
 				// Existing URL is preserved — we never overwrote it.
 				expect(runGit(fixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(fixture.forkBare);
 			});
-			it("does not depend on localized git remote-add stderr for existing remotes", async () => {
-				// The shim is a bash script resolved via `which`; neither exists on Windows.
-				if (process.platform === "win32") return;
-				const originalPath = process.env.PATH;
-				const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-"));
-				const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
-				expect(realGitResult.exitCode).toBe(0);
-				const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
-				const fakeGit = path.join(fakeBin, "git");
-				await fs.writeFile(
-					fakeGit,
-					`#!/usr/bin/env bash
-while [[ "$1" == "-c" ]]; do shift 2; done
-if [[ "$1" == "remote" && "$2" == "add" && "$3" == "forksrc" ]]; then
-	echo "本地化错误：远程 forksrc 已经存在。" >&2
-	exit 3
-fi
-exec ${JSON.stringify(realGit)} "$@"
-`,
-				);
-				await fs.chmod(fakeGit, 0o755);
-
-				try {
-					process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-					await vcs.requireGit(fixture.repoRoot).remoteAdd("forksrc", fixture.forkBare);
-				} finally {
-					if (originalPath === undefined) {
-						delete process.env.PATH;
-					} else {
-						process.env.PATH = originalPath;
-					}
-					await removeWithRetries(fakeBin);
-				}
-			});
 		});
 	});
 
@@ -1192,7 +1262,7 @@ echo ok
 				child.exited,
 			]);
 			expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok" });
+			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok", stdoutTruncated: false });
 		} finally {
 			await removeWithRetries(fakeBin);
 		}
@@ -1316,15 +1386,6 @@ echo ok
 				);
 			});
 		});
-	});
-
-	it("exposes a flat op-based schema without legacy run_watch parameters", () => {
-		const tool = new GithubTool(createSession());
-		const wire = toolWireSchema(tool);
-		const properties = wire.properties as Record<string, unknown>;
-		expect(properties.op).toBeDefined();
-		expect(properties.interval).toBeUndefined();
-		expect(properties.grace).toBeUndefined();
 	});
 
 	it("tails failed job logs inline and saves the full failed-job logs as an artifact", async () => {

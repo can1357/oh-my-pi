@@ -3,13 +3,12 @@ import { createAutoresearchExtension } from "@oh-my-pi/pi-coding-agent/autoresea
 import {
 	buildExperimentState,
 	computeConfidence,
-	findBaselineMetric,
-	findBaselineRunNumber,
 	findBestKeptMetric,
 	reconstructControlState,
 } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
 import { AutoresearchStorage, closeAllAutoresearchStorages } from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
-import type { ExperimentResult } from "@oh-my-pi/pi-coding-agent/autoresearch/types";
+import type { ExperimentResult } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { findBaselineMetric, findBaselineRunNumber } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,

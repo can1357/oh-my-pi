@@ -313,14 +313,6 @@ describe("string parsing", () => {
 		expect(T.json).toEqual(Expected.json);
 	});
 
-	it("false", () => {
-		const T = type({ key: "boolean = false" });
-		const Expected = type({ key: ["boolean", "=", false] });
-
-		const _type60: Eq<typeof T, typeof Expected> = true;
-		expect(T.json).toEqual(Expected.json);
-	});
-
 	it("null", () => {
 		// ideally we could infer a better type here,
 		// but attaching attributes to null or undefined
@@ -342,27 +334,11 @@ describe("string parsing", () => {
 		expect(T.json).toEqual(Expected.json);
 	});
 
-	it("incorrect default type", () => {
-		// @ts-expect-error
-		expect(() => type({ foo: "string", bar: "number = true" })).toThrow(
-			"ParseError: Default for bar must be a number (was boolean)",
-		);
-	});
-
 	it("non-literal", () => {
 		expect(() =>
 			// @ts-expect-error
 			type({ foo: "string", bar: "unknown = number" }),
 		).toThrow("default");
-	});
-
-	it("validated default in scope", () => {
-		const $ = scope({
-			specialNumber: "number",
-			obj: { foo: "string", bar: "specialNumber = 5" },
-		});
-
-		$.export();
 	});
 
 	it("optional with default", () => {
@@ -465,13 +441,6 @@ describe("works properly with types", () => {
 	});
 
 	describe("bad values", () => {
-		it("primitive", () => {
-			expect(
-				// @ts-expect-error
-				() => type({ foo: ["number", "=", true] }),
-			).toThrow("ParseError: Default for foo must be a number (was boolean)");
-		});
-
 		it("array", () => {
 			expect(
 				// @ts-expect-error

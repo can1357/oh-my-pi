@@ -10,10 +10,15 @@ Current behavior is implemented in
 `packages/ai/src/utils/harmony-leak.ts` and
 `packages/agent/src/agent-loop.ts`:
 
-- Requests to Harmony-dialect models escape reserved `<|...|>` spellings in
-  untrusted text, tool results, and serialized tool arguments before replay.
-- Response leak detection is enabled for every model whose provider is
-  `openai-codex`, rather than for a fixed model-ID list.
+- `isHarmonyDialectModel()` currently gates request escaping on
+  `model.identity.class === "gpt-oss"`. The OpenAI Responses/Codex conversion
+  paths escape reserved `<|...|>` spellings in their transport copies of text,
+  tool results, and serialized tool arguments; persisted messages stay unchanged.
+  This gate does not currently include GPT-5 merely because of its model ID.
+- Response leak detection is gated by `model.compat.harmonyLeakMitigation === true`.
+  `packages/catalog/src/compat/rules/providers/openai-codex.kdl` enables that
+  compatibility axis for Codex models; the detector itself no longer checks
+  provider IDs or a fixed model-ID list.
 - A bare `to=functions.NAME` marker is not sufficient. Detection requires a
   co-signal (channel adjacency, glitch token, script mismatch, cascade,
   fake-result framing, or a trusted trailing-parse boundary); fenced examples
@@ -23,14 +28,20 @@ Current behavior is implemented in
   error. Audit callbacks receive action/signal metadata and a hash/redacted
   preview of removed content.
 - Tool-argument detection is intentionally inert unless a caller supplies the
-  byte offset where a structurally valid tool parse ended. The main agent loop
+  string offset where a structurally valid tool parse ended. The main agent loop
   does not currently supply that boundary, avoiding false aborts on legitimate
   tool data that discusses the protocol.
-- Recovery support exists for bounded free-form `eval` input and the current
-  hashline `edit` DSL (input beginning with `@`): it truncates at the
-  contaminated line and appends `*** Abort`. Apply-patch envelopes and
-  JSON-schema edit inputs are not recovery-eligible and use abort/retry when a
-  bounded detection is available.
+- The recovery helper accepts bounded free-form `eval` input and an old `edit`
+  shape beginning with `@`, truncating at the contaminated line and appending
+  `*** Abort`. That `edit` gate does not match the current native hashline
+  `[PATH#TAG]` envelope (`packages/coding-agent/src/edit/index.ts`,
+  `packages/tui/src/tools/hashline-format.ts`); it is not evidence that current
+  hashline calls recover. Apply-patch envelopes and JSON-schema edit inputs
+  also fail the helper's eligibility check and use abort/retry when bounded
+  detection is supplied.
+
+Raw removed content is included in audit events only when `OMP_HARMONY_DEBUG=1`;
+normal audit events keep the hash and a redacted preview.
 
 The corpus tables below describe the historical input formats present in that
 snapshot; they are not a list of the current `edit` tool's accepted syntaxes.

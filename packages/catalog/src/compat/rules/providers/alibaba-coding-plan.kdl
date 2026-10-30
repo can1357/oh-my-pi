@@ -1,6 +1,10 @@
 // Provider-wire compat for "alibaba-coding-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "alibaba-coding-plan" {
+	default-model "qwen3.7-plus"
+	env "ALIBABA_CODING_PLAN_API_KEY"
+	discovery label="Alibaba Coding Plan"
+
 	// Replaces the Alibaba-compatible thinking-format branch.
 	thinking-format "qwen"
 	// Replaces the provider-wide completions stream-idle baseline.

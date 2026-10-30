@@ -15,6 +15,7 @@
  */
 import { agenticFixtures } from "./agentic";
 import { codeintelFixtures } from "./codeintel";
+import { coordinationFixtures } from "./coordination";
 import { editFixtures } from "./edit";
 import { fsFixtures } from "./fs";
 import { interactionFixtures } from "./interaction";
@@ -36,6 +37,7 @@ export const galleryFixtures = {
 	...searchFixtures,
 	...editFixtures,
 	...agenticFixtures,
+	...coordinationFixtures,
 	...memoryFixtures,
 	...webFixtures,
 	...codeintelFixtures,

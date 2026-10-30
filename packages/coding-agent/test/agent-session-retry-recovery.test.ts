@@ -1,20 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import type { ApiKeyResolveContext, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
+import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -27,7 +27,11 @@ type RecoveryRun = {
 
 const RATE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
+const SOCKET_CLOSE_MID_STREAM =
+	"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
 const RETRIABLE_SERVER_ERROR = "503 service unavailable: overloaded_error";
+const CODEX_STEER_REJECTION =
+	"Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead. (code=unsupported_native_inflight_message)";
 
 function emptyUsage(): Usage {
 	return {
@@ -71,14 +75,14 @@ function retryRecovery(recovery: AssistantRetryRecovery["recovery"], note: strin
 	};
 }
 
-function resolveInitialApiKey(
-	apiKey: string | ((ctx: ApiKeyResolveContext) => string | Promise<string | undefined> | undefined) | undefined,
-): string {
+function resolveInitialApiKey(apiKey: ApiKey | undefined): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
-	if (typeof resolved !== "string") {
+	const bearer =
+		typeof resolved === "string" ? resolved : resolved && "apiKey" in resolved ? resolved.apiKey : undefined;
+	if (typeof bearer !== "string") {
 		throw new Error("Expected API key to be resolved before streaming");
 	}
-	return resolved;
+	return bearer;
 }
 
 interface AssistantEntry {
@@ -133,9 +137,9 @@ describe("AgentSession retry recovery", () => {
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
-		await authStorage.remove("anthropic");
-		authStorage.removeRuntimeApiKey("anthropic");
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		await authStorage.credentials.remove("anthropic");
+		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
 		sessions = [];
 		managers = [];
@@ -163,8 +167,8 @@ describe("AgentSession retry recovery", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		authStorage.removeRuntimeApiKey("anthropic");
-		await authStorage.set("anthropic", [
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
 			{ type: "api_key", key: "anthropic-key-2" },
 		]);
@@ -208,7 +212,7 @@ describe("AgentSession retry recovery", () => {
 		});
 		sessions.push(session);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -220,6 +224,77 @@ describe("AgentSession retry recovery", () => {
 
 		return { session, sessionManager, retryEndEvents, requestedKeys };
 	}
+
+	it("waitForIdle waits for retry recovery event delivery", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["Recovered after retry."], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 100,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+			}),
+			modelRegistry,
+		});
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+
+		const rewriteStarted = Promise.withResolvers<void>();
+		const resumeRewrite = Promise.withResolvers<void>();
+		const rewriteEntries = sessionManager.rewriteEntries.bind(sessionManager);
+		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			rewriteStarted.resolve();
+			await resumeRewrite.promise;
+			await rewriteEntries();
+		});
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+		let idleResolved = false;
+		const completion = (async () => {
+			await session.prompt("Recover from the transient failure.");
+			await session.waitForIdle();
+			idleResolved = true;
+			unsubscribe();
+		})();
+
+		try {
+			await Promise.race([rewriteStarted.promise, completion]);
+			// Drain runnable work without releasing the recovery persistence gate.
+			const nextImmediate = Promise.withResolvers<void>();
+			setImmediate(nextImmediate.resolve);
+			await nextImmediate.promise;
+			expect(idleResolved).toBe(false);
+			expect(retryEndEvents).toEqual([]);
+		} finally {
+			resumeRewrite.resolve();
+			try {
+				await completion;
+			} finally {
+				unsubscribe();
+			}
+		}
+
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+	});
 
 	it("marks a recovered retry error, emits it, persists it, and excludes only model-context replay", async () => {
 		const { sessionManager, retryEndEvents, requestedKeys } = await runCredentialRecovery();
@@ -282,7 +357,7 @@ describe("AgentSession retry recovery", () => {
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -324,7 +399,7 @@ describe("AgentSession retry recovery", () => {
 			modelRegistry,
 		});
 		sessions.push(session);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -345,12 +420,61 @@ describe("AgentSession retry recovery", () => {
 		});
 	});
 
+	it("does not issue another provider request when a retry races session abort", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["resumed on request"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 4,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const abortCompleted = Promise.withResolvers<void>();
+		const unsubscribeAbort = agent.subscribe(event => {
+			if (event.type === "agent_end") {
+				void session.abort().then(abortCompleted.resolve, abortCompleted.reject);
+			}
+		});
+
+		await session.prompt("Stop after the provider failure");
+		await abortCompleted.promise;
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		unsubscribeAbort();
+		await session.prompt("Resume explicitly after abort");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(2);
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "resumed on request" }],
+		});
+	});
+
 	it("collapses exhausted retries into one terminal error naming the spent budget", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 
 		const mock = createMockModel({
 			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { throw: RETRIABLE_SERVER_ERROR }],
@@ -382,7 +506,8 @@ describe("AgentSession retry recovery", () => {
 			modelRegistry,
 		});
 		sessions.push(session);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_000);
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -424,6 +549,173 @@ describe("AgentSession retry recovery", () => {
 			.filter(presentation => presentation.kind !== "none");
 		expect(visibleErrors).toHaveLength(1);
 		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
+	});
+	/**
+	 * Runs one prompt against a primary model with a single-entry fallback chain,
+	 * scripting each provider attempt in order. Returns the model each request
+	 * went to and the fallback switches the session announced.
+	 */
+	async function runFallbackChainRecovery(
+		responses: MockResponse[],
+		maxRetries = 2,
+		models: { primary: Model; fallback: Model } = {
+			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			fallback: getBundledModel("openai", "gpt-5.5"),
+		},
+	): Promise<{
+		primary: string;
+		fallback: string;
+		requestedModels: string[];
+		fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>>;
+		sessionManager: SessionManager;
+	}> {
+		const { primary: model, fallback: fallbackModel } = models;
+		if (!model || !fallbackModel) {
+			throw new Error("Expected bundled primary and fallback test models to exist");
+		}
+		authStorage.keys.setRuntime(model.provider, `${model.provider}-test-key`);
+		authStorage.keys.setRuntime(fallbackModel.provider, `${fallbackModel.provider}-test-key`);
+		const primary = `${model.provider}/${model.id}`;
+		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses });
+		const agent = new Agent({
+			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": maxRetries,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [fallback] },
+		});
+		settings.setModelRole("default", primary);
+
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		managers.push(sessionManager);
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Trigger a socket drop");
+		await session.waitForIdle();
+		await sessionManager.flush();
+		return { primary, fallback, requestedModels, fallbackEvents, sessionManager };
+	}
+
+	const droppedAfterThinking: MockResponse = {
+		content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+		stopReason: "error",
+		errorMessage: SOCKET_CLOSE_MID_STREAM,
+	};
+
+	it("retries a mid-stream socket drop on the same model before consulting the fallback chain", async () => {
+		// The transport died after the model had already emitted reasoning, so the
+		// failure says nothing about model health: the first attempt stays on the
+		// primary instead of switching to the fallback chain.
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			droppedAfterThinking,
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+		successfulAssistantEntry(sessionManager, "recovered on the same model");
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain", note: "error; retried" });
+	});
+
+	it("retries the same model only once, then consults the fallback chain", async () => {
+		// The same-model retry is bounded to the first attempt: a second drop must
+		// fall through to the chain rather than keep retrying the primary.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			droppedAfterThinking,
+			droppedAfterThinking,
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("still consults the fallback chain when no same-model retry is left", async () => {
+		// With `retry.maxRetries: 0` the first attempt is already over budget, so the
+		// chain is the only recovery: the socket-drop gate must not suppress it.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery(
+			[droppedAfterThinking, { content: ["recovered on fallback"], stopReason: "stop" }],
+			0,
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("keeps the immediate fallback for a socket drop with no streamed content", async () => {
+		// No progress streamed before the drop, so a different route may genuinely
+		// help: the first attempt still switches to the fallback chain.
+		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+		successfulAssistantEntry(sessionManager, "recovered on fallback");
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "model" });
+	});
+
+	const codexModels = {
+		primary: getBundledModel("openai-codex", "gpt-6-astra"),
+		fallback: getBundledModel("openai-codex", "gpt-6.1-sol"),
+	};
+	const steerRejectedAfterThinking: MockResponse = {
+		content: [{ type: "thinking", thinking: "planning the next tool call" }],
+		stopReason: "error",
+		errorMessage: CODEX_STEER_REJECTION,
+	};
+
+	it("retries a Codex steering rejection on the same model instead of consulting the fallback chain", async () => {
+		// Codex dropped the response because omp steered it mid-stream, after
+		// reasoning had streamed. The provider already stopped steering the
+		// session, so the primary replays cleanly; switching models fixes nothing.
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery(
+			[steerRejectedAfterThinking, { content: ["recovered on the same model"], stopReason: "stop" }],
+			2,
+			codexModels,
+		);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+		successfulAssistantEntry(sessionManager, "recovered on the same model");
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain" });
+	});
+
+	it("still consults the fallback chain for a Codex steering rejection when no same-model retry is left", async () => {
+		// With `retry.maxRetries: 0` the chain is the only recovery left.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery(
+			[steerRejectedAfterThinking, { content: ["recovered on fallback"], stopReason: "stop" }],
+			0,
+			codexModels,
+		);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
 	});
 
 	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", () => {

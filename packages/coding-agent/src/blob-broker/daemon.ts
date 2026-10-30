@@ -210,7 +210,12 @@ class DaemonBlobBackend implements BlobBackend {
 		this.supportsLazy = info.lazy;
 	}
 
-	async ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null> {
+	async ensureBlob(
+		key: string,
+		mimeType: string,
+		getBytes: () => Uint8Array,
+		getBase64?: () => string,
+	): Promise<BlobPublication | null> {
 		try {
 			// Probe first: persisted/live registrations answer without the bytes
 			// ever crossing the socket — the common case on every turn after the
@@ -222,7 +227,7 @@ class DaemonBlobBackend implements BlobBackend {
 			if (probe.publication) return probe.publication;
 			const { publication } = await fetchUnix<EnsureBlobResponse>(this.#socket, "/blob", {
 				method: "POST",
-				body: JSON.stringify({ key, mimeType, data: Buffer.from(getBytes()).toString("base64") }),
+				body: JSON.stringify({ key, mimeType, data: getBase64?.() ?? getBytes().toBase64() }),
 			});
 			return publication ?? null;
 		} catch (error) {

@@ -1,17 +1,17 @@
 /**
- * Detail drawer for a selected trace span. Fetches the full journal entry on
- * demand (`/api/session/entry`) and renders per-kind detail: model usage grid
+ * Detail drawer for a selected trace span. Loads the full journal entry on
+ * demand (live API or embedded snapshot) and renders per-kind detail: model usage grid
  * + text blocks, tool args/result, user text, subagent task text.
  */
 
 import { Check, Copy, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getSessionEntryDetail } from "../api";
 import { formatDurationMs, formatInteger } from "../data/formatters";
 import type { TraceSpan, TraceTrack } from "../types";
-import { JsonBlock } from "../ui/JsonBlock";
-import { Skeleton } from "../ui/Skeleton";
-import { StatusPill } from "../ui/StatusPill";
+import { Badge, Drawer, type DrawerProps, ErrorState, JsonBlock, KeyValues, Skeleton } from "../ui";
+
+export type TraceEntryLoader = (file: string, entryId: string, signal: AbortSignal) => Promise<{ entry: unknown }>;
 
 export interface SpanDrawerProps {
 	span: TraceSpan | null;
@@ -19,6 +19,9 @@ export interface SpanDrawerProps {
 	onClose: () => void;
 	/** Selects the first span of the given child track ("open child track"). */
 	onOpenChildTrack?: (childTrackId: string) => void;
+	loadEntry?: TraceEntryLoader;
+	inline?: boolean;
+	onNavigate?: (trackId: string, entryId: string) => void;
 }
 
 /** Loose structural view of a fetched journal entry (validated field-by-field). */
@@ -62,27 +65,50 @@ function textBlocks(content: unknown): Array<{ kind: string; text: string }> {
 	return blocks;
 }
 
-export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawerProps) {
+function InlineSpanDetail({ title, subtitle, actions, onClose, children }: DrawerProps) {
+	return (
+		<section className="traces-inline-detail" aria-label="Selected span details">
+			<header className="drawer-header">
+				<div className="drawer-titles">
+					<h2 className="drawer-title">{title}</h2>
+					{subtitle !== undefined && <div className="drawer-subtitle">{subtitle}</div>}
+				</div>
+				{actions}
+				<button type="button" className="btn" data-icon="true" onClick={onClose} aria-label="Close span details">
+					<X size={16} />
+				</button>
+			</header>
+			<div className="drawer-body">{children}</div>
+		</section>
+	);
+}
+
+export function SpanDrawer({
+	span,
+	track,
+	onClose,
+	onOpenChildTrack,
+	loadEntry = getSessionEntryDetail,
+	inline = false,
+	onNavigate,
+}: SpanDrawerProps) {
 	const [entry, setEntry] = useState<unknown>(null);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<Error | null>(null);
 	const [copied, setCopied] = useState(false);
-	const closeButtonRef = useRef<HTMLButtonElement>(null);
-	const previousActiveElement = useRef<HTMLElement | null>(null);
+	const copyResetRef = useRef<number>(0);
 
 	useEffect(() => {
 		setEntry(null);
 		setError(null);
 		setCopied(false);
+		setLoading(false);
 		if (!span || !track || !span.entryId) return;
-		previousActiveElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		setLoading(true);
 		const controller = new AbortController();
-		getSessionEntryDetail(track.file, span.entryId, controller.signal)
+		loadEntry(track.file, span.entryId, controller.signal)
 			.then(data => {
-				if (controller.signal.aborted) return;
-				setEntry(data.entry);
-				setTimeout(() => closeButtonRef.current?.focus(), 50);
+				if (!controller.signal.aborted) setEntry(data.entry);
 			})
 			.catch(err => {
 				if (controller.signal.aborted) return;
@@ -92,31 +118,18 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 				if (!controller.signal.aborted) setLoading(false);
 			});
 		return () => controller.abort();
-	}, [span, track]);
+	}, [span, track, loadEntry]);
 
-	useEffect(() => {
-		if (!span) return;
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") onClose();
-		};
-		window.addEventListener("keydown", handleKeyDown);
-		return () => {
-			window.removeEventListener("keydown", handleKeyDown);
-			previousActiveElement.current?.focus();
-		};
-	}, [span, onClose]);
+	useEffect(() => () => window.clearTimeout(copyResetRef.current), []);
 
 	if (!span) return null;
-
-	const handleOverlayClick = (event: React.MouseEvent<HTMLDivElement>) => {
-		if (event.target === event.currentTarget) onClose();
-	};
 
 	const handleCopy = async () => {
 		try {
 			await navigator.clipboard.writeText(JSON.stringify(entry ?? span, null, 2));
 			setCopied(true);
-			setTimeout(() => setCopied(false), 1500);
+			window.clearTimeout(copyResetRef.current);
+			copyResetRef.current = window.setTimeout(() => setCopied(false), 1500);
 		} catch {
 			// Clipboard unavailable (permissions); leave the button state as-is.
 		}
@@ -127,183 +140,151 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 	const msg = view.message;
 	const usage = msg?.usage;
 
+	const metrics: Array<{ key: string; label: ReactNode; value: ReactNode }> = [
+		{
+			key: "duration",
+			label: "Duration",
+			value: (
+				<span className="num">
+					{formatDurationMs(span.end - span.start)}
+					{span.unterminated && <span className="muted"> · unterminated</span>}
+				</span>
+			),
+		},
+		{ key: "start", label: "Start", value: <span className="num">{new Date(span.start).toLocaleTimeString()}</span> },
+		{ key: "track", label: "Track", value: <span className="mono">{track?.label ?? "-"}</span> },
+	];
+	if (span.kind === "model") {
+		metrics.push(
+			{
+				key: "tokens",
+				label: "Tokens",
+				value: <span className="num">{formatInteger(span.tokens ?? 0)}</span>,
+			},
+			{ key: "cost", label: "Cost", value: <span className="num">${(span.cost ?? 0).toFixed(4)}</span> },
+			{ key: "ttft", label: "TTFT", value: <span className="num">{formatDurationMs(span.ttft ?? null)}</span> },
+			{ key: "model", label: "Model", value: <span className="mono">{msg?.model ?? span.model ?? "-"}</span> },
+		);
+		if (usage)
+			metrics.push({
+				key: "split",
+				label: "Input / output / cached",
+				value: (
+					<span className="num">
+						{formatInteger(usage.input ?? 0)} / {formatInteger(usage.output ?? 0)} /{" "}
+						{formatInteger(usage.cacheRead ?? 0)}
+					</span>
+				),
+			});
+		if (msg?.provider)
+			metrics.push({ key: "provider", label: "Provider", value: <span className="mono">{msg.provider}</span> });
+		if (msg?.stopReason)
+			metrics.push({ key: "stop", label: "Stop reason", value: <span className="mono">{msg.stopReason}</span> });
+	}
+
+	const DetailShell = inline ? InlineSpanDetail : Drawer;
+
 	return (
-		<div className="stats-drawer-overlay" onClick={handleOverlayClick} role="presentation">
-			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label="Span details">
-				<div className="stats-drawer-header">
-					<div className="stats-drawer-header-left">
-						<h2 className="stats-drawer-title truncate" style={{ maxWidth: 320 }}>
-							{span.label}
-						</h2>
-						<StatusPill variant={span.isError ? "danger" : "success"}>{span.kind}</StatusPill>
-					</div>
-					<div style={{ display: "flex", gap: 8 }}>
+		<DetailShell
+			open
+			onClose={onClose}
+			title={span.label}
+			subtitle={
+				<span className="row" style={{ gap: 6 }}>
+					<Badge tone={span.isError ? "bad" : "neutral"}>
+						{span.isError ? `${span.kind} · error` : span.kind}
+					</Badge>
+				</span>
+			}
+			actions={
+				<button
+					type="button"
+					className="btn"
+					data-variant="ghost"
+					data-icon="true"
+					onClick={handleCopy}
+					aria-label="Copy raw JSON"
+					title="Copy raw JSON"
+				>
+					{copied ? <Check size={15} /> : <Copy size={15} />}
+				</button>
+			}
+		>
+			<div className="stack traces-drawer">
+				<KeyValues items={metrics} />
+				{onNavigate && track && span.entryId && (
+					<div>
 						<button
 							type="button"
-							onClick={handleCopy}
-							className="stats-drawer-close-btn"
-							aria-label="Copy raw JSON"
-							title="Copy raw JSON"
+							className="btn"
+							data-size="sm"
+							onClick={() => {
+								if (span.entryId) onNavigate(track.id, span.entryId);
+							}}
 						>
-							{copied ? <Check size={16} /> : <Copy size={16} />}
-						</button>
-						<button
-							ref={closeButtonRef}
-							type="button"
-							onClick={onClose}
-							className="stats-drawer-close-btn"
-							aria-label="Close span details"
-						>
-							<X size={18} />
+							Jump to transcript
 						</button>
 					</div>
-				</div>
+				)}
 
-				<div className="stats-drawer-body">
-					<div className="stats-drawer-content">
-						<div className="stats-drawer-metrics-grid">
-							<div className="stats-drawer-metric-card">
-								<div className="stats-drawer-metric-label">Duration</div>
-								<div className="stats-drawer-metric-value">{formatDurationMs(span.end - span.start)}</div>
-								{span.unterminated && <div className="stats-drawer-metric-sub">unterminated</div>}
-							</div>
-							<div className="stats-drawer-metric-card">
-								<div className="stats-drawer-metric-label">Start</div>
-								<div className="stats-drawer-metric-value" style={{ fontSize: 13 }}>
-									{new Date(span.start).toLocaleTimeString()}
-								</div>
-							</div>
-							{span.kind === "model" && (
-								<>
-									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Tokens</div>
-										<div className="stats-drawer-metric-value">{formatInteger(span.tokens ?? 0)}</div>
-										{usage && (
-											<div className="stats-drawer-metric-sub">
-												{formatInteger(usage.input ?? 0)} in · {formatInteger(usage.output ?? 0)} out ·{" "}
-												{formatInteger(usage.cacheRead ?? 0)} cached
-											</div>
-										)}
-									</div>
-									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Cost</div>
-										<div className="stats-drawer-metric-value">${(span.cost ?? 0).toFixed(4)}</div>
-									</div>
-									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">TTFT</div>
-										<div className="stats-drawer-metric-value">{formatDurationMs(span.ttft ?? null)}</div>
-									</div>
-									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Model</div>
-										<div className="stats-drawer-metric-value" style={{ fontSize: 12 }}>
-											{msg?.model ?? span.model ?? "-"}
-										</div>
-										{msg?.provider && <div className="stats-drawer-metric-sub">{msg.provider}</div>}
-										{msg?.stopReason && <div className="stats-drawer-metric-sub">stop: {msg.stopReason}</div>}
-									</div>
-								</>
-							)}
-						</div>
+				{msg?.errorMessage && (
+					<div className="stack" style={{ gap: 6 }}>
+						<div className="section-label tone-bad">Error message</div>
+						<pre className="code-block traces-pre">{msg.errorMessage}</pre>
+					</div>
+				)}
 
-						{msg?.errorMessage && (
-							<div className="stats-drawer-error-block">
-								<div className="stats-drawer-error-label">Error Message</div>
-								<div className="stats-drawer-error-text">{msg.errorMessage}</div>
-							</div>
+				{span.kind === "subagent" && (
+					<div className="stack" style={{ gap: 8 }}>
+						{span.detail && (
+							<>
+								<div className="section-label">Task</div>
+								<pre className="code-block traces-pre">{span.detail}</pre>
+							</>
 						)}
-
-						{span.kind === "subagent" && (
+						{span.childTrackId && onOpenChildTrack && (
 							<div>
-								{span.detail && (
-									<pre
-										style={{
-											whiteSpace: "pre-wrap",
-											wordBreak: "break-word",
-											fontSize: 12,
-											background: "var(--surface-2)",
-											borderRadius: 6,
-											padding: 10,
-										}}
-									>
-										{span.detail}
-									</pre>
-								)}
-								{span.childTrackId && onOpenChildTrack && (
-									<button
-										type="button"
-										className="stats-segmented-control-btn"
-										style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 6 }}
-										onClick={() => onOpenChildTrack(span.childTrackId ?? "")}
-									>
-										Open child track {span.childTrackId}
-									</button>
-								)}
-							</div>
-						)}
-
-						{span.kind === "tool" && span.detail && (
-							<div>
-								<div className="stats-drawer-metric-label">Args</div>
-								<pre
-									style={{
-										whiteSpace: "pre-wrap",
-										wordBreak: "break-word",
-										fontSize: 12,
-										background: "var(--surface-2)",
-										borderRadius: 6,
-										padding: 10,
-									}}
+								<button
+									type="button"
+									className="btn"
+									data-size="sm"
+									onClick={() => onOpenChildTrack(span.childTrackId ?? "")}
 								>
-									{span.detail}
-								</pre>
-							</div>
-						)}
-
-						{loading && (
-							<div>
-								<Skeleton variant="rect" width="100%" height={80} className="mb-4" />
-								<Skeleton variant="rect" width="100%" height={160} />
-							</div>
-						)}
-						{error && (
-							<div className="stats-drawer-error">
-								<p className="stats-drawer-error-title">Failed to load entry</p>
-								<p className="stats-drawer-error-message">{error.message}</p>
-							</div>
-						)}
-
-						{!loading &&
-							entry !== null &&
-							textBlocks(msg?.content).map((block, index) => (
-								<div key={`${block.kind}-${index}`}>
-									<div className="stats-drawer-metric-label" style={{ textTransform: "capitalize" }}>
-										{block.kind}
-									</div>
-									<pre
-										style={{
-											whiteSpace: "pre-wrap",
-											wordBreak: "break-word",
-											fontSize: 12,
-											background: "var(--surface-2)",
-											borderRadius: 6,
-											padding: 10,
-											maxHeight: 360,
-											overflowY: "auto",
-										}}
-									>
-										{block.text}
-									</pre>
-								</div>
-							))}
-
-						{!loading && entry !== null && (
-							<div className="stats-drawer-json-blocks">
-								<JsonBlock data={entry} title="Raw Entry" initialCollapsed={true} />
+									Open child track <span className="mono">{span.childTrackId}</span>
+								</button>
 							</div>
 						)}
 					</div>
-				</div>
+				)}
+
+				{span.kind === "tool" && span.detail && (
+					<div className="stack" style={{ gap: 6 }}>
+						<div className="section-label">Args</div>
+						<pre className="code-block traces-pre">{span.detail}</pre>
+					</div>
+				)}
+
+				{loading && (
+					<div className="stack">
+						<Skeleton height={80} />
+						<Skeleton height={160} />
+					</div>
+				)}
+				{error && <ErrorState error={`Failed to load entry: ${error.message}`} />}
+
+				{!loading &&
+					entry !== null &&
+					textBlocks(msg?.content).map((block, index) => (
+						<div key={`${block.kind}-${index}`} className="stack" style={{ gap: 6 }}>
+							<div className="section-label">{block.kind === "thinking" ? "Thinking" : "Text"}</div>
+							<pre className="code-block traces-pre" data-scroll="true">
+								{block.text}
+							</pre>
+						</div>
+					))}
+
+				{!loading && entry !== null && <JsonBlock data={entry} title="Raw entry" initialCollapsed={true} />}
 			</div>
-		</div>
+		</DetailShell>
 	);
 }

@@ -41,8 +41,16 @@ export function isAuthRetryableError(error: unknown): boolean {
 	if (isUsageLimit(error)) return true;
 	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
-	const httpStatus = extractHttpStatusFromError(error);
-	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	let httpStatus = extractHttpStatusFromError(error);
+	let message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	if (typeof error === "object" && error !== null) {
+		if (httpStatus === undefined && "errorStatus" in error && typeof error.errorStatus === "number") {
+			httpStatus = error.errorStatus;
+		}
+		if (message === undefined && "errorMessage" in error && typeof error.errorMessage === "string") {
+			message = error.errorMessage;
+		}
+	}
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
 	const status = httpStatus ?? embeddedStatus;
 	if (isConcurrencyCapExclusion(status, message)) return false;

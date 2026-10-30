@@ -1,0 +1,28 @@
+# Swift toolchains for the Apple Foundation Models bridge (defs.bzl). The
+# toolchain() registrations live in //bazel/toolchains: the host-detected one
+# (applefm.bzl) for mac exec hosts, the pinned swift.org one (linux.bzl) for
+# linux exec hosts.
+
+load(":defs.bzl", "applefm_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+toolchain_type(name = "toolchain_type")
+
+applefm_toolchain(
+    name = "host",
+    toolchain_file = "@applefm_swift//:toolchain.txt",
+)
+
+applefm_toolchain(
+    name = "linux",
+    ld = "@llvm_darwin_tools//:bin/ld64.lld",
+    sdk_settings = "@macos_sdk//:settings",
+    srcs = [
+        "@llvm_darwin_tools//:bin",
+        "@macos_sdk//:cc",
+        "@macos_sdk//:swift",
+        "@swift_linux//:all",
+    ],
+    swiftc = "@swift_linux//:usr/bin/swiftc",
+)

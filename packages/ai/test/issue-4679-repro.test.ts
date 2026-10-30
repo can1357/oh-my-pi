@@ -5,9 +5,9 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-12-15";
 
-const bashTool: Tool = {
-	name: "bash",
-	description: "run a bash command",
+const editTool: Tool = {
+	name: "edit",
+	description: "edit a file",
 	parameters: {
 		type: "object",
 		properties: { command: { type: "string" } },
@@ -18,7 +18,7 @@ const bashTool: Tool = {
 const toolContext: Context = {
 	systemPrompt: ["Stay concise."],
 	messages: [{ role: "user", content: "Hi", timestamp: 0 }],
-	tools: [bashTool],
+	tools: [editTool],
 };
 
 function anthropicSpec(baseUrl: string): ModelSpec<"anthropic-messages"> {
@@ -93,12 +93,12 @@ describe("issue #4679 Azure Foundry Anthropic strict tools", () => {
 		);
 		const directParams = await captureToolParams(buildModel(anthropicSpec("https://api.anthropic.com")));
 
-		const azureBashTool = azureParams.tools?.find(tool => tool.name === "bash");
-		const directBashTool = directParams.tools?.find(tool => tool.name === "bash");
+		const azureEditTool = azureParams.tools?.find(tool => tool.name === "edit");
+		const directEditTool = directParams.tools?.find(tool => tool.name === "edit");
 
-		expect(azureBashTool).toBeDefined();
-		expect(azureBashTool?.strict).toBeUndefined();
-		expect(directBashTool).toBeDefined();
-		expect(directBashTool?.strict).toBe(true);
+		expect(azureEditTool).toBeDefined();
+		expect(azureEditTool?.strict).toBeUndefined();
+		expect(directEditTool).toBeDefined();
+		expect(directEditTool?.strict).toBe(true);
 	});
 });

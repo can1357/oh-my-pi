@@ -218,6 +218,38 @@ describe("Muse Code OAuth", () => {
 		});
 	});
 
+	test("completes login when Meta returns null subscription tier fields", async () => {
+		// Accounts without an assigned subscription tier at login time get
+		// explicit nulls; the schema must accept them instead of failing login.
+		const result = await attachMuseCodeApiKey(
+			{ access: "meta-account-access", refresh: "meta-refresh", expires: Date.now() + 3_600_000 },
+			{
+				provider: "muse-code",
+				phase: "login",
+				raw: {},
+				fetch: Object.assign(
+					() =>
+						Promise.resolve(
+							Response.json({
+								api_key: "LLM|subscription-key",
+								user_email: "Muse@Example.com",
+								user_id: "meta-account-1",
+								is_subs_active: true,
+								subs_tier_id: null,
+								subs_tier_name: null,
+							}),
+						),
+					{ preconnect: fetch.preconnect },
+				),
+			},
+		);
+		expect(result).toMatchObject({ accountId: "meta-account-1", email: "muse@example.com" });
+		expect(parseMuseCodeCredential(result.access)).toEqual({
+			oauthAccessToken: "meta-account-access",
+			apiKey: "LLM|subscription-key",
+		});
+	});
+
 	test("rejects an inactive subscription instead of exposing a Model API credential", async () => {
 		await expect(
 			attachMuseCodeApiKey(

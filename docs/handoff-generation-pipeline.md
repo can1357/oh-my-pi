@@ -26,13 +26,15 @@ Does not cover:
 - [`src/session/session-maintenance.ts`](../packages/coding-agent/src/session/session-maintenance.ts)
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`packages/agent/src/compaction/compaction.ts`](../packages/agent/src/compaction/compaction.ts)
+- [`packages/agent/src/compaction/messages.ts`](../packages/agent/src/compaction/messages.ts) — method-specific handoff context wrapper
+- [`packages/agent/src/telemetry.ts`](../packages/agent/src/telemetry.ts) — instrumented oneshot and transient retry
 - [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
 
 ## Trigger path
 
 1. `/handoff` is declared in the builtin slash-command registry with optional inline hint `[focus instructions]`.
 2. The registry's TUI handler clears the editor and calls `handleHandoffCommand(customInstructions?)`.
-3. `CommandController.handleHandoffCommand` refuses while the current response is streaming, then counts `type === "message"` entries.
+3. `CommandController.handleHandoffCommand` refuses while the current response is streaming or context compaction is active, then counts `type === "message"` entries in the session journal.
 4. If the count is `< 2`, it warns `Nothing to hand off (no messages yet)` and returns.
 
 The same minimum-content guard exists inside `SessionMaintenance.handoff()` and throws if violated. RPC separately refuses a handoff while streaming. Direct SDK callers must avoid invoking the session method during an active response.
@@ -52,10 +54,10 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
 
 - Requires a selected model and an API key/resolver for that model.
 - Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
-  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
-  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
-  3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
-  4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
+   1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
+   2. Converts the snapshot with `convertMessagesToLlm(...)` for the handoff model (the snapcompact archive view that model may read, session `transformContext`, LLM conversion, and obfuscation).
+   3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
+   4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
 - Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
 - Deobfuscates the returned handoff text.
 - For auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
@@ -64,12 +66,14 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
 
 If a provider rejects explicit `toolChoice: "none"` because it supports only automatic tool choice, the function retries once with `toolChoice: "auto"`. Tools remain present for cache-prefix compatibility, but returned tool-call blocks are ignored; only text blocks are joined.
 
+Each tool-choice lane also opts into the shared transient oneshot retry policy (three attempts, 500ms base backoff, honoring provider retry timing). This is separate from the session's `auto_retry_*` lifecycle.
+
 ```ts
 await generateHandoffFromContext(context, model, {
-  streamOptions,
-  completeImpl,
-  telemetry,
-  thinkingLevel,
+	streamOptions,
+	completeImpl,
+	telemetry,
+	thinkingLevel,
 });
 ```
 
@@ -101,16 +105,18 @@ An explicit user cancellation throws `Error("Handoff cancelled")`. Harness-initi
 If text was generated and not aborted, `SessionMaintenance.handoff()` commits the document on the **current** session:
 
 1. Wraps the document as a compaction summary: `upsertFileOperations(document, readFiles, modifiedFiles, …)` appends the cumulative `<files>` tag from the preparation's file operations; `{ readFiles, modifiedFiles }` becomes the entry `details`.
-2. Appends a regular `CompactionEntry` (`appendCompaction(summary, undefined, firstKeptEntryId, tokensBefore, details, false, undefined)`).
+2. Appends a regular `CompactionEntry` through `appendCompaction(summary, undefined, firstKeptEntryId, tokensBefore, options)`, with `details`, `fromExtension: false`, `method: "handoff"`, and a projected `tokensAfter` count.
 3. Rebuilds the display context, replaces live agent messages, re-anchors stats (`rebaseAfterCompaction`), resets the plan reference, advisor runtimes (`"handoff"`), and todo phases, and closes provider sessions whose history was rewritten.
 4. Emits the `session_compact` extension hook with the saved entry.
 5. Returns `{ document, savedPath? }`.
 
 The session id, session file, transcript scrollback, and provider prompt-cache key are all unchanged. Recent history from `firstKeptEntryId` onward is kept verbatim, exactly like every other compaction method; only the summarized prefix is replaced by the document.
 
+On LLM conversion, `method: "handoff"` selects `packages/agent/src/compaction/prompts/handoff-summary-context.md` instead of the generic compaction wrapper. This identifies the document as a prior agent instance's working context rather than fresh user instructions.
+
 ### Automatic handoff
 
-Manual `/handoff` works regardless of the context-maintenance method order. To use this pipeline automatically, include `handoff` in `compaction.methodOrder` (the default order is `remote`, `snapcompact`, `handoff`, `shake`, `soft`). Normal threshold-triggered handoffs defer document generation to a post-prompt task; pre-prompt, mid-turn, and `incomplete` recovery run inline. Input `overflow` skips handoff generation because the request would carry the same oversized input — but an already-armed speculative handoff result can still be applied during overflow recovery.
+Manual `/handoff` works regardless of the context-maintenance method order. To use this pipeline automatically, include `handoff` in `compaction.methodOrder` (the default order is `remote`, `snapcompact`, `handoff`, `shake`, `soft`). Threshold-triggered handoffs (post-turn, pre-prompt, mid-turn) and `incomplete` recovery generate and commit the document inline; a post-turn handoff completes before the run's `agent_end` settles. Input `overflow` skips handoff generation because the request would carry the same oversized input — but an already-armed speculative handoff result can still be applied during overflow recovery.
 
 Async compaction (`compaction.asyncEnabled`) may also generate the handoff document speculatively in the pre-threshold band and commit it instantly when the threshold is crossed; see `docs/compaction.md`.
 
@@ -120,20 +126,20 @@ If auto generation returns no document, maintenance advances to the next configu
 
 `CommandController.handleHandoffCommand` behavior:
 
-- Refuses with a warning when `session.isStreaming` (matches `/fork` and `/move`) — the user must finish or abort the response before handing off.
+- Refuses with a warning when `session.isStreaming` or `session.isCompacting` — finish or abort the response, or finish/cancel context maintenance, before handing off.
 - Shows a status loader: `Generating handoff… (esc to cancel)`.
 - Calls `await session.handoff(customInstructions)`.
 - If result is `undefined`: `showError("Handoff cancelled")`.
 - On success:
-  - clears transient session UI and re-renders the session, which now shows the handoff compaction divider
-  - invalidates status line and editor border
-  - reloads todos
-  - appends `Context handed off and compacted in place`
-  - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
+   - clears transient session UI and re-renders the session, which now shows the handoff compaction divider
+   - invalidates status line and editor border
+   - reloads todos
+   - appends `Context handed off and compacted in place`
+   - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
 - On exception:
-  - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
-  - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
-- Stops the loader, clears the status container, and requests render at end.
+   - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
+   - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
+- Stops the handoff loader in `finally`, clears the status container unless a live retry/compaction loader owns it, and reconciles the working animation. A successful command requests a full transcript render with cleared terminal scrollback.
 
 Manual `/handoff` does not stream the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after the commit completes.
 
@@ -157,12 +163,12 @@ Direct `abortHandoff()` passes an unreasoned abort signal to `completeSimple(...
 Current UI classification:
 
 - **Aborted/cancelled**
-  - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
-  - an unreasoned caller signal also triggers `"Handoff cancelled"`
-  - UI shows `Handoff cancelled`
+   - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
+   - an unreasoned caller signal also triggers `"Handoff cancelled"`
+   - UI shows `Handoff cancelled`
 - **Failed**
-  - a harness abort reason, an empty manual generation, or any thrown provider error
-  - UI logs the error and shows `Handoff failed: ...`
+   - a harness abort reason, an empty manual generation, or any thrown provider error
+   - UI logs the error and shows `Handoff failed: ...`
 
 Empty generation on the manual path throws; auto-handoff returns `undefined` only for its next-method fallback.
 
@@ -180,7 +186,7 @@ High-level state flow:
 1. Interactive slash command dispatched by the builtin registry.
 2. Streaming and message-count preflight guards.
 3. `prepareCompaction(...)` computes the cut (`firstKeptEntryId`, `tokensBefore`).
-4. Generation controller created (`isGeneratingHandoff = true`); `generateHandoffFromContext(...)` sends one cache-aligned side request, with a one-time `"auto"` tool-choice compatibility retry when required.
+4. Generation controller created (`isGeneratingHandoff = true`); `generateHandoffFromContext(...)` sends a cache-aligned side request with bounded transient retries and a one-time `"auto"` tool-choice compatibility retry when required.
 5. Assistant text blocks are joined; tool-call blocks are discarded; secret placeholders are restored locally.
 6. If missing text → manual throws / auto returns `undefined`; if aborted → cancellation error.
 7. If present: append the `CompactionEntry`, rebuild the agent context, reset plan/advisor/todo runtime state, close rewritten provider sessions, emit `session_compact`.

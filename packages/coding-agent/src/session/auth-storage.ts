@@ -18,7 +18,6 @@ export type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
-	SerializedAuthStorage,
 	StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 export { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";

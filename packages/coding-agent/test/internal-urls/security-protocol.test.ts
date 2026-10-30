@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "../../src/config/settings";
 import { InternalUrlRouter, SecurityProtocolHandler } from "../../src/internal-urls";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { importCodexSecurityBundle, importSarifFile, SecurityStore } from "../../src/security";
@@ -103,7 +104,7 @@ describe("security://", () => {
 		);
 		const resource = await enabledForSession.resolve(parseInternalUrl("security://scans"), {
 			cwd: repositoryRoot,
-			settings: { get: () => true },
+			settings: Settings.isolated({ "security.enabled": true }),
 		});
 		expect(resource.content).toContain("Security scans");
 
@@ -114,13 +115,13 @@ describe("security://", () => {
 		await expect(
 			disabledForSession.resolve(parseInternalUrl("security://scans"), {
 				cwd: repositoryRoot,
-				settings: { get: () => false },
+				settings: Settings.isolated({ "security.enabled": false }),
 			}),
 		).rejects.toThrow("disabled");
 		expect(
 			await disabledForSession.complete("", {
 				cwd: repositoryRoot,
-				settings: { get: () => false },
+				settings: Settings.isolated({ "security.enabled": false }),
 			}),
 		).toEqual([]);
 	});

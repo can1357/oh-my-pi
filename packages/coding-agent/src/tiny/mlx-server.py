@@ -116,7 +116,8 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
                 "id": request_id,
                 "event": {
                     "modelKey": model_key,
-                    "status": "progress",
+                    # Running total across the repo, tagged with the current file.
+                    "status": "progress_total",
                     "file": name,
                     "progress": (loaded / total * 100.0) if total else 0.0,
                     "loaded": loaded,
@@ -293,7 +294,10 @@ class Server:
 
     def _bind(self, socket_path):
         """Clear a stale socket file (dead predecessor) but defer to a live one (a concurrent spawn that won)."""
-        # Same lock file `worker-server.ts` takes (`withFileLock` appends `.lock`).
+        # Mirrors the native `IpcServer.listen`: same parent-dir creation (the
+        # endpoint may be relocated under /tmp/omp-<uid>), same flock on
+        # `<path>.bind.lock`, owner-only socket from the first instant.
+        os.makedirs(os.path.dirname(socket_path), mode=0o700, exist_ok=True)
         lock_fd = os.open(f"{socket_path}.bind.lock", os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
@@ -306,8 +310,12 @@ class Server:
                 except (ConnectionRefusedError, FileNotFoundError):
                     os.unlink(socket_path)
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(socket_path)
-            os.chmod(socket_path, 0o600)
+            # Only the main thread runs this early, so the process-wide umask is safe to swap.
+            previous_umask = os.umask(0o177)
+            try:
+                server.bind(socket_path)
+            finally:
+                os.umask(previous_umask)
             server.listen(16)
             return server
         finally:

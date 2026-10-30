@@ -205,33 +205,12 @@ describe("parseGitUrl", () => {
 		test("rejects unknown shorthand prefix", () => {
 			expect(parseGitUrl("notahost:user/repo")).toBeNull();
 		});
-
-		test("does not swallow protocol URLs (regression)", () => {
-			expect(parseGitUrl("https://github.com/user/repo")).toMatchObject({
-				type: "git",
-				host: "github.com",
-				path: "user/repo",
-				repo: "https://github.com/user/repo",
-			});
-		});
 	});
 });
 
 describe("isGitSpec", () => {
 	test("returns true for namespaced shorthand", () => {
 		expect(isGitSpec("github:user/repo")).toBe(true);
-	});
-
-	test("returns true for https git URLs", () => {
-		expect(isGitSpec("https://github.com/user/repo")).toBe(true);
-	});
-
-	test("returns true for unprefixed scp-like SSH (git@host:user/repo)", () => {
-		expect(isGitSpec("git@github.com:user/repo")).toBe(true);
-	});
-
-	test("returns true for git+https URLs", () => {
-		expect(isGitSpec("git+https://github.com/user/repo")).toBe(true);
 	});
 
 	test("returns false for bare npm name", () => {

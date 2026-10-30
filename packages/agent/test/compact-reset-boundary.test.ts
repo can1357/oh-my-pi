@@ -80,12 +80,14 @@ describe("prepareCompaction reset boundary", () => {
 	});
 
 	test("a reset boundary before the last compaction is superseded by it", () => {
+		const keptUser = userEntry("MID user");
+		const keptAssistant = assistantEntry("MID assistant");
 		const entries: SessionEntry[] = [
 			userEntry("PRE user"),
 			resetBoundary(),
-			userEntry("MID user"),
-			assistantEntry("MID assistant"),
-			compaction("KEEP SUMMARY", "kept-mid"),
+			keptUser,
+			keptAssistant,
+			compaction("KEEP SUMMARY", keptUser.id),
 			userEntry("TAIL one"),
 			assistantEntry("TAIL one answer"),
 			userEntry("TAIL two"),
@@ -97,6 +99,8 @@ describe("prepareCompaction reset boundary", () => {
 		expect(prep?.previousSummary).toBe("KEEP SUMMARY");
 		const summarized = JSON.stringify(prep?.messagesToSummarize ?? []);
 		expect(summarized).toContain("TAIL one");
-		expect(summarized).not.toContain("MID");
+		expect(summarized).toContain("MID user");
+		expect(summarized).toContain("MID assistant");
+		expect(summarized).not.toContain("PRE user");
 	});
 });

@@ -77,20 +77,28 @@ impl IsolationBackend for ApfsBackend {
 
 #[cfg(target_os = "macos")]
 mod imp {
-	use std::{
-		ffi::CString,
-		fs,
-		os::unix::ffi::OsStrExt,
-		path::{Path, PathBuf},
+	use std::{fs, path::Path};
+
+	use crate::{
+		IsoError, IsoResult,
+		cow::{self, CLONE_NOFOLLOW},
+		tree,
 	};
 
-	use crate::{IsoError, IsoResult};
-
-	// Darwin's clonefile.h defines this, but libc does not currently expose it.
-	const CLONE_NOFOLLOW: u32 = 0x0001;
+	/// Classifies a failed `clonefile` of `src` to `dst`.
+	fn clone_error(src: &Path, dst: &Path, err: &std::io::Error) -> IsoError {
+		if cow::is_unsupported(err) {
+			return IsoError::unavailable(format!(
+				"APFS clonefile unsupported on this volume ({err}); {} -> {}",
+				src.display(),
+				dst.display()
+			));
+		}
+		IsoError::other(format!("clonefile {} -> {}: {err}", src.display(), dst.display()))
+	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
+		let lower = tree::canonical_existing_dir(lower, "clone source", IsoError::other)?;
 		if let Some(parent) = merged.parent() {
 			fs::create_dir_all(parent).map_err(|err| {
 				IsoError::other(format!("unable to create parent of {}: {err}", merged.display()))
@@ -103,32 +111,12 @@ mod imp {
 			})?;
 		}
 
-		let src_c = to_cstring(lower.as_os_str().as_bytes(), "lower")?;
-		let dst_c = to_cstring(merged.as_os_str().as_bytes(), "merged")?;
-
-		// SAFETY: both pointers are valid CStrings whose backing storage lives
-		// until after the call. `clonefile` with `flags = 0` performs a
-		// recursive reflink clone and does not retain the pointers past the
-		// syscall.
-		let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
-		if rc == 0 {
-			return Ok(());
-		}
-		let err = std::io::Error::last_os_error();
-		if let Some(code) = err.raw_os_error()
-			&& matches!(code, libc::ENOTSUP | libc::EOPNOTSUPP | libc::EXDEV)
-		{
-			return Err(IsoError::unavailable(format!(
-				"APFS clonefile unsupported on this volume ({err}); {} -> {}",
-				lower.display(),
-				merged.display()
-			)));
-		}
-		Err(IsoError::other(format!("clonefile {} -> {}: {err}", lower.display(), merged.display())))
+		// A directory source clones the whole tree in one call.
+		cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err))
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
+		let lower = tree::canonical_existing_dir(lower, "clone source", IsoError::other)?;
 		if let Some(parent) = merged.parent() {
 			fs::create_dir_all(parent).map_err(|err| {
 				IsoError::other(format!("unable to create parent of {}: {err}", merged.display()))
@@ -172,28 +160,8 @@ mod imp {
 				}
 				let src = entry.path();
 				let dst = merged.join(entry.file_name());
-				let src_c = to_cstring(src.as_os_str().as_bytes(), "source")?;
-				let dst_c = to_cstring(dst.as_os_str().as_bytes(), "destination")?;
-				// SAFETY: both C strings remain alive for the call. CLONE_NOFOLLOW
-				// clones a symlink itself rather than its target.
-				let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), CLONE_NOFOLLOW) };
-				if rc != 0 {
-					let err = std::io::Error::last_os_error();
-					if let Some(code) = err.raw_os_error()
-						&& matches!(code, libc::ENOTSUP | libc::EOPNOTSUPP | libc::EXDEV)
-					{
-						return Err(IsoError::unavailable(format!(
-							"APFS clonefile unsupported on this volume ({err}); {} -> {}",
-							src.display(),
-							dst.display()
-						)));
-					}
-					return Err(IsoError::other(format!(
-						"clonefile {} -> {}: {err}",
-						src.display(),
-						dst.display()
-					)));
-				}
+				cow::clonefile(&src, &dst, CLONE_NOFOLLOW)
+					.map_err(|err| clone_error(&src, &dst, &err))?;
 			}
 			Ok(())
 		})();
@@ -212,29 +180,6 @@ mod imp {
 				merged.display()
 			))),
 		}
-	}
-
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		};
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid clone source {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"clone source {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
-	}
-
-	fn to_cstring(bytes: &[u8], label: &str) -> IsoResult<CString> {
-		CString::new(bytes)
-			.map_err(|err| IsoError::other(format!("{label} path contains NUL byte: {err}")))
 	}
 }
 

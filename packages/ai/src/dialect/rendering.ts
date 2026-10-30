@@ -1,5 +1,6 @@
 import { stringifyJson as stringifyJsonValue } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../types";
+import { buildArgShapes, type ToolArgShape } from "./coercion";
 import type { DialectRenderOptions, DialectToolResult } from "./types";
 
 export function renderToolResponseResults(results: readonly DialectToolResult[]): string {
@@ -79,6 +80,23 @@ export function escapeXmlAttr(value: string): string {
 
 export function escapeXmlText(value: string): string {
 	return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** Render one Anthropic-style `<invoke>`; declared string args stay raw, everything else is JSON. */
+export function renderInvoke(call: ToolCall, shape: ToolArgShape | undefined): string {
+	let body = `<invoke name="${escapeXmlAttr(call.name)}">`;
+	for (const key in call.arguments) {
+		const value = call.arguments[key];
+		const isString = shape?.stringArgs.has(key) === true;
+		const rendered = isString && typeof value === "string" ? value : stringifyJson(value);
+		body += `<parameter name="${escapeXmlAttr(key)}">${rendered}</parameter>`;
+	}
+	return `${body}</invoke>`;
+}
+
+export function renderInvokes(calls: readonly ToolCall[], tools: NonNullable<DialectRenderOptions["tools"]>): string {
+	const shapes = buildArgShapes(tools);
+	return calls.map(call => renderInvoke(call, shapes.get(call.name))).join("\n");
 }
 
 export type AssistantTranscriptParts = {

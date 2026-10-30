@@ -47,7 +47,7 @@ function changelogUtilsStubPlugin(): BunPlugin {
 		setup(build) {
 			build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
 			build.onResolve({ filter: /^\.\.\/config$/ }, args =>
-				args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
+				args.importer.replaceAll("\\", "/").endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
 			);
 		},
 	};
@@ -124,7 +124,10 @@ describe("changelog static import resources", () => {
 	test("reads the emitted changelog asset from a compiled binary", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-compiled-"));
 		try {
-			const binaryPath = path.join(tempDir, "changelog-probe");
+			const binaryPath = path.join(
+				tempDir,
+				process.platform === "win32" ? "changelog-probe.exe" : "changelog-probe",
+			);
 			const unrelatedCwd = path.join(tempDir, "cwd");
 			const missingPackageChangelogPath = path.join(tempDir, "missing-package", "CHANGELOG.md");
 			await fs.mkdir(unrelatedCwd);

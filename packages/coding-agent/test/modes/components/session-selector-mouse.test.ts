@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 beforeAll(async () => {
@@ -36,7 +36,7 @@ function makeSelector(
 	sessions: SessionInfo[],
 	onSelect: (s: SessionInfo) => void,
 	rows = 40,
-): SessionSelectorComponent {
+): SessionSelectorComponent<SessionInfo> {
 	return new SessionSelectorComponent(
 		sessions,
 		onSelect,
@@ -128,7 +128,7 @@ describe("SessionSelectorComponent mouse", () => {
 		);
 
 		const lines = selector.render(80);
-		const footerRow = lines.findIndex(line => line.includes("Esc cancel"));
+		const footerRow = lines.findIndex(line => line.includes(" cancel"));
 		expect(footerRow).toBeGreaterThanOrEqual(0);
 
 		// Click directly on the footer hint row: must not resume anything.
@@ -149,7 +149,7 @@ describe("SessionSelectorComponent fill-height footer", () => {
 		const selector = makeSelector(mixedSessions(20), () => {}, rows);
 
 		const top = selector.render(80);
-		const topHint = top.findIndex(line => line.includes("Esc cancel"));
+		const topHint = top.findIndex(line => line.includes(" cancel"));
 		expect(top.length).toBe(rows);
 		expect(topHint).toBe(rows - 3);
 		expect(top[rows - 1]!.trim().length).toBeGreaterThan(0); // bottom border on the last row
@@ -158,7 +158,7 @@ describe("SessionSelectorComponent fill-height footer", () => {
 		// height); the footer must not move.
 		for (let i = 0; i < 25; i++) selector.handleInput(wheel("down"));
 		const bottom = selector.render(80);
-		const bottomHint = bottom.findIndex(line => line.includes("Esc cancel"));
+		const bottomHint = bottom.findIndex(line => line.includes(" cancel"));
 		expect(bottom.length).toBe(rows);
 		expect(bottomHint).toBe(topHint);
 		expect(bottom[rows - 1]!.trim().length).toBeGreaterThan(0);

@@ -16,7 +16,7 @@ import { getProjectDir, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { createProgressReporter } from "../cli/progress-reporter";
 import type { AgentSession } from "../session/agent-session";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
-import { shortenPath } from "../tools/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import requestPrompt from "./prompts/request.md" with { type: "text" };
 import reviewPrompt from "./prompts/review.md" with { type: "text" };
 import { CompressProtocol } from "./protocol";

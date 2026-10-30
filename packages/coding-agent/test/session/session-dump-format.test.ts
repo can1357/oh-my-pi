@@ -10,7 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model, Usage } from "@oh-my-pi/pi-ai";
-import { formatSessionDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
+import { formatSessionDumpText, formatSubagentDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const ZERO_USAGE: Usage = {
@@ -180,6 +180,36 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		// The 16.x native-dialect transcript wrapper and envelopes must be gone.
 		expect(out).not.toContain("## Transcript");
 		expect(out).not.toContain("<|start|>");
+	});
+
+	it("heads a subagent dump with its path, persisted model, and killed status", () => {
+		const killed = formatSubagentDumpText({
+			key: "Explore/Helper",
+			aborted: true,
+			messages: [{ role: "user", content: "helper task", timestamp: 3 }],
+		});
+		expect(killed.startsWith("# Subagent: Explore/Helper\n\nModel: (unknown)\nStatus: aborted\n")).toBe(true);
+		expect(killed).toContain("## User · 1970-01-01T00:00:00.003Z\n\nhelper task");
+
+		const live = formatSubagentDumpText({
+			key: "Explore",
+			model: "anthropic/claude-sonnet",
+			thinkingLevel: "high",
+			messages: [{ role: "user", content: "explore task", timestamp: 2 }],
+		});
+		expect(live).toContain("Model: anthropic/claude-sonnet\nThinking Level: high\n");
+		expect(live).not.toContain("Status: aborted");
+	});
+
+	it("still renders the transcript when a persisted timestamp is outside the Date range", () => {
+		const out = formatSessionDumpText({
+			messages: [
+				{ role: "user", content: "corrupt stamp", timestamp: 1e20 },
+				{ role: "user", content: "next message", timestamp: 2 },
+			],
+		});
+		expect(out).toContain("## User · invalid time 100000000000000000000\n\ncorrupt stamp");
+		expect(out).toContain("## User · 1970-01-01T00:00:00.002Z\n\nnext message");
 	});
 
 	it("fences system notices under a readable title without breaking on nested code fences", () => {

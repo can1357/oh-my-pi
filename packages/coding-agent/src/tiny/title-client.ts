@@ -8,15 +8,22 @@
  * die on its own once idle. Prompt construction and title extraction live
  * here so both workers only ever see message-level `chat` requests.
  */
-import * as fs from "node:fs";
-import type * as net from "node:net";
-import * as path from "node:path";
-import type { Subprocess } from "bun";
 import { $env, getTinyWorkerRuntimeDir, logger, prompt } from "@oh-my-pi/pi-utils";
 import packageJson from "../../package.json" with { type: "json" };
-import { settings } from "../config/settings";
+import type { Setting } from "../config/registry";
+import { isSettingsInitialized, settings } from "../config/settings";
+
 import { stageRunnerScript } from "../eval/runner-cache";
+import { ModelDownloadActivity } from "../downloads/model-downloads";
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import {
+	connectSharedWorker,
+	LazyWorkerHandle,
+	type SharedWorkerLaunch,
+	smokeTestSharedWorker,
+	spawnDetached,
+	WORKER_CONNECTION_CLOSED,
+} from "../subprocess/shared-worker";
 import {
 	inferenceWorkerEnv,
 	type RefCountedWorkerHandle,
@@ -25,17 +32,10 @@ import {
 } from "../subprocess/worker-client";
 import { MLX_DEVICE, resolveTinyModelDevicePreference, tinyMlxSupported, tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
-import { connectJsonlSocket, LineParser, writeJsonLine } from "./jsonl-socket";
 import { formatTitleUserMessage } from "./message-preproc";
 import { ensureTinyMlxRuntime, getTinyMlxModelDir, MLX_LM_VERSION } from "./mlx-runtime";
 import MLX_SERVER_SCRIPT from "./mlx-server.py" with { type: "text" };
-import {
-	getTinyLocalModelSpec,
-	isTinyLocalModelKey,
-	isTinyMemoryLocalModelKey,
-	isTinyTitleLocalModelKey,
-	type TinyLocalModelKey,
-} from "./models";
+import { getTinyLocalModelSpec, isTinyLocalModelKey, type TinyLocalModelKey } from "./models";
 import { normalizeGeneratedTitle } from "./text";
 import {
 	TINY_WORKER_ARG,
@@ -48,31 +48,23 @@ import {
 	type TinyWorkerBackend,
 	type TinyWorkerRequest,
 	type TinyWorkerResponse,
-	tinyWorkerEndpoint,
-	tinyWorkerLogPath,
+	tinyWorkerName,
 } from "./title-protocol";
+import { cfgProvidersTinyModelDevice, cfgProvidersTinyModelDtype } from "../session/settings";
 
 const TITLE_PREFILL = "<title>";
 const TITLE_CLOSE = "</title>";
 const TITLE_MAX_NEW_TOKENS = 20;
-const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
+const COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: false });
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const MLX_IDLE_SECONDS = 15 * 60;
-
-const CONNECT_TIMEOUT_MS = 3_000;
-const PROBE_TIMEOUT_MS = 3_000;
-const PROBE_INTERVAL_MS = 200;
-/** Time for a spawned worker to bind its socket; a compiled binary may first side-install its runtime. */
-const READY_TIMEOUT_MS = 120_000;
-/** Time for a stale worker to honour `shutdown` and release its socket. */
-const SHUTDOWN_WAIT_MS = 5_000;
 
 type WorkerHandle = RefCountedWorkerHandle<TinyWorkerRequest, TinyWorkerResponse>;
 
 type PendingRequest =
 	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
-	| { kind: "completion"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
+	| { kind: "chat"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
 	| { kind: "load"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
@@ -96,9 +88,12 @@ export interface TinyTitleGenerateOptions {
 	systemPrompt?: string;
 }
 
-export interface TinyModelCompletionOptions {
+export interface TinyModelChatOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
+}
+
+export interface TinyModelCompletionOptions extends TinyModelChatOptions {
 	systemPrompt?: string;
 }
 
@@ -112,44 +107,43 @@ function normalizeTinyTitleGenerateOptions(
 
 // ── Device / dtype resolution ────────────────────────────────────────
 
-function readTinyModelSetting(path: "providers.tinyModelDevice" | "providers.tinyModelDtype"): string | undefined {
-	try {
-		const value = settings.get(path);
-		return typeof value === "string" ? value : undefined;
-	} catch {
-		// Settings may be uninitialized (e.g. `omp --smoke-test`); fall back to env/default.
-		return undefined;
-	}
+/** Setting value (its env var included); only the env var when settings are uninitialized (e.g. `omp --smoke-test`). */
+function readTinyModelSetting(setting: Setting<string>): string | undefined {
+	return isSettingsInitialized() ? setting.get(settings) : setting.envValue();
 }
 
 /**
- * Resolve the `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars a worker should run
- * with. A present env var wins; otherwise the mapped persisted setting is
- * used. Only resolved keys are returned — never the default sentinel — so the
+ * Map the resolved `providers.tinyModelDevice` / `providers.tinyModelDtype`
+ * values onto the `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars a worker should run
+ * with. Only resolved keys are returned — never the default sentinel — so the
  * worker's built-in defaults apply for anything absent. Pure for testability;
  * see {@link tinyModelEnv} for the settings glue.
  * @internal
  */
 export function tinyWorkerEnvOverlay(
-	env: Record<string, string | undefined>,
 	deviceSetting: string | undefined,
 	dtypeSetting: string | undefined,
 ): Record<string, string> {
 	const overlay: Record<string, string> = {};
-	const device = env.PI_TINY_DEVICE || tinyModelDeviceSettingToEnv(deviceSetting);
+	const device = tinyModelDeviceSettingToEnv(deviceSetting);
 	if (device) overlay.PI_TINY_DEVICE = device;
-	const dtype = env.PI_TINY_DTYPE || tinyModelDtypeSettingToEnv(dtypeSetting);
+	const dtype = tinyModelDtypeSettingToEnv(dtypeSetting);
 	if (dtype) overlay.PI_TINY_DTYPE = dtype;
 	return overlay;
 }
 
-/** Resolved device/dtype vars for this process (env over `providers.tinyModelDevice` / `providers.tinyModelDtype`). */
+/** Resolved device/dtype vars for this process. */
 function tinyModelEnv(): Record<string, string> {
 	return tinyWorkerEnvOverlay(
-		$env,
-		readTinyModelSetting("providers.tinyModelDevice"),
-		readTinyModelSetting("providers.tinyModelDtype"),
+		readTinyModelSetting(cfgProvidersTinyModelDevice),
+		readTinyModelSetting(cfgProvidersTinyModelDtype),
 	);
+}
+
+/** Identity of the resolved device/dtype; a worker started under a different key is stale. */
+export function tinyModelEnvKey(): string {
+	const env = tinyModelEnv();
+	return `${env.PI_TINY_DEVICE ?? ""}|${env.PI_TINY_DTYPE ?? ""}`;
 }
 
 /**
@@ -173,212 +167,18 @@ export function tinyWorkerUsesMlx(): boolean {
 	);
 }
 
-// ── Worker socket handle ─────────────────────────────────────────────
+// ── Worker launch ────────────────────────────────────────────────────
 
-/** Error surfaced when the worker closes the socket (idle exit or replacement); the client reconnects on demand. */
-export const TINY_WORKER_CLOSED = "tiny worker connection closed";
-
-/**
- * Wrap a live worker socket. An unexpected close surfaces as an error whose
- * message starts with {@link TINY_WORKER_CLOSED}, followed by the tail of the
- * worker's log so a native crash (`onnxruntime` load failure, missing model
- * file) reaches the caller instead of a bare "closed".
- */
-function createSocketWorkerHandle(socket: net.Socket, logPath: string): WorkerHandle {
-	const messages = new Set<(message: TinyWorkerResponse) => void>();
-	const errors = new Set<(error: Error) => void>();
-	let terminated = false;
-	const parser = new LineParser(line => {
-		const message = JSON.parse(line) as TinyWorkerResponse;
-		for (const handler of messages) handler(message);
-	});
-	socket.on("data", (chunk: string) => parser.push(chunk));
-	socket.once("close", () => {
-		if (terminated) return;
-		void logTail(logPath).then(tail => {
-			const error = new Error(tail ? `${TINY_WORKER_CLOSED}: ${tail}` : TINY_WORKER_CLOSED);
-			for (const handler of errors) handler(error);
-		});
-	});
-	return {
-		send(message) {
-			writeJsonLine(socket, message);
-		},
-		onMessage(handler) {
-			messages.add(handler);
-			return () => messages.delete(handler);
-		},
-		onError(handler) {
-			errors.add(handler);
-			return () => errors.delete(handler);
-		},
-		terminate() {
-			terminated = true;
-			socket.destroy();
-			return Promise.resolve();
-		},
-		ref() {
-			socket.ref();
-		},
-		unref() {
-			socket.unref();
-		},
-	};
-}
-
-/**
- * Handle that resolves its backing worker asynchronously. `TinyTitleClient`
- * needs a handle synchronously (it subscribes and sends in the same tick), but
- * reaching a worker means probing and possibly spawning; sends queue until
- * the connection lands, and a failed connect surfaces through `onError`.
- */
-class LazyWorkerHandle implements WorkerHandle {
-	#inner: WorkerHandle | null = null;
-	#queue: TinyWorkerRequest[] = [];
-	#messages = new Set<(message: TinyWorkerResponse) => void>();
-	#errors = new Set<(error: Error) => void>();
-	#refed = false;
-	#terminated = false;
-
-	constructor(connect: () => Promise<WorkerHandle>) {
-		connect().then(
-			inner => {
-				if (this.#terminated) {
-					void inner.terminate();
-					return;
-				}
-				this.#inner = inner;
-				inner.onMessage(message => {
-					for (const handler of this.#messages) handler(message);
-				});
-				inner.onError(error => {
-					for (const handler of this.#errors) handler(error);
-				});
-				if (this.#refed) inner.ref();
-				else inner.unref();
-				const queued = this.#queue;
-				this.#queue = [];
-				for (const message of queued) inner.send(message);
-			},
-			(error: unknown) => {
-				if (this.#terminated) return;
-				const failure = error instanceof Error ? error : new Error(String(error));
-				for (const handler of this.#errors) handler(failure);
-			},
-		);
-	}
-
-	send(message: TinyWorkerRequest): void {
-		if (this.#inner) this.#inner.send(message);
-		else this.#queue.push(message);
-	}
-
-	onMessage(handler: (message: TinyWorkerResponse) => void): () => void {
-		this.#messages.add(handler);
-		return () => this.#messages.delete(handler);
-	}
-
-	onError(handler: (error: Error) => void): () => void {
-		this.#errors.add(handler);
-		return () => this.#errors.delete(handler);
-	}
-
-	terminate(): Promise<void> {
-		this.#terminated = true;
-		this.#queue = [];
-		return this.#inner?.terminate() ?? Promise.resolve();
-	}
-
-	ref(): void {
-		this.#refed = true;
-		this.#inner?.ref();
-	}
-
-	unref(): void {
-		this.#refed = false;
-		this.#inner?.unref();
-	}
-}
-
-// ── Worker discovery / spawn ─────────────────────────────────────────
-
-type ProbeResult = { kind: "live"; socket: net.Socket } | { kind: "stale" } | { kind: "absent" };
-
-/** Connect and ping. `stale` means a worker answered with a different launch tag (and was told to shut down). */
-async function probeTinyWorker(endpoint: string, tag: string): Promise<ProbeResult> {
-	let socket: net.Socket | undefined;
-	try {
-		socket = await connectJsonlSocket(endpoint, CONNECT_TIMEOUT_MS);
-		const pong = Promise.withResolvers<TinyWorkerResponse | null>();
-		const parser = new LineParser(line => pong.resolve(JSON.parse(line) as TinyWorkerResponse));
-		const onData = (chunk: string): void => parser.push(chunk);
-		socket.on("data", onData);
-		socket.once("close", () => pong.resolve(null));
-		const timer = setTimeout(() => pong.resolve(null), PROBE_TIMEOUT_MS);
-		writeJsonLine(socket, { type: "ping", id: "probe" } satisfies TinyWorkerRequest);
-		const reply = await pong.promise;
-		clearTimeout(timer);
-		socket.off("data", onData);
-		if (reply?.type === "pong" && reply.tag === tag) return { kind: "live", socket };
-		if (reply?.type === "pong") {
-			logger.debug("tiny-title: worker launch tag mismatch; replacing", {
-				endpoint,
-				running: reply.tag,
-				expected: tag,
-			});
-			writeJsonLine(socket, { type: "shutdown", id: "replace" } satisfies TinyWorkerRequest);
-			socket.destroy();
-			return { kind: "stale" };
-		}
-	} catch {
-		// Not listening (or refused); the caller spawns one.
-	}
-	socket?.destroy();
-	return { kind: "absent" };
-}
-
-interface SpawnedWorker {
-	proc: Subprocess;
-	logPath: string;
-}
-
-/** How to start one worker: its backend (socket name), launch tag, and spawn recipe. */
-export interface WorkerLaunch {
+/** How to start one tiny worker: a shared-worker launch plus the backend that names its endpoint. */
+export interface TinyWorkerLaunch extends SharedWorkerLaunch {
 	backend: TinyWorkerBackend;
-	tag: string;
-	spawn(endpoint: string, logPath: string): Promise<SpawnedWorker>;
-}
-
-/** Detach a worker so it outlives this omp process; its output goes to a per-worker log file. */
-function spawnDetached(
-	cmd: string[],
-	cwd: string | undefined,
-	env: Record<string, string>,
-	logPath: string,
-): SpawnedWorker {
-	const log = fs.openSync(logPath, "w");
-	try {
-		const proc = Bun.spawn({
-			cmd,
-			cwd,
-			env,
-			detached: true,
-			stdin: "ignore",
-			stdout: log,
-			stderr: log,
-			windowsHide: true,
-		});
-		proc.unref();
-		return { proc, logPath };
-	} finally {
-		fs.closeSync(log);
-	}
 }
 
 /** How to start the ONNX worker for `modelKey` with the resolved device/dtype env. @internal */
-export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string, string>): WorkerLaunch {
+export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string, string>): TinyWorkerLaunch {
 	const tag = `${packageJson.version}|onnx|${modelEnv.PI_TINY_DEVICE ?? ""}|${modelEnv.PI_TINY_DTYPE ?? ""}`;
 	return {
+		label: `tiny onnx worker for ${modelKey}`,
 		backend: "onnx",
 		tag,
 		spawn(endpoint, logPath) {
@@ -394,11 +194,15 @@ export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string,
 	};
 }
 
-function mlxLaunch(modelKey: TinyLocalModelKey, emitProgress: (event: TinyTitleProgressEvent) => void): WorkerLaunch {
+function mlxLaunch(
+	modelKey: TinyLocalModelKey,
+	emitProgress: (event: TinyTitleProgressEvent) => void,
+): TinyWorkerLaunch {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	const tag = `mlx|${MLX_LM_VERSION}|${Bun.hash.crc32(MLX_SERVER_SCRIPT).toString(16)}`;
 	return {
+		label: `tiny mlx worker for ${modelKey}`,
 		backend: "mlx",
 		tag,
 		async spawn(endpoint, logPath) {
@@ -436,64 +240,13 @@ function mlxLaunch(modelKey: TinyLocalModelKey, emitProgress: (event: TinyTitleP
 	};
 }
 
-async function waitForEndpointRelease(endpoint: string): Promise<void> {
-	const deadline = Date.now() + SHUTDOWN_WAIT_MS;
-	while (Date.now() < deadline) {
-		if ((await probeTinyWorker(endpoint, "")).kind === "absent") return;
-		await Bun.sleep(PROBE_INTERVAL_MS);
-	}
-}
-
-/** Last 500 chars of a worker's log, minus its readiness banner; `""` when absent or empty. */
-async function logTail(logPath: string): Promise<string> {
-	try {
-		const text = await Bun.file(logPath).text();
-		return text
-			.split("\n")
-			.filter(line => !line.startsWith("omp tiny worker listening on "))
-			.join("\n")
-			.trim()
-			.slice(-500);
-	} catch {
-		return "";
-	}
-}
-
-/**
- * Connect to the worker serving `modelKey`, spawning it when absent or
- * replacing it when its launch tag is stale. A concurrent omp process may win
- * the spawn race; our child then fails to bind and exits while the probe
- * adopts the winner.
- */
-export async function connectTinyWorker(
-	launch: WorkerLaunch,
+/** Connect to the machine-shared worker serving `modelKey` on `launch.backend`, spawning or replacing it as needed. */
+export function connectTinyWorker(
+	launch: TinyWorkerLaunch,
 	modelKey: TinyLocalModelKey,
 	runtimeDir = getTinyWorkerRuntimeDir(),
 ): Promise<WorkerHandle> {
-	await fs.promises.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const endpoint = tinyWorkerEndpoint(runtimeDir, modelKey, launch.backend);
-	const logPath = tinyWorkerLogPath(runtimeDir, modelKey, launch.backend);
-	const probed = await probeTinyWorker(endpoint, launch.tag);
-	if (probed.kind === "live") return createSocketWorkerHandle(probed.socket, logPath);
-	if (probed.kind === "stale") await waitForEndpointRelease(endpoint);
-	const spawned = await launch.spawn(endpoint, logPath);
-	const deadline = Date.now() + READY_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		const result = await probeTinyWorker(endpoint, launch.tag);
-		if (result.kind === "live") return createSocketWorkerHandle(result.socket, logPath);
-		if (spawned.proc.exitCode !== null) {
-			// Our child is gone: either it lost the bind race to a sibling omp
-			// (already adopted above if so) or it crashed.
-			const tail = await logTail(spawned.logPath);
-			throw new Error(
-				`tiny ${launch.backend} worker for ${modelKey} exited with code ${spawned.proc.exitCode}${tail ? `: ${tail}` : ""}`,
-			);
-		}
-		await Bun.sleep(PROBE_INTERVAL_MS);
-	}
-	throw new Error(
-		`tiny ${launch.backend} worker for ${modelKey} did not bind ${endpoint} within ${READY_TIMEOUT_MS}ms`,
-	);
+	return connectSharedWorker(launch, runtimeDir, tinyWorkerName(modelKey, launch.backend));
 }
 
 // ── Prompt construction / output parsing ─────────────────────────────
@@ -530,13 +283,22 @@ interface ModelWorker {
 	handle: WorkerHandle;
 	unsubscribe: () => void;
 	refed: boolean;
+	/** {@link tinyModelEnvKey} when the connection was made. */
+	envKey: string;
 }
 
+/**
+ * Per-model worker connections. Device/dtype settings are read at use time: a
+ * connection made under a different device/dtype is replaced on its next idle
+ * use, and the launch-tag probe then swaps the machine-wide worker.
+ */
 export class TinyTitleClient {
 	#workers = new Map<TinyLocalModelKey, ModelWorker>();
 	#pending = new Map<string, PendingRequest>();
-	#failedModels = new Set<TinyLocalModelKey>();
+	/** Models whose load/generation failed, keyed to the device/dtype they failed under. */
+	#failedModels = new Map<TinyLocalModelKey, string>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
+	#downloads = new ModelDownloadActivity(modelKey => getTinyLocalModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
 	#connect: (modelKey: TinyLocalModelKey) => Promise<WorkerHandle>;
 
@@ -553,10 +315,10 @@ export class TinyTitleClient {
 				);
 			} catch (error) {
 				mlxUnavailable = true;
-				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", {
-					modelKey,
-					error: error instanceof Error ? error.message : String(error),
-				});
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", { modelKey, error: message });
+				// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
+				this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
 			}
 		}
 		return connectTinyWorker(onnxLaunch(modelKey, tinyModelEnv()), modelKey);
@@ -574,7 +336,7 @@ export class TinyTitleClient {
 	 * online / non-local keys and for models already marked failed.
 	 */
 	prewarm(modelKey: string): void {
-		if (!isTinyTitleLocalModelKey(modelKey) || this.#failedModels.has(modelKey)) return;
+		if (!isTinyLocalModelKey(modelKey) || this.#hasFailed(modelKey)) return;
 		try {
 			this.#ensureWorker(modelKey).handle.send({ type: "ping", id: String(++this.#nextRequestId) });
 		} catch (error) {
@@ -593,8 +355,8 @@ export class TinyTitleClient {
 		optionsOrSignal?: AbortSignal | TinyTitleGenerateOptions,
 	): Promise<string | null> {
 		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
-		if (!isTinyTitleLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
 		const { promise, resolve } = Promise.withResolvers<string | null>();
 		const request: TinyWorkerRequest = {
 			type: "chat",
@@ -609,24 +371,30 @@ export class TinyTitleClient {
 		);
 	}
 
+	async chat(
+		modelKey: string,
+		messages: readonly TinyChatMessage[],
+		options: TinyModelChatOptions = {},
+	): Promise<string | null> {
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
+		const requested = options.maxTokens ?? COMPLETION_DEFAULT_MAX_NEW_TOKENS;
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const request: TinyWorkerRequest = {
+			type: "chat",
+			id: String(++this.#nextRequestId),
+			messages,
+			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
+		};
+		return this.#run(request, { kind: "chat", modelKey, resolve }, promise, options.signal, () => resolve(null));
+	}
+
 	async complete(
 		modelKey: string,
 		promptText: string,
 		options: TinyModelCompletionOptions = {},
 	): Promise<string | null> {
-		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
-		const requested = options.maxTokens ?? MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS;
-		const { promise, resolve } = Promise.withResolvers<string | null>();
-		const request: TinyWorkerRequest = {
-			type: "chat",
-			id: String(++this.#nextRequestId),
-			messages: buildCompletionMessages(promptText, options.systemPrompt),
-			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
-		};
-		return this.#run(request, { kind: "completion", modelKey, resolve }, promise, options.signal, () =>
-			resolve(null),
-		);
+		return this.chat(modelKey, buildCompletionMessages(promptText, options.systemPrompt), options);
 	}
 
 	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<TinyTitleDownloadResult> {
@@ -699,14 +467,23 @@ export class TinyTitleClient {
 	}
 
 	#ensureWorker(modelKey: TinyLocalModelKey): ModelWorker {
+		const envKey = tinyModelEnvKey();
 		const existing = this.#workers.get(modelKey);
-		if (existing) return existing;
-		const handle = new LazyWorkerHandle(() => this.#connect(modelKey));
+		if (existing) {
+			// Device/dtype changed since connecting: reconnect once idle so in-flight
+			// requests finish on the old worker.
+			if (existing.envKey === envKey || this.#hasPending(modelKey)) return existing;
+			this.#workers.delete(modelKey);
+			existing.unsubscribe();
+			void existing.handle.terminate();
+		}
+		const handle = new LazyWorkerHandle<TinyWorkerRequest, TinyWorkerResponse>(() => this.#connect(modelKey));
 		const unsubscribeMessage = handle.onMessage(message => this.#handleMessage(modelKey, message));
 		const unsubscribeError = handle.onError(error => this.#handleWorkerError(modelKey, error));
 		const worker: ModelWorker = {
 			handle,
 			refed: false,
+			envKey,
 			unsubscribe: () => {
 				unsubscribeMessage();
 				unsubscribeError();
@@ -724,13 +501,7 @@ export class TinyTitleClient {
 	#syncWorkerRef(modelKey: TinyLocalModelKey): void {
 		const worker = this.#workers.get(modelKey);
 		if (!worker) return;
-		let inFlight = false;
-		for (const pending of this.#pending.values()) {
-			if (pending.modelKey === modelKey) {
-				inFlight = true;
-				break;
-			}
-		}
+		const inFlight = this.#hasPending(modelKey);
 		if (inFlight === worker.refed) return;
 		worker.refed = inFlight;
 		if (inFlight) worker.handle.ref();
@@ -743,6 +514,10 @@ export class TinyTitleClient {
 			this.#emitProgress(message.event);
 			return;
 		}
+		// Any answer settles the model's load, even for an abandoned request;
+		// MLX `chat` loads send no `ready` of their own.
+		if (message.type === "error") this.#downloads.observe({ modelKey, status: "error" }, message.error);
+		else this.#downloads.observe({ modelKey, status: "ready" });
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
 		this.#pending.delete(message.id);
@@ -758,23 +533,35 @@ export class TinyTitleClient {
 		}
 		if (message.type === "text") {
 			if (pending.kind === "title") pending.resolve(extractTinyTitle(message.text, pending.source));
-			else if (pending.kind === "completion") pending.resolve(message.text.trim() || null);
+			else if (pending.kind === "chat") pending.resolve(message.text.trim() || null);
 			return;
 		}
 		if (pending.kind === "load") pending.resolve({ ok: true });
 	}
 
+	#hasPending(modelKey: TinyLocalModelKey): boolean {
+		for (const pending of this.#pending.values()) {
+			if (pending.modelKey === modelKey) return true;
+		}
+		return false;
+	}
+
+	#hasFailed(modelKey: TinyLocalModelKey): boolean {
+		return this.#failedModels.get(modelKey) === tinyModelEnvKey();
+	}
+
 	#fail(pending: PendingRequest, error: string | undefined): void {
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error);
 		if (pending.kind === "load") pending.resolve(error === undefined ? { ok: false } : { ok: false, error });
 		else pending.resolve(null);
 	}
 
 	#markFailedModel(pending: PendingRequest): void {
-		if (pending.kind !== "load") this.#failedModels.add(pending.modelKey);
+		if (pending.kind !== "load") this.#failedModels.set(pending.modelKey, tinyModelEnvKey());
 	}
 
-	#emitProgress(event: TinyTitleProgressEvent): void {
+	#emitProgress(event: TinyTitleProgressEvent, error?: string): void {
+		this.#downloads.observe(event, error);
 		for (const listener of this.#progressListeners) listener(event);
 	}
 
@@ -799,18 +586,22 @@ export class TinyTitleClient {
 	/** The model's worker went away or could not be reached. */
 	#handleWorkerError(modelKey: TinyLocalModelKey, error: Error): void {
 		const failed = this.#dropWorker(modelKey, error.message);
-		// A worker exiting on its own while idle is routine; losing requests is not.
-		if (failed === 0 && error.message.startsWith(TINY_WORKER_CLOSED)) {
+		// A worker exiting on its own while idle is routine; losing requests is not. A load
+		// abandoned by an aborted request is still on the HUD, so close that row only.
+		if (failed === 0 && error.message.startsWith(WORKER_CONNECTION_CLOSED)) {
+			this.#downloads.failOpen(modelKey, error.message);
 			logger.debug("tiny-title: worker went away while idle", { modelKey });
-		} else {
-			logger.warn("tiny-title: worker error", { modelKey, error: error.message, failedRequests: failed });
+			return;
 		}
+		// Failed requests already surfaced through `#fail`; this covers a connect failure with nothing in flight.
+		if (failed === 0) this.#downloads.observe({ modelKey, status: "error" }, error.message);
+		logger.warn("tiny-title: worker error", { modelKey, error: error.message, failedRequests: failed });
 	}
 }
 
 export const tinyTitleClient = new TinyTitleClient();
 
-/** Alias for the shared tiny-model worker client (titles + memory completions). */
+/** Alias for the shared tiny-model worker client (titles + generic chat completions). */
 export const tinyModelClient = tinyTitleClient;
 
 /** Drop this process's worker connections; the workers themselves keep serving others until idle. */
@@ -824,30 +615,11 @@ export async function smokeTestTinyTitleWorker({
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await fs.promises.mkdir(getTinyWorkerRuntimeDir(), { recursive: true, mode: 0o700 });
-	const dir = await fs.promises.mkdtemp(path.join(getTinyWorkerRuntimeDir(), "smoke-"));
 	const modelKey: TinyLocalModelKey = "lfm2.5-230m";
-	const launch = onnxLaunch(modelKey, {});
-	const endpoint = tinyWorkerEndpoint(dir, modelKey, "onnx");
-	const spawned = await launch.spawn(endpoint, tinyWorkerLogPath(dir, modelKey, "onnx"));
-	try {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const result = await probeTinyWorker(endpoint, launch.tag);
-			if (result.kind === "live") {
-				result.socket.destroy();
-				return;
-			}
-			if (spawned.proc.exitCode !== null) break;
-			await Bun.sleep(PROBE_INTERVAL_MS);
-		}
-		throw new Error(`tiny worker smoke failed: no tagged pong (${(await logTail(spawned.logPath)) || "no output"})`);
-	} finally {
-		// The worker was spawned unref'd; re-reference it so awaiting its exit
-		// cannot drain the event loop and end the smoke run early.
-		spawned.proc.ref();
-		spawned.proc.kill();
-		await spawned.proc.exited.catch(() => {});
-		await fs.promises.rm(dir, { recursive: true, force: true });
-	}
+	await smokeTestSharedWorker(
+		onnxLaunch(modelKey, {}),
+		getTinyWorkerRuntimeDir(),
+		tinyWorkerName(modelKey, "onnx"),
+		timeoutMs,
+	);
 }

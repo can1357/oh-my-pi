@@ -26,7 +26,11 @@ Related references:
 ## Baseline rules
 
 - Prefer compat metadata over provider-name branches when behavior is model or
-  endpoint configurable.
+  endpoint configurable. Built-in policy is authored in
+  `packages/catalog/src/compat/rules/`; `resolveModelPolicy` in
+  `packages/catalog/src/compat/resolve.ts` layers API defaults, endpoint
+  detection, the KDL cascade, then sparse model overrides/fixups. Thinking
+  metadata resolves afterward.
 - Keep transport mechanics transport-local. Codex websocket replay, Responses
   item routing, and Chat Completions SSE decoding are protocol behavior, not
   generic compat flags.
@@ -65,9 +69,18 @@ Responses request shape is its own dialect:
   `previous_response_id` plus `store: true`
 - third-party Responses proxies may reject native reasoning history, encrypted
   reasoning replay, or `previous_response_id`
-- stream completion is authoritative only after `response.completed` or
-  `response.incomplete`; a stream close before either terminal event should fail
-  for OpenAI Responses rather than surface partial output as success
+- stream completion requires a recognized terminal event: `response.completed`,
+  `response.incomplete`, or the compatible `response.done` envelope; a close
+  before one of these fails instead of surfacing partial output as success
+- transient stream failures can retry before replay-unsafe output; once such
+  output is observed, the partial attempt is committed
+
+### OpenRouter API dispatch
+
+The catalog's `openrouter` API is a routing API, not another wire schema.
+`stream.ts` defaults it to the Responses adapter; setting
+`PI_OPENROUTER_RESPONSES=0` selects Chat Completions. Explicit
+`openai-responses` or `openai-completions` model APIs dispatch directly.
 
 ### OpenAI Codex Responses
 
@@ -133,19 +146,38 @@ routing, model ids, or usage accounting.
 - Routes providers through the OpenRouter `provider` object.
 - Has special cache-write usage accounting.
 - Has strict-tool fallback for Anthropic grammar-size failures.
-- Should omit catalog-default `max_tokens` unless the caller explicitly set a
-  cap, so upstream routing is not biased.
+- Omits catalog-default output caps unless the caller explicitly set one, except
+  models with `alwaysSendMaxTokens`. This applies to both `max_tokens` and
+  Responses `max_output_tokens`, so upstream routing is not biased.
+- Streamed `usage.cost`, when present, overrides the catalog-based cost estimate.
 
 ### Vercel AI Gateway
 
 - Routing preferences go under `providerOptions.gateway.only` and
   `providerOptions.gateway.order`.
+- Chat Completions automatic caching uses `providerOptions.gateway.caching`.
+- Responses uses top-level `caching: "auto"`, optional `cache_anchor_items`,
+  and `cache_ttl`; a `1h` TTL requires long cache retention.
 - Do not reuse OpenRouter's `provider` object.
 
 ### Alibaba Coding Plan
 
 - API key bytes may be JSON carrying `{ token, enterpriseUrl }`.
 - Auth and base URL resolution are provider-specific.
+
+### Alibaba Token Plan
+
+- Uses a dedicated Token Plan credential rather than a generic `OPENAI_API_KEY`
+  fallback.
+- A structured credential can supply both the token and its regional base URL.
+- Keep it separate from Alibaba Coding Plan's enterprise-URL encoding.
+
+### Amazon Bedrock Mantle
+
+- Uses OpenAI Responses with AWS-owned authentication, not the Converse protocol.
+- Accepts a Bedrock bearer token or signed AWS credential-chain requests.
+- The registry's authenticated sentinel is a source marker, not a bearer to
+  forward to the endpoint.
 
 ### Kimi Code
 
@@ -156,14 +188,27 @@ routing, model ids, or usage accounting.
 
 - Requests carry the official Cline CLI client identity (`X-CLIENT-TYPE`, `X-CLIENT-VERSION`, `X-PLATFORM`, `X-CORE-VERSION`, `User-Agent`, and related headers). Inference also carries OMP's stable session key as `X-Task-ID`; account and discovery calls omit it. This is the supported identification contract for Cline-gated roster entries.
 - Public catalog ids omit the gateway's `cline-pass/` namespace; Chat Completions adds it on the wire. Free-tier ids retain their full OpenRouter-style namespace because the gateway already receives them in wire form.
-- The public `recommended-models` endpoint is authoritative for membership. The required `clinePass` bucket and optional `free` bucket currently resolve to a sixteen-model roster; malformed subscription data is rejected so the generated fallback survives.
-- Known ids use a Cline-authored metadata snapshot for exact limits, subscription pricing, input modalities, and per-model reasoning controls. Unknown ids remain usable with conservative limits and no invented reasoning controls until live OpenRouter enrichment or regeneration supplies metadata.
+- The public `recommended-models` endpoint is authoritative for membership. The required `clinePass` bucket supplies subscription models and the optional `free` bucket supplies free models. A missing subscription bucket or one with no valid IDs is rejected so the generated fallback survives; invalid individual entries are skipped.
+- Known IDs use a Cline-authored metadata snapshot for exact limits, subscription pricing, input modalities, and reasoning controls. Unknown IDs are enriched from bundled upstream references and live OpenRouter metadata, then fall back to conservative limits without invented reasoning controls.
 - Subscription models display Cline's API-equivalent list price, but streamed `usage.cost` is the authoritative billed/discounted charge. Free-tier models remain genuinely $0.
 - Reasoning is model-specific: effort models send only their advertised wire tiers, Qwen3.7 Plus maps OMP efforts to Cline's nested `reasoning.max_tokens` budget, and thinking-off sends `reasoning: { enabled: false }` where Cline advertises a toggle.
-- Cline-hosted Qwen routes receive Anthropic-style ephemeral cache breakpoints. Reasoning continuations replay through `delta.reasoning` only for families that require it.
-- Login validates the key against `/users/me`; inference validation then proves model access without consuming quota.
+- Cline-hosted Qwen and Anthropic routes receive Anthropic-style ephemeral cache breakpoints. Required reasoning history replays in assistant `reasoning`; incoming reasoning text is read from `delta.reasoning`.
+- Login validates the key against `/users/me`, without a completion probe or subscription-quota charge. It does not prove access to every roster model.
 - Subscription-window exhaustion (`clinepass limit`) and free-tier caps (`free limit reached on model ...`) classify as usage limits. Roster rotation and account-policy errors receive provider-specific recovery guidance.
 - The dashboard's `/users/me/plan/usage-limits` route accepts the inference API key and reports five-hour, weekly, and monthly utilization; `/users/me` supplies the account label. Usage reporting does not require account OAuth.
+
+### Command Code
+
+- Runtime API routing comes from `rules/runtime/behavior.kdl`: Claude IDs use
+  Anthropic Messages, the listed GPT IDs use Responses, and other IDs use Chat
+  Completions.
+- The public model list carries no reasoning/modality contract. Reviewed effort
+  ladders, prices, modalities, and limits come from `providers/commandcode.kdl`,
+  not same-ID models on another host.
+- Responses rejects named-object `tool_choice`; retain the requested function
+  alone and send `"required"`. Hosted web search works, but hosted image
+  generation is not enabled.
+- `typesafe/jev` is a separate `judge` runner over the System One endpoint.
 
 ### Fireworks and Firepass
 
@@ -180,11 +225,14 @@ Check these before adding or forwarding a field:
   is path-segment aware.
 - **Max output tokens.** Kimi-family models may require a max-token field even
   when the caller did not set one. OpenRouter should omit catalog defaults unless
-  explicit. Codex drops caller caps. Responses uses `max_output_tokens`; Chat
-  Completions uses `max_tokens` or `max_completion_tokens`.
-- **Service tier.** Completions, Responses, and Codex all handle service tiers,
-  but allowed values and pricing multipliers differ. Codex has a special
-  priority multiplier for `gpt-5.5`.
+  explicit, except when `alwaysSendMaxTokens` requires a cap. Codex drops caller
+  caps. Responses uses `max_output_tokens`; Chat Completions uses `max_tokens`
+  or `max_completion_tokens`. `omitMaxOutputTokens` suppresses caps for proxies
+  with unknown upstream limits; otherwise model and provider clamps apply.
+- **Service tier.** Completions, Responses, and Codex handle service tiers, but
+  allowed values and pricing differ. Use resolved `model.serviceTierCost`
+  metadata rather than a model-name pricing branch. OpenAI Responses falls back
+  to 0.5× Flex/2× Priority; Codex leaves unpriced tiers at 1×.
 - **Prompt cache/session.** OpenAI Responses uses `prompt_cache_key`.
   OpenRouter Responses uses `session_id`. Codex uses prompt cache/session ids for
   transport state. Anthropic-style cache control requires `cache_control` on a
@@ -208,12 +256,21 @@ Reasoning fields are not interchangeable.
 - Uses `reasoning: { effort, summary }`.
 - Can include `reasoning.encrypted_content` for replay.
 - xAI Grok models may require omitting `reasoning.effort`.
-- When reasoning is forced off for GPT-5.6+ Responses models, a trailing
+- When `forceReasoningOff` is set on a model with
+  `requiresReasoningOffJuiceInstruction` (the GPT-5.6+ class policy), a trailing
   developer item `# Juice: <N> !important` is appended, with `N` mapped from
   the requested effort (`none`→0, `minimal`→2, `low`→4, `medium`→8, `high`→48,
   `xhigh`→112, `max`→960; default 8) — see `getJuiceValue` in
   `packages/ai/src/providers/openai-shared.ts` and the `forceReasoningOff`
   path in `packages/ai/src/providers/openai-responses.ts`.
+
+### Conversation-stable effort
+
+For models with `supportsConfigurationUpdate` (currently GPT-6 Astra),
+Responses and Codex retain the conversation's request-level effort and encode
+later changes as `configuration_update` input items. This needs session identity
+and provider session state; standalone requests send their own effort directly.
+Codex compaction bypasses this policy.
 
 ### OpenRouter `reasoning`
 
@@ -226,17 +283,27 @@ Reasoning fields are not interchangeable.
 - Uses `thinking: { type: "enabled" }` or
   `thinking: { type: "disabled" }`.
 - GLM 5.2 reasoning-effort models may also receive `reasoning_effort`.
-- Tool requests need `tool_stream: true`.
+- Chat Completions emits `tool_stream: true` only when tools are present and the
+  resolved compat enables the Z.AI reasoning-effort dialect.
 
 ### Qwen
 
 - One dialect uses top-level `enable_thinking`.
-- Another uses `chat_template_kwargs.enable_thinking`.
+- Another uses `chat_template_kwargs.enable_thinking`; do not leak the
+  top-level field onto strict NIM/vLLM/SGLang request schemas.
+- Local Qwen replay can also require `preserve_thinking`. Models with
+  `qwenTemplateReasoningEffort` map effort into the template kwargs (and the
+  top-level field only on the compatible dialect).
 
 ### Anthropic-compatible format
 
-- Reasoning maps to Anthropic thinking enablement and thinking-budget tokens,
-  not OpenAI-style fields.
+- Use the model's thinking mode: budget thinking, adaptive thinking, or
+  budget-plus-effort. Do not translate every model to a fixed token budget.
+- Adaptive thinking uses Anthropic `thinking` and `output_config.effort`, not
+  OpenAI-style `reasoning_effort`.
+- Thinking Off is not universally `thinking.type: "disabled"`: models with
+  `supportsBetweenToolsThinking` use `"between_tools"`; adaptive-only models
+  omit the thinking field and use low effort.
 
 ### DeepSeek reasoning history
 
@@ -284,9 +351,12 @@ session/provider path.
 ### Responses and Codex custom tools
 
 Responses and Codex both support freeform custom grammar tools for `apply_patch`.
-Custom grammar tools do not force request-level `parallel_tool_calls`; Codex
-`responsesLite` separately disables request-level parallel tool calls whenever
-tools are present. Responses additionally:
+Custom grammar tools do not force request-level `parallel_tool_calls`. Codex
+`responsesLite` forces parallel calling off, moves declarations into a leading
+`additional_tools` developer item, moves instructions inline, and drops
+top-level `tools`/`instructions`. Named function and computer choices isolate
+the selected declaration and use `"required"`; other hosted choices become
+`"auto"`. Responses additionally:
 
 - sanitizes schemas differently
 - quarantines invalid enum/const schema contradictions
@@ -303,8 +373,11 @@ Before emitting `tool_choice`:
 - downgrade forced choice to `auto` if forced choice is unsupported
 - drop `tool_choice: "none"` when no tools are emitted
 - drop forced named tool choice if that named tool was filtered out
+- when named objects are unsupported but `"required"` is supported, narrow the
+  emitted tools to the named function before using `"required"`; otherwise
+  another tool could satisfy the forced choice
 
-### Anthropic through LiteLLM/Bedrock
+### Anthropic history through Chat Completions proxies
 
 - If history contains tool calls/results and `context.tools` is undefined, send
   `tools: []` as a sentinel.
@@ -322,6 +395,14 @@ Before emitting `tool_choice`:
 Responses/Codex must remember whether a call was `custom_tool_call`; the paired
 output must then be `custom_tool_call_output`, not `function_call_output`.
 
+### Native computer tools
+
+Responses and Codex serialize supported native computer tools as
+`{ type: "computer" }` and preserve native call/result metadata for replay.
+Unsupported models use the offered computer tool as a normal function instead.
+Azure Responses has its own serializer; it must not inherit every native tool
+accepted by the generic Responses adapter.
+
 ### MiniMax-compatible streaming arguments
 
 Tool arguments can stream as objects instead of JSON strings. Deep-merge object
@@ -329,9 +410,9 @@ deltas, then emit one final concat-safe JSON delta.
 
 ## 6. Convert messages and replay history safely
 
-- **System/developer roles.** Reasoning models may require `developer`. Some
-  providers do not support `developer` and must downgrade to `user`. Some reject
-  multiple system messages and need coalescing.
+- **System/developer roles.** Reasoning models may require `developer`. Hosts
+  without that role use their supported system-role policy, not an unconditional
+  downgrade to `user`. Some reject multiple system messages and need coalescing.
 - **Responses system prompts.** Responses usually uses top-level `instructions`.
   Reasoning models that support `developer` put system prompts inline as
   developer messages.
@@ -369,9 +450,12 @@ deltas, then emit one final concat-safe JSON delta.
   `content_part.added` or `output_item.added`. Finalize pending tool calls at the
   terminal event.
 - **Terminal behavior.** Chat Completions can break after `finish_reason` plus
-  usage. Responses breaks on `response.completed` or `response.incomplete`. Tool
-  calls with `stop` promote to `toolUse`. Codex/Responses `end_turn:false` maps
-  to `pause_turn`.
+  usage. Responses breaks on `response.completed`, `response.incomplete`, or
+  `response.done`. Tool calls with `stop` promote to `toolUse`; executable
+  token-limit-truncated calls can also promote from `length`. If no tool
+  promotion applies, Codex/Responses `end_turn:false` sets
+  `stopDetails: { type: "pause_turn" }` while retaining `stopReason: "stop"`.
+  Responses hosted web search with no visible answer also pauses the turn.
 - **Ollama length failures.** `finish_reason: length` with no visible content is
   treated as context-window failure and mapped to an error.
 
@@ -383,8 +467,11 @@ deltas, then emit one final concat-safe JSON delta.
   separate cache-write charge. Do not double-count it.
 - GitHub Copilot `premiumRequests` must survive when usage is populated or
   replaced.
-- Responses and Codex both adjust cost by resolved service tier, but Codex uses
-  different multipliers.
+- OpenRouter and ClinePass `usage.cost` is authoritative when reported; preserve
+  it rather than replacing it with catalog estimates.
+- Service-tier pricing uses the served tier echoed by the response, falling back
+  to the request only when absent. Standard Responses adjusts only the `openai`
+  provider; Codex uses its own resolved tariff metadata.
 
 ## 9. Implement recovery at the right boundary
 
@@ -393,17 +480,22 @@ deltas, then emit one final concat-safe JSON delta.
 - **OpenAI Responses stateful fallback.** Stale, invalid, or unsupported
   `previous_response_id` resets chain state and retries with full context. Zero
   Data Retention disables chaining immediately.
-- **Codex websocket fallback.** Websocket connection errors, stale sockets,
-  connection limits, retry-budget exhaustion, or unsafe partial output can
-  trigger reconnect or SSE replay.
+- **Codex websocket fallback.** Connection errors, stale sockets, connection
+  limits, or retry-budget exhaustion can trigger reconnect or SSE replay.
+  Replay is refused after a completed tool call has reached the consumer;
+  transport-specific buffering/replay rules govern partial output.
 - **Codex whitespace tool-loop breaker.** Codex can stream whitespace-only
   tool-call argument deltas indefinitely. Cap events/chars, drop the degenerate
   partial tool call, and retry only when safe.
 - **Codex `previous_response_id` fallback.** Stale or unsupported ids are chain
   breaks and retry with full context, but only for websocket because SSE never
   chains.
+- **Responses transient-stream retry.** Retry incomplete/transient streams only
+  before replay-unsafe output has been observed; retain partial output and fail
+  once the attempt is committed.
 - **Provider retry before content.** Codex retries retryable provider stream
-  errors only before user-visible content has been emitted.
+  errors only before emitted text/thinking or completed tool calls commit the
+  attempt. A raw emitted delta counts even if it is whitespace.
 
 ## 10. Checklist for a new constraint
 

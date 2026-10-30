@@ -32,6 +32,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
@@ -42,6 +43,7 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 function makeKind(socketSuffix: string): CmuxKind {
@@ -53,12 +55,12 @@ function makeKind(socketSuffix: string): CmuxKind {
 }
 
 function makeSession(cwd: string, screenshotDir?: string): ToolSession {
-	// Minimal shape: `runInTab` reads `cwd`, `settings.get("browser.screenshotDir")`,
+	// Minimal shape: `runInTab` reads `cwd`, the `browser.screenshotDir` setting,
 	// and `getActiveModel?.()`. Everything else is untouched by this flow.
 	return {
 		cwd,
 		hasUI: false,
-		settings: { get: (key: string) => (key === "browser.screenshotDir" ? screenshotDir : undefined) },
+		settings: Settings.isolated({ "browser.screenshotDir": screenshotDir }),
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 }
@@ -546,5 +548,52 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		} finally {
 			await fs.rm(screenshotDir, { recursive: true, force: true });
 		}
+	});
+
+	it.each([
+		{ name: "measured", width: { value: 1000 }, note: "by 0.98 to get viewport CSS pixels for tab.clickAt" },
+		{ name: "missing", width: { value: "" }, note: "scale to CSS pixels could not be read" },
+		{ name: "failed", width: new Error("eval failed"), note: "scale to CSS pixels could not be read" },
+	])("screenshot coordinate note with $name viewport width", async ({ width, note }) => {
+		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		// A 2x capture of a 1000 CSS px wide viewport.
+		const png = encodeRawPng(new Uint8Array(2000 * 20 * 3), 2000, 20, 3).toBase64();
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+				switch (method) {
+					case "browser.open_split":
+						return { surface_id: "surface-screenshot-scale", url: "about:blank" };
+					case "browser.url.get":
+						return { url: "about:blank" };
+					case "browser.snapshot":
+						return { page: { html: "" } };
+					case "browser.eval":
+						if (params.script !== "window.innerWidth") return { value: "" };
+						if (width instanceof Error) throw width;
+						return width;
+					case "browser.screenshot":
+						return { png_base64: png };
+					default:
+						return {};
+				}
+			},
+		);
+
+		const browser = await acquireBrowser(makeKind("screenshot-scale"), { cwd: "/tmp" });
+		await acquireTab("screenshot-scale", browser, {
+			timeoutMs: 5_000,
+			ownerSessionId: "session-screenshot-scale",
+		});
+
+		const result = await runInTab("screenshot-scale", {
+			code: "return await tab.screenshot();",
+			timeoutMs: 5_000,
+			session: makeSession("/tmp"),
+		});
+		const text = result.displays.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text).toContain(note);
+		expect(result.displays.filter(block => block.type === "image")).toHaveLength(1);
+		if (typeof result.returnValue === "string") await fs.rm(result.returnValue);
 	});
 });

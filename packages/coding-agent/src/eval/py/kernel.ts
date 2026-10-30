@@ -8,7 +8,7 @@
  * timeout.
  */
 import * as path from "node:path";
-import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import {
 	BaseKernel,
@@ -19,6 +19,7 @@ import {
 } from "../kernel-base";
 import { type BackendProbeOptions, probeCandidates } from "../probe";
 import { stageRunnerScript } from "../runner-cache";
+import type { ShadowPlan } from "../speculation/types";
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
 import {
@@ -39,9 +40,6 @@ export type {
 	KernelShutdownResult,
 } from "../kernel-base";
 
-export type { KernelDisplayOutput, PythonStatusEvent } from "./display";
-export { renderKernelDisplay } from "./display";
-
 const TRACE_IPC = $flag("PI_PYTHON_IPC_TRACE");
 
 const SHUTDOWN_GRACE_MS = 1_000;
@@ -53,18 +51,23 @@ const STARTUP_TIMEOUT_MS = 10_000;
 // generous: a clean interrupt is far preferable to losing the persistent
 // kernel's state, so we only kill as a last-resort recovery path.
 const INTERRUPT_ESCALATION_MS = 5_000;
+/** Bounds interrupt escalation plus the three shutdown grace windows before ACP abandons a session. */
+export const PYTHON_KERNEL_CANCEL_BUDGET_MS = INTERRUPT_ESCALATION_MS + 3 * SHUTDOWN_GRACE_MS;
 
 const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	__omp_tools__: true,
 	_omp_prelude: true,
 	AgentHandle: true,
 	CompletionHandle: true,
+	JudgmentBatch: true,
+	JudgmentItem: true,
 	WorkPool: true,
 	agent: true,
 	budget: true,
 	completion: true,
-	display: true,
 	env: true,
+	judge: true,
+	judge_batch: true,
 	log: true,
 	output: true,
 	phase: true,
@@ -81,6 +84,8 @@ export interface PythonKernelAvailability {
 	reason?: string;
 	/** The probed-working runtime, when one was found. */
 	runtime?: PythonRuntime;
+	/** Cancellation or an exhausted probe budget does not establish runtime unavailability. */
+	transient?: boolean;
 }
 
 export interface PythonPreludeSource {
@@ -89,11 +94,46 @@ export interface PythonPreludeSource {
 	source: string;
 }
 
-// Cache successful probes per resolved cwd + explicit interpreter: every cell
-// otherwise pays one (or two — backend.isAvailable + ensureKernelAvailable)
-// interpreter spawns even when the kernel is already hot. Failures are not
-// cached so installing a Python mid-session is picked up on the next attempt.
-const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
+export interface PythonShadowSnapshot {
+	revision: number;
+	values: Readonly<Record<string, unknown>>;
+	digest: string;
+}
+
+export interface PythonShadowPlan extends ShadowPlan {
+	snapshot: PythonShadowSnapshot;
+}
+
+interface PythonKernelExecuteOptions extends KernelExecuteOptions {
+	expectedShadowRevision?: number;
+	expectedShadowDigest?: string;
+}
+
+// Retain definitive results for synchronous capability advertisement. Execution
+// reuses only successes: failed probes are retried on an explicit invocation, so
+// installing Python mid-session remains discoverable without restarting.
+const availabilityCache = new Map<string, PythonKernelAvailability>();
+
+function availabilityKey(cwd: string, interpreter?: string): string {
+	return [
+		path.resolve(cwd),
+		interpreter ?? "",
+		$env.PATH,
+		$env.VIRTUAL_ENV,
+		$env.CONDA_PREFIX,
+		$env.HOME,
+		$env.PYTHONPATH,
+		$env.LD_LIBRARY_PATH,
+	].join("\0");
+}
+
+/** Read the last definitive probe without spawning or awaiting interpreter discovery. */
+export function getCachedPythonKernelAvailability(
+	cwd: string,
+	interpreter?: string,
+): PythonKernelAvailability | undefined {
+	return availabilityCache.get(availabilityKey(cwd, interpreter));
+}
 
 export async function checkPythonKernelAvailability(
 	cwd: string,
@@ -104,13 +144,13 @@ export async function checkPythonKernelAvailability(
 		return { ok: true };
 	}
 	const resolvedCwd = path.resolve(cwd);
-	const key = `${resolvedCwd}\0${interpreter ?? ""}`;
+	const key = availabilityKey(resolvedCwd, interpreter);
 	const cached = availabilityCache.get(key);
-	if (cached) return await cached;
+	if (!options?.forceProbe && cached?.ok) return cached;
 	// Probe controls belong to one caller. Do not share an in-flight promise:
 	// aborting one eval must not cancel a concurrent session's availability check.
 	const result = await probePythonKernelAvailability(resolvedCwd, interpreter, options);
-	if (result.ok) availabilityCache.set(key, Promise.resolve(result));
+	if (!result.transient && !options?.signal?.aborted) availabilityCache.set(key, result);
 	return result;
 }
 
@@ -142,22 +182,32 @@ async function probePythonKernelAvailability(
 			return { ok: true, pythonPath: runtime.pythonPath, runtime };
 		}
 		if (result.aborted) {
-			return { ok: false, pythonPath: runtimes[0].pythonPath, reason: "Python availability probe was cancelled." };
+			return {
+				ok: false,
+				pythonPath: runtimes[0].pythonPath,
+				reason: "Python availability probe was cancelled.",
+				transient: true,
+			};
 		}
 		return {
 			ok: false,
 			pythonPath: runtimes[0].pythonPath,
 			reason: `No working Python interpreter found. Tried: ${result.failures.join("; ")}`,
+			...(result.timedOut ? { transient: true } : {}),
 		};
 	} catch (err) {
-		return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+		return { ok: false, reason: err instanceof Error ? err.message : String(err), transient: true };
 	}
 }
 
-export class PythonKernel extends BaseKernel {
+export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	#installedPreludes = new Map<string, PythonPreludeSource>();
 
-	private constructor(id: string) {
+	/** @param pythonPath Interpreter executable this kernel runs on; reported as the runtime in eval state. */
+	private constructor(
+		id: string,
+		readonly pythonPath: string,
+	) {
 		super(id, {
 			languageName: "Python",
 			traceIpc: TRACE_IPC,
@@ -169,9 +219,12 @@ export class PythonKernel extends BaseKernel {
 					id: msgId,
 					code,
 					cwd: opts?.cwd,
+					filename: opts?.filename,
 					env: opts?.env,
 					silent: opts?.silent ?? false,
 					storeHistory: opts?.storeHistory ?? !(opts?.silent ?? false),
+					expectedShadowRevision: opts?.expectedShadowRevision,
+					expectedShadowDigest: opts?.expectedShadowDigest,
 				}),
 		});
 	}
@@ -280,7 +333,7 @@ export class PythonKernel extends BaseKernel {
 		spawnEnv.PYTHONIOENCODING = "utf-8";
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
-		const kernel = new PythonKernel(Snowflake.next());
+		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
 
 		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
 			cwd: options.cwd,
@@ -310,7 +363,61 @@ export class PythonKernel extends BaseKernel {
 			throw err;
 		}
 	}
+
+	/**
+	 * Captures the runner's JSON-safe user namespace only when no Python cell is
+	 * executing. Ineligible or malformed responses deliberately fall back.
+	 */
+	async snapshotUserNamespace(timeoutMs?: number): Promise<PythonShadowSnapshot | null> {
+		const id = Snowflake.next();
+		const frame = await this.requestControl(JSON.stringify({ type: "shadow_snapshot", id }), id, timeoutMs);
+		if (
+			frame.type !== "shadow_snapshot" ||
+			frame.eligible !== true ||
+			typeof frame.revision !== "number" ||
+			typeof frame.digest !== "string"
+		) {
+			return null;
+		}
+		return { revision: frame.revision, digest: frame.digest, values: Object.freeze(frame.values ?? {}) };
+	}
+
+	/** Projects a candidate against an already-running, idle Python kernel. */
+	async shadowPlan(code: string, timeoutMs?: number): Promise<PythonShadowPlan | null> {
+		const id = Snowflake.next();
+		const frame = await this.requestControl(JSON.stringify({ type: "shadow_plan", id, code }), id, timeoutMs);
+		if (
+			frame.type !== "shadow_plan" ||
+			frame.eligible !== true ||
+			typeof frame.revision !== "number" ||
+			typeof frame.digest !== "string" ||
+			!Array.isArray(frame.operations)
+		) {
+			return null;
+		}
+		return {
+			snapshot: { revision: frame.revision, digest: frame.digest, values: Object.freeze(frame.values ?? {}) },
+			operations: frame.operations,
+			...(frame.controls && frame.controls.length > 0 ? { controls: frame.controls } : {}),
+			...(frame.barrier ? { barrier: frame.barrier } : {}),
+		};
+	}
+
+	/** Atomically starts a cell only if its retained shadow snapshot is still current. */
+	async executeIfSnapshotMatches(
+		code: string,
+		snapshot: Pick<PythonShadowSnapshot, "revision" | "digest">,
+		options?: KernelExecuteOptions,
+	): Promise<KernelExecuteResult | null> {
+		const result = await this.execute(code, {
+			...options,
+			expectedShadowRevision: snapshot.revision,
+			expectedShadowDigest: snapshot.digest,
+		});
+		return result.admissionRejected ? null : result;
+	}
 }
+
 function buildInitScript(cwd: string, env?: Record<string, string | undefined>): string {
 	const envEntries = Object.entries(env ?? {}).filter(([, value]) => value !== undefined);
 	const envPayload = Object.fromEntries(envEntries);

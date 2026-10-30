@@ -12,12 +12,14 @@
  */
 
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
-import type { SettingPath } from "../config/settings-schema";
-import { Semaphore } from "./parallel";
 
-const PROVIDER_MAX_CONCURRENCY_SETTINGS: Record<string, SettingPath> = {
-	"ollama-cloud": "providers.ollama-cloud.maxConcurrency",
+import { Semaphore } from "./parallel";
+import { cfgProvidersOllamaCloudMaxConcurrency } from "../session/settings";
+
+const PROVIDER_MAX_CONCURRENCY_SETTINGS: Record<string, Setting<number>> = {
+	"ollama-cloud": cfgProvidersOllamaCloudMaxConcurrency,
 };
 
 interface ProviderSemaphoreEntry {
@@ -34,9 +36,9 @@ const providerSemaphores = new Map<string, ProviderSemaphoreEntry>();
  * holds a slot and a later finite resize counts work started while unlimited.
  */
 export function getProviderConcurrencyLimit(settings: Settings, provider: string): number | undefined {
-	const settingPath = PROVIDER_MAX_CONCURRENCY_SETTINGS[provider];
-	if (!settingPath) return undefined;
-	const raw = settings.get(settingPath);
+	const setting = PROVIDER_MAX_CONCURRENCY_SETTINGS[provider];
+	if (!setting) return undefined;
+	const raw = setting.get(settings);
 	const limit = Number.isFinite(raw) ? Math.trunc(raw) : 0;
 	return limit > 0 ? limit : Number.POSITIVE_INFINITY;
 }

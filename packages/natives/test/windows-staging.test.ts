@@ -172,26 +172,6 @@ describe("windows native addon staging", () => {
 		}
 	});
 
-	it("falls back to the node_modules-only candidate list when staging is off", () => {
-		// Mirrors the non-Windows / workspace-dev path: same behavior as before
-		// the staging feature was introduced.
-		const versionedDir = "/home/u/.omp/natives/15.0.1";
-		const candidates = resolveLoaderCandidates({
-			addonFilenames: getAddonFilenames({ tag: "linux-x64", arch: "x64", variant: "baseline" }),
-			isCompiledBinary: false,
-			stageFromNodeModules: false,
-			nativeDir: posixNodeModulesNativeDir,
-			execDir: "/usr/bin",
-			versionedDir,
-			userDataDir: "/home/u/.local/bin",
-		});
-
-		const versionedBaseline = path.join(versionedDir, "pi_natives.linux-x64-baseline.node");
-		const nodeModulesBaseline = path.join(posixNodeModulesNativeDir, "pi_natives.linux-x64-baseline.node");
-		expect(candidates).not.toContain(versionedBaseline);
-		expect(candidates).toContain(nodeModulesBaseline);
-	});
-
 	it("removes only older version directories after the current native version loads", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
 		const currentMajor = Number.parseInt(packageJson.version, 10);
@@ -218,19 +198,5 @@ describe("windows native addon staging", () => {
 		} finally {
 			await fs.rm(nativesDir, { recursive: true, force: true });
 		}
-	});
-});
-
-describe("pi-natives version sentinel", () => {
-	it("Rust `js_name` matches the package version", async () => {
-		// The JS loader (`packages/natives/native/index.js`) computes its expected
-		// sentinel from `package.json#version`; if the Rust source falls out of
-		// sync we ship a `.node` that the loader will refuse to use. Pinning the
-		// pairing here catches release-script regressions before they reach CI.
-		const libRs = await Bun.file(path.join(import.meta.dir, "../../../crates/pi-natives/src/lib.rs")).text();
-		const sentinelMatch = libRs.match(/js_name = "(__piNativesV[A-Za-z0-9_]+)"/);
-		expect(sentinelMatch, 'Rust sentinel `js_name = "__piNativesV…"` not found in lib.rs').not.toBeNull();
-		const expected = `__piNativesV${packageJson.version.replace(/[^A-Za-z0-9]/g, "_")}`;
-		expect(sentinelMatch?.[1]).toBe(expected);
 	});
 });

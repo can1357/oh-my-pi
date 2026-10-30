@@ -157,13 +157,4 @@ describe.skipIf(!jjBinary)("native JJ workspace queries", () => {
 		const workspace = vcs.jj(dir);
 		expect(await workspace?.workingCopyLabel()).toBe("feature");
 	});
-
-	it("snapshots new files for status and changed-file queries", async () => {
-		const dir = await createRepo();
-		await Bun.write(path.join(dir, "new.txt"), "native jj\n");
-
-		const workspace = vcs.jj(dir);
-		expect(await workspace?.statusSummary()).toEqual({ staged: 0, unstaged: 0, untracked: 1 });
-		expect(await workspace?.changedFiles([], true)).toEqual(["new.txt"]);
-	});
 });

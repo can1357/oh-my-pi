@@ -34,7 +34,7 @@ describe("AuthStorage config-override apiKey", () => {
 
 	async function seedOAuth(provider: string, access: string): Promise<void> {
 		if (!authStorage) throw new Error("test setup failed");
-		await authStorage.set(provider, [
+		await authStorage.credentials.set(provider, [
 			{
 				type: "oauth",
 				access,
@@ -48,10 +48,10 @@ describe("AuthStorage config-override apiKey", () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
 			await seedOAuth("anthropic", "oauth-from-broker");
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer");
 
-			expect(await authStorage.getApiKey("anthropic")).toBe("gateway-bearer");
-			expect(await authStorage.peekApiKey("anthropic")).toBe("gateway-bearer");
+			expect(await authStorage.keys.get("anthropic")).toBe("gateway-bearer");
+			expect(await authStorage.keys.peek("anthropic")).toBe("gateway-bearer");
 		});
 	});
 
@@ -59,10 +59,10 @@ describe("AuthStorage config-override apiKey", () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
 			await seedOAuth("anthropic", "oauth-from-broker");
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer");
-			authStorage.setRuntimeApiKey("anthropic", "cli-flag-bearer");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer");
+			authStorage.keys.setRuntime("anthropic", "cli-flag-bearer");
 
-			expect(await authStorage.getApiKey("anthropic")).toBe("cli-flag-bearer");
+			expect(await authStorage.keys.get("anthropic")).toBe("cli-flag-bearer");
 		});
 	});
 
@@ -70,11 +70,11 @@ describe("AuthStorage config-override apiKey", () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
 			await seedOAuth("anthropic", "oauth-from-broker");
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer");
-			expect(await authStorage.getApiKey("anthropic")).toBe("gateway-bearer");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer");
+			expect(await authStorage.keys.get("anthropic")).toBe("gateway-bearer");
 
-			authStorage.removeConfigApiKey("anthropic");
-			expect(await authStorage.getApiKey("anthropic")).toBe("oauth-from-broker");
+			authStorage.keys.removeConfig("anthropic");
+			expect(await authStorage.keys.get("anthropic")).toBe("oauth-from-broker");
 		});
 	});
 
@@ -83,20 +83,20 @@ describe("AuthStorage config-override apiKey", () => {
 			if (!authStorage) throw new Error("test setup failed");
 			await seedOAuth("anthropic", "oauth-anthropic");
 			await seedOAuth("openai-codex", "oauth-codex");
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer-A");
-			authStorage.setConfigApiKey("openai-codex", "gateway-bearer-B");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer-A");
+			authStorage.keys.setConfig("openai-codex", "gateway-bearer-B");
 
-			authStorage.clearConfigApiKeys();
+			authStorage.keys.clearConfig();
 
-			expect(await authStorage.getApiKey("anthropic")).toBe("oauth-anthropic");
-			expect(await authStorage.getApiKey("openai-codex")).toBe("oauth-codex");
+			expect(await authStorage.keys.get("anthropic")).toBe("oauth-anthropic");
+			expect(await authStorage.keys.get("openai-codex")).toBe("oauth-codex");
 		});
 	});
 
 	test("setConfigApiKey suppresses OAuth account_uuid attribution", async () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
-			await authStorage.set("anthropic", [
+			await authStorage.credentials.set("anthropic", [
 				{
 					type: "oauth",
 					access: "oauth-with-account",
@@ -106,12 +106,12 @@ describe("AuthStorage config-override apiKey", () => {
 				},
 			]);
 			// Sanity: without override, accountId is exposed.
-			expect(authStorage.getOAuthAccountId("anthropic")).toBe("acc-123");
+			expect(authStorage.oauth.identity("anthropic")?.accountId).toBe("acc-123");
 
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer");
 			// With an explicit config bearer in play, OAuth account attribution
 			// must NOT leak — outbound auth is the gateway bearer, not OAuth.
-			expect(authStorage.getOAuthAccountId("anthropic")).toBeUndefined();
+			expect(authStorage.oauth.identity("anthropic")?.accountId).toBeUndefined();
 		});
 	});
 
@@ -119,8 +119,8 @@ describe("AuthStorage config-override apiKey", () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");
 			await seedOAuth("anthropic", "oauth-from-broker");
-			authStorage.setConfigApiKey("anthropic", "gateway-bearer");
-			expect(authStorage.describeCredentialSource("anthropic")).toBe("config override (models.yml)");
+			authStorage.keys.setConfig("anthropic", "gateway-bearer");
+			expect(authStorage.keys.describe("anthropic")).toBe("config override (models.yml)");
 		});
 	});
 });

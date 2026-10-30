@@ -1,10 +1,17 @@
+import {
+	MAX_THINKING_SUFFIX_OPTIONS,
+	parseThinkingSuffix,
+	splitThinkingSuffix,
+	parseModelString,
+	splitUpstreamRouting,
+} from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Model resolution, scoping, and initial selection.
  *
  * Layering:
  * - `matchModel` is the single matching engine. Order: exact `provider/id`
  *   reference (with variant-alias and OpenRouter routed/date fallbacks) →
- *   exact bare id → retired variant alias → provider-scoped fuzzy → substring
+ *   exact bare id → retired variant alias → substring (bare selectors only)
  *   with alias-vs-dated pick.
  * - `parseModelPatternWithContext`/`parseModelPattern` layer the selector
  *   grammar on top: trailing `:level` thinking suffixes (`splitThinkingSuffix`)
@@ -16,43 +23,53 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
-	parseThinkingLevel,
+	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
-} from "../thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
+	CHAT_MODEL_ROLE_IDS,
 	MODEL_ROLE_ALIAS_PREFIX,
 	MODEL_ROLE_IDS,
 	type ModelRole,
 } from "./model-roles";
 import type { Settings } from "./settings";
 
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
+import { cfgRetryFallbackChains } from "../session/settings";
+
 function isKnownProvider(provider: string): provider is KnownProvider {
 	return provider in DEFAULT_MODEL_PER_PROVIDER;
 }
 
 /**
- * Pick the first provider-default model in availability order.
+ * Pick the first auto-selectable provider-default model in availability order.
+ * A provider's default is the model its discovery marks as the account default
+ * (`isProviderDefault`), else its bundled `default-model`.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -66,37 +83,40 @@ function isKnownProvider(provider: string): provider is KnownProvider {
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
+ * Providers with `automatic-default #false` remain available to explicit model
+ * selectors but cannot become the startup fallback.
  */
 export function pickDefaultAvailableModel(
 	availableModels: Model<Api>[],
 	hasConcreteCredential?: (provider: string) => boolean,
 ): Model<Api> | undefined {
+	const autoSelectable = availableModels.filter(model => providerEntry(model.provider)?.automaticDefault !== false);
 	const models =
 		hasConcreteCredential === undefined
-			? availableModels
+			? autoSelectable
 			: (() => {
 					const concreteAuthByProvider = new Map<string, boolean>();
-					const concrete = availableModels.filter(model => {
+					const concrete = autoSelectable.filter(model => {
 						const cached = concreteAuthByProvider.get(model.provider);
 						if (cached !== undefined) return cached;
 						const hasConcreteAuth = hasConcreteCredential(model.provider);
 						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
 						return hasConcreteAuth;
 					});
-					return concrete.length > 0 ? concrete : availableModels;
+					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
+	const accountDefaultProviders = new Set(
+		models.filter(model => model.isProviderDefault).map(model => model.provider),
 	);
+	const isDefaultForProvider = (model: Model<Api>): boolean =>
+		accountDefaultProviders.has(model.provider)
+			? model.isProviderDefault === true
+			: isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+	const firstDefault = models.find(isDefaultForProvider);
 	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = models.filter(
-		model =>
-			model.id === firstDefault.id &&
-			isKnownProvider(model.provider) &&
-			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const sharedDefaultMatches = models.filter(model => model.id === firstDefault.id && isDefaultForProvider(model));
 	return [...sharedDefaultMatches].sort((a, b) => {
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
@@ -109,50 +129,6 @@ export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
-}
-
-interface ThinkingSuffixOptions {
-	allowMaxSuffix?: boolean;
-	allowAutoAlias?: boolean;
-}
-
-interface ModelStringParseOptions extends ThinkingSuffixOptions {
-	isLiteralModelId?: (provider: string, id: string) => boolean;
-}
-// Suffix recognition for the model-pattern parser: `:max` is a real thinking
-// level and `:auto` maps to the auto sentinel. Both are gated behind flags
-// (and the literal-id / exact-match guards on the callers) because real model
-// ids end in `:max` (e.g. `glm-4.7:max`) — an ungated split would silently
-// reinterpret them as a thinking suffix.
-const MAX_THINKING_SUFFIX_OPTIONS: ThinkingSuffixOptions = { allowMaxSuffix: true, allowAutoAlias: true };
-
-function parseThinkingSuffix(value: string, options?: ThinkingSuffixOptions): ConfiguredThinkingLevel | undefined {
-	const level = parseThinkingLevel(value);
-	if (level === ThinkingLevel.Max) return options?.allowMaxSuffix === true ? level : undefined;
-	if (level !== undefined) return level;
-	if (options?.allowAutoAlias === true && value === AUTO_THINKING) return AUTO_THINKING;
-	return undefined;
-}
-
-/**
- * Split a trailing `:<level>` thinking selector off a model pattern.
- *
- * `level` is set when the suffix parses as a concrete thinking level (or, when
- * the caller opts in via `allowMaxSuffix`/`allowAutoAlias`, the guarded `:max`
- * level / `:auto` sentinel); `base` then has the suffix stripped. Otherwise
- * `base` is the input.
- * `minColonIndex` requires the colon to appear strictly after that index —
- * role-alias callers pass the matched alias prefix length.
- */
-function splitThinkingSuffix(
-	pattern: string,
-	minColonIndex = -1,
-	options?: ThinkingSuffixOptions,
-): { base: string; level?: ConfiguredThinkingLevel } {
-	const colonIdx = pattern.lastIndexOf(":");
-	if (colonIdx <= minColonIndex) return { base: pattern };
-	const level = parseThinkingSuffix(pattern.slice(colonIdx + 1), options);
-	return level ? { base: pattern.slice(0, colonIdx), level } : { base: pattern };
 }
 
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
@@ -203,32 +179,6 @@ function resolveGlobScopePattern(
 }
 
 /**
- * Parse a model string in "provider/modelId" format.
- * Returns undefined if the format is invalid.
- */
-export function parseModelString(
-	modelStr: string,
-	options?: ModelStringParseOptions,
-): { provider: string; id: string; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const slashIdx = modelStr.indexOf("/");
-	if (slashIdx <= 0) return undefined;
-	const id = modelStr.slice(slashIdx + 1);
-	const provider = modelStr.slice(0, slashIdx);
-	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
-	const strict = splitThinkingSuffix(id);
-	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
-	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
-	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
-		return options?.isLiteralModelId?.(provider, id) === true
-			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
-	}
-	return { provider, id };
-}
-
-/**
  * Format a model as "provider/modelId" string.
  */
 export function formatModelString(model: Model<Api>): string {
@@ -260,10 +210,6 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
-}
-
-export function formatModelSelectorValue(selector: string, thinkingLevel: ConfiguredThinkingLevel | undefined): string {
-	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -356,6 +302,7 @@ function resolveBedrockInferenceProfileModelId(
 		contextWindow: null,
 		maxTokens: null,
 		...(template.headers ? { headers: template.headers } : {}),
+		...(template.resolveHeaders ? { resolveHeaders: template.resolveHeaders } : {}),
 		...(template.transport !== undefined ? { transport: template.transport } : {}),
 		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
@@ -371,28 +318,6 @@ function resolveBedrockInferenceProfileReference(
 ): Model<Api> | undefined {
 	if (provider.toLowerCase() !== AMAZON_BEDROCK_PROVIDER) return undefined;
 	return resolveBedrockInferenceProfileModelId(modelId, availableModels);
-}
-
-const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
-
-/**
- * Split a trailing `@<upstream>` provider-routing selector off a model pattern.
- *
- * `openrouter/z-ai/glm-4.7@cerebras` -> base `openrouter/z-ai/glm-4.7`, upstream
- * `cerebras`. A `:thinking` suffix after the slug is kept on the base
- * (`...@cerebras:high` -> base `...:high`). Returns undefined when there is no
- * `@` or the suffix is not a bare provider slug, so model ids that legitimately
- * contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are never split.
- */
-export function splitUpstreamRouting(pattern: string): { base: string; upstream: string } | undefined {
-	const at = pattern.lastIndexOf("@");
-	if (at <= 0) return undefined;
-	const rest = pattern.slice(at + 1);
-	const colon = rest.indexOf(":");
-	const upstream = colon === -1 ? rest : rest.slice(0, colon);
-	if (!UPSTREAM_ROUTING_SLUG.test(upstream)) return undefined;
-	const trailing = colon === -1 ? "" : rest.slice(colon);
-	return { base: pattern.slice(0, at) + trailing, upstream };
 }
 
 /** OpenRouter and Vercel AI Gateway are the aggregators that honor per-request upstream routing. */
@@ -562,6 +487,17 @@ export function resolveProviderModelReference(
 		return spelled;
 	}
 
+	// Revision-pinned ids (Vertex `claude-opus-4-8@default`) are also named without
+	// the revision the catalog declares for them (`selector-revision-suffix`).
+	if (!normalizedModelId.includes("@")) {
+		const revisioned = availableModels.find(model => {
+			if (model.provider.toLowerCase() !== normalizedProvider) return false;
+			const suffix = resolveCatalogPolicy(model).selectorRevisionSuffix;
+			return typeof suffix === "string" && model.id.toLowerCase() === `${normalizedModelId}${suffix.toLowerCase()}`;
+		});
+		if (revisioned) return revisioned;
+	}
+
 	if (normalizedProvider !== "openrouter") {
 		return undefined;
 	}
@@ -586,12 +522,36 @@ export interface ModelMatchPreferences {
 	providerOrder?: readonly string[];
 	/** Providers to deprioritize when no recent usage or provider priority is available. */
 	deprioritizeProviders?: string[];
+	/**
+	 * Whether a provider exists beyond the models matched against, such as a
+	 * discovery provider whose cache is still empty: a `provider/id` selector
+	 * naming one never falls back to another provider's ids.
+	 */
+	isKnownProvider?: (provider: string) => boolean;
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
+
+const kModelOrderIndex = Symbol("model-resolver.modelOrderIndex");
+type ModelsWithOrderIndex = readonly Model<Api>[] & {
+	[kModelOrderIndex]?: Map<string, number>;
+};
+
+/** `provider/id` → last position in `availableModels`; cached on the array like the provider indexes. */
+function getModelOrderIndex(availableModels: readonly Model<Api>[]): Map<string, number> {
+	const tagged = availableModels as ModelsWithOrderIndex;
+	const cached = tagged[kModelOrderIndex];
+	if (cached) return cached;
+	const index = new Map<string, number>();
+	for (let i = 0; i < availableModels.length; i += 1) {
+		index.set(formatModelString(availableModels[i]), i);
+	}
+	tagged[kModelOrderIndex] = index;
+	return index;
+}
 
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
@@ -599,6 +559,7 @@ interface ModelPreferenceContext {
 	providerPriorityRank: Map<string, number>;
 	deprioritizedProviders: Set<string>;
 	modelOrder: Map<string, number>;
+	isKnownProvider: ((provider: string) => boolean) | undefined;
 }
 
 function buildPreferenceContext(
@@ -620,20 +581,23 @@ function buildPreferenceContext(
 	}
 	const providerPriorityRank = buildModelProviderPriorityRank(preferences?.providerOrder);
 	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? []);
-	const modelOrder = new Map<string, number>();
-	for (let i = 0; i < availableModels.length; i += 1) {
-		modelOrder.set(formatModelString(availableModels[i]), i);
-	}
+	const modelOrder = getModelOrderIndex(availableModels);
 
-	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
+	return {
+		modelUsageRank,
+		providerUsageRank,
+		providerPriorityRank,
+		deprioritizedProviders,
+		modelOrder,
+		isKnownProvider: preferences?.isKnownProvider,
+	};
 }
 
-export function getModelMatchPreferences(
-	settings?: Partial<Pick<Settings, "get" | "getStorage">>,
-): ModelMatchPreferences {
+export function getModelMatchPreferences(settings?: Settings): ModelMatchPreferences {
+	if (!settings) return { usageOrder: undefined, providerOrder: undefined };
 	return {
-		usageOrder: settings?.getStorage?.()?.getModelUsageOrder(),
-		providerOrder: settings?.get?.("modelProviderOrder"),
+		usageOrder: settings.getStorage()?.getModelUsageOrder(),
+		providerOrder: cfgModelProviderOrder.get(settings),
 	};
 }
 
@@ -646,6 +610,7 @@ function mergeModelMatchPreferences(
 		usageOrder: preferences?.usageOrder ?? settingsPreferences.usageOrder,
 		providerOrder: preferences?.providerOrder ?? settingsPreferences.providerOrder,
 		deprioritizeProviders: preferences?.deprioritizeProviders,
+		isKnownProvider: preferences?.isKnownProvider,
 	};
 }
 
@@ -747,6 +712,15 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 	if (matchedModel.provider.toLowerCase() === provider) {
 		return false;
 	}
+	// A cross-provider exact-id match on a provider that has no bundled
+	// catalog at all is a user-configured custom provider (models.json /
+	// models.yml): the user wrote this literal id explicitly, so resolving
+	// it is stated intent rather than an aggregator shadow, and the lock
+	// must not fire (#8800). Bundled providers (e.g. OpenRouter) keep the
+	// lock below unchanged.
+	if (getBundledModels(matchedModel.provider.toLowerCase() as GeneratedProvider).length === 0) {
+		return false;
+	}
 	// Case- and revision-spelling-insensitive on both halves: the surrounding
 	// matcher lowercases the selector before comparing ids, and
 	// resolveProviderModelReference accepts `5.1` for `5-1`, so the lock must
@@ -780,14 +754,14 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
  *    fallbacks included),
  * 2. exact bare id (preference-ranked),
  * 3. retired effort-tier variant alias (collapsed catalog entries),
- * 4. provider-scoped fuzzy match,
- * 5. substring match with the alias-vs-dated pick.
- * Returns the matched model or undefined if no match found.
+ * 4. substring match with the alias-vs-dated pick.
+ * A selector whose prefix names a known provider stops after the exact phases:
+ * it never falls back to a sibling id. Returns the matched model or undefined.
  *
- * `exactOnly` stops after the exact phases (1-3), skipping the fuzzy/substring
- * fallbacks (4-5). Callers use it to resolve the full selector exactly before
+ * `exactOnly` stops after the exact phases (1-3), skipping the substring
+ * fallback (4). Callers use it to resolve the full selector exactly before
  * a trailing `:<level>` thinking suffix is split off, so the suffix can never
- * be fuzzily absorbed into a longer sibling id (e.g. `kimi-for-coding:high`
+ * be absorbed into a longer sibling id (e.g. `kimi-for-coding:high`
  * must not match `kimi-for-coding-highspeed`).
  */
 function matchModel(
@@ -801,8 +775,8 @@ function matchModel(
 		return exactRefMatch;
 	}
 
-	// Exact ID match (case-insensitive) — this must happen before provider-scoped
-	// fuzzy matching so raw IDs that contain slashes (for example OpenRouter model
+	// Exact ID match (case-insensitive) — this must happen before the
+	// provider-qualified cut-off below so raw IDs that contain slashes (for example OpenRouter model
 	// IDs like "openai/gpt-4o:extended") still resolve as IDs instead of being
 	// misread as a provider-qualified selector. A provider-qualified pattern
 	// whose named provider carries the id stays locked to that provider when its
@@ -844,49 +818,28 @@ function matchModel(
 	if (options?.exactOnly) {
 		return undefined;
 	}
-	// Check for provider/modelId format — fuzzy match within provider only.
+	// A `provider/modelId` selector naming a known provider resolves exactly or
+	// not at all: the exact phases above already covered its ids and aliases, and
+	// fuzzy-matching within the provider would silently run a sibling model
+	// (`anthropic/claude-haiku-5-5` → `claude-haiku-4-5`). Returning undefined also
+	// lets the aggregator routing fallback apply `@upstream` slugs.
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
-		const provider = modelPattern.substring(0, slashIndex);
-		const modelId = modelPattern.substring(slashIndex + 1);
-		const lowerProvider = provider.toLowerCase();
-		const providerModels = availableModels.filter(m => m.provider.toLowerCase() === lowerProvider);
-		if (providerModels.length === 0) {
-			// The prefix is not a known provider in this candidate set, so treat the
-			// slash as part of the raw model ID and continue with generic matching.
-		} else {
-			// Let the routing fallback apply `@upstream` before fuzzy matching can consume the
-			// slug — but only for aggregator providers (OpenRouter / Vercel Gateway). Other
-			// providers have ids that legitimately end in `@` (Vertex `claude-opus-4-8@default`),
-			// and the fallback never routes them, so they must keep fuzzy matching.
-			if (splitUpstreamRouting(modelId) && providerModels.some(supportsUpstreamRouting)) {
-				return undefined;
-			}
-			const scored = providerModels
-				.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
-				.filter(entry => entry.match.matches);
-			if (scored.length === 0) {
-				return undefined;
-			}
-
-			scored.sort((a, b) => {
-				if (a.match.score !== b.match.score) return a.match.score - b.match.score;
-				const aKey = formatModelString(a.model);
-				const bKey = formatModelString(b.model);
-				const aUsage = context.modelUsageRank.get(aKey) ?? Number.POSITIVE_INFINITY;
-				const bUsage = context.modelUsageRank.get(bKey) ?? Number.POSITIVE_INFINITY;
-				if (aUsage !== bUsage) return aUsage - bUsage;
-
-				const aProviderUsage = context.providerUsageRank.get(a.model.provider) ?? Number.POSITIVE_INFINITY;
-				const bProviderUsage = context.providerUsageRank.get(b.model.provider) ?? Number.POSITIVE_INFINITY;
-				if (aProviderUsage !== bProviderUsage) return aProviderUsage - bProviderUsage;
-
-				const aOrder = context.modelOrder.get(aKey) ?? 0;
-				const bOrder = context.modelOrder.get(bKey) ?? 0;
-				return aOrder - bOrder;
-			});
-			return scored[0]?.model;
+		const lowerProvider = modelPattern.substring(0, slashIndex).toLowerCase();
+		// Known means in this candidate set, a catalog provider (KDL), even one
+		// with no bundled rows or credentials, or one the caller knows otherwise (a
+		// discovery provider with an empty cache): absent from an availability-filtered
+		// pool, its selector must still not fall through to another provider's raw
+		// ids (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
+		if (
+			availableModels.some(m => m.provider.toLowerCase() === lowerProvider) ||
+			providerEntry(lowerProvider) ||
+			context.isKnownProvider?.(lowerProvider)
+		) {
+			return undefined;
 		}
+		// The prefix is not a known provider, so treat the slash as part of the
+		// raw model ID and continue with generic matching.
 	}
 
 	// No exact match - fall back to partial matching
@@ -918,6 +871,46 @@ function matchModel(
 	return pickPreferredModel(topCandidates, context);
 }
 
+/**
+ * The not-found hint for a `provider/id` selector: ` Did you mean a, b, c?` naming up
+ * to three ids of that provider that fuzzy-match the id (thinking suffix ignored),
+ * or `""` when the selector names no known provider or nothing is close.
+ * Provider-qualified selectors never resolve to these; they only feed the message.
+ */
+export function providerModelHint(selector: string, models: readonly Model<Api>[]): string {
+	const slashIndex = selector.indexOf("/");
+	if (slashIndex === -1) return "";
+	const lowerProvider = selector.slice(0, slashIndex).toLowerCase();
+	const modelId = splitThinkingSuffix(selector.slice(slashIndex + 1), -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+	const nearMatches = models
+		.filter(model => model.provider.toLowerCase() === lowerProvider)
+		.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
+		.filter(entry => entry.match.matches)
+		.sort((a, b) => a.match.score - b.match.score)
+		.slice(0, 3)
+		.map(entry => formatModelString(entry.model));
+	return nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
+}
+
+/**
+ * Recover the effort a retired wire-tier id (e.g. `gemini-3.8-flash-high`) implied before it was
+ * collapsed into a logical model. Only a route owned by exactly one level carries intent: the
+ * model's default wire id and ids shared by several levels imply nothing, so the caller's level
+ * still applies.
+ */
+function inferWireRouteThinkingLevel(pattern: string, model: Model<Api>): ConfiguredThinkingLevel | undefined {
+	const routing = model.thinking?.effortRouting;
+	if (!routing) return undefined;
+	const normalized = pattern.trim().toLowerCase();
+	const providerPrefix = `${model.provider.toLowerCase()}/`;
+	const wireId = normalized.startsWith(providerPrefix) ? normalized.slice(providerPrefix.length) : normalized;
+	if (wireId === model.id.toLowerCase() || wireId === model.requestModelId?.toLowerCase()) return undefined;
+
+	const levels = [ThinkingLevel.Off, ...(model.thinking?.efforts ?? [])];
+	const matches = levels.filter(level => routing[level]?.toLowerCase() === wireId);
+	return matches.length === 1 ? parseConfiguredThinkingLevel(matches[0]) : undefined;
+}
+
 export interface ParsedModelResult {
 	model: Model<Api> | undefined;
 	/** Thinking level if explicitly specified in pattern, undefined otherwise */
@@ -932,12 +925,11 @@ export interface ParsedModelResult {
  * Parse a pattern to extract model and thinking level.
  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
  *
- * Algorithm:
- * 1. Try to match full pattern as a model
- * 2. If found, return it with undefined thinking level
- * 3. If not found and has colons, split on last colon:
- *    - If suffix is valid thinking level, use it and recurse on prefix
- *    - If suffix is invalid, warn and recurse on prefix
+ * 1. Try to match the full pattern as a model
+ * 2. If it names a collapsed wire route, preserve that route's thinking level
+ * 3. If not found and it has colons, split on the last colon:
+ *    - If the suffix is a valid thinking level, use it and recurse on the prefix
+ *    - If the suffix is invalid, warn and recurse on the prefix
  *
  * @internal Exported for testing
  */
@@ -950,7 +942,13 @@ function parseModelPatternWithContext(
 	// Exact match on the full pattern first (no fuzzy): a literal id that
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
 	if (exactMatch) {
-		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
+		const thinkingLevel = inferWireRouteThinkingLevel(pattern, exactMatch);
+		return {
+			model: exactMatch,
+			thinkingLevel,
+			warning: undefined,
+			explicitThinkingLevel: thinkingLevel !== undefined,
+		};
 	}
 
 	// Prefer a fuzzy match whose actual id ends in the suffix, preserving
@@ -1062,10 +1060,6 @@ export function parseModelPattern(
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
-export interface ModelRoleLookup {
-	getModelRole(role: ModelRole | string): string | undefined;
-}
-
 function isModelRole(role: string): role is ModelRole {
 	return (MODEL_ROLE_IDS as string[]).includes(role);
 }
@@ -1137,24 +1131,80 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 }
 
 /**
- * Roles that have no priority.json chain of their own reuse another role's
- * list. The advisor — a second-opinion reviewer — defaults to the `slow`
- * reasoning chain, but (unlike the `slow` role, see
- * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
- * the override for online title/memory/classifier tasks — reuses the `smol`
- * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
+ * Roles that have no catalog default chain (`roleDefaultModels()`) reuse another role's
+ * list. The advisor — a second-opinion reviewer — uses a configured `slow`
+ * role before that list, but never inherits the primary's model when `slow`
+ * is unset, so it stays a distinct strong model out of the box. The `tiny`
+ * role — the override for online title/classifier tasks — resolves through
+ * `smol` so it picks the same configured, inherited, or built-in fast model.
+ * The `memory` role first reuses a configured/effective `tiny` role, then the
+ * same `smol` priority list. The `widget` role — the author of background-job
+ * widget specs — resolves exactly like `smol` until configured on its own.
  */
-const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
+const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, string>> = {
 	advisor: "slow",
+	memory: "smol",
 	tiny: "smol",
+	widget: "smol",
 };
 
+interface ConfiguredRoleFallback {
+	role: ModelRole;
+	/** Skip the target role's default inheritance when it has no explicit configuration. */
+	configuredOnly: boolean;
+}
+
+const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ConfiguredRoleFallback>> = {
+	advisor: { role: "slow", configuredOnly: true },
+	memory: { role: "tiny", configuredOnly: false },
+	tiny: { role: "smol", configuredOnly: false },
+	widget: { role: "smol", configuredOnly: false },
+};
+
+function hasOwnKey<T extends object>(value: T, key: PropertyKey): key is keyof T {
+	return Object.hasOwn(value, key);
+}
+
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
-function rolePriorityDefaults(role: ModelRole): string[] {
-	const key = ROLE_PRIORITY_ALIAS[role] ?? (role as keyof typeof MODEL_PRIO);
-	return normalizeModelPatternList(MODEL_PRIO[key]);
+export function rolePriorityDefaults(role: string): string[] {
+	const alias = hasOwnKey(ROLE_PRIORITY_ALIAS, role) ? ROLE_PRIORITY_ALIAS[role] : undefined;
+	const key = alias ?? role;
+	const defaults = roleDefaultModels();
+	return hasOwnKey(defaults, key) ? normalizeModelPatternList([...defaults[key]]) : [];
+}
+
+/** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
+function resolveNestedRolePatterns(
+	value: string | string[],
+	roleDefaults: string[],
+	settings: ModelRoleLookup | undefined,
+	visited: Set<string>,
+): string[] {
+	const resolved: string[] = [];
+	for (const pattern of normalizeModelPatternList(value)) {
+		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
+			pattern,
+			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			MAX_THINKING_SUFFIX_OPTIONS,
+		);
+		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
+		if (!aliasRole) {
+			resolved.push(pattern);
+			continue;
+		}
+		if (visited.has(aliasRole)) {
+			resolved.push(
+				...(thinkingLevel
+					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+					: roleDefaults),
+			);
+			continue;
+		}
+
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		if (recursed) resolved.push(...recursed);
+	}
+	return resolved;
 }
 
 function resolveDefaultInheritedPatterns(
@@ -1165,36 +1215,7 @@ function resolveDefaultInheritedPatterns(
 	visited: Set<string>,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
-
-	const resolved: string[] = [];
-	for (const pattern of normalizeModelPatternList(configuredDefault)) {
-		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
-			pattern,
-			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-			MAX_THINKING_SUFFIX_OPTIONS,
-		);
-		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
-		if (aliasRole === role) {
-			// Self-alias (e.g. modelRoles.default = "@smol") would loop back to the
-			resolved.push(
-				...(thinkingLevel
-					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
-					: roleDefaults),
-			);
-			continue;
-		}
-		if (aliasRole && !visited.has(aliasRole)) {
-			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
-			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
-			if (recursed && recursed.length > 0) {
-				resolved.push(...recursed);
-				continue;
-			}
-		}
-		resolved.push(pattern);
-	}
-	return resolved;
+	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
 }
 
 function resolveConfiguredRolePattern(
@@ -1217,12 +1238,25 @@ function resolveConfiguredRolePattern(
 
 	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
-	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
+	// Built-in defaults chain to other roles (judge: `@tiny`, `@smol`, `@default`). Left unexpanded, the
+	// matcher reads them as literal ids and `@default` fuzzy-matches Vertex ids like `claude-opus-4-8@default`.
+	const roleDefaults = isModelRole(role)
+		? resolveNestedRolePatterns(rolePriorityDefaults(role), [], settings, visited)
+		: [];
+	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
+	const fallbackPatterns =
+		configured ||
+		!configuredFallback ||
+		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
+			? undefined
+			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
 	const resolved = configured
-		? normalizeModelPatternList(configured)
-		: isModelRole(role)
-			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
-			: roleDefaults;
+		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
+		: fallbackPatterns
+			? fallbackPatterns
+			: isModelRole(role)
+				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
+				: roleDefaults;
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
 	}
@@ -1378,8 +1412,9 @@ export interface AgentAdvisorSelection {
  * runs unadvised. The settings override decides enablement first ("off" wins,
  * "on" enables with the agent's own model pattern or the `advisor` role, any
  * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
+ * `advisor` field applies. Callers expand a returned pattern against the
+ * owner's roles (`resolveAgentAdvisorRolePattern`) before it lands on the
+ * spawned session's `modelRoles.advisor`, so `@advisor` cannot point at itself.
  */
 export function resolveAgentAdvisorSelection(
 	options: AgentAdvisorResolutionOptions,
@@ -1395,6 +1430,17 @@ export function resolveAgentAdvisorSelection(
 	}
 	if (options.agentAdvisor === true) return {};
 	return agentPattern ? { model: agentPattern } : undefined;
+}
+
+/**
+ * Expand an agent advisor pattern against the owner's role lookup before it is
+ * stamped onto a spawned session's `modelRoles.advisor`. Without this, a
+ * self-referential `@advisor` lands as the child's own advisor role, trips the
+ * cycle guard, and silently degrades to the built-in `slow` priority list.
+ */
+export function resolveAgentAdvisorRolePattern(pattern: string, settings?: ModelRoleLookup): string {
+	const expanded = resolveConfiguredModelPatterns(pattern, settings);
+	return expanded.length > 0 ? expanded.join(",") : pattern;
 }
 
 /**
@@ -1458,12 +1504,14 @@ export function resolveModelRoleValue(
 }
 
 interface ExplicitThinkingSelectorOptions {
-	isLiteralModelId?: (provider: string, id: string) => boolean;
+	/** Exact ID lookup; an undefined provider checks unqualified IDs across the caller's model set. */
+	isLiteralModelId?: (provider: string | undefined, id: string) => boolean;
 }
 
 function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
 	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	if (parsed) return options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	return options?.isLiteralModelId?.(undefined, value) === true;
 }
 
 export function extractExplicitThinkingSelector(
@@ -1479,7 +1527,7 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? 0;
 		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
 		if (strictSelector) {
 			return strictSelector;
@@ -1531,7 +1579,7 @@ export function resolveModelFromSettings(options: {
 	roleOrder?: readonly ModelRole[];
 }): Model<Api> | undefined {
 	const { settings, availableModels, matchPreferences, roleOrder } = options;
-	const roles = roleOrder ?? MODEL_ROLE_IDS;
+	const roles = roleOrder ?? CHAT_MODEL_ROLE_IDS;
 	let sawConfiguredProviderQualifiedRole = false;
 	for (const role of roles) {
 		const configured = settings.getModelRole(role);
@@ -1544,6 +1592,59 @@ export function resolveModelFromSettings(options: {
 		if (resolved) return resolved;
 	}
 	return sawConfiguredProviderQualifiedRole ? undefined : availableModels[0];
+}
+
+/** A resolved role-chain attempt and whether configuration explicitly admitted it. */
+export interface RoleChainCandidate {
+	model: Model<Api>;
+	explicit: boolean;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** A configured provider-qualified selector earlier in the chain that matched no model. */
+	replaces?: string;
+}
+
+/** Resolve a role's primary and retry candidates in effective attempt order. */
+export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
+	const configuredRoles = settings.getModelRoles();
+	const configured = settings.getModelRole(role)?.trim();
+	const primarySelector = configured || formatModelRoleAlias(role);
+	const configuredFallbacks = cfgRetryFallbackChains.get(settings)[role];
+	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
+	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	const selectors = [
+		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
+	];
+	const candidates: RoleChainCandidate[] = [];
+	const candidateByRoute = new Map<string, RoleChainCandidate>();
+	// First explicitly configured provider-qualified selector that resolved to
+	// nothing; the next candidate carries it so callers can say what replaced it.
+	let unresolvedExplicit: string | undefined;
+	for (const { selector, explicit } of selectors) {
+		const resolved = resolveModelRoleValue(selector, pool, { settings });
+		// An explicit value that resolved nothing, or a list that matched on a later
+		// entry, skipped expanded patterns (role aliases included): record the first
+		// provider-qualified one among them.
+		if (explicit && (!resolved.model || (resolved.matchedPatternIndex ?? 0) > 0)) {
+			const patterns = resolveConfiguredModelPatterns(selector, settings) ?? [selector];
+			const skipped = resolved.model ? patterns.slice(0, resolved.matchedPatternIndex) : patterns;
+			const qualifiedMiss = skipped.find(pattern => pattern.includes("/"));
+			if (qualifiedMiss) unresolvedExplicit ??= qualifiedMiss;
+		}
+		if (!resolved.model) continue;
+		const key = formatModelStringWithRouting(resolved.model);
+		const existing = candidateByRoute.get(key);
+		if (existing) {
+			if (explicit) existing.explicit = true;
+			continue;
+		}
+		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
+		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+		if (unresolvedExplicit !== undefined && candidates.length === 0) candidate.replaces = unresolvedExplicit;
+		candidateByRoute.set(key, candidate);
+		candidates.push(candidate);
+	}
+	return candidates;
 }
 
 /**
@@ -1577,8 +1678,69 @@ export function resolveModelOverride(
 }
 
 /**
+ * Provider ids turned off through the `disabledProviders` setting, already
+ * resolved for the current working directory's path scopes.
+ *
+ * A disabled provider is unreachable however a model is named — catalog
+ * listing, configured role, or an explicit `provider/id` pin — so every
+ * resolution path filters through this set.
+ */
+export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
+	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
+}
+
+function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
+	return parseModelString(selector, {
+		...MAX_THINKING_SUFFIX_OPTIONS,
+		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+	});
+}
+
+/**
+ * Resolve a saved session model selector (`provider/id`, optionally with a
+ * thinking suffix) to a registered model whose provider is enabled and has
+ * credentials configured. Startup resume and runtime session switches share
+ * this lookup, so both restore the same models.
+ *
+ * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
+ * tokens and runs no `!command` keys, which would stall a restore on the network.
+ */
+export function resolveSessionModelSelector(
+	modelRegistry: ModelRegistry,
+	selector: string,
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	if (!parsed) return undefined;
+	const model = modelRegistry.find(parsed.provider, parsed.id);
+	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
+	return { model, thinkingLevel: parsed.thinkingLevel };
+}
+
+/**
+ * Discovery-backed providers (models.yml `discovery:` or extension
+ * `fetchDynamicModels`) that could still supply one of the saved selectors
+ * after a provider-scoped refresh. Disabled providers are skipped.
+ */
+export function sessionModelDiscoveryProviders(
+	modelRegistry: ModelRegistry,
+	selectors: readonly string[],
+	disabledProviders: ReadonlySet<string>,
+): Set<string> {
+	const providers = new Set<string>();
+	for (const selector of selectors) {
+		const parsed = parseSessionModelSelector(modelRegistry, selector);
+		const provider = parsed && modelRegistry.getDiscoveryProviderId(parsed.provider);
+		if (provider && !disabledProviders.has(provider)) providers.add(provider);
+	}
+	return providers;
+}
+
+/**
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
+ *
+ * Providers disabled through settings are removed before matching so ordered
+ * overrides skip them and an all-disabled list resolves to no model.
  *
  * If the resolved subagent model has no working credentials (provider has no
  * usable auth), and the parent's active model resolves with working auth,
@@ -1615,7 +1777,13 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
+	const disabledProviders = disabledProviderIds(settings);
+	let lookupRegistry: ModelLookupRegistry = modelRegistry;
+	if (disabledProviders.size > 0) {
+		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
+		lookupRegistry = { getAvailable: () => enabledModels };
+	}
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -1624,8 +1792,18 @@ export async function resolveModelOverrideWithAuthFallback(
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
 		return { ...primary, authFallbackUsed: false };
 	}
+	// The ordered override list is the caller's own fallback chain: an
+	// authenticated later entry beats the parent's model.
+	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
+		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
+		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
+		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
+			return { ...candidate, authFallbackUsed: false };
+		}
+	}
 
-	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
+	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -1664,10 +1842,10 @@ export function resolveRoleSelection(
 /**
  * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
  * wins outright (a bad override surfaces as no model rather than silently
- * running something else); when unset it falls back to the `slow` priority
- * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
- * the `slow` role itself, never inherits the primary's model. Returns undefined
- * only when no candidate in the resolved chain is available.
+ * running something else); when unset it uses a configured `slow` role before
+ * the built-in slow priority chain. It never inherits the primary model through
+ * an unconfigured `slow` role. Returns undefined only when no candidate in the
+ * resolved chain is available.
  */
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
@@ -1710,6 +1888,22 @@ export async function resolveModelScope(
 			explicitThinkingLevel: explicit,
 		});
 	};
+	// The scope is chat-only (it feeds Ctrl+P cycling and the initial model). A
+	// pattern naming an available non-chat runner (judge, search, image, …) is
+	// not a typo: the model hub and role resolution use runners outside the scope.
+	let runnerModels: Model<Api>[] | undefined;
+	const reportUnmatched = (pattern: string, glob: boolean) => {
+		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
+		const namesRunner = glob
+			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+					.model !== undefined;
+		if (namesRunner) {
+			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
+			return;
+		}
+		logger.warn(`No models match pattern "${pattern}"`);
+	};
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -1723,7 +1917,7 @@ export async function resolveModelScope(
 			} = resolveGlobScopePattern(pattern, availableModels);
 
 			if (matchingModels.length === 0) {
-				logger.warn(`No models match pattern "${pattern}"`);
+				reportUnmatched(pattern, true);
 				continue;
 			}
 
@@ -1763,7 +1957,7 @@ export async function resolveModelScope(
 		}
 
 		if (!model) {
-			logger.warn(`No models match pattern "${pattern}"`);
+			reportUnmatched(pattern, false);
 			continue;
 		}
 
@@ -1797,7 +1991,7 @@ export async function resolveAllowedModels(
 	preferences?: ModelMatchPreferences,
 ): Promise<Model<Api>[]> {
 	const available = modelRegistry.getAvailable();
-	const patterns = settings?.get("enabledModels");
+	const patterns = settings ? cfgEnabledModels.get(settings) : undefined;
 	if (!patterns || patterns.length === 0) {
 		return available;
 	}
@@ -1818,7 +2012,7 @@ export async function resolveAllowedModels(
  * `enabledModels` scope semantics as startup resolution:
  *
  * - Glob selectors match `provider/modelId` and bare model id
- * - Exact `provider/modelId`, bare ids, provider-scoped fuzzy, and substring selectors
+ * - Exact `provider/modelId`, bare ids, and bare substring selectors
  *   resolve through the shared model-pattern matcher
  * - Optional `:thinkingLevel` suffixes are stripped only when valid
  *
@@ -1867,6 +2061,7 @@ function findExactCliModel(
 	selector: string,
 	allModels: Model<Api>[],
 	availableModels: Model<Api>[],
+	preferences: ModelMatchPreferences | undefined,
 	options?: { catalogFallback?: boolean },
 ): Model<Api> | undefined {
 	// Explicit provider/id references stay authoritative against the full catalog.
@@ -1874,6 +2069,7 @@ function findExactCliModel(
 	if (referenced) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
+	// ranked like any other ambiguous bare id (recent use, modelProviderOrder),
 	// then fall back to catalog order. This covers aggregator-style flat ids
 	// that merely look provider-qualified (e.g. "openai/gpt-oss-120b" hosted on
 	// OpenRouter), where the provider/id decomposition above found nothing. A
@@ -1883,8 +2079,8 @@ function findExactCliModel(
 	const lower = selector.toLowerCase();
 	const isFlatMatch = (model: Model<Api>) =>
 		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
-	const preferred = availableModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
-	if (preferred) return preferred;
+	const preferred = availableModels.filter(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
+	if (preferred.length > 0) return pickPreferredModel(preferred, buildPreferenceContext(availableModels, preferences));
 	// The unauthenticated catalog fallback is a weak match: a bare id like
 	// `default` collides with the bundled `cursor/default` model, which must not
 	// shadow a configured `modelRoles.default` role the user can actually run.
@@ -1909,6 +2105,32 @@ export interface ResolveCliModelResult {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	warning: string | undefined;
 	error: string | undefined;
+	/**
+	 * Provider the selector wanted but that `disabledProviders` turns off. Set
+	 * only alongside `error`, so callers can refuse the selector outright
+	 * instead of deferring it to a later resolution pass.
+	 */
+	disabledProvider?: string;
+}
+
+/** Inputs accepted by {@link resolveCliModel}. */
+interface CliModelOptions {
+	cliProvider?: string;
+	cliModel?: string;
+	modelRegistry: CliModelRegistry;
+	/** Authenticated models to prefer for unqualified selectors; defaults to the registry's authenticated set. */
+	availableModels?: Model<Api>[];
+	settings?: Settings;
+	preferences?: ModelMatchPreferences;
+}
+
+/**
+ * Catalog a CLI selector may bind to: the full set plus the preferred
+ * (authenticated, or `--models`-scoped) subset.
+ */
+interface CliModelScope {
+	all: Model<Api>[];
+	available: Model<Api>[];
 }
 
 /**
@@ -1918,23 +2140,61 @@ export interface ResolveCliModelResult {
  * over configured role names, which in turn take precedence over an
  * unauthenticated catalog-only id (so a bundled `cursor/default` never shadows a
  * configured `modelRoles.default`).
+ *
+ * Disabled providers are dropped from both halves of the scope before matching,
+ * so a selector naming one is refused rather than silently spending on it
+ * (issue #13079); an unqualified selector falls through to an enabled provider
+ * carrying the same id. The unfiltered catalog is consulted only after that
+ * failed, to report which disabled provider the selector wanted.
  */
-export function resolveCliModel(options: {
-	cliProvider?: string;
-	cliModel?: string;
-	modelRegistry: CliModelRegistry;
-	/** Authenticated models to prefer for unqualified selectors; defaults to the registry's authenticated set. */
-	availableModels?: Model<Api>[];
-	settings?: Settings;
-	preferences?: ModelMatchPreferences;
-}): ResolveCliModelResult {
-	const { cliProvider, cliModel, modelRegistry, settings, preferences, availableModels: preferredModels } = options;
+export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult {
+	const { cliProvider, cliModel, modelRegistry, settings, availableModels: preferredModels } = options;
 
 	if (!cliModel) {
 		return { model: undefined, selector: undefined, warning: undefined, error: undefined };
 	}
 
-	const allModels = modelRegistry.getAll();
+	const scoped = { ...options, cliModel };
+	const scope: CliModelScope = {
+		all: modelRegistry.getAll(),
+		available: preferredModels ?? modelRegistry.getAvailable(),
+	};
+	const disabled = disabledProviderIds(settings);
+	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
+
+	const enabled = resolveCliModelInScope(scoped, {
+		all: scope.all.filter(model => !disabled.has(model.provider)),
+		available: scope.available.filter(model => !disabled.has(model.provider)),
+	});
+	if (enabled.model) return enabled;
+
+	// Nothing enabled matched. An explicit `--provider` names its target
+	// directly; otherwise re-resolve unfiltered to see what the selector was
+	// aiming at, so the refusal names the provider instead of reading as a typo.
+	const blocked = cliProvider
+		? scope.all.find(model => model.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
+		: resolveCliModelInScope(scoped, scope).model?.provider;
+	if (blocked === undefined || !disabled.has(blocked)) return enabled;
+	return {
+		model: undefined,
+		selector: undefined,
+		thinkingLevel: undefined,
+		warning: enabled.warning,
+		error: `Provider "${blocked}" is disabled. Remove "${blocked}" from disabledProviders to use "${cliModel.trim()}".`,
+		disabledProvider: blocked,
+	};
+}
+
+function resolveCliModelInScope(
+	options: CliModelOptions & { cliModel: string },
+	scope: CliModelScope,
+): ResolveCliModelResult {
+	const { cliProvider, cliModel, settings, modelRegistry } = options;
+	const preferences: ModelMatchPreferences = {
+		...mergeModelMatchPreferences(settings, options.preferences),
+		isKnownProvider: id => modelRegistry.hasProvider?.(id) ?? false,
+	};
+	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
 			model: undefined,
@@ -1944,7 +2204,6 @@ export function resolveCliModel(options: {
 		};
 	}
 
-	const availableModels = preferredModels ?? modelRegistry.getAvailable();
 	const providerMap = new Map<string, string>();
 	for (const model of allModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
@@ -1962,7 +2221,9 @@ export function resolveCliModel(options: {
 
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
-		const exact = findExactCliModel(trimmedModel, allModels, availableModels, { catalogFallback: false });
+		const exact = findExactCliModel(trimmedModel, allModels, availableModels, preferences, {
+			catalogFallback: false,
+		});
 		if (exact) {
 			return {
 				model: exact,
@@ -1978,7 +2239,9 @@ export function resolveCliModel(options: {
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
 		if (exactThinkingLevel) {
-			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, { catalogFallback: false });
+			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, preferences, {
+				catalogFallback: false,
+			});
 			if (exactSuffixed) {
 				return {
 					model: exactSuffixed,
@@ -2080,7 +2343,10 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
+	// Keep the explicit provider on the pattern: the raw-id phase provider-locks
+	// `google/gemini-x` to the bundled `google` provider unless the selector
+	// names the aggregator carrying it (`openrouter/google/gemini-x@upstream`).
+	let parsed = parseModelPattern(provider ? `${provider}/${pattern}` : pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {
@@ -2092,13 +2358,14 @@ export function resolveCliModel(options: {
 
 	if (!model) {
 		const display = provider ? `${provider}/${pattern}` : cliModel;
+		const hint = provider ? providerModelHint(display, candidates) : "";
 		return {
 			model: undefined,
 			configuredPatterns,
 			selector: undefined,
 			thinkingLevel: undefined,
 			warning,
-			error: `Model "${display}" not found. Run "omp models" to see available models.`,
+			error: `Model "${display}" not found.${hint} Run "omp models" to see available models.`,
 		};
 	}
 
@@ -2286,7 +2553,7 @@ export async function findSmolModel(
 	}
 
 	// 2. Try priority chain
-	for (const pattern of MODEL_PRIO.smol) {
+	for (const pattern of roleDefaultModels().smol) {
 		// Try exact match with provider prefix
 		const providerMatch = availableModels.find(m => `${m.provider}/${m.id}`.toLowerCase() === pattern);
 		if (providerMatch) return providerMatch;
@@ -2326,7 +2593,7 @@ export async function findSlowModel(
 	}
 
 	// 2. Try priority chain
-	for (const pattern of MODEL_PRIO.slow) {
+	for (const pattern of roleDefaultModels().slow) {
 		// Try exact match first
 		const exactMatch = parseModelPattern(pattern, availableModels, undefined).model;
 		if (exactMatch) return exactMatch;

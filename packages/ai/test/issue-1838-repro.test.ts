@@ -127,11 +127,6 @@ function findCompletionAssistantWireMessage(
 }
 
 describe("issue #1838 — kimi-k2.6 preserves historical reasoning across tool calls", () => {
-	it("sends thinking.keep='all' on native Moonshot kimi-k2.6 when reasoning is enabled", async () => {
-		const payload = (await capturePayload(moonshotKimiModel("kimi-k2.6"), { reasoning: "high" })) as CompletionBody;
-		expect(payload.thinking).toEqual({ type: "enabled", keep: "all" });
-	});
-
 	it("preserves the Moonshot-native gate against gateway IDs that match the kimi-k2.6 prefix", async () => {
 		// Sanity: the Moonshot-native gate is provider+baseUrl driven, not id-only.
 		// A made-up host with `kimi-k2.6` in the id but a non-Moonshot baseUrl must

@@ -96,6 +96,20 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("ok");
 	});
 
+	it("omitted execute-time context inherits the session runner settings", async () => {
+		const result = await bashTool().execute("inherit-session", { command: "echo inherited" });
+		expect(textOf(result)).toContain("inherited");
+	});
+
+	it("missing execute-time context fails closed for an exec-tier tool", async () => {
+		// Explicit empty context: no settings and no --auto-approve. Omitting the
+		// argument inherits the session runner's settings (schema default yolo),
+		// which is the live-session path used by direct execute() callers.
+		await expect(
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
 	it("always-ask mode rejects exec tools when no UI is available", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		await expect(
@@ -193,18 +207,20 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("(no output)");
 	});
 
-	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {
+	it("xd:// dispatch approval (xdevPolicyKey) suppresses the tier-only re-prompt", async () => {
 		// The write tool's outer gate already prompted at the device tool's tier;
 		// without the flag this exact call rejects (see the always-ask test above).
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
 			settings,
-			xdevApproved: true,
+			xdevPolicyKey: "bash",
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("dispatched");
 	});
 
-	it("xdevApproved does not bypass explicit per-tool prompt or deny policies", async () => {
+	it("xd:// dispatch approval does not cover explicit prompts under another key, or deny policies", async () => {
+		// The outer gate resolved `tools.approval.<device>`; a policy keyed
+		// elsewhere was never asked about, so it must still prompt.
 		const promptSettings = approvalSettings({
 			"tools.approvalMode": "always-ask",
 			"tools.approval": { bash: "prompt" },
@@ -212,7 +228,7 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings: promptSettings,
-				xdevApproved: true,
+				xdevPolicyKey: "other_device",
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 
@@ -223,19 +239,71 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
 				settings: denySettings,
-				xdevApproved: true,
+				xdevPolicyKey: "bash",
 			} as AgentToolContext),
 		).rejects.toThrow(/blocked by user policy/);
 	});
 
-	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {
-		// Regression lock for the architectural fix: the per-tool approval gate is implemented
-		// inside `ExtensionToolWrapper`, which is only attached when `session.extensionRunner` exists.
-		// Historically the runner was conditional on `extensionsResult.extensions.length > 0`, which
-		// meant the entire approval system silently disappeared for users with no extensions loaded —
-		// any non-yolo approval mode setting would be a no-op without feedback. The
-		// fix is to construct the runner unconditionally; this test makes that contract explicit so
-		// a future change to make the runner optional again cannot silently re-open the hole.
-		expect(session.extensionRunner).toBeDefined();
+	it("ACP-approved arguments satisfy explicit user and tool-override prompts", async () => {
+		const promptSettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "prompt" },
+		});
+		const explicitResult = await bashTool().execute(
+			"acp-explicit-prompt",
+			{ command: "echo acp-explicit" },
+			undefined,
+			undefined,
+			{
+				settings: promptSettings,
+				acpApprovedArgs: { command: "echo acp-explicit" },
+			} as AgentToolContext,
+		);
+		expect(textOf(explicitResult)).toContain("acp-explicit");
+
+		const overrideSettings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const overrideResult = await bashTool().execute(
+			"acp-tool-override",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings: overrideSettings,
+				acpApprovedArgs: { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			} as AgentToolContext,
+		);
+		expect(textOf(overrideResult)).toContain("(no output)");
+	});
+
+	it("ACP-approved arguments do not bypass deny policies", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-denied", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "rm -rf /tmp/never-run" },
+			} as AgentToolContext),
+		).rejects.toThrow(/blocked by tool policy/);
+	});
+
+	it("ACP-approved arguments do not bypass provider safety checks", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-safety", { command: "echo blocked" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "echo blocked" },
+				toolCall: {
+					batchId: "safety-batch",
+					index: 0,
+					total: 1,
+					toolCalls: [],
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-call",
+						actions: [],
+						pendingSafetyChecks: [{ id: "safety-check" }],
+					},
+				},
+			} as never),
+		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
 	});
 });

@@ -1,26 +1,33 @@
 /**
  * Contract: the anchored subagent HUD (rendered above the editor, next to the
- * Todos block) lists exactly the running *detached* subagents as
- * `Id: description` rows and yields no output once nothing qualifies, so the
- * block self-clears. Sync task spawns and eval `agent()` spawns are excluded:
- * their progress is already rendered inline (tool block / eval cell).
+ * Todos block) lists every running subagent — detached background spawns and
+ * sync task calls alike — as numbered `N Id: description` jump-list rows and
+ * yields no output once nothing qualifies, so the block self-clears.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InteractiveMode, renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import {
-	type ObservableSession,
-	SessionObserverRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+	InteractiveMode,
+	layoutPinnedHud,
+	nextSubagentPreviewTickMs,
+	renderSubagentHudLines,
+	SubagentHudComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { type ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
 import {
-	type AgentProgress,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -28,6 +35,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgDisplayPinnedAgents, cfgDisplaySubagentLivePreview } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function makeSession(overrides: Partial<ObservableSession> & { id: string }): ObservableSession {
 	return {
@@ -88,8 +99,8 @@ function makeProgressPayload(
 	};
 }
 
-function render(sessions: ObservableSession[], columns = 120): string {
-	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).join("\n"));
+function render(sessions: ObservableSession[], columns = 120, livePreview = false): string {
+	return Bun.stripANSI(renderSubagentHudLines(sessions, columns, false, livePreview).join("\n"));
 }
 
 describe("subagent HUD lines", () => {
@@ -151,7 +162,7 @@ describe("subagent HUD lines", () => {
 					}),
 				}),
 			];
-			Settings.instance.override("task.showResolvedModelBadge", false);
+			cfgTaskShowResolvedModelBadge.override(Settings.instance, false);
 			const disabled = render(sessions);
 			expect(disabled).toContain(`${theme.status.done} HiddenBadge: Inspect rendering`);
 			expect(disabled).not.toContain("openai/gpt-5");
@@ -208,7 +219,7 @@ describe("subagent HUD lines", () => {
 					makeSession({ id: "ShortWorker", agent: "scout", description: "Every available column ".repeat(10) }),
 				];
 				for (const enabled of [true, false]) {
-					Settings.instance.override("task.showResolvedModelBadge", enabled);
+					cfgTaskShowResolvedModelBadge.override(Settings.instance, enabled);
 					for (const width of [40, 120, 40]) {
 						const rows = render(sessions, width).split("\n");
 						expect(rows.find(row => row.includes("LongWorker"))).toStartWith(" 界├ ");
@@ -246,6 +257,35 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Subagents");
 		expect(out).toContain("AuthLoader: Refactoring the auth flow");
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
+	});
+
+	it("counts running agents and previews the raw assignment, not the rendered prompt", () => {
+		const assignment = "Run the 512-rule corpus against the native build and report every mismatch";
+		const out = render([
+			makeSession({
+				id: "Corpus",
+				progress: makeProgress({
+					id: "Corpus",
+					task: `Complete assignment thoroughly:\n\n${assignment}`,
+					assignment,
+				}),
+			}),
+			makeSession({ id: "Bench", description: "Benchmark the shared build" }),
+		]);
+		expect(out).toContain("Subagents · 2 running");
+		expect(out).toContain(`Corpus ${assignment}`);
+		expect(out).not.toContain("Complete assignment thoroughly");
+	});
+
+	it("strips terminal control sequences from the assignment preview", () => {
+		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
+		const raw = renderSubagentHudLines(
+			[makeSession({ id: "Corpus", progress: makeProgress({ id: "Corpus", task: assignment, assignment }) })],
+			120,
+		).join("\n");
+		expect(Bun.stripANSI(raw)).toContain("Audit the corpus");
+		expect(raw).not.toContain("\x1b]0;");
+		expect(raw).not.toContain("\x1b[2J");
 	});
 
 	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
@@ -350,21 +390,28 @@ describe("subagent HUD lines", () => {
 		expect(multiLineDesc).toContain("First line ↵ Second line");
 		expect(multiLineDesc).not.toContain("\nSecond line");
 	});
-	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
+	it("lists sync and detached spawns alike", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
-		// (no detached flag at all) both stay off the HUD.
+		// (no detached flag at all) join the pinned jump list.
 		const sessions = [
 			makeSession({ id: "SyncSpawn", description: "inline task work", detached: false }),
 			makeSession({ id: "EvalSpawn", description: "eval cell work", detached: undefined }),
+			makeSession({ id: "BackgroundSpawn", description: "detached work" }),
 		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
-
-		const out = render([...sessions, makeSession({ id: "BackgroundSpawn", description: "detached work" })]);
+		const out = render(sessions);
 		expect(out).toContain("BackgroundSpawn: detached work");
-		expect(out).not.toContain("SyncSpawn");
-		expect(out).not.toContain("EvalSpawn");
+		expect(out).toContain("SyncSpawn: inline task work");
+		expect(out).toContain("EvalSpawn: eval cell work");
+		const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, 120), [
+			"SyncSpawn",
+			"EvalSpawn",
+			"BackgroundSpawn",
+		]);
+		hud.render(120);
+		expect(hud.getClickAgentAtRow(2)).toBe("SyncSpawn");
+		expect(hud.getClickAgentAtRow(3)).toBe("EvalSpawn");
+		expect(hud.getClickAgentAtRow(4)).toBe("BackgroundSpawn");
 	});
-
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();
@@ -377,7 +424,7 @@ describe("subagent HUD lines", () => {
 		const out = render(registry.getSessions());
 		expect(out).toContain("Detached: background work");
 		expect(out).toContain("FromProgress: background work");
-		expect(out).not.toContain("Inline");
+		expect(out).toContain("Inline: sync work");
 	});
 
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
@@ -440,7 +487,24 @@ describe("subagent HUD lines", () => {
 		expect(activeIds()).toEqual(["SelectorSurfaces", "BlastRadius", "VariantsSurvey"]);
 	});
 
-	it("renders the first eight active detached subagents and summarizes the rest", () => {
+	it("renders every live agent when expanded, with a collapse row", () => {
+		const active = Array.from({ length: 10 }, (_, index) =>
+			makeSession({
+				id: `Worker${index}`,
+				description: `job ${index}`,
+			}),
+		);
+
+		const out = Bun.stripANSI(renderSubagentHudLines(active, 120, true).join("\n"));
+
+		for (const session of active) {
+			expect(out).toContain(`${session.id}: ${session.description}`);
+		}
+		expect(out).not.toContain("more running");
+		expect(out).toContain("show less");
+	});
+
+	it("collapses to a few rows with an expander by default", () => {
 		const active = Array.from({ length: 10 }, (_, index) =>
 			makeSession({
 				id: `Worker${index}`,
@@ -449,14 +513,408 @@ describe("subagent HUD lines", () => {
 		);
 
 		const out = render(active, 120);
+		expect(out).toContain("Worker0: job 0");
+		expect(out).toContain("Worker2: job 2");
+		expect(out).not.toContain("Worker3: job 3");
+		expect(out).toContain("7 more — expand");
+		expect(out).not.toContain("show less");
+	});
 
-		for (const session of active.slice(0, 8)) {
-			expect(out).toContain(`${session.id}: ${session.description}`);
+	describe("live preview", () => {
+		it("shows the current tool call only when enabled", () => {
+			const sessions = [
+				makeSession({
+					id: "AuthLoader",
+					description: "Refactoring the auth flow",
+					progress: makeProgress({
+						id: "AuthLoader",
+						currentTool: "read",
+						currentToolArgs: "src/auth.ts:50-100",
+					}),
+				}),
+			];
+			expect(render(sessions)).not.toContain("read: src/auth.ts:50-100");
+			const out = render(sessions, 120, true);
+			expect(out).toContain("AuthLoader: Refactoring the auth flow");
+			expect(out).toContain("read: src/auth.ts:50-100");
+		});
+
+		it("falls back to the most recent tool when idle between calls", () => {
+			const out = render(
+				[
+					makeSession({
+						id: "Worker",
+						progress: makeProgress({
+							id: "Worker",
+							recentTools: [{ tool: "grep", args: "renderSubagentHudLines", endMs: Date.now() }],
+						}),
+					}),
+				],
+				120,
+				true,
+			);
+			expect(out).toContain("grep: renderSubagentHudLines");
+		});
+
+		it("adds an elapsed marker to long-running calls and stays within the viewport", () => {
+			const columns = 120;
+			const out = render(
+				[
+					makeSession({
+						id: "Builder",
+						progress: makeProgress({
+							id: "Builder",
+							currentTool: "bash",
+							currentToolArgs: "npm test",
+							currentToolStartMs: Date.now() - 10_000,
+						}),
+					}),
+				],
+				columns,
+				true,
+			);
+			const toolRow = out.split("\n").find(line => line.includes("bash: npm test"));
+			expect(toolRow).toMatch(/\d+s$/);
+			for (const line of out.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(columns);
+			}
+		});
+
+		it("shortens long tool details to the viewport", () => {
+			const columns = 60;
+			const out = render(
+				[
+					makeSession({
+						id: "Reader",
+						progress: makeProgress({
+							id: "Reader",
+							currentTool: "read",
+							currentToolArgs: "x".repeat(300),
+							currentToolStartMs: Date.now() - 10_000,
+						}),
+					}),
+				],
+				columns,
+				true,
+			);
+			expect(out).toContain("read: xxxxxxxx");
+			for (const line of out.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(columns);
+			}
+		});
+		it("shortens home-directory paths in preview details", () => {
+			const homeFile = `${os.homedir()}/.ssh/config`;
+			const out = render(
+				[
+					makeSession({
+						id: "Reader",
+						progress: makeProgress({
+							id: "Reader",
+							currentTool: "read",
+							currentToolArgs: `cat ${homeFile}`,
+						}),
+					}),
+				],
+				120,
+				true,
+			);
+			expect(out).toContain("cat ~/.ssh/config");
+			expect(out).not.toContain(os.homedir());
+		});
+
+		it("shortens a path argument by its key but keeps a literal search pattern as written", () => {
+			const homeFile = `${os.homedir()}/.ssh/config`;
+			const preview = (key: string) =>
+				render(
+					[
+						makeSession({
+							id: "Reader",
+							progress: makeProgress({
+								id: "Reader",
+								currentTool: "grep",
+								currentToolArgs: homeFile,
+								currentToolArgsKey: key,
+							}),
+						}),
+					],
+					200,
+					true,
+				);
+			expect(preview("path")).toContain("~/.ssh/config");
+			expect(preview("path")).not.toContain(os.homedir());
+			// A search pattern that names a home path must still show what was searched.
+			expect(preview("pattern")).toContain(homeFile);
+		});
+
+		it("marks the last completed call with how it ended while idle between calls", () => {
+			const rowFor = (isError: boolean) =>
+				render(
+					[
+						makeSession({
+							id: "Worker",
+							progress: makeProgress({
+								id: "Worker",
+								recentTools: [{ tool: "read", args: "a.ts", argsKey: "path", isError, endMs: Date.now() }],
+							}),
+						}),
+					],
+					120,
+					true,
+				)
+					.split("\n")
+					.find(line => line.includes("read: a.ts"));
+			const success = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
+			const error = Bun.stripANSI(theme.styledSymbol("status.error", "error"));
+			expect(rowFor(false)).toContain(`${success} read: a.ts`);
+			expect(rowFor(true)).toContain(`${error} read: a.ts`);
+			expect(rowFor(false)).not.toContain(error);
+		});
+
+		it("keeps the elapsed marker with a very long tool name at a narrow width", () => {
+			const columns = 40;
+			const out = render(
+				[
+					makeSession({
+						id: "Mcp",
+						progress: makeProgress({
+							id: "Mcp",
+							currentTool: `mcp__tool_${"x".repeat(120)}`,
+							currentToolArgs: "some detail that cannot fit",
+							currentToolStartMs: Date.now() - 20_000,
+						}),
+					}),
+				],
+				columns,
+				true,
+			);
+			const toolRow = out.split("\n").find(line => line.includes("mcp__tool_"));
+			expect(toolRow).toBeDefined();
+			expect(toolRow).toMatch(/\d+s$/);
+			for (const line of out.split("\n")) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(columns);
+			}
+		});
+
+		it("fits every rendered component row within the viewport without wrapping the elapsed marker", () => {
+			const sessions = [
+				makeSession({
+					id: "Builder",
+					description: "Narrow build",
+					progress: makeProgress({
+						id: "Builder",
+						currentTool: "bash",
+						currentToolArgs: `cat ${os.homedir()}/.ssh/config`,
+						currentToolStartMs: Date.now() - 10_000,
+					}),
+				}),
+				makeSession({
+					id: "Reader",
+					progress: makeProgress({
+						id: "Reader",
+						currentTool: "read",
+						currentToolArgs: "x".repeat(300),
+						currentToolStartMs: Date.now() - 12_000,
+					}),
+				}),
+			];
+			for (const columns of [60, 120]) {
+				const hud = new SubagentHudComponent(
+					renderSubagentHudLines(sessions, columns, false, true),
+					sessions.map(session => session.id),
+				);
+				const rows = hud.render(columns).map(row => Bun.stripANSI(row));
+				for (const row of rows) {
+					expect(Bun.stringWidth(row)).toBeLessThanOrEqual(columns);
+				}
+				const elapsedRows = rows.filter(row => /\d+s/.test(row));
+				expect(elapsedRows.length).toBeGreaterThan(0);
+				for (const row of elapsedRows) {
+					expect(row).toMatch(/bash|read/);
+				}
+			}
+		});
+
+		it("routes clicks on a preview row to its agent and keeps later rows and the expander aligned", () => {
+			const sessions = ["Alpha", "Beta", "Gamma", "Delta"].map(id =>
+				makeSession({ id, progress: makeProgress({ id, currentTool: "read", currentToolArgs: `${id}.ts` }) }),
+			);
+			const layout = layoutPinnedHud(sessions.length, false);
+			const hud = new SubagentHudComponent(
+				renderSubagentHudLines(sessions, 120, false, true),
+				sessions.map(session => session.id),
+				layout.toggleRow,
+			);
+			const rows = hud.render(120).map(row => Bun.stripANSI(row));
+			const rowOf = (text: string) => rows.findIndex(row => row.includes(text));
+			expect(hud.getClickAgentAtRow(rowOf("Alpha.ts"))).toBe("Alpha");
+			expect(hud.getClickAgentAtRow(rowOf("Beta"))).toBe("Beta");
+			expect(hud.getClickAgentAtRow(rowOf("Gamma.ts"))).toBe("Gamma");
+			expect(hud.getClickAgentAtRow(rowOf("more — expand"))).toBe(PINNED_HUD_TOGGLE_ID);
+		});
+
+		it("labels a call with its own intent, never an earlier call's", () => {
+			const out = render(
+				[
+					makeSession({
+						id: "Worker",
+						progress: makeProgress({
+							id: "Worker",
+							lastIntent: "Reading auth config",
+							currentTool: "mcp__db_query",
+							currentToolArgs: "SELECT 1",
+							recentTools: [{ tool: "read", args: "auth.ts", intent: "Reading auth config", endMs: 1 }],
+						}),
+					}),
+					makeSession({
+						id: "Between",
+						progress: makeProgress({
+							id: "Between",
+							lastIntent: "Reading auth config",
+							recentTools: [{ tool: "mcp__db_query", args: "SELECT 2", endMs: 2 }],
+						}),
+					}),
+					makeSession({
+						id: "Intentful",
+						progress: makeProgress({
+							id: "Intentful",
+							currentTool: "read",
+							currentToolArgs: "auth.ts",
+							currentToolIntent: "Checking the session cookie",
+						}),
+					}),
+				],
+				120,
+				true,
+			);
+			expect(out).toContain("mcp__db_query: SELECT 1");
+			expect(out).toContain("mcp__db_query: SELECT 2");
+			expect(out).toContain("read: Checking the session cookie");
+			expect(out).not.toContain("Reading auth config");
+		});
+
+		it("keeps the header and agent rows within the padded HUD width", () => {
+			const sessions = [
+				makeSession({ id: `Worker${"W".repeat(80)}`, description: "Every available column ".repeat(10) }),
+			];
+			for (const columns of [40, 60]) {
+				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true), [
+					sessions[0]!.id,
+				]);
+				// No wrapping: exactly the blank row, the header and one agent row.
+				expect(hud.render(columns)).toHaveLength(3);
+			}
+		});
+
+		it("arms the repaint for when the elapsed marker first shows, then every second", () => {
+			const now = 100_000;
+			const midCall = (id: string, startMs: number) =>
+				makeSession({ id, progress: makeProgress({ id, currentTool: "bash", currentToolStartMs: startMs }) });
+			const thinking = makeSession({ id: "Thinking", progress: makeProgress({ id: "Thinking" }) });
+			expect(nextSubagentPreviewTickMs([thinking], now)).toBeUndefined();
+			expect(nextSubagentPreviewTickMs([midCall("Fresh", now - 1_000)], now)).toBe(4_001);
+			expect(nextSubagentPreviewTickMs([midCall("Long", now - 30_000)], now)).toBe(1_000);
+			expect(
+				nextSubagentPreviewTickMs([thinking, midCall("Fresh", now - 4_500), midCall("Long", now - 30_000)], now),
+			).toBe(501);
+		});
+	});
+});
+
+describe("SubagentHudComponent click rows", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("maps item rows to session ids and chrome rows nowhere", () => {
+		const lines = renderSubagentHudLines([makeSession({ id: "Alpha" }), makeSession({ id: "Beta" })], 120);
+		const hud = new SubagentHudComponent(lines, ["Alpha", "Beta"]);
+
+		const rendered = hud.render(120);
+		expect(rendered).toHaveLength(lines.length);
+		expect(Bun.stripANSI(rendered[2] ?? "")).toContain("Alpha");
+		expect(Bun.stripANSI(rendered[3] ?? "")).toContain("Beta");
+
+		expect(hud.getClickAgentAtRow(0)).toBeUndefined();
+		expect(hud.getClickAgentAtRow(1)).toBeUndefined();
+		expect(hud.getClickAgentAtRow(2)).toBe("Alpha");
+		expect(hud.getClickAgentAtRow(3)).toBe("Beta");
+		expect(hud.getClickAgentAtRow(4)).toBeUndefined();
+		expect(hud.getClickAgentAtRow(-1)).toBeUndefined();
+	});
+
+	it("resolves the expander row to the toggle sentinel", () => {
+		const hud = new SubagentHudComponent(["", "Subagents", "row", "toggle"], ["Only"], 3);
+		hud.render(120);
+		expect(hud.getClickAgentAtRow(3)).toBe(PINNED_HUD_TOGGLE_ID);
+		expect(hud.getClickAgentAtRow(2)).toBe("Only");
+	});
+
+	it("maps wrapped continuation rows to the agent that started them", () => {
+		const long = ` ${"x".repeat(200)}`;
+		const hud = new SubagentHudComponent(["", "Subagents", long, "short"], ["Long", "Short"]);
+		const rendered = hud.render(40);
+		expect(rendered.length).toBeGreaterThan(4);
+		const shortRow = rendered.findIndex(line => Bun.stripANSI(line).includes("short"));
+		expect(shortRow).toBeGreaterThan(3);
+		expect(hud.getClickAgentAtRow(2)).toBe("Long");
+		expect(hud.getClickAgentAtRow(3)).toBe("Long");
+		expect(hud.getClickAgentAtRow(shortRow)).toBe("Short");
+		expect(hud.getClickAgentAtRow(shortRow + 1)).toBeUndefined();
+	});
+
+	it("maps clicks after wrapping and resizing while leaving clicks before rendering unmapped", () => {
+		const hud = new SubagentHudComponent(["", "Subagents", ` ${"x".repeat(100)}`, "short"], ["Long", "Short"]);
+		expect(hud.getClickAgentAtRow(2)).toBeUndefined();
+
+		const narrowRows = hud.render(40);
+		const narrowShortRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("short"));
+		expect(narrowShortRow).toBeGreaterThan(3);
+		expect(hud.getClickAgentAtRow(narrowShortRow - 1)).toBe("Long");
+		expect(hud.getClickAgentAtRow(narrowShortRow)).toBe("Short");
+
+		const wideRows = hud.render(120);
+		expect(wideRows.length).toBeLessThan(narrowRows.length);
+		const wideShortRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("short"));
+		expect(hud.getClickAgentAtRow(wideShortRow)).toBe("Short");
+		expect(hud.getClickAgentAtRow(wideShortRow + 1)).toBeUndefined();
+	});
+
+	it("remaps clicks when runtime character width changes", () => {
+		setHangulCompatibilityJamoWidth(1);
+		try {
+			const hud = new SubagentHudComponent(["", "Subagents", ` ${"ㅁ".repeat(25)}`, "next"], ["Jamo", "Next"]);
+			const narrowRows = hud.render(40);
+			const narrowNextRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("next"));
+			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
+
+			setHangulCompatibilityJamoWidth(2);
+			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
+			const wideRows = hud.render(40);
+			const wideNextRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("next"));
+			expect(wideNextRow).toBeGreaterThan(narrowNextRow);
+			expect(hud.getClickAgentAtRow(wideNextRow - 1)).toBe("Jamo");
+			expect(hud.getClickAgentAtRow(wideNextRow)).toBe("Next");
+		} finally {
+			resetHangulCompatibilityJamoWidthForTests();
 		}
-		for (const session of active.slice(8)) {
-			expect(out).not.toContain(`${session.id}: ${session.description}`);
-		}
-		expect(out).toContain("2 more running");
+	});
+});
+
+describe("layoutPinnedHud", () => {
+	it("fits small lists without an expander", () => {
+		expect(layoutPinnedHud(0, false)).toEqual({ itemRows: 0, toggle: undefined, toggleRow: undefined });
+		expect(layoutPinnedHud(3, false)).toEqual({ itemRows: 3, toggle: undefined, toggleRow: undefined });
+		expect(layoutPinnedHud(3, true)).toEqual({ itemRows: 3, toggle: undefined, toggleRow: undefined });
+	});
+
+	it("collapses longer lists behind an expander", () => {
+		expect(layoutPinnedHud(4, false)).toEqual({ itemRows: 3, toggle: "expand", toggleRow: 5 });
+		expect(layoutPinnedHud(10, false)).toEqual({ itemRows: 3, toggle: "expand", toggleRow: 5 });
+	});
+
+	it("expands to every row with a collapse row", () => {
+		expect(layoutPinnedHud(5, true)).toEqual({ itemRows: 5, toggle: "collapse", toggleRow: 7 });
+		expect(layoutPinnedHud(10, true)).toEqual({ itemRows: 10, toggle: "collapse", toggleRow: 12 });
 	});
 });
 
@@ -507,6 +965,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		authStorage?.close();
 		tempDir?.removeSync();
 		vi.useRealTimers();
+		setSystemTime();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
@@ -514,7 +973,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const rebuildHud = vi.spyOn(mode.subagentContainer, "clear");
+		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {
@@ -530,8 +990,223 @@ describe("InteractiveMode subagent observer UI sync", () => {
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
 		expect(hud).toContain("BurstAgent0: Burst job 0");
-		expect(hud).toContain("BurstAgent5: Burst job 5");
-		expect(rebuildHud).toHaveBeenCalledTimes(1);
+		expect(hud).toContain("BurstAgent2: Burst job 2");
+		expect(hud).not.toContain("BurstAgent3: Burst job 3");
+		expect(hud).toContain("3 more — expand");
+		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not repaint unchanged background progress after the HUD settles", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
+		vi.useFakeTimers();
+		const payload = makeProgressPayload("Background", 0, "Compile", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		requestRender.mockClear();
+		updateHud.mockClear();
+		for (let index = 0; index < 20; index++) {
+			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				...payload,
+				progress: { ...payload.progress, durationMs: index + 1 },
+			});
+			await Promise.resolve();
+			vi.runAllTimers();
+			await Promise.resolve();
+		}
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(updateHud).not.toHaveBeenCalled();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Background", 0, "Link", true));
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		expect(requestRender).toHaveBeenCalled();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
+	});
+
+	it("repaints native checklist changes outside the terminal TODO window", async () => {
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		await mode.init({ suppressWelcomeIntro: true });
+		const cx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		let paintedStatus: string | undefined;
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			for (const child of mode.describeStatusHud([], cx).c ?? []) {
+				if ("k" in child && child.k === "checklist") {
+					paintedStatus = child.p?.phases[5]?.items[0]?.status;
+				}
+			}
+		});
+		mode.setTodos(
+			[
+				"Inspect inputs",
+				"Design interface",
+				"Implement parser",
+				"Check output",
+				"Document settings",
+				"Verify deployment",
+			].map((content, index) => ({
+				name: `Phase ${index + 1}`,
+				tasks: [{ content, status: "pending" as const }],
+			})),
+		);
+		expect(paintedStatus).toBe("pending");
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		const terminalRows = [...mode.todoContainer.render(120)];
+		expect(terminalRows.join("\n")).not.toContain("Verify deployment");
+
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Verify deployment", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(mode.todoContainer.render(120)).toEqual(terminalRows);
+		expect(paintedStatus).toBe("active");
+	});
+
+	it("repaints the transcript todo card after the sticky HUD auto-clears", async () => {
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		cfgTasksTodoClearDelay.override(session.settings, 0);
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
+		const target = "Verify transcript repaint";
+		const transcriptPhases: TodoPhase[] = [
+			{
+				name: "Review",
+				tasks: [...Array.from({ length: 10 }, (_, index) => `Inspect module ${index}`), target].map(content => ({
+					content,
+					status: "pending",
+				})),
+			},
+		];
+		const closedPhases: TodoPhase[] = transcriptPhases.map(phase => ({
+			...phase,
+			tasks: phase.tasks.map(task => ({ ...task, status: "completed" })),
+		}));
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: closedPhases });
+		session.setTodoPhases(closedPhases);
+		mode.setTodos(closedPhases);
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(mode.todoContainer.render(120)).toEqual([]);
+		const card = todoToolRenderer.renderResult(
+			{ content: [], details: { op: "init", phases: transcriptPhases, storage: "session" } },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		mode.chatContainer.addChild(card);
+		const readTranscript = () => Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		let painted = readTranscript();
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			painted = readTranscript();
+		});
+		expect(painted).not.toContain(target);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, target, true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain(target);
+		expect(mode.todoContainer.render(120)).toEqual([]);
+		expect(mode.subagentContainer.render(120)).toEqual([]);
+
+		const unrelated = makeProgressPayload("Reviewer", 0, "Unrelated work", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).not.toContain(target);
+		requestRender.mockClear();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("applies the setting over a clicked expand override", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		for (let index = 0; index < 5; index++) {
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle(`Override${index}`, index, `job ${index}`));
+		}
+		await Promise.resolve();
+		const hudText = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+
+		mode.togglePinnedHudExpanded();
+		expect(hudText()).toContain("Override4");
+
+		mode.applyPinnedAgentsSetting();
+		expect(hudText()).not.toContain("Override4");
+		expect(hudText()).toContain("more — expand");
+	});
+
+	it("advances a quiet call's elapsed marker by repainting the same HUD in place", async () => {
+		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		vi.useFakeTimers();
+		setSystemTime(1_000_000);
+		const payload = makeProgressPayload("Sleeper", 0, "Run sleep", true);
+		payload.progress = {
+			...payload.progress,
+			currentTool: "bash",
+			currentToolArgs: "sleep 40",
+			currentToolStartMs: 1_000_000 - 20_000,
+		};
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100); // observer UI coalesce window
+		const hudText = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		const hud = mode.subagentContainer.children[0];
+		expect(hudText()).toContain("bash: sleep 40 · 20.1s");
+
+		vi.advanceTimersByTime(1_000);
+		expect(mode.subagentContainer.children[0]).toBe(hud);
+		expect(hudText()).toContain("bash: sleep 40 · 21.1s");
+	});
+
+	it("repaints an identical new call after the elapsed timer painted the previous call", async () => {
+		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
+		await mode.init({ suppressWelcomeIntro: true });
+		let painted = "";
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			painted = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		});
+		vi.useFakeTimers();
+		setSystemTime(1_000_000);
+		const payload = makeProgressPayload("Builder", 0, "Build", true);
+		payload.progress = {
+			...payload.progress,
+			currentTool: "bash",
+			currentToolArgs: "build it",
+			currentToolStartMs: Date.now(),
+		};
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain("bash: build it");
+		expect(painted).not.toContain("bash: build it ·");
+
+		vi.advanceTimersByTime(6_000);
+		expect(painted).toContain("bash: build it ·");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...payload,
+			progress: { ...payload.progress, currentToolStartMs: Date.now(), toolCount: 2 },
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain("bash: build it");
+		expect(painted).not.toContain("bash: build it ·");
 	});
 });

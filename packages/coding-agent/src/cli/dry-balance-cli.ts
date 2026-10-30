@@ -13,6 +13,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -33,7 +34,6 @@ const BENCH_MAX_TOKENS = 512;
 const BENCH_RENDER_INTERVAL_MS = 80;
 const BENCH_ACCOUNT_WIDTH = 60;
 const BENCH_ERROR_WIDTH = 110;
-const BENCH_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const DRY_BALANCE_BENCH_PROMPT = dryBalanceBenchPrompt.trim();
 
 export interface DryBalanceCommandArgs {
@@ -44,6 +44,7 @@ export interface DryBalanceCommandArgs {
 		concurrency?: number;
 		json?: boolean;
 		bench?: boolean;
+		config?: string[];
 	};
 }
 
@@ -51,21 +52,20 @@ export interface DryBalanceAuthOptions {
 	baseUrl?: string;
 	modelId?: string;
 	signal?: AbortSignal;
+	recordAffinity?: boolean;
 }
 
 export interface DryBalanceAuthStorage {
-	getOAuthAccess(
-		provider: string,
-		sessionId?: string,
-		options?: DryBalanceAuthOptions,
-	): Promise<OAuthAccess | undefined>;
-	getOAuthAccesses?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
-	/**
-	 * Force-refresh a single credential by id (step (b) of the auth-retry
-	 * policy). The bench re-mints the failing account's token in place on a
-	 * 401 rather than rotating accounts — it is measuring each account.
-	 */
-	forceRefreshCredentialById?(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	readonly oauth: {
+		access(provider: string, sessionId?: string, options?: DryBalanceAuthOptions): Promise<OAuthAccess | undefined>;
+		accessAll?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
+		/**
+		 * Force-refresh a single credential by id (step (b) of the auth-retry
+		 * policy). The bench re-mints the failing account's token in place on a
+		 * 401 rather than rotating accounts — it is measuring each account.
+		 */
+		refresh?(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	};
 }
 
 export interface DryBalanceModelRegistry {
@@ -317,7 +317,8 @@ function renderBenchStatusLine(
 		case "waiting":
 			return `${chalk.dim("○")} ${prefix} ${chalk.dim("waiting")}`;
 		case "running": {
-			const spinner = BENCH_SPINNER_FRAMES[frame % BENCH_SPINNER_FRAMES.length] ?? "*";
+			const frames = SPINNER_FRAMES.unicode.activity;
+			const spinner = frames[frame % frames.length] ?? "*";
 			return `${chalk.yellow(spinner)} ${prefix} ${formatBenchAccount(status.account)} ${chalk.dim("sending request")}`;
 		}
 		case "success":
@@ -409,8 +410,8 @@ async function runBenchRequest(
 	// The bench measures one account, so the switch step intentionally declines.
 	const apiKey: ApiKeyResolver = async ({ lastChance, error }) => {
 		if (error === undefined) return accessToken;
-		if (lastChance || credentialId === undefined || !authStorage.forceRefreshCredentialById) return undefined;
-		const refreshed = await authStorage.forceRefreshCredentialById(credentialId);
+		if (lastChance || credentialId === undefined || !authStorage.oauth.refresh) return undefined;
+		const refreshed = await authStorage.oauth.refresh(credentialId);
 		return refreshed.credential.type === "oauth" ? refreshed.credential.access : undefined;
 	};
 	try {
@@ -471,13 +472,13 @@ async function resolveBenchTargets(
 	model: Model<Api>,
 	authStorage: DryBalanceAuthStorage,
 ): Promise<DryBalanceBenchTarget[]> {
-	const resolved = authStorage.getOAuthAccesses
-		? await authStorage.getOAuthAccesses(model.provider, {
+	const resolved = authStorage.oauth.accessAll
+		? await authStorage.oauth.accessAll(model.provider, {
 				baseUrl: model.baseUrl,
 				modelId: model.id,
 			})
-		: await authStorage
-				.getOAuthAccess(model.provider, undefined, {
+		: await authStorage.oauth
+				.access(model.provider, undefined, {
 					baseUrl: model.baseUrl,
 					modelId: model.id,
 				})
@@ -526,12 +527,13 @@ async function runBenchTargets(
 	);
 }
 
-async function createDefaultRuntime(): Promise<DryBalanceRuntime> {
-	const authStorage = await discoverAuthStorage();
+async function createDefaultRuntime(configFiles: string[] | undefined): Promise<DryBalanceRuntime> {
+	const cwd = getProjectDir();
+	const settings = await Settings.init({ cwd, configFiles });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const cwd = getProjectDir();
-		const settings = await Settings.init({ cwd });
 		const modelRegistry = new ModelRegistry(authStorage);
+		await modelRegistry.hydrateCredentialScopedModelCaches();
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
 			modelRegistry,
@@ -548,7 +550,6 @@ async function resolveDryBalanceModel(
 	modelSelector: string | undefined,
 	modelRegistry: DryBalanceModelRegistry,
 	settings: Settings | undefined,
-	randomSessionId: () => string,
 ): Promise<{ model: Model<Api>; warning?: string }> {
 	const preferences = getModelMatchPreferences(settings);
 	if (modelSelector) {
@@ -579,7 +580,7 @@ async function resolveDryBalanceModel(
 	}
 
 	for (const candidate of allowedModels) {
-		const apiKey = await modelRegistry.getApiKey(candidate, randomSessionId());
+		const apiKey = await modelRegistry.getApiKey(candidate);
 		if (apiKey) return { model: candidate };
 	}
 
@@ -596,12 +597,14 @@ async function runOneAttempt(
 	sessionId: string,
 ): Promise<DryBalanceAttemptResult> {
 	try {
-		// AuthStorage.getOAuthAccess shares the OAuth credential ranking, refresh,
+		// AuthStorage.oauth.access shares the OAuth credential ranking, refresh,
 		// usage-limit, broker, and session-sticky path used by getApiKey(), while
-		// returning the selected account metadata instead of bearer bytes.
-		const access = await modelRegistry.authStorage.getOAuthAccess(model.provider, sessionId, {
+		// returning the selected account metadata instead of bearer bytes. Samples
+		// are not real sessions, so their selections are never recorded as sticky.
+		const access = await modelRegistry.authStorage.oauth.access(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
+			recordAffinity: false,
 		});
 		if (!access) return { ok: false, reason: "no OAuth access resolved" };
 		return { ok: true, account: extractAccount(access) };
@@ -793,7 +796,7 @@ export async function runDryBalanceCommand(
 		});
 	const streamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
-	const runtime = await (deps.createRuntime ?? createDefaultRuntime)();
+	const runtime = await (deps.createRuntime?.() ?? createDefaultRuntime(command.flags.config));
 	let progress: DryBalanceBenchProgressSink | undefined;
 	let progressClosed = false;
 	const closeProgress = (): void => {
@@ -803,12 +806,7 @@ export async function runDryBalanceCommand(
 	};
 	try {
 		const modelSelector = command.flags.model ?? command.model;
-		const { model, warning } = await resolveDryBalanceModel(
-			modelSelector,
-			runtime.modelRegistry,
-			runtime.settings,
-			randomSessionId,
-		);
+		const { model, warning } = await resolveDryBalanceModel(modelSelector, runtime.modelRegistry, runtime.settings);
 		if (warning) writeStderr(`${chalk.yellow(`Warning: ${warning}`)}\n`);
 		let results: DryBalanceAttemptResult[];
 		let benchResults: DryBalanceBenchResult[] | undefined;

@@ -7,13 +7,10 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	type BranchVariantPath,
-	RewindSelectorComponent,
-} from "@oh-my-pi/pi-coding-agent/modes/components/rewind-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -82,11 +79,26 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
+/** The cutoff falls on a tool result; keep its call and user turn. */
+function longEntriesWithBoundaryTool(): SessionMessageEntry[] {
+	const entries: SessionMessageEntry[] = [];
+	for (let index = 0; index < 40; index++) {
+		entries.push(entry(`u${index}`, entries.at(-1)?.id ?? null, userMessage(`prompt ${index}`)));
+	}
+	entries.push(entry("a39", "u39", assistantWithBashCall("boundary-call")));
+	entries.push(entry("t39", "a39", bashResult("boundary-call")));
+	for (let index = 40; index <= 638; index++) {
+		entries.push(entry(`u${index}`, entries.at(-1)!.id, userMessage(`prompt ${index}`)));
+	}
+	return entries;
+}
+
 function makeSelector(
 	onSelect: (id: string) => void,
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
+	entries: SessionMessageEntry[] = makeEntries(),
 ): RewindSelectorComponent {
-	return new RewindSelectorComponent(makeEntries(), {
+	return new RewindSelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
@@ -109,6 +121,89 @@ describe("RewindSelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
+	it("steps past the startup tail into earlier history without splitting the cutoff tool exchange", () => {
+		const selected: string[] = [];
+		const entries = longEntriesWithBoundaryTool();
+		const selector = makeSelector(id => selected.push(id), undefined, entries);
+		try {
+			selector.render(120);
+
+			// The tail starts at u39 (601 targets): 600 steps reach its oldest turn.
+			for (let index = 0; index < 600; index++) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			// Left past the oldest replayed turn loads the earlier history.
+			selector.handleInput(LEFT);
+			selector.render(120);
+			selector.handleInput(ENTER);
+
+			// The cutoff turn keeps its folded tool result after the reload.
+			selector.handleInput(DOWN);
+			selector.handleInput(DOWN);
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("file.txt");
+			selector.handleInput(ENTER);
+
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["u39", "u38", "t39", "u0"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("filters the whole branch, not just the startup tail", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(id => selected.push(id), undefined, longEntriesWithBoundaryTool());
+		try {
+			selector.render(120);
+			selector.handleInput("f");
+			selector.render(120);
+			selector.handleInput("prompt 0");
+			selector.render(120);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["u0"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps the selected sibling entry and main anchor when `a` loads earlier history", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(
+			id => selected.push(id),
+			entryId =>
+				entryId === "u638"
+					? [
+							{
+								rootId: "b0",
+								entries: [
+									entry("b0", "u637", userMessage("alternate start")),
+									entry("b1", "b0", userMessage("alternate continuation")),
+								],
+							},
+						]
+					: [],
+			longEntriesWithBoundaryTool(),
+		);
+		try {
+			selector.render(120);
+
+			selector.handleInput(RIGHT);
+			selector.handleInput(DOWN);
+			selector.handleInput("a");
+			selector.render(120);
+
+			selector.handleInput(ENTER);
+			selector.handleInput(LEFT);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["b1", "u638"]);
+		} finally {
+			selector.dispose();
+		}
+	});
 	it("starts on the newest rendered item and Up steps in transcript order past hidden notices", () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));
@@ -228,5 +323,111 @@ describe("RewindSelectorComponent", () => {
 		expect(boxed.join("\n")).toContain("second prompt");
 		expect(boxed.join("\n")).not.toContain("first prompt");
 		expect(lines.join("\n")).toContain("first prompt");
+	});
+
+	it("f filters the transcript to matching items and Enter rewinds to one", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(id => selected.push(id));
+		selector.render(80);
+
+		// The rendered bash card is searchable: "ls" matches only the bash turn,
+		// so the prompts drop out of the body and Enter rewinds onto that turn.
+		for (const key of ["f", ..."ls"]) selector.handleInput(key);
+		const body = selector
+			.render(80)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(body).toContain("Running a command.");
+		expect(body).not.toContain("first prompt");
+		expect(body).not.toContain("second prompt");
+		selector.handleInput(ENTER);
+
+		expect(selected).toEqual(["tr1"]);
+	});
+
+	it("Up steps only through filtered matches", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(id => selected.push(id));
+		selector.render(80);
+
+		// "prompt" keeps u1 and u2; one Up skips the assistant turn between them.
+		for (const key of ["f", ..."prompt"]) selector.handleInput(key);
+		selector.render(80);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
+
+		expect(selected).toEqual(["u1"]);
+	});
+
+	it("keeps only items containing every filter word as a whole word", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(id => selected.push(id));
+		selector.render(80);
+
+		// A word prefix is not a match.
+		for (const key of ["f", ..."prom"]) selector.handleInput(key);
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain('No items match "prom"');
+
+		// Both words must appear: "second" rules out u1 even though it has "prompt".
+		for (const key of "pt second") selector.handleInput(key);
+		expect(Bun.stripANSI(selector.render(80).join("\n"))).not.toContain("first prompt");
+		selector.handleInput(ENTER);
+
+		expect(selected).toEqual(["u2"]);
+	});
+
+	it("matches words in scripts without spaces as substrings", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			[
+				entry("u1", null, userMessage("first prompt")),
+				entry("u2", "u1", userMessage("打开文件后输出你好世界")),
+				entry("u3", "u2", userMessage("third prompt")),
+			],
+			{
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+				cwd: "/tmp",
+				requestRender: () => {},
+				onSelect: id => selected.push(id),
+				onCancel: () => {},
+			},
+		);
+		selector.render(80);
+
+		for (const key of ["f", ..."你好"]) selector.handleInput(key);
+		const body = Bun.stripANSI(selector.render(80).join("\n"));
+		expect(body).not.toContain('No items match "你好"');
+		expect(body).not.toContain("first prompt");
+		selector.handleInput(ENTER);
+
+		expect(selected).toEqual(["u2"]);
+	});
+
+	it("Esc leaves the filter with the match kept instead of closing the selector", () => {
+		const selected: string[] = [];
+		let cancelled = false;
+		const selector = new RewindSelectorComponent(makeEntries(), {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onSelect: id => selected.push(id),
+			onCancel: () => {
+				cancelled = true;
+			},
+		});
+		selector.render(80);
+
+		for (const key of ["f", ..."first"]) selector.handleInput(key);
+		selector.handleInput("\x1b");
+		expect(cancelled).toBe(false);
+		const body = selector
+			.render(80)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		// Full transcript is back; the filtered selection survives.
+		expect(body).toContain("second prompt");
+		selector.handleInput(ENTER);
+
+		expect(selected).toEqual(["u1"]);
 	});
 });

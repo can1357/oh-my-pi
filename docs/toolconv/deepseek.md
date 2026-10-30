@@ -1,13 +1,12 @@
 # DeepSeek tool-calling wire format
 
-DeepSeek's chat models (DeepSeek-V3, V3-0324, R1, R1-0528, and DeepSeek-V3.1) share a
-single tokenizer family and a distinctive envelope built from **fullwidth-pipe** special
-tokens such as `<｜begin▁of▁sentence｜>` and `<｜User｜>`. Tool calling is emitted as a run
-of dedicated special tokens (`<｜tool▁calls▁begin｜>` … `<｜tool▁calls▁end｜>`) rather than
-JSON-in-text or XML. This document centers on **DeepSeek-V3.1** (the current hybrid
-thinking/non-thinking model) and documents the older **DeepSeek-V3-0324** and
-**DeepSeek-R1-0528** format as an explicit version difference, because their on-the-wire
-tool syntax is *not* the same as V3.1's.
+DeepSeek-V3, V3-0324, R1, R1-0528, and V3.1 use a distinctive chat envelope built from
+**fullwidth-pipe** tokens such as `<｜begin▁of▁sentence｜>` and `<｜User｜>`. Their tool
+calls use dedicated markers (`<｜tool▁calls▁begin｜>` … `<｜tool▁calls▁end｜>`) around JSON
+arguments. This document centers on the **V3.1** convention emitted by OMP's `deepseek`
+dialect, distinguishes the older **V3-0324 / R1-0528** encoding, and covers the newer
+XML-style [DSML envelope](#dsml-envelope-newer-deepseek-models) accepted by the scanner.
+The V3.1 reference chat template is not the same as OMP's history/transcript rendering.
 
 An inference server enables it with a chat template plus a tool-call parser:
 
@@ -28,13 +27,13 @@ DeepSeek's markers do **not** use the ASCII vertical bar `|` (U+007C) or ASCII u
 
 - `｜` — **U+FF5C FULLWIDTH VERTICAL LINE**, as the delimiter just inside the angle brackets.
 - `▁` — **U+2581 LOWER ONE EIGHTH BLOCK** (the SentencePiece word-boundary glyph), as the
-  separator *between words* inside a token, e.g. `begin▁of▁sentence`, `tool▁calls▁begin`.
+  separator _between words_ inside a token, e.g. `begin▁of▁sentence`, `tool▁calls▁begin`.
 
 So `<｜tool▁calls▁begin｜>` is `<` + `｜`(FF5C) + `tool` + `▁`(2581) + `calls` + `▁`(2581) +
 `begin` + `｜`(FF5C) + `>`. Copying these tokens as `<|tool_calls_begin|>` (ASCII pipe +
 underscore) produces tokens the model never trained on and will silently break parsing and
-generation. The only DeepSeek markers that use ASCII brackets are the thinking tags
-`<think>` / `</think>` (plain `<`, `/`, `>`) and the rarely used `<|EOT|>` (ASCII pipes).
+generation. The thinking tags `<think>` / `</think>` contain no pipe delimiters, and the
+rarely used `<|EOT|>` uses ASCII pipes. DSML also has an accepted ASCII-pipe spelling.
 
 ## Special tokens
 
@@ -42,28 +41,28 @@ Token IDs are from DeepSeek-V3.1 `tokenizer.json` (`added_tokens`); `vocab_size`
 The `special` column reflects the tokenizer's `"special"` flag (it governs
 `skip_special_tokens`); note that the role/think/tool markers are `special: false`.
 
-| Token (verbatim) | ID | `special` | Purpose |
-| --- | --- | --- | --- |
-| `<｜begin▁of▁sentence｜>` | 0 | true | BOS; prepended once at the very start of the prompt. |
-| `<｜end▁of▁sentence｜>` | 1 | true | EOS; ends every assistant/tool turn and is the stop token. |
-| `<｜▁pad▁｜>` | 2 | true | Padding (`pad_token`; the model card/config also reuse EOS as pad). |
-| `<｜search▁begin｜>` | 128796 | false | Search-agent query open (thinking-mode search tool). |
-| `<｜search▁end｜>` | 128797 | false | Search-agent query close. |
-| `<think>` | 128798 | false | Opens the reasoning/thinking span. ASCII brackets. |
-| `</think>` | 128799 | false | Closes the reasoning span; **also emitted in non-thinking mode** (see below). |
-| `<｜fim▁hole｜>` / `<｜fim▁begin｜>` / `<｜fim▁end｜>` | 128800–128802 | false | Fill-in-the-middle (not chat). |
-| `<｜User｜>` | 128803 | false | User role marker. |
-| `<｜Assistant｜>` | 128804 | false | Assistant role marker. |
-| `<\|EOT\|>` | 128805 | true | End-of-turn (legacy; ASCII pipes, rarely used in chat). |
-| `<｜tool▁calls▁begin｜>` | 128806 | false | Opens the assistant's batch of tool calls. |
-| `<｜tool▁calls▁end｜>` | 128807 | false | Closes the batch of tool calls. |
-| `<｜tool▁call▁begin｜>` | 128808 | false | Opens a single tool call inside the batch. |
-| `<｜tool▁call▁end｜>` | 128809 | false | Closes a single tool call. |
-| `<｜tool▁outputs▁begin｜>` | 128810 | false | Opens a batch of tool results (**R1-0528 / V3-0324 only**). |
-| `<｜tool▁outputs▁end｜>` | 128811 | false | Closes a batch of tool results (**R1-0528 / V3-0324 only**). |
-| `<｜tool▁output▁begin｜>` | 128812 | false | Opens a single tool result. |
-| `<｜tool▁output▁end｜>` | 128813 | false | Closes a single tool result. |
-| `<｜tool▁sep｜>` | 128814 | false | Separator inside a tool call (between name and arguments). |
+| Token (verbatim)                                       | ID            | `special` | Purpose                                                                       |
+| ------------------------------------------------------ | ------------- | --------- | ----------------------------------------------------------------------------- |
+| `<｜begin▁of▁sentence｜>`                              | 0             | true      | BOS; prepended once at the very start of the prompt.                          |
+| `<｜end▁of▁sentence｜>`                                | 1             | true      | EOS; ends every assistant/tool turn and is the stop token.                    |
+| `<｜▁pad▁｜>`                                          | 2             | true      | Padding (`pad_token`; the model card/config also reuse EOS as pad).           |
+| `<｜search▁begin｜>`                                   | 128796        | false     | Search-agent query open (thinking-mode search tool).                          |
+| `<｜search▁end｜>`                                     | 128797        | false     | Search-agent query close.                                                     |
+| `<think>`                                              | 128798        | false     | Opens the reasoning/thinking span. ASCII brackets.                            |
+| `</think>`                                             | 128799        | false     | Closes the reasoning span; **also emitted in non-thinking mode** (see below). |
+| `<｜fim▁hole｜>` / `<｜fim▁begin｜>` / `<｜fim▁end｜>` | 128800–128802 | false     | Fill-in-the-middle (not chat).                                                |
+| `<｜User｜>`                                           | 128803        | false     | User role marker.                                                             |
+| `<｜Assistant｜>`                                      | 128804        | false     | Assistant role marker.                                                        |
+| `<\|EOT\|>`                                            | 128805        | true      | End-of-turn (legacy; ASCII pipes, rarely used in chat).                       |
+| `<｜tool▁calls▁begin｜>`                               | 128806        | false     | Opens the assistant's batch of tool calls.                                    |
+| `<｜tool▁calls▁end｜>`                                 | 128807        | false     | Closes the batch of tool calls.                                               |
+| `<｜tool▁call▁begin｜>`                                | 128808        | false     | Opens a single tool call inside the batch.                                    |
+| `<｜tool▁call▁end｜>`                                  | 128809        | false     | Closes a single tool call.                                                    |
+| `<｜tool▁outputs▁begin｜>`                             | 128810        | false     | Opens a batch of tool results (**R1-0528 / V3-0324 only**).                   |
+| `<｜tool▁outputs▁end｜>`                               | 128811        | false     | Closes a batch of tool results (**R1-0528 / V3-0324 only**).                  |
+| `<｜tool▁output▁begin｜>`                              | 128812        | false     | Opens a single tool result.                                                   |
+| `<｜tool▁output▁end｜>`                                | 128813        | false     | Closes a single tool result.                                                  |
+| `<｜tool▁sep｜>`                                       | 128814        | false     | Separator inside a tool call (between name and arguments).                    |
 
 `config.json` confirms `bos_token_id: 0`, `eos_token_id: 1`.
 
@@ -85,14 +84,14 @@ the prompt is one flat string:
 - **Assistant turn**: opens with `<｜Assistant｜>`, then a thinking tag, then content, then
   `<｜end▁of▁sentence｜>`.
 - **Thinking vs non-thinking (V3.1 hybrid)** — selected by the template, not by the model:
-  - Non-thinking generation prefix: `…<｜Assistant｜></think>` — the model starts *after* a
-    `</think>` it never had to open. Unlike DeepSeek-V3, V3.1 always injects this `</think>`.
-  - Thinking generation prefix: `…<｜Assistant｜><think>` — the model emits its chain of
-    thought, closes with `</think>`, then the answer.
-  - In multi-turn context, **every** stored assistant turn keeps a `</think>`; only the last
-    turn's leading thinking tag reflects the requested mode. When rendering a stored
-    assistant message, any text up to and including `</think>` is stripped from `content`
-    before re-emitting (the template does `content.split('</think>', 1)[1]`).
+   - Non-thinking generation prefix: `…<｜Assistant｜></think>` — the model starts _after_ a
+     `</think>` it never had to open. Unlike DeepSeek-V3, V3.1 always injects this `</think>`.
+   - Thinking generation prefix: `…<｜Assistant｜><think>` — the model emits its chain of
+     thought, closes with `</think>`, then the answer.
+   - In multi-turn context, **every** stored assistant turn keeps a `</think>`; only the last
+     turn's leading thinking tag reflects the requested mode. When rendering a stored
+     assistant message, any text up to and including `</think>` is stripped from `content`
+     before re-emitting (the template does `content.split('</think>', 1)[1]`).
 - **Tool calling runs in non-thinking mode.** The model card states "Toolcall is supported
   in non-thinking mode," and the V3.1 tool template opens the tool-call turn with
   `<｜Assistant｜></think>`. With vLLM, V3.1 reasoning is disabled by default; enable it via
@@ -241,13 +240,13 @@ deepseek_v31`):
 - **`finish_reason`**: `"tool_calls"` when the model emitted a `<｜tool▁calls▁begin｜>…`
   batch; otherwise `"stop"`.
 - **`message.tool_calls[]`**: one element per `<｜tool▁call▁begin｜>…<｜tool▁call▁end｜>`.
-  - `.type` = `"function"`.
-  - `.function.name` = the text between `<｜tool▁call▁begin｜>` and `<｜tool▁sep｜>`.
-  - `.function.arguments` = the text between `<｜tool▁sep｜>` and `<｜tool▁call▁end｜>`, returned
-    as a **JSON string** (per the OpenAI spec), not a nested object. The model already emits
-    raw JSON there, so it is passed through.
-  - `.id` = **synthesized by the server** (e.g. `chatcmpl-tool-…`). DeepSeek's wire format
-    carries no call ID.
+   - `.type` = `"function"`.
+   - `.function.name` = the text between `<｜tool▁call▁begin｜>` and `<｜tool▁sep｜>`.
+   - `.function.arguments` = the text between `<｜tool▁sep｜>` and `<｜tool▁call▁end｜>`, returned
+     as a **JSON string** (per the OpenAI spec), not a nested object. The model already emits
+     raw JSON there, so it is passed through.
+   - `.id` = **synthesized by the server** (e.g. `chatcmpl-tool-…`). DeepSeek's wire format
+     carries no call ID.
 - **Tool result messages**: `{"role": "tool", "tool_call_id": "<id>", "content": "<result>"}`.
   The server renders `content` into `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>`. Because the
   prompt has no IDs, `tool_call_id` is used only for client-side bookkeeping; **the model
@@ -268,9 +267,9 @@ deepseek_v31`):
   decoding with `skip_special_tokens=True` will **not** strip `<｜tool▁calls▁begin｜>`,
   `<｜tool▁sep｜>`, `<｜Assistant｜>`, `</think>`, etc. — they remain in the decoded string for
   the parser to find. (Conversely, do not assume special-token filtering removes them.)
-- **No code fence / no `type` field in V3.1.** A parser written for R1/V3-0324
-  (`function<｜tool▁sep｜>name` + ` ```json ` block) will not parse V3.1, and vice-versa.
-  V3.1 is `name<｜tool▁sep｜>raw_json`.
+- **No code fence / no `type` field in V3.1.** The R1/V3-0324 grammar
+  (`function<｜tool▁sep｜>name` + ` ```json ` block) differs from V3.1's
+  `name<｜tool▁sep｜>raw_json`. OMP accepts both, but a parser limited to one grammar does not.
 - **Chaining has no delimiter in V3.1.** Calls abut directly:
   `…<｜tool▁call▁end｜><｜tool▁call▁begin｜>…`. Do not split on newlines/whitespace; split on
   the `<｜tool▁call▁begin｜>` / `<｜tool▁call▁end｜>` boundaries. (R1/V3-0324 put a `\n` before
@@ -313,15 +312,15 @@ encoding, served in vLLM with `--tool-call-parser deepseek_v3`. The per-call bod
 
 Differences from V3.1:
 
-| Aspect | V3.1 (`deepseek_v31`) | V3-0324 / R1-0528 (`deepseek_v3`) |
-| --- | --- | --- |
-| Field order in a call | `{name}<｜tool▁sep｜>{args}` | `function<｜tool▁sep｜>{name}` (the literal `type`, then name) |
-| Arguments wrapping | raw JSON, inline | fenced ` ```json … ``` ` block (name and args separated by `\n`) |
-| Chaining of calls | abut directly, **no separator** | each subsequent call prefixed with `\n` |
-| Tool results | `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>` per message, no batch wrapper | wrapped in `<｜tool▁outputs▁begin｜>…<｜tool▁outputs▁end｜>`, results newline-separated |
-| User→assistant boundary | user turn = `<｜User｜>{q}`; `<｜Assistant｜></think>` added at generation | user turn = `<｜User｜>{q}<｜Assistant｜>` (assistant marker appended in the user branch) |
-| Thinking | hybrid; `thinking` kwarg toggles `<think>` vs `</think>` prefix | R1-0528 always reasoning (bare `<｜Assistant｜>` generation prefix, model opens `<think>` itself); V3-0324 non-reasoning |
-| vLLM parser | `--tool-call-parser deepseek_v31` | `--tool-call-parser deepseek_v3` |
+| Aspect                  | V3.1 (`deepseek_v31`)                                                         | V3-0324 / R1-0528 (`deepseek_v3`)                                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Field order in a call   | `{name}<｜tool▁sep｜>{args}`                                                  | `function<｜tool▁sep｜>{name}` (the literal `type`, then name)                                                           |
+| Arguments wrapping      | raw JSON, inline                                                              | fenced ` ```json … ``` ` block (name and args separated by `\n`)                                                         |
+| Chaining of calls       | abut directly, **no separator**                                               | each subsequent call prefixed with `\n`                                                                                  |
+| Tool results            | `<｜tool▁output▁begin｜>…<｜tool▁output▁end｜>` per message, no batch wrapper | wrapped in `<｜tool▁outputs▁begin｜>…<｜tool▁outputs▁end｜>`, results newline-separated                                  |
+| User→assistant boundary | user turn = `<｜User｜>{q}`; `<｜Assistant｜></think>` added at generation    | user turn = `<｜User｜>{q}<｜Assistant｜>` (assistant marker appended in the user branch)                                |
+| Thinking                | hybrid; `thinking` kwarg toggles `<think>` vs `</think>` prefix               | R1-0528 always reasoning (bare `<｜Assistant｜>` generation prefix, model opens `<think>` itself); V3-0324 non-reasoning |
+| vLLM parser             | `--tool-call-parser deepseek_v31`                                             | `--tool-call-parser deepseek_v3`                                                                                         |
 
 Example R1-0528 / V3-0324 parallel call with its result batch:
 
@@ -363,47 +362,110 @@ reuse the same fullwidth pipe (`｜`, U+FF5C), but the body is an Anthropic-styl
   so `…string="false">15</…>` decodes to the number `15`.
 - An ASCII-pipe variant (`<|DSML|tool_calls>`, `<|DSML|invoke …>`, `<|DSML|parameter …>`) occurs
   on the wire alongside the fullwidth form.
-- Several OpenAI-compatible hosts (DeepSeek's own API, NanoGPT, NVIDIA, Ollama / Ollama Cloud,
-  Fireworks, OpenRouter, OpenCode) leak this envelope into visible `content` instead of returning
-  structured `tool_calls`; a parser must heal it back into tool calls and strip the markers from
-  user-visible text.
+- OpenAI-compatible hosts can leak this envelope into visible `content` instead of returning
+  structured `tool_calls`. OMP's native healing is separate from selecting the owned
+  `deepseek` dialect; its compatibility policy determines whether DSML recovery is enabled.
 
 ## omp / pi converter behavior
 
 The repository's `deepseek` dialect is an **owned in-band converter**, not a
-vLLM parser wrapper. Select it with `PI_DIALECT=deepseek` (or the equivalent
-agent configuration). When tools are present, the agent appends the dialect
-guide and compact tool catalog to the system prompt, removes native provider
-tools from the request, re-encodes prior calls/results with this syntax, and
-scans streamed assistant text back into canonical pi tool-call events.
+vLLM parser wrapper. Select it with `PI_DIALECT=deepseek` or the agent's
+`dialect`/`getDialect` configuration. When tools are present, the agent appends
+the dialect guide and compact tool catalog to the system prompt, removes
+native provider tools from the request, re-encodes prior calls/results with
+this syntax, and scans streamed assistant text back into canonical pi events.
+The catalog is one OpenAI-style JSON function definition per line, not the
+model card's `## Tools` block shown above.
 
 The current scanner accepts all three forms described above:
 
 - V3.1 `name<｜tool▁sep｜>{json}` calls;
 - legacy `function<｜tool▁sep｜>name` plus a fenced JSON body; and
-- fullwidth or ASCII DSML `invoke` / `parameter` blocks.
+- fullwidth or ASCII DSML `invoke` / `parameter` blocks inside a DSML `tool_calls` wrapper.
 
-For V3.1 and legacy calls, omp emits `toolStart` after the header is complete
-but buffers arguments until `<｜tool▁call▁end｜>`; it then uses the shared
-repairing JSON parser. A missing/invalid completed argument object becomes
-`{}`. Flush emits no `toolEnd` for an unfinished call and only clears the
-scanner's private state. Once `toolStart` has been projected, however, the
-canonical call remains and a normally stopped turn may dispatch it: unfinished
-V3.1/legacy calls retain `{}`, while DSML calls retain any argument text already
-published through `toolArgDelta`. DSML is genuinely incremental: parameter
-body text is streamed as those deltas. A DSML parameter is a raw string unless
-`string="false"`; the latter is repairing-JSON-decoded at a completed close and
-falls back to the raw text if decoding fails. Call IDs for id-less DeepSeek
-forms are synthesized as `ptc_…`.
+A V3.1/legacy `<｜tool▁call▁begin｜>` may also appear outside the plural wrapper.
+Names are trimmed for those forms. DSML opening tags require a double-quoted
+`name="…"` attribute; a bare DSML `invoke` without a `tool_calls` wrapper is
+not recognized. DSML values are raw text, without XML entity decoding, and
+are strings unless the tag has exactly `string="false"`. The scanner does
+not validate tool names or schemas; validation/execution happens downstream.
 
-The scanner also removes leaked DeepSeek chat-template control tokens from
-visible text and, by default, maps `<think>…</think>` to thinking events. Its
-renderer emits V3.1 calls, joins parallel calls without separators, and renders
-multiple results as singular output blocks separated by newlines. The DSML
-syntax is accepted for healing leaked provider output but is not the owned
-dialect's emitted history format.
+For V3.1 calls, the scanner emits `toolStart` when `<｜tool▁sep｜>` completes
+the name; legacy calls wait until the ` ```json ` fence completes the name.
+Both buffer arguments until `<｜tool▁call▁end｜>` and then emit `toolEnd` with
+repairing-JSON-decoded arguments. Missing, invalid, or non-object completed
+arguments become `{}`.
+
+Flush emits no `toolEnd` for an unfinished call. Once `toolStart` has been
+projected, however, the canonical call remains and a normally stopped turn
+may dispatch it: unfinished V3.1/legacy calls retain `{}`, while DSML calls
+retain argument text already published through `toolArgDelta`, without
+close-time coercion. A `length` stop is not runnable. DSML is incremental:
+parameter body text is streamed as those deltas. At a completed parameter
+close, `string="false"` values are repairing-JSON-decoded, falling back to
+raw text on failure. The completed object replaces the partial raw strings
+at `</｜DSML｜invoke>` (or its ASCII equivalent). Call IDs are synthesized
+as `ptc_…`.
+
+The scanner removes leaked DeepSeek chat-template control tokens and trailing
+template whitespace from visible text. Orphan DSML `invoke`/`parameter`
+closing tags are stripped too. By default it maps `<think>…</think>` to
+thinking events; with `parseThinking: false`, it emits the body as visible
+text but still removes the thinking tags. An unclosed thinking span is
+finalized at EOF.
+
+The renderer emits V3.1 calls, joins parallel calls without separators, and
+renders multiple results as singular output blocks separated by newlines.
+Those result blocks contain only result text: ids, names, and `isError` are
+not encoded. History encoding groups consecutive results into a `user`
+message and preserves result images as separate image blocks after the text.
+Tool-calling assistant turns are replayed as prose plus rendered calls,
+without their thinking blocks.
+
+The standalone transcript renderer starts with `<｜begin▁of▁sentence｜>`,
+renders every assistant turn as `<｜Assistant｜>` + thinking/text/calls +
+`<｜end▁of▁sentence｜>`, and uses `<think>…</think>` only for nonempty thinking.
+It does not add a non-thinking `</think>` prefix or omit the assistant marker
+after results as the V3.1 reference template does. Developer text is unmarked;
+user turns use `<｜User｜>`.
+
+The owned stream cuts off fabricated results at `<｜tool▁outputs▁begin｜>` or
+`<｜tool▁output▁begin｜>` (aborting by default), retaining calls before the
+boundary. If native structured calls nevertheless arrive, the first real
+native or in-band call selects the channel for that turn, avoiding duplicate
+dispatch.
+
+### Native leaked-markup healing
+
+OpenAI-completions healing uses `model.compat.streamMarkupHealingPattern`.
+The catalog defaults DeepSeek-class models to `dsml` on `ollama`,
+`ollama-cloud`, `nvidia`, `deepseek`, `fireworks`, `nanogpt`, `opencode-go`,
+`openrouter`, `litellm`, and `nous`; authored compatibility can override
+the pattern. The native Ollama adapter selects `dsml` directly for
+`model.identity.class === "deepseek"`.
+
+`StreamMarkupHealing` with the `dsml` pattern delegates to
+`XmlInbandScanner` with `xmlTagset: "dsml"` and therefore the same
+`DeepSeekInbandScanner`. Unlike the owned-stream projector, the healer
+reconstructs calls only from `toolEnd`: an unfinished call produces no
+synthesized call. Healed calls get `call_…` ids and JSON-string arguments.
+When an upstream chunk also supplies structured tool calls, the
+OpenAI-completions and Ollama adapters use `feedEventsWithoutCalls` to strip
+the markup without synthesizing duplicates. Cleaned text additionally
+passes through the generic leaked-thinking healer. DSML is accepted for
+recovery but is not the owned dialect's emitted history format.
 
 ## Sources
+
+Repository implementation:
+
+- [DeepSeek dialect](../../packages/ai/src/dialect/deepseek.ts) — `DeepSeekInbandScanner`, V3.1 renderers, and transcript rendering.
+- [Generic XML selector](../../packages/ai/src/dialect/xml.ts) and [native markup healing](../../packages/ai/src/utils/stream-markup-healing.ts).
+- [Catalog healing defaults](../../packages/catalog/src/compat/resolve.ts) and [DeepSeek compatibility rules](../../packages/catalog/src/compat/rules/classes/deepseek.kdl).
+- [Owned-stream projection](../../packages/ai/src/dialect/owned-stream.ts), [history encoding](../../packages/ai/src/dialect/history.ts), [tool catalog](../../packages/ai/src/dialect/catalog.ts), and [call-id generation](../../packages/ai/src/dialect/coercion.ts).
+- [Agent request preparation](../../packages/agent/src/agent-loop.ts).
+
+External format references:
 
 - DeepSeek-V3.1 model card (Chat Template / ToolCall sections): <https://huggingface.co/deepseek-ai/DeepSeek-V3.1>
 - DeepSeek-V3.1 `assets/chat_template.jinja`: <https://huggingface.co/deepseek-ai/DeepSeek-V3.1/resolve/main/assets/chat_template.jinja>

@@ -26,8 +26,12 @@ describe("issue #9158 — malformed worker IPC frame must not terminate the pare
 		// Bun advanced-IPC frame with an invalid structured-clone body, written
 		// raw to the IPC fd (3), then the child blocks forever. Staying alive is
 		// the point: the malformed frame — not an exit — must fault the worker.
+		// On Windows the IPC fd is a libuv ipc-mode named pipe that wraps every
+		// write in a 16-byte frame header ({flags=HAS_DATA, 0, length, 0}); an
+		// unwrapped raw write is rejected by libuv and silently closes the
+		// channel without ever reaching Bun's deserializer.
 		const childScript =
-			'require("node:fs").writeSync(3, Buffer.from([2, 4, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef])); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);';
+			'const body = Buffer.from([2, 4, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef]); let frame = body; if (process.platform === "win32") { const header = Buffer.alloc(16); header.writeUInt32LE(1, 0); header.writeUInt32LE(body.length, 8); frame = Buffer.concat([header, body]); } require("node:fs").writeSync(3, frame); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);';
 		// Runs in a spawned `bun -e` parent: importing worker-client pulls in the
 		// postmortem module, which installs the global uncaughtException handler
 		// under test.

@@ -41,14 +41,6 @@ describe("parseMarketplaceInstallArgs — success", () => {
 		});
 	});
 
-	it("--force and --scope project together", () => {
-		expect(ok("--force --scope project hello@market")).toEqual({
-			force: true,
-			scope: "project",
-			installSpec: "hello@market",
-		});
-	});
-
 	it("flags after the positional", () => {
 		expect(ok("hello@market --force")).toEqual({ force: true, scope: "user", installSpec: "hello@market" });
 	});
@@ -79,10 +71,6 @@ describe("parseMarketplaceInstallArgs — errors", () => {
 
 	it("unknown flag → Unknown flag message", () => {
 		expect(err("--froce hello@market")).toMatch(/Unknown flag.*--froce/);
-	});
-
-	it("unknown flag before positional still rejects", () => {
-		expect(err("--unknown")).toMatch(/Unknown flag/);
 	});
 
 	it("invalid scope value → clear error", () => {

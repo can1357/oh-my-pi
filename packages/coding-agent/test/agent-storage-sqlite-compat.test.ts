@@ -96,4 +96,27 @@ describe("AgentStorage SQLite compatibility", () => {
 		expect(storage.getModelUsageOrder()).toEqual(["anthropic/claude-sonnet-4-5"]);
 		expect(readSettingsRows(dbPath)).toEqual([{ key: "theme", value: '"dark"', updated_at: LEGACY_TIMESTAMP }]);
 	});
+
+	it("clears migrated settings rows", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-clear-settings-");
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		const seed = new Database(dbPath);
+		seed.exec(`
+			CREATE TABLE settings (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL,
+				updated_at INTEGER NOT NULL DEFAULT 0
+			);
+		`);
+		seed
+			.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
+			.run("theme", '"dark"', LEGACY_TIMESTAMP);
+		seed.close();
+
+		const storage = await AgentStorage.open(dbPath);
+		expect(storage.getSettings()).toEqual({ theme: "dark" });
+		storage.clearMigratedSettings();
+		expect(storage.getSettings()).toBeNull();
+		expect(readSettingsRows(dbPath)).toEqual([]);
+	});
 });

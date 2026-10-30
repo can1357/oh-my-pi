@@ -1,12 +1,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+import { cfgSpeechEnabled, cfgSpeechMode } from "@oh-my-pi/pi-coding-agent/tts/settings";
 
 function zeroUsage(): Usage {
 	return {
@@ -125,8 +127,8 @@ describe("EventController message_update coalescing", () => {
 	it("speaks every delta exactly once even when intermediate snapshots are coalesced away", async () => {
 		const { emit } = createStreamingFixture();
 		const pushDelta = vi.spyOn(vocalizer, "pushDelta");
-		settings.set("speech.enabled", true);
-		settings.set("speech.mode", "assistant");
+		cfgSpeechEnabled.set(settings, true);
+		cfgSpeechMode.set(settings, "assistant");
 
 		emit(messageUpdate("one "));
 		emit(messageUpdate("one two "));

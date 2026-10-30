@@ -9,6 +9,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
+
 function createSession(cwd: string): ToolSession {
 	return {
 		cwd,
@@ -87,10 +89,30 @@ describe("write tool hashline header", () => {
 		expect(final).toBe("export const enabled = true;\n");
 	});
 
+	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {
+		const session = createSession(tmpDir);
+		const backingPath = path.join(tmpDir, "artifacts", "local", "notes.ts");
+		const content = "export const enabled = false;\n";
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: "local://notes.ts", content });
+		const [headerLine = "", writeLine] = resultText(writeResult).split("\n");
+		expect(HASHLINE_HEADER_LINE.exec(headerLine)?.[1]).toBe("local://notes.ts");
+		expect(writeLine).toBe(`Successfully wrote ${content.length} bytes to local://notes.ts`);
+
+		await new EditTool(session, "hashline").execute("call-2", {
+			input: `${headerLine}\nPUT 1-1:\n+export const enabled = true;\n`,
+		});
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const enabled = true;\n");
+
+		// The URL-form header also addresses the same file as a `write` path.
+		await new WriteTool(session).execute("call-3", { path: headerLine, content: "export const v = 2;\n" });
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const v = 2;\n");
+	});
+
 	it("omits the hashline header when the edit mode is not hashline", async () => {
 		const filePath = path.join(tmpDir, "plain.txt");
 		const session = createSession(tmpDir);
-		session.settings.set("edit.mode", "replace");
+		cfgEditMode.set(session.settings, "replace");
 		const tool = new WriteTool(session);
 		const content = "no anchors here\n";
 
@@ -98,5 +120,30 @@ describe("write tool hashline header", () => {
 		const text = resultText(result);
 		expect(text.startsWith("[")).toBe(false);
 		expect(text).toBe(`Successfully wrote ${content.length} bytes to ${path.relative(tmpDir, filePath)}`);
+	});
+
+	it("reports UTF-8 bytes, not JavaScript string length", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		const session = createSession(tmpDir);
+		cfgEditMode.set(session.settings, "replace");
+		const tool = new WriteTool(session);
+		const content = "café\n";
+
+		const result = await tool.execute("call-1", { path: filePath, content });
+		expect(resultText(result)).toBe(`Successfully wrote 6 bytes to ${path.relative(tmpDir, filePath)}`);
+	});
+
+	it("writes numbered data verbatim but still strips copied read rows", async () => {
+		const session = createSession(tmpDir);
+		const tool = new WriteTool(session);
+		const dump = "100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n";
+		const dumpPath = path.join(tmpDir, "disassembly.txt");
+		const dumpResult = await tool.execute("call-1", { path: dumpPath, content: dump });
+		expect(resultText(dumpResult)).not.toContain("auto-stripped");
+		expect(await Bun.file(dumpPath).text()).toBe(dump);
+
+		const echoPath = path.join(tmpDir, "echo.ts");
+		await tool.execute("call-2", { path: echoPath, content: "1:const a = 1;\n2:const b = 2;\n" });
+		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\n");
 	});
 });

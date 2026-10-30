@@ -28,9 +28,10 @@ import {
 } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import { Settings } from "../config/settings";
-import type { TtsrSettings } from "../config/settings-schema";
+import { cfgTtsr, type TtsrSettings } from "../export/ttsr-settings";
 import { initializeWithSettings, loadCapability } from "../discovery";
 import { buildRuleFromMarkdown, createSourceMeta } from "../discovery/helpers";
+import { ensureGrammar } from "../utils/grammars";
 import type { TtsrManager } from "../export/ttsr";
 
 export type TtsrAction = "test" | "list" | "scan";
@@ -95,6 +96,8 @@ interface RuleMatchDetail {
 	/** All conditions defined on the rule (for verbose display). */
 	defined: { regex: string[]; ast: string[] };
 	skippedAst?: string;
+	/** Judged-rule question; the CLI never calls the judge, so it cannot trigger here. */
+	question?: string;
 	agents?: string[];
 }
 
@@ -205,6 +208,7 @@ async function astMatches(rule: Rule, snippet: string, lang: string): Promise<st
 	const out: string[] = [];
 	for (const pattern of rule.astCondition ?? []) {
 		try {
+			await ensureGrammar({ lang });
 			const result = await astMatch({
 				patterns: [pattern],
 				source: snippet,
@@ -252,6 +256,7 @@ async function evaluate(
 			sourceProvider: rule._source?.provider,
 			matched: { regex, ast },
 			defined: { regex: rule.condition ?? [], ast: rule.astCondition ?? [] },
+			question: rule.question,
 			agents: rule.agents,
 		};
 		if (!astEligible && (rule.astCondition ?? []).length > 0) {
@@ -262,7 +267,7 @@ async function evaluate(
 	return { triggered, notTriggered };
 }
 
-async function createTtsrManager(settings?: TtsrSettings): Promise<TtsrManager> {
+async function createTtsrManager(settings?: Partial<TtsrSettings>): Promise<TtsrManager> {
 	const { TtsrManager } = await import("../export/ttsr");
 	return new TtsrManager(settings);
 }
@@ -280,6 +285,8 @@ function filterTtsrRulesForScan(
 	return rules.filter(rule => {
 		if (disabled.has(rule.name)) return false;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return false;
+		// A judged rule's conditions only gate its question; a condition hit is not a violation.
+		if (rule.question !== undefined) return false;
 		return (rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 	});
 }
@@ -287,7 +294,7 @@ function filterTtsrRulesForScan(
 async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ rules: Rule[]; manager: TtsrManager }> {
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
-	const ttsrSettings = settingsInstance.getGroup("ttsr");
+	const ttsrSettings = cfgTtsr.get(settingsInstance);
 	const manager = await createTtsrManager(ttsrSettings);
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	bucketRules(result.items, manager, {
@@ -301,7 +308,7 @@ async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ 
 async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
-	const ttsrSettings = settingsInstance.getGroup("ttsr");
+	const ttsrSettings = cfgTtsr.get(settingsInstance);
 	if (!ttsrSettings.enabled) {
 		return [];
 	}
@@ -347,7 +354,7 @@ async function loadIsolatedRule(
 	});
 	if (!manager.addRule(rule)) {
 		throw new Error(
-			`Rule "${rule.name}" has no usable TTSR condition. Add a \`condition\` (regex) or \`astCondition\` (ast-grep pattern) to its frontmatter.`,
+			`Rule "${rule.name}" has no usable TTSR condition. Add a \`condition\` (regex), \`astCondition\` (ast-grep pattern), or \`question\` (judged) to its frontmatter.`,
 		);
 	}
 	return { ok: true, rules: manager.getRules(), manager };
@@ -485,6 +492,9 @@ function renderRuleDetail(detail: RuleMatchDetail, hit: boolean): void {
 	if (detail.skippedAst) {
 		condParts.push(chalk.dim(`astCondition: ${detail.skippedAst}`));
 	}
+	if (detail.question) {
+		condParts.push(chalk.dim(`question (judged at runtime, not tested): ${detail.question}`));
+	}
 	const condLabel = condParts.length > 0 ? condParts.join("  ") : chalk.dim("no active conditions");
 	const provider = detail.sourceProvider ? chalk.dim(` [${detail.sourceProvider}]`) : "";
 	process.stdout.write(`  ${mark} ${chalk.bold(detail.name)}  ${condLabel}${provider}\n`);
@@ -502,6 +512,7 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 					provider: r._source?.provider,
 					condition: r.condition ?? [],
 					astCondition: r.astCondition ?? [],
+					question: r.question,
 					scope: r.scope ?? [],
 					globs: r.globs ?? [],
 					agents: r.agents ?? [],
@@ -522,6 +533,7 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 		const condParts: string[] = [];
 		if ((rule.condition ?? []).length > 0) condParts.push(`condition: ${rule.condition!.join(", ")}`);
 		if ((rule.astCondition ?? []).length > 0) condParts.push(`astCondition: ${rule.astCondition!.join(", ")}`);
+		if (rule.question) condParts.push(`question: ${rule.question}`);
 		if ((rule.scope ?? []).length > 0) condParts.push(`scope: ${rule.scope!.join(", ")}`);
 		if ((rule.globs ?? []).length > 0) condParts.push(`globs: ${rule.globs!.join(", ")}`);
 		if ((rule.agents ?? []).length > 0) condParts.push(`agents: ${rule.agents!.join(", ")}`);
@@ -718,6 +730,7 @@ async function scanRulePlanMatchesContent(
 			astHit = matchedAst.length > 0;
 		} else {
 			try {
+				await ensureGrammar({ lang });
 				const result = await astMatch({
 					patterns: plan.astConditions,
 					source: fileContent,
@@ -758,6 +771,7 @@ async function scanAnyAstConditionMatches(
 		return false;
 	}
 	try {
+		await ensureGrammar({ lang });
 		const result = await astMatch({
 			patterns,
 			source: fileContent,

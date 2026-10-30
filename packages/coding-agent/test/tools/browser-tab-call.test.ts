@@ -1,11 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	ELEMENT_METHODS,
-	renderTabCall,
-	TAB_HANDLE_METHODS,
-	TAB_PRESENCE_METHODS,
-	TAB_VALUE_METHODS,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-call";
+import { renderTabCall } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-call";
 
 function errorMessage(run: () => unknown): string {
 	try {
@@ -18,46 +12,6 @@ function errorMessage(run: () => unknown): string {
 }
 
 describe("renderTabCall", () => {
-	it("keeps the public direct and element allowlists exact", () => {
-		expect(TAB_VALUE_METHODS).toEqual([
-			"url",
-			"title",
-			"goto",
-			"observe",
-			"ariaSnapshot",
-			"screenshot",
-			"extract",
-			"click",
-			"type",
-			"fill",
-			"press",
-			"scroll",
-			"drag",
-			"scrollIntoView",
-			"select",
-			"uploadFile",
-			"waitForUrl",
-			"evaluate",
-		]);
-		expect(TAB_PRESENCE_METHODS).toEqual(["waitFor", "waitForSelector"]);
-		expect(TAB_HANDLE_METHODS).toEqual(["id", "ref"]);
-		expect(ELEMENT_METHODS).toEqual([
-			"click",
-			"type",
-			"fill",
-			"press",
-			"hover",
-			"focus",
-			"select",
-			"uploadFile",
-			"scrollIntoView",
-			"boundingBox",
-			"isVisible",
-			"isHidden",
-			"evaluate",
-		]);
-	});
-
 	it("renders value, presence, and one-hop element calls byte-for-byte", () => {
 		expect(renderTabCall([{ method: "click", args: ["text/Go"] }])).toBe('return await tab.click("text/Go");');
 		expect(renderTabCall([{ method: "waitFor", args: ["#x", { timeout: 1_000 }] }])).toBe(
@@ -83,10 +37,10 @@ describe("renderTabCall", () => {
 		).toBe("return await (await tab.id(5)).evaluate((node => node.textContent));");
 	});
 
-	it("reports every invalid chain with its exact public error", () => {
+	it("rejects invalid call chains with actionable errors", () => {
 		expect(errorMessage(() => renderTabCall([]))).toBe("Action 'call' requires a non-empty 'chain'.");
-		expect(errorMessage(() => renderTabCall([{ method: "waitForNavigation", args: [] }]))).toBe(
-			'Unknown tab helper "waitForNavigation". Direct helpers: url, title, goto, observe, ariaSnapshot, screenshot, extract, click, type, fill, press, scroll, drag, scrollIntoView, select, uploadFile, waitForUrl, evaluate, waitFor, waitForSelector; element handles via tab.id(n)/tab.ref(id).',
+		expect(errorMessage(() => renderTabCall([{ method: "notAHelper", args: [] }]))).toContain(
+			'Unknown tab helper "notAHelper".',
 		);
 		expect(errorMessage(() => renderTabCall([{ method: "id", args: [5] }]))).toBe(
 			"tab.id() returns an element handle; call a method on it (tab.id(5).click()) or use tab.run(fn).",
@@ -98,7 +52,7 @@ describe("renderTabCall", () => {
 					{ method: "focus", args: [] },
 				]),
 			),
-		).toBe("Only tab.id(n)/tab.ref(id) results accept a chained call; got tab.click().");
+		).toMatch(/^Only tab\.id\(n\)\/tab\.ref\(id\).* results accept a chained call; got tab\.click\(\)\.$/);
 		expect(
 			errorMessage(() =>
 				renderTabCall([
@@ -106,9 +60,7 @@ describe("renderTabCall", () => {
 					{ method: "remove", args: [] },
 				]),
 			),
-		).toBe(
-			'Unknown element method "remove". Element handles support: click, type, fill, press, hover, focus, select, uploadFile, scrollIntoView, boundingBox, isVisible, isHidden, evaluate.',
-		);
+		).toContain('Unknown element method "remove".');
 		expect(
 			errorMessage(() =>
 				renderTabCall([

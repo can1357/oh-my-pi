@@ -1,0 +1,10 @@
+// Provider-wire compat for "litellm".
+
+provider "litellm" {
+	default-model "claude-opus-5-5"
+	env "LITELLM_API_KEY"
+	discovery label="LiteLLM" allow-unauthenticated=#true
+
+	// The proxy groups request logs into sessions by this header.
+	session-header "x-litellm-session-id"
+}

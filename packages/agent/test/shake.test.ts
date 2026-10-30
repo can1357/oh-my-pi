@@ -6,7 +6,6 @@ import {
 	applyShakeRegion,
 	applyShakeRegions,
 	collectShakeRegions,
-	DEFAULT_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -83,7 +82,7 @@ describe("collectShakeRegions — tool results", () => {
 		expect(region.kind).toBe("toolResult");
 		expect(region.tokens).toBeGreaterThan(0);
 
-		applyShakeRegion(region, "[shaken]");
+		applyShakeRegion(region, "[shaken]", tokenizer.countTokens("[shaken]"));
 		expect(tr.prunedAt).toBeGreaterThan(0);
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
 	});
@@ -155,7 +154,7 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 		if (region.kind !== "block") throw new Error("expected block region");
 		expect(text.slice(region.start, region.end)).toBe(fence);
 
-		applyShakeRegion(region, "[shaken]");
+		applyShakeRegion(region, "[shaken]", tokenizer.countTokens("[shaken]"));
 		const block = (entry.message as AssistantMessage).content[0] as TextContent;
 		expect(block.text).toBe("intro line\n[shaken]\noutro line");
 	});
@@ -219,21 +218,17 @@ describe("applyShakeRegions — multi-region ordering", () => {
 		expect(regions).toHaveLength(2);
 
 		applyShakeRegions([
-			{ region: regions[0], replacement: "[A]" },
-			{ region: regions[1], replacement: "[B]" },
+			{ region: regions[0], replacement: "[A]", replacementTokens: 1 },
+			{ region: regions[1], replacement: "[B]", replacementTokens: 1 },
 		]);
 		const block = (entry.message as AssistantMessage).content[0] as TextContent;
 		expect(block.text).toBe("head\n[A]\nmiddle\n[B]\ntail");
+		// The turn's usage still bills both blocks; the tally records what left.
+		expect((entry.message as AssistantMessage).elidedOutputTokens).toBe(regions[0].tokens + regions[1].tokens - 2);
 	});
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and keeps a small recent tail", () => {
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
-	});
-
 	test("manual shake preserves the recent tool-result tail instead of stripping everything", () => {
 		const older = messageEntry(toolResultMessage("bash", "old-result ".repeat(300)));
 		const recent = messageEntry(toolResultMessage("bash", "recent-result ".repeat(3000)));
@@ -243,11 +238,6 @@ describe("shake config presets", () => {
 		// still shaken aggressively.
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(older);
-	});
-
-	test("default preset keeps a protect window", () => {
-		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
 	});
 
 	test("rescue preset overrides the manual tail so it can elide the newest result", () => {

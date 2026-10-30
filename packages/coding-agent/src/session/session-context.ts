@@ -1,4 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -7,20 +9,24 @@ import {
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
-	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
-	isCustomMessageContent,
 	isEmptyErrorTurn,
-	isUserTurnInitiator,
-	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import {
+	type CompactionEntry,
+	type CustomMessageEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	resolveSessionLeafId,
+	type SessionEntry,
+	type SessionMessageEntry,
+} from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -32,14 +38,37 @@ const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
 
+function isRolloverRequestEntry(entry: SessionEntry): boolean {
+	return (
+		isUserRequestEntry(entry) ||
+		(entry.type === "custom_message" &&
+			entry.customType === "irc:incoming" &&
+			isRecord(entry.details) &&
+			entry.details.fromParent === true)
+	);
+}
+
 function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
 
-function hasCrashRiskSnapcompactFramePayload(archive: snapcompact.Archive): boolean {
+function snapcompactFrameDataBytes(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): number {
+	if (!resolveFrameData) return snapcompact.frameDataBytes(archive.frames);
+	let total = 0;
+	for (const frame of archive.frames) total += resolveFrameData(frame.data)?.bytes ?? frame.data.length;
+	return total;
+}
+
+function hasCrashRiskSnapcompactFramePayload(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompact.frameDataBytes(archive.frames) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -51,21 +80,31 @@ function hasCrashRiskSnapcompactArchiveSize(archive: snapcompact.Archive): boole
 	);
 }
 
-function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): boolean {
+function isCrashRiskLegacySnapcompactArchive(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		hasLegacySnapcompactFrames(archive) &&
-		hasCrashRiskSnapcompactFramePayload(archive) &&
+		hasCrashRiskSnapcompactFramePayload(archive, resolveFrameData) &&
 		hasCrashRiskSnapcompactArchiveSize(archive)
 	);
 }
 
-function snapcompactHistoryBlockOptions(
+/** Byte budget and frame resolution for one archive's prompt blocks, as context rebuilding applies them. */
+export function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
-): snapcompact.HistoryBlockOptions | undefined {
-	if (options?.transcript) return undefined;
-	if (isCrashRiskLegacySnapcompactArchive(archive)) return { maxFrameDataBytes: 0 };
-	return { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
+): snapcompact.HistoryBlockOptions {
+	const resolveFrameData = options?.resolveFrameData;
+	if (options?.transcript) return resolveFrameData ? { resolveFrameData } : {};
+	if (isCrashRiskLegacySnapcompactArchive(archive, resolveFrameData)) {
+		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
+	}
+	return {
+		maxFrameDataBytes: options?.maxFrameDataBytes ?? snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
+		...(resolveFrameData ? { resolveFrameData } : {}),
+	};
 }
 
 export interface SessionContext {
@@ -111,7 +150,7 @@ export function getRestorableSessionModels(
 	return [roleModel, defaultModel];
 }
 
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
+export function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
 			return entries[i] as CompactionEntry;
@@ -131,14 +170,25 @@ export interface BuildSessionContextOptions {
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
 	/**
-	 * Transcript mode only: keep `toolCall` blocks that have no matching
-	 * `toolResult` on the path instead of stripping them. Pass this when the
-	 * session is mid-turn (a tool is still executing, its result not yet
-	 * persisted) so the rebuilt transcript renders the in-flight call as
-	 * pending; without it a focus/unfocus or overlay-close rebuild silently
-	 * hides the call the agent is still waiting on.
+	 * Tool calls the live agent loop is still executing. They count as paired, so a
+	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
 	 */
-	keepDanglingToolCalls?: boolean;
+	inFlightToolCallIds?: ReadonlySet<string>;
+	/** Price and resolve persisted snapcompact frame payloads on demand. */
+	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
+	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
+	maxFrameDataBytes?: number;
+}
+
+/** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
+export interface TranscriptSessionContextOptions extends Pick<BuildSessionContextOptions, "collapseCompactedHistory"> {
+	/**
+	 * Keep the unpaired tool calls of the turn the agent loop is still executing,
+	 * so a mid-turn rebuild keeps them routable. Calls left unpaired by earlier
+	 * turns are stripped either way. Pass while the viewed session streams.
+	 */
+	keepInFlightToolCalls?: boolean;
 }
 
 /**
@@ -167,7 +217,7 @@ function snapcompactHistoryBlocksForContext(
 
 /** Reads validated OpenAI Responses replacement history from a compaction entry. */
 export function getOpenAiRemoteCompactionPayload(
-	compaction: CompactionEntry | null | undefined,
+	compaction: Pick<CompactionEntry, "preserveData"> | null | undefined,
 ): OpenAIResponsesHistoryPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
 	if (!isRecord(candidate)) return undefined;
@@ -180,36 +230,11 @@ export function getOpenAiRemoteCompactionPayload(
 	};
 }
 
-/**
- * True for entries that represent a user-attributed request: an ordinary user
- * message, or a custom message that initiates a user turn per the shared
- * `isUserTurnInitiator` semantics (directly invoked `/skill:` prompts and
- * writable-collab prompts). Notes-backed rollover retention uses this so a
- * custom request crossing a boundary is retained exactly like an ordinary
- * one, instead of being skipped in favor of an older plain user message.
- */
-function isUserRequestEntry(entry: SessionEntry): boolean {
-	if (entry.type === "message") {
-		if (entry.message.role === "user") return true;
-		if (entry.message.role === "custom") return isUserTurnInitiator(entry.message as CustomMessage);
-		return false;
-	}
-	if (entry.type === "custom_message") {
-		if (!isCustomMessageContent(entry.content)) return false;
-		const normalized = normalizeCustomMessagePayload(entry);
-		const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-		return isUserTurnInitiator(
-			createCustomMessage(
-				normalized.customType,
-				normalized.content,
-				normalized.display,
-				normalized.details,
-				entry.timestamp,
-				attribution,
-			),
-		);
-	}
-	return false;
+/** Session entries that replay as transcript messages: persisted messages and custom messages. */
+export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
+
+export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
+	return entry.type === "message" || entry.type === "custom_message";
 }
 
 export function buildSessionContext(
@@ -226,10 +251,9 @@ export function buildSessionContext(
 		}
 	}
 
-	// Find leaf
-	let leaf: SessionEntry | undefined;
-	if (leafId === null) {
-		// Explicitly null - return no messages (navigated to before first entry)
+	// An explicit null or a replayed clear marker selects no active branch.
+	const resolvedLeafId = leafId === undefined ? resolveSessionLeafId(entries) : leafId;
+	if (resolvedLeafId === null) {
 		return {
 			messages: [],
 			thinkingLevel: "off",
@@ -239,14 +263,12 @@ export function buildSessionContext(
 			mode: "none",
 		};
 	}
-	if (leafId) {
-		leaf = byId.get(leafId);
+	let leaf = byId.get(resolvedLeafId);
+	if (!leaf && leafId !== undefined) {
+		// An explicitly requested leaf is unavailable: use the replayed leaf, never a trailing usage marker.
+		const replayedLeafId = resolveSessionLeafId(entries);
+		leaf = replayedLeafId === null ? undefined : byId.get(replayedLeafId);
 	}
-	if (!leaf) {
-		// Fallback to last entry (when leafId is undefined)
-		leaf = entries[entries.length - 1];
-	}
-
 	if (!leaf) {
 		return {
 			messages: [],
@@ -309,7 +331,8 @@ export function buildSessionContext(
 			// recorded yet. Newer sessions always record an explicit default
 			// model_change at the start of the conversation, so this branch is
 			// only used to keep pre-model_change sessions working.
-			if (!hasExplicitDefaultModel) {
+			// Claude Code's synthetic API errors retain their placeholder model in history, not as a selection.
+			if (!hasExplicitDefaultModel && entry.message.model !== "<synthetic>") {
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
@@ -358,19 +381,40 @@ export function buildSessionContext(
 		}
 	};
 
+	const trackMessageCacheState = (msg: AgentMessage): boolean => {
+		if (msg.role !== "assistant") return false;
+		const currentModel = `${msg.provider}/${msg.model}`;
+		const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
+		lastAssistantModel = currentModel;
+		const cacheMissExplained = pendingReset || modelChanged;
+		pendingReset = false;
+		return cacheMissExplained;
+	};
+
 	const pushMessage = (msg: AgentMessage) => {
 		messages.push(msg);
 		if (!options?.transcript) return;
-		if (msg.role === "assistant") {
-			const currentModel = `${msg.provider}/${msg.model}`;
-			const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
-			lastAssistantModel = currentModel;
-			cacheMissExplainedAt.push(pendingReset || modelChanged);
-			pendingReset = false;
-		} else {
-			cacheMissExplainedAt.push(false);
-		}
+		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
+
+	// A rewind persists its report twice: as the branch_summary closing the
+	// exploration branch (shown in the transcript) and as the rewind-report
+	// message that follows it (the model-facing framing). Model context keeps
+	// only the latter so each report reaches the provider once.
+	const rewindSummaryIds = new Set<string>();
+	if (!options?.transcript) {
+		for (let i = 1; i < path.length; i++) {
+			const entry = path[i];
+			const previous = path[i - 1];
+			if (
+				entry.type === "custom_message" &&
+				entry.customType === REWIND_REPORT_MESSAGE_TYPE &&
+				previous.type === "branch_summary"
+			) {
+				rewindSummaryIds.add(previous.id);
+			}
+		}
+	}
 
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
@@ -390,20 +434,9 @@ export function buildSessionContext(
 			) {
 				return;
 			}
-			if (!isCustomMessageContent(entry.content)) return;
-			const normalized = normalizeCustomMessagePayload(entry);
-			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-			pushMessage(
-				createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
-				),
-			);
-		} else if (entry.type === "branch_summary" && entry.summary) {
+			const message = customMessageEntryMessage(entry);
+			if (message) pushMessage(message);
+		} else if (entry.type === "branch_summary" && entry.summary && !rewindSummaryIds.has(entry.id)) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
 	};
@@ -412,10 +445,23 @@ export function buildSessionContext(
 		// Display transcript: every entry in chronological order. Compactions do
 		// not erase prior history here — each renders inline (as a divider in the
 		// TUI) at the point it fired, with any snapcompact frames re-attached so
-		// the component can report them.
-		for (const entry of path) {
+		// the component can report them. An immediate frame-rescue replacement is
+		// the same compaction point and supersedes its source entry below.
+		for (let index = 0; index < path.length; index++) {
+			const entry = path[index];
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
+				const replacement = path[index + 1];
+				if (
+					replacement?.type === "compaction" &&
+					entry.method === "snapcompact" &&
+					replacement.method === "snapcompact" &&
+					replacement.parentId === entry.id &&
+					replacement.firstKeptEntryId === entry.firstKeptEntryId &&
+					replacement.tokensBefore === entry.tokensBefore
+				) {
+					continue;
+				}
 				const active = entry.id === compaction?.id;
 				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
 				pushMessage(
@@ -457,8 +503,45 @@ export function buildSessionContext(
 			appendMessage(path[i]);
 		}
 	} else if (compaction) {
-		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
-		const remoteReplacementHistory = providerPayload?.items;
+		const remotePayload = getOpenAiRemoteCompactionPayload(compaction);
+		const remoteReplacementHistory = remotePayload?.items;
+		// Anthropic server compaction persists a plain-text summary plus its
+		// native replay; the kept tail still comes from entries below.
+		const anthropicPayload = getAnthropicCompactionPayload(compaction.preserveData);
+		const providerPayload = remotePayload ?? anthropicPayload;
+
+		// Find compaction index in path
+		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+
+		// A natively replayed summary must not invalidate the retained tail's
+		// bound thinking: the commit timestamp as historyRewriteAt would be newer
+		// than the tail and strip its signatures on the next request. Predate the
+		// marker before the first retained entry instead (other lanes use the
+		// commit timestamp). The summary itself keeps the commit timestamp, which
+		// still retires the tail's pre-compaction usage reports.
+		let historyRewriteAt: number | undefined;
+		if (anthropicPayload !== undefined) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			const snapshotIdx =
+				compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
+					? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
+					: -1;
+			const firstRetained =
+				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
+				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
+				path[compactionIdx + 1];
+			// The message's own time, not the entry's: an assistant message is
+			// stamped when its stream starts and saved after it ends, so a marker
+			// derived from the entry would postdate that turn and strip its thinking.
+			// Summaries without `exactTail` keep the entry time: thinking created
+			// after them was signed against requests that stripped that turn's.
+			if (firstRetained?.type === "message" && anthropicPayload.exactTail) {
+				historyRewriteAt = firstRetained.message.timestamp - 1;
+			} else if (firstRetained) {
+				const retainedAt = new Date(firstRetained.timestamp).getTime();
+				if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
+			}
+		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
@@ -474,6 +557,7 @@ export function buildSessionContext(
 				warning: compaction.warning,
 				method: compaction.method,
 				tokensAfter: compaction.tokensAfter,
+				historyRewriteAt,
 			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
@@ -482,11 +566,11 @@ export function buildSessionContext(
 			pushMessage(compactionSummaryMsg);
 		}
 
-		// Find compaction index in path
-		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
-
 		// Notes-backed windows do not summarize a discarded turn prefix. Recover
-		// its latest user request verbatim, independently of the disposable tail.
+		// its latest authoritative request verbatim, independently of the
+		// disposable tail. Parent IRC delivered while idle is persisted as a
+		// custom message, while a mid-stream parent steer is a user message; both
+		// are request candidates, but peer IRC remains ordinary agent context.
 		// Resolve from the branch journal so repeated rollovers and resume retain
 		// it too, without copying messages into compaction metadata or transcripts.
 		// Attribution follows the shared turn-initiator semantics so a
@@ -500,7 +584,7 @@ export function buildSessionContext(
 			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
 				const entry = path[i];
-				if (!isUserRequestEntry(entry)) continue;
+				if (!isRolloverRequestEntry(entry)) continue;
 				if (i < firstKeptIdx) appendMessage(entry);
 				break;
 			}
@@ -512,14 +596,41 @@ export function buildSessionContext(
 		// SessionEntry rows so a remotely-compacted session keeps its recent
 		// turns visible instead of showing only the summary and post-compaction.
 		if (!remoteReplacementHistory || options?.transcript) {
-			// Emit kept messages (before compaction, starting from firstKeptEntryId)
-			let foundFirstKept = false;
-			for (let i = 0; i < compactionIdx; i++) {
-				const entry = path[i];
-				if (entry.id === compaction.firstKeptEntryId) {
-					foundFirstKept = true;
+			// Emit kept messages (before compaction, starting from firstKeptEntryId).
+			const firstKeptIdx = path.findIndex(
+				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
+			);
+			const snapshotIdx =
+				anthropicPayload && compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
+					? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
+					: -1;
+			const retainedStart = firstKeptIdx >= 0 ? firstKeptIdx : snapshotIdx >= 0 ? snapshotIdx + 1 : -1;
+			if (retainedStart >= 0 && retainedStart < compactionIdx) {
+				let displayStartIdx = retainedStart;
+				if (options?.transcript) {
+					// `findCutPoint` may leave the collapsed display's kept region
+					// mid-turn. Trim only to a new turn initiated by the user:
+					// agent-authored custom messages (such as advisor notes) can
+					// follow the final answer of that same turn. Keep the original
+					// suffix when there is no later boundary, because the summary
+					// does not include that kept content.
+					for (let i = retainedStart; i < compactionIdx; i++) {
+						const entry = path[i];
+						if (isTurnStartEntry(entry) && (entry.type !== "custom_message" || isUserRequestEntry(entry))) {
+							displayStartIdx = i;
+							break;
+						}
+					}
 				}
-				if (foundFirstKept) {
+				for (let i = retainedStart; i < compactionIdx; i++) {
+					const entry = path[i];
+					if (i < displayStartIdx) {
+						// Hidden assistants still consume pending resets and update the
+						// previous-model state exactly as they do in the visible walk.
+						handleEntryResetTracking(entry);
+						if (entry.type === "message") trackMessageCacheState(entry.message);
+						continue;
+					}
 					appendMessage(entry);
 				}
 			}
@@ -560,7 +671,21 @@ export function buildSessionContext(
 		if (notes && renderedNotes.length > 0) {
 			const sourceEntry = path.find(entry => entry.id === notes.entryId);
 			if (sourceEntry) {
-				messages.unshift(
+				// A native Anthropic compaction block must open the request, and the
+				// provider folds it into a directly following retained assistant turn
+				// (whose signed thinking is bound to that prefix). Nothing may precede
+				// the block or split that fold, so the notes follow the summary and any
+				// retained assistant turn with its tool results.
+				const head = messages[0];
+				let insertAt = 0;
+				if (head?.role === "compactionSummary" && head.providerPayload?.type === "anthropicCompaction") {
+					insertAt = 1;
+					if (messages[insertAt]?.role === "assistant") insertAt++;
+					while (messages[insertAt]?.role === "toolResult") insertAt++;
+				}
+				messages.splice(
+					insertAt,
+					0,
 					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
 				);
 			}
@@ -588,45 +713,40 @@ export function buildSessionContext(
 	// visible reasoning while removing the immutability/invalid-signature hazard. Drop a
 	// turn left with no content. (Live turns only qualify mid-turn: a transcript rebuild
 	// while the tool still executes sees the persisted assistant turn without its result.
-	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
-	// a pending block instead of vanishing from the chat.)
-	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
-	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
-		for (const message of messages) {
-			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
+	// Those callers pass `inFlightToolCallIds` so the in-flight call stays visible as
+	// a pending block instead of vanishing from the chat, while older abandoned calls
+	// are still stripped.)
+	const pairedToolResultIds = new Set<string>(options?.inFlightToolCallIds);
+	for (const message of messages) {
+		if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
+	}
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		let strippedToolCalls = 0;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
 		}
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message.role !== "assistant") continue;
-			let strippedToolCalls = 0;
-			for (const block of message.content) {
-				if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
+		if (strippedToolCalls === 0) continue;
+		const normalized = message.content
+			.filter(
+				block =>
+					!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) && block.type !== "redactedThinking",
+			)
+			.map(block =>
+				block.type === "thinking" && block.thinkingSignature ? { ...block, thinkingSignature: undefined } : block,
+			);
+		if (normalized.length === 0 && !options?.transcript) {
+			messages.splice(i, 1);
+		} else {
+			const rewritten = { ...message, content: normalized };
+			if (options?.transcript) {
+				// Display transcript: keep the turn (even content-less) and mark
+				// how many calls were dropped so the TUI renders a placeholder
+				// row instead of silently erasing the turn's activity.
+				(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
 			}
-			if (strippedToolCalls === 0) continue;
-			const normalized = message.content
-				.filter(
-					block =>
-						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
-						block.type !== "redactedThinking",
-				)
-				.map(block =>
-					block.type === "thinking" && block.thinkingSignature
-						? { ...block, thinkingSignature: undefined }
-						: block,
-				);
-			if (normalized.length === 0 && !options?.transcript) {
-				messages.splice(i, 1);
-			} else {
-				const rewritten = { ...message, content: normalized };
-				if (options?.transcript) {
-					// Display transcript: keep the turn (even content-less) and mark
-					// how many calls were dropped so the TUI renders a placeholder
-					// row instead of silently erasing the turn's activity.
-					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
-				}
-				messages[i] = rewritten;
-			}
+			messages[i] = rewritten;
 		}
 	}
 

@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { peekFile, peekFileEnds, peekFileSync, peekFileTail } from "@oh-my-pi/pi-utils/peek-file";
 
-function rangeBuffer(length: number): Buffer {
-	return Buffer.from(Array.from({ length }, (_, index) => index % 256));
+function rangeBuffer(length: number, offset = 0): Buffer {
+	return Buffer.from(Array.from({ length }, (_, index) => (index + offset) % 256));
 }
 
 function bytesOf(input: Uint8Array): number[] {
@@ -41,17 +41,31 @@ describe("peekFile", () => {
 		expect(bytesOf(header)).toEqual(bytesOf(content.subarray(0, 777)));
 	});
 
-	it("serves concurrent async peeks without corrupting buffers", async () => {
-		const filePath = path.join(tempDir, "sample.bin");
-		const content = rangeBuffer(4096);
+	it("keeps a retained 512-byte slice stable across later peeks", async () => {
+		const firstPath = path.join(tempDir, "first.bin");
+		const secondPath = path.join(tempDir, "second.bin");
+		const firstContent = Buffer.alloc(512, 0x11);
+		fs.writeFileSync(firstPath, firstContent);
+		fs.writeFileSync(secondPath, Buffer.alloc(512, 0xee));
+
+		const retained = await peekFile(firstPath, 512, bytes => bytes.slice());
+		await peekFile(secondPath, 512, bytes => bytes[0]);
+
+		expect(bytesOf(retained)).toEqual(bytesOf(firstContent));
+	});
+
+	it("gives callbacks Uint8Array slice copy semantics", async () => {
+		const filePath = path.join(tempDir, "slice.bin");
+		const content = rangeBuffer(32, 71);
 		fs.writeFileSync(filePath, content);
 
-		const lengths = [17, 33, 64, 128, 257, 511, 512, 513, 777, 1024, 1536, 2048];
-		const headers = await Promise.all(lengths.map(length => peekFile(filePath, length, bytes => bytes.slice())));
-		expect(headers).toHaveLength(lengths.length);
-		for (const [index, header] of headers.entries()) {
-			expect(bytesOf(header)).toEqual(bytesOf(content.subarray(0, lengths[index])));
-		}
+		const sliced = await peekFile(filePath, content.length, bytes => {
+			const result = bytes.slice();
+			bytes.fill(0);
+			return result;
+		});
+
+		expect(bytesOf(sliced)).toEqual(bytesOf(content));
 	});
 });
 
@@ -66,13 +80,16 @@ describe("peekFileTail", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("reads an exact tail slice ending at EOF", async () => {
+	it("reads an exact tail slice ending at EOF with Uint8Array slice semantics", async () => {
 		const filePath = path.join(tempDir, "sample.bin");
 		const content = rangeBuffer(1024);
 		fs.writeFileSync(filePath, content);
 
-		// `op` must copy out of the pooled buffer; the pool reuses slots between calls.
-		const tail = await peekFileTail(filePath, 37, bytes => Uint8Array.from(bytes));
+		const tail = await peekFileTail(filePath, 37, bytes => {
+			const result = bytes.slice();
+			bytes.fill(0);
+			return result;
+		});
 		expect(bytesOf(tail)).toEqual(bytesOf(content.subarray(content.length - 37)));
 	});
 
@@ -89,21 +106,6 @@ describe("peekFileTail", () => {
 		const filePath = path.join(tempDir, "z.bin");
 		fs.writeFileSync(filePath, rangeBuffer(64));
 		expect(bytesOf(await peekFileTail(filePath, 0, bytes => Uint8Array.from(bytes)))).toEqual([]);
-	});
-
-	it("serves concurrent tail peeks across pool and alloc paths", async () => {
-		const filePath = path.join(tempDir, "sample.bin");
-		const content = rangeBuffer(4096);
-		fs.writeFileSync(filePath, content);
-
-		const lengths = [17, 33, 64, 128, 257, 511, 512, 513, 777, 1024, 1536, 2048];
-		const tails = await Promise.all(
-			lengths.map(length => peekFileTail(filePath, length, bytes => Uint8Array.from(bytes))),
-		);
-		expect(tails).toHaveLength(lengths.length);
-		for (const [index, tail] of tails.entries()) {
-			expect(bytesOf(tail)).toEqual(bytesOf(content.subarray(content.length - lengths[index])));
-		}
 	});
 });
 
@@ -123,10 +125,12 @@ describe("peekFileEnds", () => {
 		const content = rangeBuffer(2048);
 		fs.writeFileSync(filePath, content);
 
-		const [head, tail] = await peekFileEnds(filePath, 37, 41, (headBytes, tailBytes) => [
-			Uint8Array.from(headBytes),
-			Uint8Array.from(tailBytes),
-		]);
+		const [head, tail] = await peekFileEnds(filePath, 37, 41, (headBytes, tailBytes) => {
+			const result = [headBytes.slice(), tailBytes.slice()] as const;
+			headBytes.fill(0);
+			tailBytes.fill(0);
+			return result;
+		});
 		expect(bytesOf(head)).toEqual(bytesOf(content.subarray(0, 37)));
 		expect(bytesOf(tail)).toEqual(bytesOf(content.subarray(content.length - 41)));
 	});
@@ -180,24 +184,24 @@ describe("peekFileEnds", () => {
 		expect(bytesOf(tail)).toEqual([]);
 	});
 
-	it("serves concurrent head and tail peeks without corrupting buffers", async () => {
-		const filePath = path.join(tempDir, "sample.bin");
-		const content = rangeBuffer(4096);
-		fs.writeFileSync(filePath, content);
+	it("reads distinct head and tail content across 512-byte boundaries", async () => {
+		const cases = [511, 512, 513].map((headLength, index) => {
+			const filePath = path.join(tempDir, `boundary-${headLength}.bin`);
+			const content = rangeBuffer(2048, 79 * (index + 1));
+			fs.writeFileSync(filePath, content);
+			return { content, filePath, headLength, tailLength: headLength + 1 };
+		});
 
-		const lengths = [17, 33, 64, 128, 257, 511, 512, 513, 777, 1024, 1536, 2048];
 		const slices = await Promise.all(
-			lengths.map(length =>
-				peekFileEnds(filePath, length, length + 1, (headBytes, tailBytes) => [
-					Uint8Array.from(headBytes),
-					Uint8Array.from(tailBytes),
+			cases.map(({ filePath, headLength, tailLength }) =>
+				peekFileEnds(filePath, headLength, tailLength, (headBytes, tailBytes) => [
+					headBytes.slice(),
+					tailBytes.slice(),
 				]),
 			),
 		);
-		expect(slices).toHaveLength(lengths.length);
 		for (const [index, [head, tail]] of slices.entries()) {
-			const headLength = lengths[index];
-			const tailLength = headLength + 1;
+			const { content, headLength, tailLength } = cases[index];
 			expect(bytesOf(head)).toEqual(bytesOf(content.subarray(0, headLength)));
 			expect(bytesOf(tail)).toEqual(bytesOf(content.subarray(content.length - tailLength)));
 		}

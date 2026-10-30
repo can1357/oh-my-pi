@@ -445,13 +445,6 @@ function optionalStringField(value: unknown, field: string): string | undefined 
 	return typeof result === "string" ? result : undefined;
 }
 
-async function sha1Hex(bytes: Uint8Array): Promise<string> {
-	const digest = new Uint8Array(await crypto.subtle.digest("SHA-1", strictBytes(bytes)));
-	let result = "";
-	for (const byte of digest) result += byte.toString(16).padStart(2, "0");
-	return result;
-}
-
 async function b2Json(
 	config: DestinationRuntimeConfig,
 	url: string,
@@ -575,7 +568,7 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 					headers: {
 						authorization: uploadTarget.authorizationToken,
 						"content-type": uploadRequest.mimeType,
-						"x-bz-content-sha1": await sha1Hex(uploadRequest.bytes),
+						"x-bz-content-sha1": new Bun.CryptoHasher("sha1").update(uploadRequest.bytes).digest("hex"),
 						"x-bz-file-name": encodePath(key),
 						...(cacheControl ? { "x-bz-info-b2-cache-control": encodeURIComponent(cacheControl) } : {}),
 					},

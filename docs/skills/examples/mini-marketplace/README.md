@@ -1,6 +1,6 @@
 # mini-marketplace
 
-A minimal `oh-my-pi` marketplace catalog that demonstrates the `marketplace.json` format. It lists one plugin (`my-plugin`) using a relative path source.
+A minimal `omp` marketplace catalog that demonstrates the `marketplace.json` format. It lists one plugin (`my-plugin`) using a relative path source.
 
 ## Install command
 
@@ -16,12 +16,15 @@ omp plugin marketplace add ./docs/skills/examples/mini-marketplace
 omp plugin install my-plugin@example-marketplace
 ```
 
+Run these paths from the repository root. Start or reload `omp` after CLI installation to load the extension; its `session_start` handler shows a notification in interactive mode.
+
 ## What it demonstrates
 
 - Minimum required `marketplace.json` fields: `name`, `owner.name`, `plugins`
 - Relative path plugin source using `./` prefix (`"source": "./my-plugin"`)
 - Plugin bundled inside the same directory tree as the marketplace catalog
-- Extra catalog metadata: the example includes a top-level `description`; current marketplace parsing preserves extra top-level fields, while runtime behavior uses required fields and plugin entries.
+- Marketplace description in `metadata.description`
+- `package.json` with `omp.extensions` loads the bundled TypeScript factory after installation
 
 ## Structure
 

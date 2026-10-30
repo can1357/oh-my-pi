@@ -11,6 +11,8 @@ import {
 	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
+	type GetUserJwtRequest,
+	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	ModelAssignmentSchema,
 	StopReason,
@@ -57,6 +59,7 @@ interface RecordedTurn {
 	/** Request paths in call order, so ordering between AssignModel and chat is observable. */
 	paths: string[];
 	assignment?: AssignModelRequest;
+	authApiKeys: string[];
 	chat?: GetChatMessageRequest;
 }
 
@@ -67,7 +70,12 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
+	const message = framed.subarray(5, 5 + length);
+	return fromBinary(GetChatMessageRequestSchema, framed[0] & 0x01 ? gunzipSync(message) : message);
+}
+
+function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
+	return fromBinary(GetUserJwtRequestSchema, new Uint8Array(body as ArrayBuffer));
 }
 
 /** Fake Devin edge: serves auth, a fixed model assignment, and one chat response frame. */
@@ -75,7 +83,7 @@ function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: st
 	fetch: typeof fetch;
 	recorded: RecordedTurn;
 } {
-	const recorded: RecordedTurn = { paths: [] };
+	const recorded: RecordedTurn = { paths: [], authApiKeys: [] };
 	const chatFrame = frameConnectMessage(
 		toBinary(
 			GetChatMessageResponseSchema,
@@ -89,7 +97,10 @@ function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: st
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
 		recorded.paths.push(new URL(url).pathname);
-		if (url.includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
+		if (url.includes("GetUserJwt")) {
+			recorded.authApiKeys.push(decodeAuthRequest(init?.body).metadata?.apiKey ?? "");
+			return new Response(AUTH_PAYLOAD);
+		}
 		if (url.includes("AssignModel")) {
 			recorded.assignment = decodeAssignRequest(init?.body);
 			const response = create(AssignModelResponseSchema, {
@@ -134,7 +145,7 @@ describe("streamDevin router assignment", () => {
 		});
 
 		const result = await streamDevin(devinModel({ modelRouter: true }), context, {
-			apiKey: "token",
+			apiKey: "header.payload.signature",
 			fetch: fetchImpl,
 			conversationId: "cascade-42",
 		}).result();
@@ -155,8 +166,8 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.6.2",
-			apiKey: "devin-session-token$token",
+			extensionVersion: "3000.11.205",
+			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});
 		// The router uid must never reach GetChatMessage as the chat model.
@@ -165,6 +176,24 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.cascadeId).toBe("cascade-42");
 		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "user-jwt" });
 		expect(result.upstreamModel).toBe("claude-sonnet-4-5");
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("sends a legacy Windsurf key bare on the first and only auth attempt", async () => {
+		// Legacy `sk-ws-` keys are rejected with the session-token prefix, so they
+		// must go out bare everywhere, without a failing prefixed probe.
+		const { fetch: fetchImpl, recorded } = fakeDevin({
+			assignment: { assignmentJwt: "assign-jwt", modelUid: "claude-sonnet-4-5" },
+		});
+
+		const result = await streamDevin(devinModel({ modelRouter: true }), context, {
+			apiKey: "sk-ws-01-legacy",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(recorded.authApiKeys).toEqual(["sk-ws-01-legacy"]);
+		expect(recorded.assignment?.metadata?.apiKey).toBe("sk-ws-01-legacy");
+		expect(recorded.chat?.metadata?.apiKey).toBe("sk-ws-01-legacy");
 		expect(result.stopReason).toBe("stop");
 	});
 
@@ -240,5 +269,211 @@ describe("streamDevin router assignment", () => {
 			fetch: on.fetch,
 		}).result();
 		expect(on.recorded.chat?.disableParallelToolCalls).toBe(false);
+	});
+
+	it("normalizes tool schemas for Gemini-backed Devin models", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({});
+		const geminiContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), geminiContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown; nullable?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: "number", nullable: true });
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("normalizes tool schemas when the router assigns a Gemini backend", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({
+			assignment: { assignmentJwt: "assign-jwt", modelUid: "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW" },
+		});
+		const toolContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		await streamDevin(devinModel({ modelRouter: true }), toolContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown; nullable?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: "number", nullable: true });
+	});
+
+	it("keeps verbatim tool schemas for non-Gemini models", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({});
+		const toolContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		await streamDevin(devinModel({}, "claude-sonnet-4-5"), toolContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: ["number", "null"] });
+	});
+
+	it("hides proxy HTML in Devin HTTP errors while preserving the status", async () => {
+		const auth = fakeDevin({});
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(
+					"<html><head><title>504 Gateway Time-out</title></head><body><h1>504 Gateway Time-out</h1></body></html>",
+					{
+						status: 504,
+						statusText: "Gateway Time-out",
+						headers: { "content-type": "text/html", "retry-after": "1" },
+					},
+				);
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
+		expect(result.errorMessage).not.toContain("<html>");
+	});
+
+	it.each([
+		["C0 escape", "\u001b[2J<html>injected</html>"],
+		["C1 CSI", "\u009b2Jinjected"],
+		["DEL", "inject\u007fed"],
+	])("suppresses %s bytes materialized from JSON error envelopes", async (_label, message) => {
+		const auth = fakeDevin({});
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(JSON.stringify({ error: { message } }), {
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBe("Devin API error 502 Bad Gateway");
+	});
+
+	it("truncates oversized error details on a code-point boundary", async () => {
+		const auth = fakeDevin({});
+		// 4095 units of padding put the astral pair astride the 4096 cutoff.
+		const message = `${"x".repeat(4095)}\u{1f600}tail`;
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(JSON.stringify({ error: { message } }), {
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBeDefined();
+		expect(result.errorMessage?.isWellFormed()).toBe(true);
+		expect(result.errorMessage?.endsWith("x")).toBe(true);
+		expect(result.errorMessage).not.toContain("\ufffd");
+	});
+
+	it("sends the native CLI's completion configuration by default", async () => {
+		const edge = fakeDevin({});
+
+		await streamDevin(devinModel({}, "gpt-5-6-sol-medium"), context, { apiKey: "token", fetch: edge.fetch }).result();
+
+		expect(edge.recorded.chat?.configuration).toMatchObject({
+			numCompletions: 1n,
+			maxTokens: 64_000n,
+			maxNewlines: 400n,
+			temperature: 1,
+			firstTemperature: 0,
+			topK: 40n,
+			stopPatterns: [],
+			fimEotProbThreshold: 0,
+		});
+		// float32-widened, matching the native CLI's bytes rather than the double 0.95.
+		expect(edge.recorded.chat?.configuration?.topP).toBe(Math.fround(0.95));
+		expect(edge.recorded.chat?.configuration?.topP).not.toBe(0.95);
+	});
+
+	it("keeps explicit completion overrides without adding stop patterns", async () => {
+		const edge = fakeDevin({});
+
+		await streamDevin(devinModel({}, "gpt-5-6-sol-medium"), context, {
+			apiKey: "token",
+			fetch: edge.fetch,
+			maxTokens: 32_000,
+			temperature: 0.2,
+			topP: 0.8,
+			stopSequences: ["END"],
+		}).result();
+
+		expect(edge.recorded.chat?.configuration).toMatchObject({
+			maxTokens: 32_000n,
+			temperature: 0.2,
+			topP: Math.fround(0.8),
+			stopPatterns: ["END"],
+		});
 	});
 });

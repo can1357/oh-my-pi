@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	resolvePluginExtensionPaths,
+	resolvePluginManifestEntries,
 	resolvePluginToolPaths,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
 import type { InstalledPlugin, PluginManifest } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/types";
@@ -43,6 +44,31 @@ describe("plugin manifest path resolution", () => {
 
 			expect(resolvePluginToolPaths(plugin)).toEqual([path.join(dir, "index.ts")]);
 			expect(resolvePluginExtensionPaths(plugin)).toEqual([path.join(dir, "ext.ts")]);
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	it("reports an unresolved extension directory whose authoritative manifest entries are missing", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-manifest-paths-"));
+		try {
+			const extensionsDir = path.join(dir, "extensions");
+			fs.mkdirSync(extensionsDir);
+			fs.writeFileSync(
+				path.join(extensionsDir, "package.json"),
+				JSON.stringify({ omp: { extensions: ["./missing.ts"] } }),
+			);
+			fs.writeFileSync(path.join(extensionsDir, "index.ts"), "export default function () {};");
+			const plugin = makePlugin(dir, {
+				name: "fixture-plugin",
+				version: "1.0.0",
+				extensions: ["./extensions"],
+			});
+
+			expect(resolvePluginManifestEntries(plugin, "extensions")).toEqual([
+				{ entry: "./extensions", resolvedPath: null },
+			]);
+			expect(resolvePluginExtensionPaths(plugin)).toEqual([]);
 		} finally {
 			removeSyncWithRetries(dir);
 		}

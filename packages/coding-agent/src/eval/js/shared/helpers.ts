@@ -1,6 +1,7 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
-import { ToolError } from "../../../tools/tool-errors";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./types";
 
 export interface HelperOptions {
@@ -17,9 +18,9 @@ export interface HelperContext {
 	cwd(): string;
 	env: Map<string, string>;
 	/**
-	 * On-disk roots for internal-URL schemes the helpers accept (e.g.
-	 * `{ local: "/…/artifacts/local" }`). A path like `local://x.md` is rewritten
-	 * to `<root>/x.md` before any filesystem op; unknown schemes are rejected.
+	 * On-disk roots for internal-URL schemes the helpers accept, keyed by scheme
+	 * (see `buildEvalUrlRoots`). A path like `<scheme>://x.md` is rewritten to
+	 * `<root>/x.md` before any filesystem op; unknown schemes are rejected.
 	 */
 	localRoots(): Record<string, string>;
 	emitStatus(event: JsStatusEvent): void;
@@ -31,9 +32,12 @@ export interface HelperContext {
  * onto the global scope.
  */
 export interface HelperBundle {
-	read(rawPath: string, options?: HelperOptions): Promise<string>;
+	/** Resolves to `undefined` when `artifact://<id>` is not in this session's artifacts dir; the prelude then asks the read tool. */
+	read(rawPath: string, options?: HelperOptions): Promise<string | undefined>;
 	writeFile(rawPath: string, data: unknown): Promise<string>;
 	env(key?: string, value?: string): string | Record<string, string> | undefined;
+	/** Whether `rawPath` is an internal URL whose scheme has an injected root (served by these helpers, not delegated to the read tool). */
+	hasRoot(rawPath: string): boolean;
 }
 
 const utf8Encoder = new TextEncoder();
@@ -41,7 +45,9 @@ const utf8Encoder = new TextEncoder();
 export function createHelpers(ctx: HelperContext): HelperBundle {
 	return {
 		read: async (rawPath, options = {}) => {
-			const { filePath, file, size } = await resolveRegularFile(ctx, rawPath);
+			const resolved = await resolveRegularFile(ctx, rawPath);
+			if (!resolved) return undefined;
+			const { filePath, file, size } = resolved;
 			let text = await file.text();
 			const offset = typeof options.offset === "number" ? options.offset : 1;
 			const limit = typeof options.limit === "number" ? options.limit : undefined;
@@ -82,6 +88,14 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			ctx.emitStatus({ op: "env", key, value: result, action: "get" });
 			return result;
 		},
+		hasRoot: rawPath => {
+			const match = INTERNAL_URL_RE.exec(rawPath);
+			if (match === null) return false;
+			const scheme = match[1].toLowerCase();
+			if (!Object.hasOwn(ctx.localRoots(), scheme)) return false;
+			// `artifact://<id>` reads its file here; selector forms (`artifact://3:raw:5-9`) stay with the read tool.
+			return scheme !== "artifact" || ARTIFACT_ID_RE.test(match[2]);
+		},
 	};
 }
 
@@ -95,6 +109,7 @@ function getMergedEnv(ctx: HelperContext): Record<string, string> {
 }
 
 const INTERNAL_URL_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i;
+const ARTIFACT_ID_RE = /^\d+$/;
 
 function resolvePath(ctx: HelperContext, value: string): string {
 	if (path.isAbsolute(value)) return path.normalize(value);
@@ -103,8 +118,8 @@ function resolvePath(ctx: HelperContext, value: string): string {
 
 /**
  * Map a raw helper path to an absolute filesystem path. Plain paths resolve
- * against the cwd; an internal-URL whose scheme has an injected root (e.g.
- * `local://`) is rewritten under that root; any other `scheme://` is rejected
+ * against the cwd; an internal-URL whose scheme has an injected root is
+ * rewritten under that root; any other `scheme://` is rejected
  * so we never silently create a literal `scheme:/` directory.
  */
 function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "write"): string {
@@ -112,14 +127,33 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
 	if (!match) return resolvePath(ctx, rawPath);
 	const scheme = match[1].toLowerCase();
 	const root = ctx.localRoots()[scheme];
-	if (!root) {
+	// Artifacts are immutable, and their root is a lookup dir rather than a path prefix.
+	if (!root || scheme === "artifact") {
 		throw new ToolError(`Protocol paths are not supported by ${op}(): ${rawPath}`);
 	}
 	return resolveUnderRoot(scheme, root, match[2], rawPath);
 }
 
+/**
+ * The file backing `artifact://<id>` in the artifacts dir `root` (`<id>.<tool>.log`), or `undefined` when absent.
+ * Mirrors `ArtifactManager.getPath`, which lives on the host (the worker cannot import it without loading the
+ * native addon), as `resolveUnderRoot` mirrors the local:// handler. A miss, including a dir still being seeded,
+ * falls back to the read tool, which resolves through the manager.
+ */
+async function resolveArtifactPath(root: string, id: string): Promise<string | undefined> {
+	let files: string[];
+	try {
+		files = await fs.readdir(root);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		return undefined;
+	}
+	const name = files.find(file => file.startsWith(`${id}.`));
+	return name === undefined ? undefined : path.join(root, name);
+}
+
 /** Resolve an internal-URL relative path under its root, mirroring the host
- *  local-protocol handler: decode, reject absolute/traversal, confine to root. */
+ *  protocol handler: decode, reject absolute/traversal, confine to root. */
 function resolveUnderRoot(scheme: string, root: string, rawRelative: string, rawPath: string): string {
 	let relative: string;
 	try {
@@ -146,8 +180,14 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
 async function resolveRegularFile(
 	ctx: HelperContext,
 	rawPath: string,
-): Promise<{ filePath: string; file: Bun.BunFile; size: number }> {
-	const filePath = resolveHelperPath(ctx, rawPath, "read");
+): Promise<{ filePath: string; file: Bun.BunFile; size: number } | undefined> {
+	const match = INTERNAL_URL_RE.exec(rawPath);
+	const artifactRoot = match?.[1].toLowerCase() === "artifact" ? ctx.localRoots().artifact : undefined;
+	const filePath =
+		artifactRoot && match && ARTIFACT_ID_RE.test(match[2])
+			? await resolveArtifactPath(artifactRoot, match[2])
+			: resolveHelperPath(ctx, rawPath, "read");
+	if (filePath === undefined) return undefined;
 	const file = Bun.file(filePath);
 	const stat = await file.stat();
 	if (stat.isDirectory()) {

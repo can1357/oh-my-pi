@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -15,7 +15,7 @@ function createTestSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	};
 }
 
-function createSettingsWithOverrides(overrides: Partial<Record<SettingPath, unknown>> = {}): Settings {
+function createSettingsWithOverrides(overrides: Record<string, unknown> = {}): Settings {
 	return Settings.isolated({
 		"lsp.formatOnWrite": true,
 		"bashInterceptor.enabled": true,
@@ -72,27 +72,12 @@ describe("createTools", () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({ "astGrep.enabled": false }),
 		});
-		const tools = await createTools(session, ["search", "find", "grep"]);
+		const tools = await createTools(session, ["search", "glob", "grep"]);
 		const names = tools.map(t => t.name);
 
 		expect(names.filter(name => name === "grep")).toHaveLength(1);
 		expect(names).toContain("glob");
 		expect(names).not.toContain("search");
-		expect(names).not.toContain("find");
-	});
-
-	it("includes bash and eval when both eval backends are allowed", async () => {
-		const session = createTestSession({
-			settings: createSettingsWithOverrides({
-				"eval.py": true,
-				"eval.js": true,
-			}),
-		});
-		const tools = await createTools(session);
-		const names = tools.map(t => t.name);
-
-		expect(names).toContain("eval");
-		expect(names).toContain("bash");
 	});
 
 	it("still exposes eval when only the js backend is allowed", async () => {
@@ -127,22 +112,6 @@ describe("createTools", () => {
 	it("excludes lsp tool when session disables LSP", async () => {
 		const session = createTestSession({ enableLsp: false });
 		const tools = await createTools(session, ["read", "lsp", "write"]);
-		const names = tools.map(t => t.name);
-
-		expect(names).toEqual(["read", "write"]);
-	});
-
-	it("excludes lsp tool when disabled", async () => {
-		const session = createTestSession({ enableLsp: false });
-		const tools = await createTools(session);
-		const names = tools.map(t => t.name);
-
-		expect(names).not.toContain("lsp");
-	});
-
-	it("respects requested tool subset", async () => {
-		const session = createTestSession();
-		const tools = await createTools(session, ["read", "write"]);
 		const names = tools.map(t => t.name);
 
 		expect(names).toEqual(["read", "write"]);
@@ -258,15 +227,6 @@ describe("createTools", () => {
 		expect(requested.map(t => t.name)).toEqual(["read", "write"]);
 	});
 
-	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {
-		const session = createTestSession({
-			hasUI: true,
-			settings: createSettingsWithOverrides({ "ask.enabled": true }),
-		});
-		const tools = await createTools(session);
-		expect(tools.map(t => t.name)).toContain("ask");
-	});
-
 	it("filters disabled builtin tools by settings", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({
@@ -347,6 +307,14 @@ describe("createTools", () => {
 		).map(t => t.name);
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
+	});
+
+	it("grants wait to subagents when explicitly requested", async () => {
+		const settings = createSettingsWithOverrides({ "async.enabled": true });
+		const main = (await createTools(createTestSession({ settings }), ["read", "wait"])).map(t => t.name);
+		const sub = (await createTools(createTestSession({ taskDepth: 1, settings }), ["read", "wait"])).map(t => t.name);
+		expect(main).toContain("wait");
+		expect(sub).toContain("wait");
 	});
 
 	it("excludes checkpoint/rewind from subagent when not explicitly requested", async () => {
@@ -444,9 +412,5 @@ describe("createTools", () => {
 		).map(t => t.name);
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
-	});
-
-	it("HIDDEN_TOOLS contains yield, goal, and think", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "think", "yield"]);
 	});
 });

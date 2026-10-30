@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -6,7 +9,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const taskAgent: AgentDefinition = {
@@ -20,9 +24,10 @@ function createSession(options: {
 	manager: AsyncJobManager;
 	settings?: Record<string, unknown>;
 	spawns?: string | boolean;
+	cwd?: string;
 }): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		settings: Settings.isolated({ "async.enabled": true, ...options.settings }),
 		getSessionFile: () => null,
@@ -107,6 +112,7 @@ describe("task async preflight", () => {
 			const result = await tool.execute("preflight", params as TaskParams);
 
 			expect(textOf(result)).toContain(expectation);
+			expect(result.isError).toBe(true);
 			expect(jobs.getJob(name)).toBeUndefined();
 		},
 	);
@@ -129,6 +135,7 @@ describe("task async preflight", () => {
 
 		const text = textOf(result);
 		expect(text).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(result.isError).toBe(true);
 		expect(text).toContain('Task AlsoInvalid failed preflight: Unknown agent "also-missing"');
 		expect(register).not.toHaveBeenCalled();
 		expect(runSubprocess).not.toHaveBeenCalled();
@@ -159,5 +166,28 @@ describe("task async preflight", () => {
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it("names the searched agent directories, home-shortened, when the agent is unknown", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unknown-agent-"));
+		try {
+			const projectDir = path.join(home, "project");
+			await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+			vi.spyOn(os, "homedir").mockReturnValue(home);
+			const tool = await TaskTool.create(createSession({ manager: manager(), cwd: projectDir }));
+
+			const result = await tool.execute("unknown", {
+				agent: "missing",
+				name: "Unknown",
+				task: "Work.",
+			} as TaskParams);
+
+			const text = textOf(result);
+			// shortenPath renders home paths as portable `~/…` on every platform.
+			expect(text).toContain("Searched: ~/project/.omp/agents");
+			expect(text).not.toContain(home);
+		} finally {
+			await fs.rm(home, { recursive: true, force: true });
+		}
 	});
 });

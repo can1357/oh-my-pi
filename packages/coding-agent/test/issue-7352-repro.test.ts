@@ -46,6 +46,8 @@ function silentEmbedWorker(state: { spawns: number; terminated: number }): () =>
 			onError() {
 				return () => {};
 			},
+			ref() {},
+			unref() {},
 			async terminate() {
 				state.terminated += 1;
 				handler = undefined;
@@ -136,6 +138,8 @@ describe("issue #7352 — mnemopi embed requests are bounded and reap a wedged w
 				onError() {
 					return () => {};
 				},
+				ref() {},
+				unref() {},
 				async terminate() {
 					state.terminated += 1;
 					handler = undefined;

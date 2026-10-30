@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -13,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const noopSchema = type({});
@@ -46,7 +47,10 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 	});
 
 	async function createSession(options: {
-		responses: MockResponse[];
+		responses: MockHandler[];
+		contextWindow?: number;
+		maxTokens?: number;
+		thresholdTokens?: number;
 		/** Optional `session_before_compact` short-circuit so a viable compaction makes no LLM call. */
 		shortCircuitCompaction?: boolean;
 		/** Delay message-end hooks so the turn is absent until the persistence barrier resolves. */
@@ -54,9 +58,13 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 	}): Promise<{ notices: string[]; compactionStarts: number[]; compactionResults: number }> {
 		tempDir = TempDir.createSync("@pi-mid-turn-compaction-dead-end-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("mock", "test-key");
+		authStorage.keys.setRuntime("mock", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const mock = createMockModel({ responses: options.responses });
+		const mock = createMockModel({
+			responses: options.responses,
+			contextWindow: options.contextWindow,
+			maxTokens: options.maxTokens,
+		});
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock]);
 
 		let extensionRunner: ExtensionRunner | undefined;
@@ -102,7 +110,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.methodOrder": ["soft"],
-			"compaction.thresholdTokens": 100_000,
+			"compaction.thresholdTokens": options.thresholdTokens ?? 100_000,
 			"compaction.midTurnEnabled": true,
 			"compaction.autoContinue": false,
 			"retry.enabled": false,
@@ -128,6 +136,54 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 		});
 		return state;
 	}
+
+	it("compacts older reasoning before continuing a long turn with the full output allowance", async () => {
+		const olderThinking = "older-step " + "r".repeat(87_382);
+		const latestThinking = "latest-step " + "r".repeat(67_448);
+		let continued = false;
+		let continuedThinking: string[] = [];
+		let continuedMaxTokens: number | null | undefined;
+		const state = await createSession({
+			contextWindow: 117_120,
+			maxTokens: 55_000,
+			thresholdTokens: 45_000,
+			shortCircuitCompaction: true,
+			responses: [
+				{
+					content: [
+						{ type: "thinking", thinking: olderThinking },
+						{ type: "toolCall", id: "first", name: "noop", arguments: {} },
+					],
+					usage: { input: 44_654, output: 22_608 },
+				},
+				{
+					content: [
+						{ type: "thinking", thinking: latestThinking },
+						{ type: "toolCall", id: "second", name: "noop", arguments: {} },
+					],
+					usage: { input: 44_806, output: 18_840 },
+				},
+				(context, options) => {
+					continuedThinking = context.messages.flatMap(message =>
+						message.role === "assistant"
+							? message.content.filter(block => block.type === "thinking").map(block => block.thinking)
+							: [],
+					);
+					continuedMaxTokens = options?.maxTokens ?? session.model?.maxTokens;
+					continued = true;
+					return { content: ["done"] };
+				},
+			],
+		});
+
+		await session.prompt("Continue the review");
+		expect(continued).toBe(true);
+		expect(continuedThinking).not.toContain(olderThinking);
+		expect(continuedThinking).toContain(latestThinking);
+		expect(continuedMaxTokens).toBe(55_000);
+		expect(state.compactionResults).toBe(2);
+		expect(state.notices.filter(message => message.includes(DEAD_END_WARNING))).toEqual([]);
+	});
 
 	it("attempts and warns once per oversized tool-loop turn when no cut point ever appears", async () => {
 		// The genuinely-unrecoverable shape: prepareCompaction can never find a cut
@@ -185,7 +241,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 				isSplitTurn: false,
 				tokensBefore: 190_000,
 				fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-				settings: session.settings.getGroup("compaction"),
+				settings: cfgCompaction.get(session.settings),
 			};
 		});
 

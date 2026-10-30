@@ -1,5 +1,5 @@
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { ASIData, ASIValue, MetricDirection, NumericMetricMap } from "./types";
+import type { ASIData, ASIValue, NumericMetricMap } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 export const METRIC_LINE_PREFIX = "METRIC";
 export const ASI_LINE_PREFIX = "ASI";
@@ -7,10 +7,85 @@ export const EXPERIMENT_MAX_LINES = 10;
 export const EXPERIMENT_MAX_BYTES = 4 * 1024;
 
 const DENIED_KEY_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+const METRIC_LINE_PATTERN = `^${METRIC_LINE_PREFIX}\\s+([\\w.µ-]+)=(\\S+)\\s*$`;
+const ASI_LINE_PATTERN = `^${ASI_LINE_PREFIX}\\s+([\\w.-]+)=(.+)\\s*$`;
+/** Characters `^`/`$` treat as line boundaries under the `m` flag. */
+const LINE_TERMINATOR_RE = /[\n\r\u2028\u2029]/g;
+const NON_WHITESPACE_RE = /\S/g;
+
+function indexOfPattern(re: RegExp, text: string, from: number): number {
+	re.lastIndex = from;
+	return re.exec(text)?.index ?? -1;
+}
+
+/**
+ * Streaming equivalent of {@link parseMetricLines} + {@link parseAsiLines}: feed output
+ * chunks with {@link append}, then {@link finish}. Only the unfinished trailing line (or a
+ * prefix line still awaiting its `name=value` continuation) is buffered, so memory stays
+ * O(line) instead of O(output) while yielding the same results as parsing the full text.
+ */
+export class ExperimentOutputScanner {
+	#carry = "";
+	#metrics = new Map<string, number>();
+	#asi: ASIData = {};
+	#metricRe = new RegExp(METRIC_LINE_PATTERN, "my");
+	#asiRe = new RegExp(ASI_LINE_PATTERN, "my");
+
+	append(chunk: string): void {
+		if (!chunk) return;
+		this.#carry += chunk;
+		this.#scan(false);
+	}
+
+	finish(): { metrics: Map<string, number>; asi: ASIData | null } {
+		this.#scan(true);
+		return { metrics: this.#metrics, asi: Object.keys(this.#asi).length > 0 ? this.#asi : null };
+	}
+
+	#scan(final: boolean): void {
+		const carry = this.#carry;
+		let pos = 0;
+		while (pos < carry.length) {
+			const lineEnd = indexOfPattern(LINE_TERMINATOR_RE, carry, pos);
+			if (lineEnd < 0 && !final) break;
+			const prefixLength = carry.startsWith(METRIC_LINE_PREFIX, pos)
+				? METRIC_LINE_PREFIX.length
+				: carry.startsWith(ASI_LINE_PREFIX, pos)
+					? ASI_LINE_PREFIX.length
+					: 0;
+			if (prefixLength > 0) {
+				// `\s+` after the prefix may span lines: wait until the first non-blank
+				// continuation line is terminated before matching.
+				const valueStart = indexOfPattern(NON_WHITESPACE_RE, carry, pos + prefixLength);
+				const valueLineEnd = valueStart < 0 ? -1 : indexOfPattern(LINE_TERMINATOR_RE, carry, valueStart);
+				if (valueLineEnd < 0 && !final) break;
+				this.#matchAt(carry, pos);
+			}
+			if (lineEnd < 0) {
+				pos = carry.length;
+				break;
+			}
+			pos = lineEnd + 1;
+		}
+		this.#carry = pos === 0 ? carry : carry.slice(pos);
+	}
+
+	#matchAt(text: string, pos: number): void {
+		this.#metricRe.lastIndex = pos;
+		const metric = this.#metricRe.exec(text);
+		if (metric && !DENIED_KEY_NAMES.has(metric[1])) {
+			const value = Number(metric[2]);
+			if (Number.isFinite(value)) this.#metrics.set(metric[1], value);
+		}
+		this.#asiRe.lastIndex = pos;
+		const asi = this.#asiRe.exec(text);
+		if (asi && !DENIED_KEY_NAMES.has(asi[1])) this.#asi[asi[1]] = parseAsiValue(asi[2]);
+	}
+}
 
 export function parseMetricLines(output: string): Map<string, number> {
 	const metrics = new Map<string, number>();
-	const regex = new RegExp(`^${METRIC_LINE_PREFIX}\\s+([\\w.µ-]+)=(\\S+)\\s*$`, "gm");
+	const regex = new RegExp(METRIC_LINE_PATTERN, "gm");
 	let match = regex.exec(output);
 	while (match !== null) {
 		const name = match[1];
@@ -27,7 +102,7 @@ export function parseMetricLines(output: string): Map<string, number> {
 
 export function parseAsiLines(output: string): ASIData | null {
 	const asi: ASIData = {};
-	const regex = new RegExp(`^${ASI_LINE_PREFIX}\\s+([\\w.-]+)=(.+)\\s*$`, "gm");
+	const regex = new RegExp(ASI_LINE_PATTERN, "gm");
 	let match = regex.exec(output);
 	while (match !== null) {
 		const key = match[1];
@@ -67,40 +142,6 @@ export function mergeAsi(base: ASIData | null, override: ASIData | undefined): A
 	};
 }
 
-export function commas(value: number): string {
-	const sign = value < 0 ? "-" : "";
-	const digits = String(Math.trunc(Math.abs(value)));
-	const groups: string[] = [];
-	for (let index = digits.length; index > 0; index -= 3) {
-		groups.unshift(digits.slice(Math.max(0, index - 3), index));
-	}
-	return sign + groups.join(",");
-}
-
-export function fmtNum(value: number, decimals: number = 0): string {
-	if (decimals <= 0) return commas(Math.round(value));
-	const absolute = Math.abs(value);
-	const whole = Math.floor(absolute);
-	const fraction = (absolute - whole).toFixed(decimals).slice(1);
-	return `${value < 0 ? "-" : ""}${commas(whole)}${fraction}`;
-}
-
-export function formatNum(value: number | null, unit: string): string {
-	if (value === null) return "-";
-	if (Number.isInteger(value)) return `${fmtNum(value)}${unit}`;
-	return `${fmtNum(value, 2)}${unit}`;
-}
-
-export function formatElapsed(milliseconds: number): string {
-	const totalSeconds = Math.floor(milliseconds / 1000);
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	if (minutes > 0) {
-		return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-	}
-	return `${seconds}s`;
-}
-
 export function killTree(pid: number, signal: NodeJS.Signals | number = "SIGTERM"): void {
 	try {
 		process.kill(-pid, signal);
@@ -111,10 +152,6 @@ export function killTree(pid: number, signal: NodeJS.Signals | number = "SIGTERM
 			// Process already exited.
 		}
 	}
-}
-
-export function isBetter(current: number, best: number, direction: MetricDirection): boolean {
-	return direction === "lower" ? current < best : current > best;
 }
 
 export function inferMetricUnitFromName(name: string): string {

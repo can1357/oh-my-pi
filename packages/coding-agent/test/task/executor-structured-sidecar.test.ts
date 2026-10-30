@@ -43,6 +43,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		},
 		prompt: async (_text: string, _options?: PromptOptions) => {
 			onPrompt({ emit });
+			return true;
 		},
 	};
 	return session as unknown as AgentSession;

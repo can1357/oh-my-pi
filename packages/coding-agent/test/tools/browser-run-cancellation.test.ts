@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
-import { postmortem } from "@oh-my-pi/pi-utils";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../src/eval/js/shared/runtime";
 import {
 	bindRunFacade,
@@ -207,6 +207,53 @@ describe("browser run cancellation", () => {
 		expect(isBrowserRunRejection(caught, owner)).toBe(true);
 	});
 
+	it("keeps async facade results on the tracked path inside browser combinator tracking", async () => {
+		const owner = {};
+		const browserFailure = new Error("async browser failure");
+		const facade = bindRunFacade(
+			{
+				async fail(): Promise<never> {
+					throw browserFailure;
+				},
+			},
+			new AbortController().signal,
+			owner,
+		);
+		let caught: unknown;
+		await withBrowserPromiseCombinatorTracking(
+			owner,
+			() => {},
+			async () => {
+				try {
+					await facade.fail();
+				} catch (error) {
+					caught = error;
+				}
+			},
+		);
+		expect(caught).toBe(browserFailure);
+		expect(isBrowserRunRejection(caught, owner)).toBe(true);
+	});
+
+	it("keeps a thenable handle's methods and rejects its await after abort", async () => {
+		const controller = new AbortController();
+		const deferred = Promise.withResolvers<string>();
+		const handle = {
+			// oxlint-disable-next-line unicorn/no-thenable -- fixture models an awaitable element handle.
+			then: (onFulfilled?: (value: string) => unknown, onRejected?: (reason: unknown) => unknown) =>
+				deferred.promise.then(onFulfilled, onRejected),
+			click: async () => "clicked",
+		};
+		const facade = bindRunFacade({ ref: () => handle }, controller.signal);
+		expect(await facade.ref().click()).toBe("clicked");
+		const fulfilled: unknown[] = [];
+		const awaited = facade.ref().then(value => fulfilled.push(value));
+		controller.abort(postmortem.markExpectedCleanupError(new Error("run ended")));
+		deferred.resolve("element");
+		await expect(awaited).rejects.toThrow();
+		expect(fulfilled).toEqual([]);
+	});
+
 	it("reports user rethrows from native browser-promise combinators", async () => {
 		vi.useRealTimers();
 		for (const name of ["all", "race", "allSettled", "any"] as const) {
@@ -260,6 +307,33 @@ describe("browser run cancellation", () => {
 		}
 	});
 
+	it("reports a user rethrow from a combinator over a thenable handle", async () => {
+		// The report is queued with setTimeout(0); fake timers would never deliver it.
+		vi.useRealTimers();
+		for (const name of ["all", "race"] as const) {
+			const owner = {};
+			const userFailure = new Error(`${name} continuation failure`);
+			const reported = Promise.withResolvers<unknown>();
+			const handle = {
+				// oxlint-disable-next-line unicorn/no-thenable -- fixture models an awaitable element handle.
+				then: (onFulfilled?: (value: string) => unknown, onRejected?: (reason: unknown) => unknown) =>
+					Promise.resolve("element").then(onFulfilled, onRejected),
+				click: async () => "clicked",
+			};
+			const facade = bindRunFacade({ ref: () => handle }, new AbortController().signal, owner, reported.resolve);
+
+			await withBrowserPromiseCombinatorTracking(owner, reported.resolve, async () => {
+				// oxlint-disable-next-line unicorn/no-single-promise-in-promise-methods -- the combinators themselves are under test
+				const combined = name === "all" ? Promise.all([facade.ref()]) : Promise.race([facade.ref()]);
+				void combined.then(() => {
+					throw userFailure;
+				});
+				// The tracked combinator reports the dropped rethrow instead of leaving it unhandled.
+				expect(await reported.promise).toBe(userFailure);
+			});
+		}
+	});
+
 	it("preserves native await through a tracked browser-promise combinator", async () => {
 		vi.useRealTimers();
 		const owner = {};
@@ -297,7 +371,8 @@ describe("browser run cancellation", () => {
 
 	it("keeps a real worker alive after floating browser and continuation rejections", async () => {
 		vi.useRealTimers();
-		const workerPath = `/tmp/omp-browser-rejections-${process.pid}.ts`;
+		using workerDir = TempDir.createSync("@omp-browser-rejections-");
+		const workerPath = workerDir.join("worker.ts");
 		await Bun.write(
 			workerPath,
 			`
@@ -501,7 +576,7 @@ describe("browser run cancellation", () => {
 
 		const run = Promise.race([
 			runtime.run(
-				'try { await wait(60); } catch {} await tab.goto("https://late.example"); display("late display");',
+				'try { await wait(60); } catch {} await tab.goto("https://late.example"); print("late print");',
 				"browser-run-cancellation-test.js",
 				hooks,
 			),

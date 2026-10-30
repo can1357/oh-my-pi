@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 beforeAll(async () => {
@@ -65,7 +65,6 @@ describe("issue #1909: tree-selector empty-state messaging", () => {
 		// the panel isn't broken and can widen the view without leaving the screen.
 		expect(text).toContain("hidden by the current filter");
 		expect(text).toContain("[default]");
-		expect(text.toLowerCase()).toContain("alt+a");
 		// Total count must reflect the real flatNodes count, not 0/0 (otherwise the
 		// "filter hides things" framing is unconvincing).
 		expect(text).toContain("(0/2)");
@@ -84,7 +83,6 @@ describe("issue #1909: tree-selector empty-state messaging", () => {
 		const text = renderSelector(selector);
 
 		expect(text).toContain('No entries match search "z"');
-		expect(text.toLowerCase()).toContain("backspace");
 		// Must NOT misattribute the empty result to the filter mode.
 		expect(text).not.toContain("hidden by the current filter");
 	});

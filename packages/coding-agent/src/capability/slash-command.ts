@@ -22,27 +22,10 @@ export interface SlashCommand {
 	description?: string;
 	/** Already-parsed argument hint (`argumentHint` or `argument-hint`). */
 	argumentHint?: string;
+	/** Already-parsed `side: true` frontmatter (literal boolean only), when discovery stripped it from `content`. */
+	side?: boolean;
 	/** Source metadata */
 	_source: SourceMeta;
-}
-
-function optionalTrimmedString(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-/** Display fields already parsed from command frontmatter. */
-export function slashCommandFrontmatterDisplay(frontmatter: Record<string, unknown>): {
-	description?: string;
-	argumentHint?: string;
-} {
-	return {
-		description: optionalTrimmedString(frontmatter.description),
-		argumentHint: optionalTrimmedString(
-			frontmatter.argumentHint ?? ("argument-hint" in frontmatter ? frontmatter["argument-hint"] : undefined),
-		),
-	};
 }
 
 export const slashCommandCapability = defineCapability<SlashCommand>({

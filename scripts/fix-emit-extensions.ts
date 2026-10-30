@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * Rewrite extensionless relative specifiers in emitted `.d.ts`/`.js` files to
  * explicit `.js` extensions so published output resolves under Node ESM and
@@ -37,7 +36,7 @@ export type EmitExt = ".d.ts" | ".js";
  *  given the directory of the importing emitted file and the extension the
  *  emitted tree uses (`.d.ts` for declarations, `.js` for runtime output).
  *  Returns null to leave as-is. */
-export async function resolveEmitSpecifier(fromDir: string, spec: string, ext: EmitExt): Promise<string | null> {
+async function resolveEmitSpecifier(fromDir: string, spec: string, ext: EmitExt): Promise<string | null> {
 	// Already has a JS/JSON extension, or a declaration extension we map to .js.
 	if (/\.(js|json|mjs|cjs)$/.test(spec)) return null;
 	if (spec.endsWith(".d.ts")) return `${spec.slice(0, -".d.ts".length)}.js`;
@@ -61,7 +60,7 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /** Rewrite one emitted file in place. Returns the number of specifiers changed. */
-export async function fixEmitFile(filePath: string, ext: EmitExt): Promise<number> {
+async function fixEmitFile(filePath: string, ext: EmitExt): Promise<number> {
 	const source = await Bun.file(filePath).text();
 	const fromDir = path.dirname(filePath);
 	let changed = 0;
@@ -101,15 +100,4 @@ export async function fixEmitExtensions(dir: string, ext: EmitExt): Promise<{ fi
 		}
 	}
 	return { files, specifiers };
-}
-
-if (import.meta.main) {
-	const target = process.argv[2];
-	const ext = (process.argv[3] ?? ".d.ts") as EmitExt;
-	if (!target || (ext !== ".d.ts" && ext !== ".js")) {
-		console.error("usage: fix-emit-extensions.ts <emitted dir> [.d.ts|.js]");
-		process.exit(1);
-	}
-	const { files, specifiers } = await fixEmitExtensions(target, ext);
-	console.log(`fix-emit-extensions: rewrote ${specifiers} specifiers across ${files} files in ${target}`);
 }

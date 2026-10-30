@@ -3,7 +3,6 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -12,40 +11,37 @@ import {
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
 	resolveWireModelId,
+	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models";
-import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
+import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import type { OAuthRequestIdentity } from "./auth/types";
+import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
+import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
-import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
+import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
-import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
+import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
+import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
-import { isKimiModel, streamKimi } from "./providers/kimi";
+import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
-// Heavy provider stream functions are imported lazily via register-builtins,
-// which wraps each provider module in a dynamic import. This keeps the
-// AWS SDK, google-auth-library, @google/genai, and
-// other provider SDKs out of the CLI startup parse graph. The
-// gitlab-duo / kimi / synthetic providers stay eager because their modules
-// export routing predicates (isGitLabDuoModel, isKimiModel, isSyntheticModel)
-// that must be callable synchronously before streaming begins, and their
-// modules are thin wrappers with no heavy SDK dependencies.
+import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
 	streamCursor,
@@ -58,8 +54,7 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
-import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
-import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
+import { getProviderDefinition } from "./registry";
 import type {
 	Api,
 	AssistantMessage,
@@ -68,7 +63,6 @@ import type {
 	FetchImpl,
 	Model,
 	OptionsForApi,
-	ProviderSessionState,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -76,7 +70,6 @@ import type {
 } from "./types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
-import { isFoundryEnabled } from "./utils/foundry";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
@@ -91,77 +84,12 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 }
 
 /**
- * Whether {@link model} is an official first-party endpoint whose stream needs
- * no leaked-thinking healing — the official Anthropic API and the official
- * OpenAI / OpenAI-Codex endpoints return structured thinking blocks and never
- * leak reasoning idioms into the visible text channel.
- *
- * The gate is provider id **and** official endpoint URL: pointing
- * `provider: "anthropic"` (or `openai`) at a custom proxy via `models.yml`
- * still routes through {@link wrapLeakedThinkingStream}, since a third-party
- * gateway may well leak. URL checks are strict (exact origin / path boundary
- * or parsed hostname) — a substring match would accept lookalikes like
- * `https://api.openai.com.evil/`. Anthropic Foundry (`CLAUDE_CODE_USE_FOUNDRY`)
- * redirects an empty `baseUrl` to `FOUNDRY_BASE_URL`, so the check runs against
- * that effective endpoint — exempt only when it resolves to the official host.
- */
-function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
-	switch (model.provider) {
-		case "anthropic": {
-			// Mirror resolveAnthropicBaseUrl's effective endpoint: Foundry redirects
-			// an empty baseUrl to FOUNDRY_BASE_URL; otherwise an explicit non-official
-			// model.baseUrl wins, then the ANTHROPIC_BASE_URL gateway fallback, then
-			// the official default. Exempt only when the effective endpoint is official.
-			if (isFoundryEnabled()) {
-				const foundry = $env.FOUNDRY_BASE_URL?.trim();
-				if (foundry) return isOfficialAnthropicApiUrl(foundry);
-			}
-			if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
-			return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
-		}
-		case "openai":
-			return isOfficialOpenAIApiUrl(model.baseUrl);
-		case "openai-codex":
-			return isOfficialCodexApiUrl(model.baseUrl);
-		default:
-			return false;
-	}
-}
-
-/** Strict official-OpenAI endpoint check; missing baseUrl defaults to `api.openai.com`. */
-function isOfficialOpenAIApiUrl(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return true;
-	try {
-		return new URL(baseUrl).hostname === "api.openai.com";
-	} catch {
-		return false;
-	}
-}
-
-const OFFICIAL_CODEX_URL = new URL(CODEX_BASE_URL);
-
-/** Strict official-Codex endpoint check; exact origin or a path boundary after {@link CODEX_BASE_URL}. */
-export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return true;
-	try {
-		const candidate = new URL(baseUrl);
-		const candidatePath = candidate.pathname.replace(/\/+$/, "");
-		return (
-			candidate.origin === OFFICIAL_CODEX_URL.origin &&
-			(candidatePath === OFFICIAL_CODEX_URL.pathname || candidatePath.startsWith(`${OFFICIAL_CODEX_URL.pathname}/`))
-		);
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Apply live leaked-thinking healing unless {@link model} is an official
- * first-party endpoint ({@link isLeakedThinkingHealExempt}), which emits
- * structured thinking and needs no healing.
+ * Apply live leaked-thinking healing unless the request reaches the model's official endpoint
+ * ({@link reachesOfficialEndpoint}): official Anthropic / OpenAI / Codex endpoints return structured
+ * thinking blocks and never leak reasoning idioms into the visible text channel.
  */
 function healLeakedThinking(model: Model<Api>, inner: AssistantMessageEventStream): AssistantMessageEventStream {
-	return isLeakedThinkingHealExempt(model) ? inner : wrapLeakedThinkingStream(inner);
+	return reachesOfficialEndpoint(model) ? inner : wrapLeakedThinkingStream(inner);
 }
 
 type ProviderInFlightLease = {
@@ -183,6 +111,9 @@ const PROVIDER_INFLIGHT_HEARTBEAT_MS = 5_000;
 const PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS = 250;
 const PROVIDER_INFLIGHT_HEARTBEAT_FLUSH_TIMEOUT_MS = 1_000;
 const PROVIDER_INFLIGHT_RELEASE_TIMEOUT_MS = 5_000;
+const PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS = 25;
+const PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS = 250;
+const PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS = 3_000;
 
 let configuredProviderMaxInFlightRequests: Record<string, number> = {};
 let providerInFlightRootOverride: string | undefined;
@@ -193,6 +124,11 @@ let providerInFlightHeartbeatWriterOverride:
 	| undefined;
 let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
 let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
+let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockMkdirOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockPlatformOverride: NodeJS.Platform | undefined;
+let providerInFlightLockRetryTimings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -214,7 +150,7 @@ function providerInFlightRoot(): string {
 }
 
 function providerInFlightSegment(provider: string): string {
-	return crypto.createHash("sha256").update(provider).digest("base64url");
+	return Bun.SHA256.hash(provider, "base64url");
 }
 
 function providerInFlightDir(provider: string): string {
@@ -357,6 +293,42 @@ async function releaseProviderInFlightLockDirIfSame(
 	} catch {}
 }
 
+// On Windows, mkdir on a lock directory another process is concurrently deleting
+// (delete-pending while a watcher, antivirus, or indexer still holds it) fails
+// with ERROR_ACCESS_DENIED — mapped to EPERM/EACCES — instead of EEXIST, so
+// ordinary contention looks like a permission error. On win32 only, back off and
+// retry briefly; if the failure persists past the budget, rethrow the original
+// error so a real permission problem still surfaces. Every other outcome
+// (success, EEXIST, any other code) exits immediately, keeping non-win32 and
+// non-transient behavior unchanged.
+function isTransientProviderInFlightLockMkdirError(error: NodeJS.ErrnoException): boolean {
+	if ((providerInFlightLockPlatformOverride ?? process.platform) !== "win32") return false;
+	return error.code === "EPERM" || error.code === "EACCES";
+}
+
+async function mkdirProviderInFlightLockDir(lockDir: string, signal?: AbortSignal): Promise<void> {
+	const mkdir = providerInFlightLockMkdirOverride ?? ((dir: string) => fs.mkdir(dir));
+	let failures = 0;
+	let since = Date.now();
+	while (true) {
+		try {
+			await mkdir(lockDir);
+			return;
+		} catch (error) {
+			if (!isTransientProviderInFlightLockMkdirError(error as NodeJS.ErrnoException)) throw error;
+			const now = Date.now();
+			if (failures === 0) since = now;
+			const budgetMs = providerInFlightLockRetryTimings?.budgetMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS;
+			if (now - since >= budgetMs) throw error;
+			const initialMs = providerInFlightLockRetryTimings?.initialDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS;
+			const maxMs = providerInFlightLockRetryTimings?.maxDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS;
+			const delayMs = Math.min(maxMs, initialMs * 2 ** failures);
+			failures++;
+			await untilAborted(signal, Bun.sleep(delayMs));
+		}
+	}
+}
+
 async function acquireProviderInFlightLock(provider: string, signal?: AbortSignal): Promise<() => Promise<void>> {
 	const lockDir = providerInFlightLockDir(provider);
 	await fs.mkdir(path.dirname(lockDir), { recursive: true });
@@ -364,13 +336,22 @@ async function acquireProviderInFlightLock(provider: string, signal?: AbortSigna
 	while (true) {
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 		try {
-			await fs.mkdir(lockDir);
-			const lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			await mkdirProviderInFlightLockDir(lockDir, signal);
+			await providerInFlightLockCreatedObserverOverride?.(lockDir);
+			let lockIdentity: ProviderInFlightLockIdentity;
+			try {
+				lockIdentity = await readProviderInFlightLockIdentity(lockDir);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
 			const token = crypto.randomUUID();
 			try {
+				await providerInFlightLockIdentifiedObserverOverride?.(lockDir);
 				await writeProviderInFlightInfo(lockDir, token);
 			} catch (error) {
 				await releaseProviderInFlightLockDirIfSame(lockDir, lockIdentity);
+				if (isEnoent(error)) continue;
 				throw error;
 			}
 			return async () => {
@@ -623,6 +604,21 @@ export const __providerInFlightForTesting = {
 	setWaitObserver(observer: ((provider: string) => void) | undefined): void {
 		providerInFlightWaitObserverOverride = observer;
 	},
+	setLockCreatedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockCreatedObserverOverride = observer;
+	},
+	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockIdentifiedObserverOverride = observer;
+	},
+	setLockMkdirOverride(mkdir: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockMkdirOverride = mkdir;
+	},
+	setLockPlatformOverride(platform: NodeJS.Platform | undefined): void {
+		providerInFlightLockPlatformOverride = platform;
+	},
+	setLockRetryTimings(timings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined): void {
+		providerInFlightLockRetryTimings = timings;
+	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);
 	},
@@ -649,14 +645,14 @@ export const __providerInFlightForTesting = {
 function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
 	model: Model<Api>,
 	options: TOptions | undefined,
-	dispatch: () => AssistantMessageEventStream,
+	dispatch: (limited: boolean) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch());
+	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -691,7 +687,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
-			const inner = healLeakedThinking(model, dispatch());
+			const inner = healLeakedThinking(model, dispatch(true));
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -803,72 +799,30 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 	return rewriteUrl(input);
 }
 
-type KeyResolver = string | (() => string | undefined);
+function withResolvedModelHeaders<TApi extends Api>(
+	model: Model<TApi>,
+	signal: AbortSignal | undefined,
+	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	const resolveHeaders = model.resolveHeaders;
+	if (!resolveHeaders) return run(model);
 
-const LEGACY_ENV_KEYS: Record<string, KeyResolver> = {
-	// Non-provider / search-tool keys and API-name keys not modeled as registry provider defs.
-	"azure-openai-responses": "AZURE_OPENAI_API_KEY",
-	jina: "JINA_API_KEY",
-	brave: "BRAVE_API_KEY",
-	tinyfish: "TINYFISH_API_KEY",
-	firecrawl: "FIRECRAWL_API_KEY",
-};
-
-/**
- * Env fallbacks derived from the catalog table — the single source for plain
- * provider env-var names. Registry defs override with computed resolvers
- * (Foundry/ADC/Bedrock probes); legacy non-provider keys merge last.
- */
-const CATALOG_ENTRY_ENV_KEYS = (CATALOG_PROVIDERS as readonly ProviderCatalogEntry[]).flatMap(provider => {
-	const envVars = provider.envVars;
-	if (!envVars || envVars.length === 0) return [];
-	const resolver: KeyResolver = envVars.length === 1 ? envVars[0] : () => $pickenv(...envVars);
-	return [[provider.id, resolver] as [string, KeyResolver]];
-});
-
-const serviceProviderMap: Record<string, KeyResolver> = {
-	...Object.fromEntries(CATALOG_ENTRY_ENV_KEYS),
-	...Object.fromEntries(
-		PROVIDER_REGISTRY.flatMap(provider =>
-			provider.envKeys != null ? [[provider.id, provider.envKeys] as [string, KeyResolver]] : [],
-		),
-	),
-	...LEGACY_ENV_KEYS,
-};
-
-/**
- * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
- *
- * Will not return API keys for providers that require OAuth tokens.
- * Checks Bun.env, then cwd/.env, then ~/.env.
- */
-export function getEnvApiKey(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
-	if (typeof resolver === "string") {
-		return $env[resolver];
-	}
-	return resolver?.();
-}
-
-/**
- * Name of the environment variable that backs `getEnvApiKey` for a provider,
- * when that provider maps to a single named variable (e.g. `github-copilot` →
- * `COPILOT_GITHUB_TOKEN`). Returns undefined for providers whose env fallback
- * is computed (multi-var pickers, Vertex ADC / Bedrock probes, …) since no
- * single variable name describes the source.
- */
-export function getEnvApiKeyName(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
-	return typeof resolver === "string" ? resolver : undefined;
-}
-
-/**
- * Enumerate every provider that has an env-var fallback for `getEnvApiKey`.
- * Used by `omp auth-broker migrate --include-env` to discover env-sourced keys
- * that should be uploaded to the broker.
- */
-export function listProvidersWithEnvKey(): string[] {
-	return Object.keys(serviceProviderMap);
+	const outer = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			const headers = await untilAborted(signal, () => resolveHeaders(signal));
+			signal?.throwIfAborted();
+			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			for await (const event of inner) {
+				outer.push(event);
+				if (outer.done) return;
+			}
+			if (!outer.done) outer.end(await inner.result());
+		} catch (error) {
+			outer.fail(error);
+		}
+	})();
+	return outer;
 }
 
 export function stream<TApi extends Api>(
@@ -876,9 +830,12 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -887,7 +844,7 @@ export function stream<TApi extends Api>(
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
 		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, codec.context, opts, limited)),
 		),
 	);
 }
@@ -895,18 +852,22 @@ export function stream<TApi extends Api>(
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
-	options?: OptionsForApi<TApi>,
+	options: OptionsForApi<TApi> | undefined,
+	limited: boolean,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as StreamOptions),
+	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.stream(model, context, requestOptions as StreamOptions);
+		return customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited });
 	}
 
-	if (isGitLabDuoModel(model)) {
+	if (model.provider === "gitlab-duo") {
 		const apiKey = requestOptions.apiKey || getEnvApiKey(model.provider);
 		if (!apiKey) {
 			throw new AIError.MissingApiKeyError(model.provider);
@@ -914,6 +875,7 @@ function streamDispatch<TApi extends Api>(
 		return streamGitLabDuo(model, context, {
 			...(requestOptions as SimpleStreamOptions),
 			apiKey,
+			waitForTerminalDrain: limited,
 		});
 	}
 
@@ -935,6 +897,12 @@ function streamDispatch<TApi extends Api>(
 	if (model.api === "bedrock-converse-stream") {
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
+	if (model.api === "factory-droid-agent") {
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, {
+			...(requestOptions as FactoryDroidOptions),
+			waitForTerminalDrain: limited,
+		});
+	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
 	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
@@ -954,6 +922,13 @@ function streamDispatch<TApi extends Api>(
 		: { ...preparedOptions, apiKey };
 
 	const api: Api = providerModel.api;
+	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0") {
+		return streamOpenAIResponses(
+			providerModel as Model<"openai-responses">,
+			context,
+			providerOptions as OptionsForApi<"openai-responses">,
+		);
+	}
 	switch (api) {
 		case "anthropic-messages": {
 			const anthropicOptions = providerOptions as AnthropicOptions;
@@ -963,28 +938,12 @@ function streamDispatch<TApi extends Api>(
 			});
 		}
 
-		case "openrouter": {
-			const useResponses = $env.PI_OPENROUTER_RESPONSES !== "0";
-			if (useResponses) {
-				return streamOpenAIResponses(
-					providerModel as Model<"openai-responses">,
-					context,
-					providerOptions as OptionsForApi<"openai-responses">,
-				);
-			}
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
-		}
-
+		case "openrouter":
 		case "openai-completions":
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
+			return streamOpenAICompletions(providerModel as Model<"openai-completions">, context, {
+				...(providerOptions as OpenAICompletionsOptions),
+				waitForTerminalDrain: limited,
+			});
 
 		case "openai-responses":
 			return streamOpenAIResponses(
@@ -1026,6 +985,13 @@ function streamDispatch<TApi extends Api>(
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
+		case "apple-foundation-models":
+			return streamAppleFoundationModels(
+				providerModel as Model<"apple-foundation-models">,
+				context,
+				providerOptions as AppleFoundationModelsOptions,
+			);
+
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
 	}
@@ -1060,7 +1026,11 @@ async function resolveWithThinkingLoopRetries(
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
-		const message = await dispatch().result();
+		const response = dispatch();
+		for await (const _event of response) {
+			// Completion callers do not consume deltas; drain them as they arrive to avoid retaining the response history.
+		}
+		const message = await response.result();
 		onAttempt?.(message);
 		return message;
 	};
@@ -1153,288 +1123,46 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 		stream.push(event);
 	}
 }
-
-const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
-const ANTHROPIC_CACHE_REFRESH_LEAD_MS = 15_000;
-const ANTHROPIC_CACHE_REFRESH_LIMIT = 3;
-const ANTHROPIC_CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
-
-interface AnthropicCacheRefreshPlan {
-	refresh(controller: AbortController): Promise<number | undefined>;
-}
-
-class AnthropicCacheRefreshState implements ProviderSessionState {
-	#controller: AbortController | undefined;
-	#generation = 0;
-	#plan: AnthropicCacheRefreshPlan | undefined;
-	#refreshesRemaining = 0;
-	#timer: NodeJS.Timeout | undefined;
-
-	cancel(): void {
-		this.#generation++;
-		if (this.#timer !== undefined) {
-			clearTimeout(this.#timer);
-			this.#timer = undefined;
-		}
-		this.#controller?.abort();
-		this.#controller = undefined;
-		this.#plan = undefined;
-		this.#refreshesRemaining = 0;
-	}
-
-	arm(plan: AnthropicCacheRefreshPlan, cacheTouchedAtMs: number): void {
-		this.cancel();
-		this.#plan = plan;
-		this.#refreshesRemaining = ANTHROPIC_CACHE_REFRESH_LIMIT;
-		this.#schedule(cacheTouchedAtMs, this.#generation);
-	}
-
-	close(): void {
-		this.cancel();
-	}
-
-	#schedule(cacheTouchedAtMs: number, generation: number): void {
-		const refreshAtMs = cacheTouchedAtMs + ANTHROPIC_CACHE_TTL_MS - ANTHROPIC_CACHE_REFRESH_LEAD_MS;
-		this.#timer = setTimeout(
-			() => {
-				this.#timer = undefined;
-				void this.#refresh(generation);
-			},
-			Math.max(0, refreshAtMs - Date.now()),
-		);
-		this.#timer.unref?.();
-	}
-
-	async #refresh(generation: number): Promise<void> {
-		const plan = this.#plan;
-		if (generation !== this.#generation || !plan || this.#refreshesRemaining <= 0) return;
-
-		const controller = new AbortController();
-		this.#controller = controller;
-		let cacheTouchedAtMs: number | undefined;
-		try {
-			cacheTouchedAtMs = await plan.refresh(controller);
-		} catch (error) {
-			if (generation === this.#generation && !controller.signal.aborted) {
-				logger.debug("Anthropic prompt-cache refresh failed", { error: String(error) });
-			}
-		}
-		if (generation !== this.#generation) return;
-
-		this.#controller = undefined;
-		if (cacheTouchedAtMs === undefined) {
-			this.#plan = undefined;
-			this.#refreshesRemaining = 0;
-			return;
-		}
-
-		this.#refreshesRemaining--;
-		if (this.#refreshesRemaining <= 0) {
-			this.#plan = undefined;
-			return;
-		}
-		this.#schedule(cacheTouchedAtMs, generation);
-	}
-}
-
-function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): boolean {
-	return (
-		model.api === "anthropic-messages" &&
-		model.provider === "anthropic" &&
-		model.transport !== "pi-native" &&
-		isLeakedThinkingHealExempt(model)
-	);
-}
-
-function isAnthropicRefreshPayload(payload: unknown): payload is MessageCreateParamsStreaming {
-	return (
-		typeof payload === "object" &&
-		payload !== null &&
-		"messages" in payload &&
-		Array.isArray(payload.messages) &&
-		"max_tokens" in payload &&
-		typeof payload.max_tokens === "number"
-	);
-}
-
-function isShortAnthropicCacheControl(cacheControl: unknown): boolean {
-	return (
-		typeof cacheControl === "object" &&
-		cacheControl !== null &&
-		"type" in cacheControl &&
-		cacheControl.type === "ephemeral" &&
-		(!("ttl" in cacheControl) || cacheControl.ttl !== "1h")
-	);
-}
-
-function hasShortAnthropicMessageBreakpoint(payload: MessageCreateParamsStreaming): boolean {
-	for (const message of payload.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if ("cache_control" in block && isShortAnthropicCacheControl(block.cache_control)) return true;
-		}
-	}
-	return false;
-}
-
-function isAnthropicGenerationEvent(event: AssistantMessageEvent): boolean {
-	switch (event.type) {
-		case "text_start":
-		case "thinking_start":
-		case "toolcall_start":
-		case "image_end":
-			return true;
-		case "text_delta":
-		case "thinking_delta":
-		case "toolcall_delta":
-			return event.delta.length > 0;
-		default:
-			return false;
-	}
-}
-
-function isAnthropicThinkingActive(model: Model<Api>, payload: MessageCreateParamsStreaming): boolean {
-	if (payload.thinking) return payload.thinking.type !== "disabled";
-	return model.thinking?.mode === "anthropic-adaptive" && payload.output_config?.effort != null;
-}
-
-function createAnthropicCacheRefreshPlan<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-	payload: MessageCreateParamsStreaming,
-): AnthropicCacheRefreshPlan {
-	const thinkingEnabled = isAnthropicThinkingActive(model, payload);
-	return {
-		async refresh(controller) {
-			let cacheRead = 0;
-			let cacheWrite = 0;
-			let cacheTouchedAtMs: number | undefined;
-			let canceledAfterGenerationStarted = false;
-			const response = streamSimpleRequest(model, context, {
-				...options,
-				acceptEmptyResponse: true,
-				anthropicCacheRefreshRequest: !thinkingEnabled,
-				cacheRetention: "short",
-				maxTokens: thinkingEnabled ? options?.maxTokens : 0,
-				onPayload: () => ({
-					...payload,
-					max_tokens: thinkingEnabled ? payload.max_tokens : 0,
-				}),
-				onResponse: () => {
-					cacheTouchedAtMs = Date.now();
-				},
-				onSseEvent: undefined,
-				signal: controller.signal,
-			});
-
-			for await (const event of response) {
-				if ("partial" in event) {
-					cacheRead = event.partial.usage.cacheRead;
-					cacheWrite = event.partial.usage.cacheWrite;
-				}
-				if (event.type === "error") return undefined;
-				if (event.type === "done") {
-					cacheRead = event.message.usage.cacheRead;
-					cacheWrite = event.message.usage.cacheWrite;
-					return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0
-						? cacheTouchedAtMs
-						: undefined;
-				}
-				if (thinkingEnabled && isAnthropicGenerationEvent(event)) {
-					canceledAfterGenerationStarted = true;
-					controller.abort();
-					break;
-				}
-			}
-
-			if (canceledAfterGenerationStarted) {
-				try {
-					await response.result();
-				} catch (error) {
-					if (!controller.signal.aborted) throw error;
-				}
-			}
-			return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0 ? cacheTouchedAtMs : undefined;
-		},
-	};
-}
-
-function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-): AssistantMessageEventStream {
-	const providerSessionState = options?.providerSessionState;
-	if (!options?.anthropicCacheRefresh || !providerSessionState) {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const existingState = providerSessionState.get(ANTHROPIC_CACHE_REFRESH_STATE_KEY);
-	if (existingState instanceof AnthropicCacheRefreshState) {
-		existingState.cancel();
-	} else if (existingState) {
-		return streamSimpleRequest(model, context, options);
-	}
-	if (!supportsAnthropicCacheRefresh(model) || resolveCacheRetention(options.cacheRetention) !== "short") {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const refreshState = existingState ?? new AnthropicCacheRefreshState();
-	if (!existingState) providerSessionState.set(ANTHROPIC_CACHE_REFRESH_STATE_KEY, refreshState);
-
-	let cacheTouchedAtMs: number | undefined;
-	let capturedPayload: MessageCreateParamsStreaming | undefined;
-	const inner = streamSimpleRequest(model, context, {
-		...options,
-		onPayload: async (payload, payloadModel) => {
-			const replacement = await options?.onPayload?.(payload, payloadModel);
-			const finalPayload = replacement ?? payload;
-			if (isAnthropicRefreshPayload(finalPayload)) capturedPayload = finalPayload;
-			return replacement;
-		},
-		onResponse: async (response, responseModel) => {
-			cacheTouchedAtMs = Date.now();
-			await options?.onResponse?.(response, responseModel);
-		},
-	});
-	const outer = new AssistantMessageEventStream();
-	const armRefresh = (message: AssistantMessage): void => {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			message.usage.cacheRead + message.usage.cacheWrite <= 0 ||
-			cacheTouchedAtMs === undefined ||
-			capturedPayload === undefined ||
-			!hasShortAnthropicMessageBreakpoint(capturedPayload)
-		) {
-			return;
-		}
-		refreshState.arm(createAnthropicCacheRefreshPlan(model, context, options, capturedPayload), cacheTouchedAtMs);
-	};
-
-	void (async () => {
-		try {
-			for await (const event of inner) {
-				if (event.type === "done") armRefresh(event.message);
-				outer.push(event);
-				if (outer.done) return;
-			}
-			if (!outer.done) {
-				const result = await inner.result();
-				armRefresh(result);
-				outer.end(result);
-			}
-		} catch (error) {
-			outer.fail(error);
-		}
-	})();
-	return outer;
-}
-
 function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOptions {
 	if (options?.sessionId) return options;
 	return { ...options, sessionId: crypto.randomUUID() };
+}
+
+type SamplingOptions = Pick<
+	StreamOptions,
+	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "frequencyPenalty"
+>;
+
+/**
+ * Drop explicit sampling parameters before any provider builds its payload
+ * when the model's resolved `compat.supportsSamplingParams` is `false`. The
+ * catalog's class rules assign that per model lineage on every compat record,
+ * and an explicit compat override still wins, so this one check covers every
+ * provider.
+ */
+function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api>, options: T): T {
+	if (
+		options.temperature === undefined &&
+		options.topP === undefined &&
+		options.topK === undefined &&
+		options.minP === undefined &&
+		options.presencePenalty === undefined &&
+		options.repetitionPenalty === undefined &&
+		options.frequencyPenalty === undefined
+	) {
+		return options;
+	}
+	const compat = model.compat;
+	if (!compat || !("supportsSamplingParams" in compat) || compat.supportsSamplingParams !== false) return options;
+	const supported = { ...options };
+	delete supported.temperature;
+	delete supported.topP;
+	delete supported.topK;
+	delete supported.minP;
+	delete supported.presencePenalty;
+	delete supported.repetitionPenalty;
+	delete supported.frequencyPenalty;
+	return supported;
 }
 
 export function streamSimple<TApi extends Api>(
@@ -1443,8 +1171,13 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
+	// Unverified thinking is opt-in: without a requested effort the request is
+	// byte-identical to a non-reasoning model's.
+	const effortRequested =
+		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
+	if (!effortRequested) model = withoutUnverifiedThinking(model);
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
+		return streamSimpleRequest(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1457,7 +1190,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
 }
 
 /**
@@ -1485,7 +1218,10 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
@@ -1494,7 +1230,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (apiKey?: string): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (
+			apiKey?: string,
+			credentialId?: number,
+			oauthIdentity?: OAuthRequestIdentity,
+		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1503,9 +1243,14 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
+					if (credentialId !== undefined) {
+						if ("partial" in event) event.partial.credentialId = credentialId;
+						else if (event.type === "done") event.message.credentialId = credentialId;
+						else event.error.credentialId = credentialId;
+					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
 						continue;
@@ -1532,7 +1277,11 @@ function streamSimpleRequest<TApi extends Api>(
 					if (outer.done) return undefined;
 				}
 				flushBuffered();
-				if (!outer.done) outer.end(await inner.result());
+				if (!outer.done) {
+					const result = await inner.result();
+					if (credentialId !== undefined) result.credentialId = credentialId;
+					outer.end(result);
+				}
 			} catch (error) {
 				if (
 					!emittedReplayUnsafeEvent &&
@@ -1561,8 +1310,13 @@ function streamSimpleRequest<TApi extends Api>(
 
 		void (async () => {
 			let lastKey: string | undefined;
+			let credentialId: number | undefined;
+			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
-				lastKey = (await apiKeyResolver({ lastChance: false, error: undefined, signal })) || undefined;
+				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				lastKey = resolvedApiKeyBearer(resolved);
+				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1584,21 +1338,38 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
+				let nextCredentialId: number | undefined;
+				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				const nextKey = await resolveNextAuthRetryKey(
+					retryState,
+					apiKeyResolver,
+					failure.error,
+					signal,
+					resolved => {
+						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+					},
+				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
 			emitFailure(failure);
 		})();
 		return outer;
+	}
+
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
+			streamSimpleRequest(resolvedModel, context, requestOptions),
+		);
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
@@ -1638,7 +1409,9 @@ function streamSimpleRequest<TApi extends Api>(
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited =>
+				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
+			),
 		);
 	}
 
@@ -1668,12 +1441,13 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
-	if (isGitLabDuoModel(model)) {
+	if (model.provider === "gitlab-duo") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamGitLabDuo(model, context, {
 					...opts,
 					apiKey,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1694,7 +1468,7 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (isKimiModel(model)) {
+	if (model.provider === "kimi-code") {
 		// streamKimi handles openai/anthropic format mapping internally, but the
 		// mandatory-reasoning clamp is a request-shaping concern owned here: K3's
 		// `supports_thinking_type: "only"` endpoint rejects disabled/omitted
@@ -1702,25 +1476,27 @@ function streamSimpleRequest<TApi extends Api>(
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
 		return withThinkingLoopGuard(model, kimiOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamKimi(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.kimiApiFormat,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
 	}
 
 	// Synthetic - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (isSyntheticModel(model)) {
+	if (model.provider === "synthetic") {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamSynthetic(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.syntheticApiFormat ?? "openai",
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1779,6 +1555,34 @@ const GOOGLE_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
+/**
+ * Estimated thinking spend for an effort, used to size Google's
+ * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
+ * dynamic budget (`-1`, from a custom or catalog budget) put no positive
+ * number on the wire, so the effort default stands in for them.
+ */
+function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets?: ThinkingBudgets): number {
+	const custom = customBudgets?.[effort];
+	if (custom !== undefined && custom > 0) return custom;
+	const catalog = model.thinking?.effortBudgets?.[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+}
+
+/**
+ * Google total output cap for a caller answer budget: the budget plus thinking
+ * headroom, bounded by the model cap. `undefined` (no cap sent) when neither
+ * the caller nor the model has one.
+ */
+function googleMaxOutputTokens(
+	baseMaxTokens: number | undefined,
+	model: Model<Api>,
+	headroom: number,
+): number | undefined {
+	return baseMaxTokens === undefined
+		? undefined
+		: maxTokensWithThinkingBudget(baseMaxTokens, model.maxTokens, headroom);
+}
+
 const BEDROCK_CLAUDE_THINKING: Record<Effort, number> = {
 	minimal: 1024,
 	low: 2048,
@@ -1792,7 +1596,7 @@ function resolveBedrockThinkingBudget(
 	model: Model<"bedrock-converse-stream">,
 	options?: SimpleStreamOptions,
 ): { budget: number; level: Effort } | null {
-	if (!options?.reasoning || !model.reasoning) return null;
+	if (!options?.reasoning || !model.reasoning || options.disableReasoning || options.forceReasoningOff) return null;
 	const level = requireSupportedEffort(model, options.reasoning);
 	const budget = options.thinkingBudgets?.[level] ?? BEDROCK_CLAUDE_THINKING[level];
 	return { budget, level };
@@ -1990,12 +1794,16 @@ function mapOptionsForApi<TApi extends Api>(
 		repetitionPenalty: options?.repetitionPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
+		maxHttpAttempts: options?.maxHttpAttempts,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
+		credentialId: options?.credentialId,
+		oauthIdentity: options?.oauthIdentity,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		metadata: options?.metadata,
+		loopGuard: options?.loopGuard,
 		taskBudget: options?.taskBudget,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
@@ -2003,8 +1811,10 @@ function mapOptionsForApi<TApi extends Api>(
 		streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
+		parentSessionId: options?.parentSessionId,
+		minimizeEffort: options?.minimizeEffort,
+		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
-		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
@@ -2012,8 +1822,10 @@ function mapOptionsForApi<TApi extends Api>(
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
-		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		anthropicCompaction: options?.anthropicCompaction,
+		anthropicSlowMode: options?.anthropicSlowMode,
+		userProfileId: options?.userProfileId,
 		...simpleProviderOptions,
 	};
 
@@ -2054,11 +1866,21 @@ function mapOptionsForApi<TApi extends Api>(
 					? mapEffortToAnthropicAdaptiveEffort(model, reasoning)
 					: undefined;
 
+			// A caller's maxTokens is the output it asked for, but thinking spends the
+			// same max_tokens: adaptive thinking can use all of it and leave no answer.
+			// Give thinking its budget on top, as the budget-only path below does. An
+			// uncapped request keeps the provider default.
+			const maxTokensWithThinking =
+				base.maxTokens === undefined
+					? undefined
+					: maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
+
 			// For Opus 4.6+ and Sonnet 4.6+: use adaptive thinking with effort level
 			// For older models: use budget-based thinking
 			if (thinkingMode === "anthropic-adaptive") {
 				return castApi<"anthropic-messages">({
 					...base,
+					maxTokens: maxTokensWithThinking,
 					requestModelId: resolveWireModelId(model, reasoning),
 					thinkingEnabled: true,
 					effort,
@@ -2069,28 +1891,39 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 
 			if (ANTHROPIC_USE_INTERLEAVED_THINKING) {
-				return castApi<"anthropic-messages">({
-					...base,
-					requestModelId: resolveWireModelId(model, reasoning),
-					thinkingEnabled: true,
-					thinkingBudgetTokens: thinkingBudget,
-					effort,
-					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
-					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
-				});
+				if (
+					model.maxTokens !== null &&
+					model.maxTokens !== undefined &&
+					model.maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER
+				) {
+					thinkingBudget = model.maxTokens - OUTPUT_FALLBACK_BUFFER;
+				}
+				if (thinkingBudget >= ANTHROPIC_THINKING.minimal) {
+					return castApi<"anthropic-messages">({
+						...base,
+						maxTokens: maxTokensWithThinking,
+						requestModelId: resolveWireModelId(model, reasoning),
+						thinkingEnabled: true,
+						thinkingBudgetTokens: thinkingBudget,
+						effort,
+						toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+						thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+						serviceTier: options?.serviceTier,
+					});
+				}
 			}
 
 			// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 			const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
 
-			// If not enough room for thinking + output, reduce thinking budget
-			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = maxTokens - MIN_OUTPUT_TOKENS;
+			// Keep the provider's output buffer after thinking, reducing the
+			// budget before its wire-level clamp could fall below the API minimum.
+			if (maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER) {
+				thinkingBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
 			}
 
 			// If thinking budget is too low, disable thinking
-			if (thinkingBudget <= 0) {
+			if (thinkingBudget < ANTHROPIC_THINKING.minimal) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -2117,7 +1950,11 @@ function mapOptionsForApi<TApi extends Api>(
 		case "bedrock-converse-stream": {
 			const bedrockBase: BedrockOptions = {
 				...base,
-				reasoning: options?.reasoning,
+				// Explicit reasoning-off must fold here like the anthropic-messages
+				// branch: the provider gates thinking only on `reasoning`, and the
+				// budget path below must not inflate a capped request for thinking
+				// that was turned off.
+				reasoning: options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning,
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
@@ -2126,8 +1963,25 @@ function mapOptionsForApi<TApi extends Api>(
 				guardrailTrace: model.guardrailTrace ?? options?.guardrailTrace,
 				requestMetadata: options?.requestMetadata,
 			};
-			// Effort modes send effort directly, no budget_tokens — skip budget inflation.
-			if (model.thinking?.mode === "effort" || model.thinking?.mode === "anthropic-adaptive") {
+			// Adaptive Claude shares max_tokens between thinking and the answer, like
+			// the anthropic-messages adaptive path: a caller's cap is the output it
+			// wants, so add the effort's budget on top. Uncapped requests keep the
+			// provider default.
+			if (model.thinking?.mode === "anthropic-adaptive") {
+				const reasoning = bedrockBase.reasoning;
+				const budget = reasoning
+					? (options?.thinkingBudgets?.[reasoning] ?? BEDROCK_CLAUDE_THINKING[reasoning])
+					: 0;
+				if (!model.reasoning || bedrockBase.maxTokens === undefined || budget <= 0) {
+					return castApi<"bedrock-converse-stream">(bedrockBase);
+				}
+				return castApi<"bedrock-converse-stream">({
+					...bedrockBase,
+					maxTokens: maxTokensWithThinkingBudget(bedrockBase.maxTokens, model.maxTokens, budget),
+				});
+			}
+			// Effort mode sends effort directly, no budget_tokens — skip budget inflation.
+			if (model.thinking?.mode === "effort") {
 				return castApi<"bedrock-converse-stream">(bedrockBase);
 			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
@@ -2162,6 +2016,9 @@ function mapOptionsForApi<TApi extends Api>(
 					openrouterVariant: options?.openrouterVariant,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 					disableReasoning: options?.disableReasoning,
+					// Forwarded, not folded: the Responses record reads both flags
+					// itself (`applyResponsesCompatPolicy`).
+					forceReasoningOff: options?.forceReasoningOff,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
@@ -2170,7 +2027,8 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-completions">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
@@ -2183,7 +2041,8 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-completions">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
@@ -2205,6 +2064,7 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				storeResponses: options?.storeResponses,
 			});
 
 		case "azure-openai-responses":
@@ -2230,6 +2090,7 @@ function mapOptionsForApi<TApi extends Api>(
 				codexCompaction: options?.codexCompaction,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,
+				disableReasoning: options?.disableReasoning,
 				forceReasoningOff: options?.forceReasoningOff,
 			});
 
@@ -2237,14 +2098,16 @@ function mapOptionsForApi<TApi extends Api>(
 			// Explicitly disable thinking when reasoning is absent, unsupported, or
 			// replaced by the caller's external scratchpad. Gemini defaults thinking on.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
-				return castApi<"google-generative-ai">({
+			const thinkingOff = () =>
+				castApi<"google-generative-ai">({
 					...base,
 					serviceTier: options?.serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
+			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+				return thinkingOff();
 			}
 
 			const googleModel = model as Model<"google-generative-ai">;
@@ -2255,6 +2118,12 @@ function mapOptionsForApi<TApi extends Api>(
 			if (googleModel.thinking?.mode === "google-level") {
 				return castApi<"google-generative-ai">({
 					...base,
+					// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+					maxTokens: googleMaxOutputTokens(
+						base.maxTokens,
+						model,
+						googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+					),
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
@@ -2266,11 +2135,24 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
+			const requestedBudget = getGoogleBudget(googleModel, effort, options?.thinkingBudgets);
+			const maxTokens = googleMaxOutputTokens(
+				base.maxTokens,
+				model,
+				requestedBudget > 0 ? requestedBudget : googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+			);
+			let budgetTokens = requestedBudget;
+			// If not enough room for thinking + output, reduce thinking budget.
+			if (requestedBudget > 0 && maxTokens !== undefined && maxTokens <= requestedBudget) {
+				budgetTokens = maxTokens - MIN_OUTPUT_TOKENS;
+				if (budgetTokens <= 0) return thinkingOff();
+			}
 			return castApi<"google-generative-ai">({
 				...base,
+				maxTokens,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
+					budgetTokens,
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2288,6 +2170,12 @@ function mapOptionsForApi<TApi extends Api>(
 				if (model.thinking?.mode === "google-level") {
 					return castApi<"google-gemini-cli">({
 						...base,
+						// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+						maxTokens: googleMaxOutputTokens(
+							base.maxTokens,
+							model,
+							googleThinkingHeadroom(model, effort, options.thinkingBudgets),
+						),
 						requestModelId: resolveWireModelId(model, effort),
 						thinking: {
 							enabled: true,
@@ -2343,14 +2231,16 @@ function mapOptionsForApi<TApi extends Api>(
 			// Explicitly disable thinking when reasoning is absent, unsupported, or
 			// replaced by the caller's external scratchpad.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
-				return castApi<"google-vertex">({
+			const thinkingOff = () =>
+				castApi<"google-vertex">({
 					...base,
 					serviceTier: options?.serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
+			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+				return thinkingOff();
 			}
 
 			const vertexModel = model as Model<"google-vertex">;
@@ -2360,6 +2250,12 @@ function mapOptionsForApi<TApi extends Api>(
 			if (geminiModel.thinking?.mode === "google-level") {
 				return castApi<"google-vertex">({
 					...base,
+					// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+					maxTokens: googleMaxOutputTokens(
+						base.maxTokens,
+						model,
+						googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+					),
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
@@ -2371,12 +2267,25 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
+			const requestedBudget = getGoogleBudget(geminiModel, effort, options?.thinkingBudgets);
+			const maxTokens = googleMaxOutputTokens(
+				base.maxTokens,
+				model,
+				requestedBudget > 0 ? requestedBudget : googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+			);
+			let budgetTokens = requestedBudget;
+			// If not enough room for thinking + output, reduce thinking budget.
+			if (requestedBudget > 0 && maxTokens !== undefined && maxTokens <= requestedBudget) {
+				budgetTokens = maxTokens - MIN_OUTPUT_TOKENS;
+				if (budgetTokens <= 0) return thinkingOff();
+			}
 			return castApi<"google-vertex">({
 				...base,
+				maxTokens,
 				serviceTier: options?.serviceTier,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets),
+					budgetTokens,
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2409,11 +2318,37 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 		}
 
+		case "factory-droid-agent": {
+			const factoryModel = model as Model<"factory-droid-agent">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff
+					? requireSupportedEffort(factoryModel, options.reasoning)
+					: undefined;
+			return castApi<"factory-droid-agent">({
+				...base,
+				// The wrapper resolves native defaults for the selected OAuth
+				// account; do not turn the discovery scope's cap into a caller cap.
+				maxTokens: options?.maxTokens,
+				reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				textVerbosity: options?.textVerbosity,
+				serviceTier: options?.serviceTier,
+				toolChoice: options?.toolChoice,
+			});
+		}
+
 		case "gitlab-duo-agent":
 			return castApi<"gitlab-duo-agent">({
 				...base,
 				cwd: options?.cwd,
 				toolChoice: options?.toolChoice,
+			});
+		case "apple-foundation-models":
+			return castApi<"apple-foundation-models">({
+				...base,
+				toolChoice: options?.toolChoice,
+				reasoning: options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning,
 			});
 		case "devin-agent": {
 			const devinModel = model as Model<"devin-agent">;

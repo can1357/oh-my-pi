@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -355,18 +355,31 @@ function buildQuotaSummaryReport(
 		);
 		const amount = buildQuotaSummaryAmount(bucket);
 		const counterKeys = getQuotaSummaryCounterKeys(group, bucket);
+		const sharedGroup =
+			counterKeys.length > 1
+				? `${bucket.bucketId ?? group?.displayName ?? "third-party"}:${window?.id ?? bucket.window ?? "default"}`
+				: undefined;
+		// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
+		// so the `bucketId` is the only signal that a Google-counter bucket
+		// tracks its own model family; Argon's weekly-only quota is separate
+		// from the shared Gemini weekly bucket and must stay distinguishable.
+		const bucketLabel = bucket.bucketId?.toLowerCase().startsWith("gemini-argon-") ? "Gemini (Argon)" : undefined;
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			const label =
+				sharedGroup !== undefined
+					? "Claude & GPT (shared)"
+					: (bucketLabel ?? (counterKey === "google" ? "Gemini" : counterName));
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
-				label: counterName ? `Usage (${counterName})` : (group?.displayName ?? bucket.displayName ?? "Usage"),
+				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
 				scope: {
 					provider: params.provider,
 					accountId: params.credential.accountId,
 					projectId: params.credential.projectId,
 					windowId,
-					...(counterKeys.length > 1 ? { shared: true } : {}),
+					...(sharedGroup !== undefined ? { shared: true, sharedGroup } : {}),
 				},
 				window,
 				amount,
@@ -424,7 +437,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
+					...getAntigravityHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,
@@ -643,6 +656,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
+	cacheVersion: 2,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };

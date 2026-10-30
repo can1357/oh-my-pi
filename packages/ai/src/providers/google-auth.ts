@@ -5,7 +5,8 @@
  * Sources, in priority order:
  *   1. `GOOGLE_APPLICATION_CREDENTIALS` env → file with `type: "service_account"` (RS256 JWT exchange)
  *     or `type: "authorized_user"` (refresh-token exchange).
- *   2. `~/.config/gcloud/application_default_credentials.json` (user ADC, same authorized_user flow).
+ *   2. gcloud user ADC: `%APPDATA%\gcloud\application_default_credentials.json` on Windows,
+ *     `~/.config/gcloud/application_default_credentials.json` elsewhere (authorized_user flow).
  *   3. GCE / Cloud Run metadata server (`metadata.google.internal`).
  *
  * Tokens are cached per source key and refreshed `GOOGLE_VERTEX_REFRESH_SKEW_MS` before expiry
@@ -66,8 +67,14 @@ function getRefreshSkewMs(): number {
 	return $envpos("GOOGLE_VERTEX_REFRESH_SKEW_MS", 60_000);
 }
 
-function userAdcPath(): string {
-	return path.join(os.homedir(), ".config", "gcloud", "application_default_credentials.json");
+/** gcloud's user ADC file: `%APPDATA%\gcloud\…` on Windows, `~/.config/gcloud/…` elsewhere. */
+export function userAdcPath(
+	platform: typeof process.platform = process.platform,
+	appData: string | undefined = Bun.env.APPDATA,
+): string {
+	const gcloudDir =
+		platform === "win32" && appData ? path.join(appData, "gcloud") : path.join(os.homedir(), ".config", "gcloud");
+	return path.join(gcloudDir, "application_default_credentials.json");
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | undefined> {

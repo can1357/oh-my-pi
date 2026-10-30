@@ -12,7 +12,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-openai-prompt-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("mock", "test-key");
+		storage.keys.setRuntime("mock", "test-key");
 		const mock = createMockModel({
 			provider: "mock",
 			id: "gateway-prompt-cache",
@@ -20,7 +20,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 		});
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
+			bearerTokens: ["gw-test-token"],
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -29,7 +29,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 		try {
 			const chatResponse = await fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "gateway-prompt-cache",
 					messages: [{ role: "user", content: "hi" }],
@@ -46,7 +46,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 
 			const responsesResponse = await fetch(`${handle.url}/v1/responses`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "gateway-prompt-cache",
 					input: [
@@ -67,7 +67,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 
 			const piResponse = await fetch(`${handle.url}/v1/pi/stream`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					modelId: "gateway-prompt-cache",
 					context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },

@@ -8,11 +8,14 @@ import { SessionManager } from "../../src/session/session-manager";
 import { createTools, type ToolSession } from "../../src/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgAstGrepEnabled, cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 function createSession(enabled: boolean, restricted = false): ToolSession {
 	const settings = Settings.isolated();
-	settings.override("compaction.experimentalContextManagement", enabled);
-	settings.override("tools.xdev", false);
-	settings.override("astGrep.enabled", false);
+	cfgCompactionExperimentalContextManagement.override(settings, enabled);
+	cfgToolsXdev.override(settings, false);
+	cfgAstGrepEnabled.override(settings, false);
 	const sessionManager = SessionManager.inMemory();
 	return {
 		cwd: process.cwd(),

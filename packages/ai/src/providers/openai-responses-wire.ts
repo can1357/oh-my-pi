@@ -791,7 +791,7 @@ export interface Response {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * The status of the response generation. One of `completed`, `failed`,
 	 * `in_progress`, `cancelled`, `queued`, or `incomplete`.
@@ -871,60 +871,6 @@ export declare namespace Response {
 		output: Moderation.ModerationResult | Moderation.Error;
 	}
 	namespace Moderation {
-		/**
-		 * A moderation result produced for the response input or output.
-		 */
-		interface ModerationResult {
-			/**
-			 * A dictionary of moderation categories to booleans, True if the input is flagged
-			 * under this category.
-			 */
-			categories: {
-				[key: string]: boolean;
-			};
-			/**
-			 * Which modalities of input are reflected by the score for each category.
-			 */
-			category_applied_input_types: {
-				[key: string]: Array<"text" | "image">;
-			};
-			/**
-			 * A dictionary of moderation categories to scores.
-			 */
-			category_scores: {
-				[key: string]: number;
-			};
-			/**
-			 * A boolean indicating whether the content was flagged by any category.
-			 */
-			flagged: boolean;
-			/**
-			 * The moderation model that produced this result.
-			 */
-			model: string;
-			/**
-			 * The object type, which was always `moderation_result` for successful moderation
-			 * results.
-			 */
-			type: "moderation_result";
-		}
-		/**
-		 * An error produced while attempting moderation for the response input or output.
-		 */
-		interface Error {
-			/**
-			 * The error code.
-			 */
-			code: string;
-			/**
-			 * The error message.
-			 */
-			message: string;
-			/**
-			 * The object type, which was always `error` for moderation failures.
-			 */
-			type: "error";
-		}
 		/**
 		 * A moderation result produced for the response input or output.
 		 */
@@ -3602,7 +3548,7 @@ export declare namespace ResponseInputItem {
 	}
 	/**
 	 * Changes reasoning effort for subsequent responses without touching the
-	 * request-level `reasoning.effort` (GPT-6 Astra). Must not be adjacent to
+	 * request-level `reasoning.effort` (GPT-6 family). Must not be adjacent to
 	 * another `configuration_update`.
 	 */
 	interface ConfigurationUpdate {
@@ -5951,8 +5897,8 @@ export interface ResponseCreateParamsBase {
 	 *   `prompt_cache_retention` is not specified.
 	 */
 	prompt_cache_retention?: "in_memory" | "24h" | null;
-	/** Explicit prompt-cache mode and minimum lifetime for GPT-5.6+ models. */
-	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" } | null;
+	/** Explicit prompt-cache mode and minimum lifetime (`12h` is Responses-only) for GPT-5.6+ models. */
+	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" | "12h" } | null;
 	/**
 	 * **gpt-5 and o-series models only**
 	 *
@@ -5986,7 +5932,7 @@ export interface ResponseCreateParamsBase {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * Whether to store the generated model response for later retrieval via API.
 	 */

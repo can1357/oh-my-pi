@@ -2,7 +2,7 @@
 //!
 //! Ported from pi-shell's in-process `which` implementation.
 
-use std::io::Write;
+use std::{io::Write, path::Path};
 
 use brush_core::{
 	ShellExtensions,
@@ -47,19 +47,16 @@ impl Utility for WhichCli {
 		for name in self.names {
 			let matches = if sys::fs::contains_path_separator(&name) {
 				let candidate = host.resolve(&name);
-				if candidate.is_dir() {
+				if host.fs().is_dir(&candidate) {
 					Vec::new()
 				} else {
-					sys::fs::resolve_executable(candidate).into_iter().collect()
+					pathsearch::resolve_executable_blocking(host.fs(), candidate)
+						.into_iter()
+						.collect()
 				}
 			} else {
 				let dirs = sys::fs::split_paths(&path_var).map(|dir| host.resolve(dir));
-				let mut found = pathsearch::search_for_executable(dirs, &name);
-				if self.all {
-					found.collect()
-				} else {
-					found.next().into_iter().collect()
-				}
+				pathsearch::find_executables_blocking(host.fs(), dirs, Path::new(&name), self.all)
 			};
 
 			if matches.is_empty() {

@@ -6,7 +6,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
 import type { ChangelogGenerationResult } from "../../commit/types";
-import { toReasoningEffort } from "../../thinking";
+import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../utils";
 
 // Build the changelog entry schema with arktype
@@ -57,16 +57,18 @@ export async function generateChangelogEntries({
 		stat,
 		diff,
 	});
-	const response = await retryTransientCompletion(() =>
-		completeSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(changelogSystemPrompt)],
-				messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-				tools: [changelogTool],
-			},
-			{ apiKey, sessionId, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
-		),
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(changelogSystemPrompt)],
+					messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
+					tools: [changelogTool],
+				},
+				{ apiKey, sessionId, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
+			),
+		{ provider: model.provider },
 	);
 
 	if (response.stopReason === "error") {

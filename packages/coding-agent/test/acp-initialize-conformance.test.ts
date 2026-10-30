@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { ACP_TERMINAL_AUTH_FLAG, prepareAcpTerminalAuthArgs } from "@oh-my-pi/pi-coding-agent/modes/acp/terminal-auth";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -53,7 +54,7 @@ class FakeAgentSession {
 	queuedMessageCount = 0;
 	systemPrompt = "system";
 	disposed = false;
-	settings = { get: (_path: string) => false };
+	settings = Settings.isolated();
 
 	constructor(cwd: string) {
 		this.sessionManager = SessionManager.create(cwd);
@@ -113,6 +114,7 @@ class FakeAgentSession {
 	}
 	setActiveToolsByName(): void {}
 	setClientBridge(): void {}
+	setMcpServerInstructionsSource(): void {}
 	getPlanModeState(): undefined {
 		return undefined;
 	}
@@ -231,8 +233,7 @@ describe("ACP initialize conformance", () => {
 		const pkg = (await Bun.file(pkgPath).json()) as { version: string };
 		expect(response.agentInfo).toEqual(
 			expect.objectContaining({
-				name: "oh-my-pi",
-				title: "Oh My Pi",
+				title: "omp",
 				version: VERSION,
 			}),
 		);
@@ -256,5 +257,15 @@ describe("ACP initialize conformance", () => {
 				}),
 			}),
 		);
+	});
+
+	it("advertises the steering extension via top-level _meta", async () => {
+		const agent = await createAgent();
+		const response = await agent.initialize(buildInitializeRequest());
+		expectAcpStructure(arkInitializeResponse, response);
+		// Top-level `_meta` (sibling of `agentCapabilities`) is the
+		// claude-agent-acp / codex-acp advertisement that gates clients'
+		// `_session/steering` calls (agent-shell, spec proposal `session/inject`).
+		expect(response._meta).toEqual({ steering: { supported: true } });
 	});
 });

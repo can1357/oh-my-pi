@@ -1,0 +1,28 @@
+auth "factory-droid" {
+	name "Factory Droid"
+	org-scoped-identity #true
+	// WorkOS public client: the access token authorizes the Factory LLM proxy.
+	login "device-code" {
+		client-id "client_01HNM792M5G5G1A2THWPXKFMXB"
+		device url="https://api.workos.com/user_management/authorize/device" timeout-ms=15000 {
+			headers { Accept "application/json" }
+		}
+		token url="https://api.workos.com/user_management/authenticate" timeout-ms=15000 {
+			headers { Accept "application/json" }
+		}
+		credential {
+			expires "jwt" skew-ms=0 fallback-ms=86400000
+			email "user.email" claim="email"
+			account-id "user.id" claim="sub"
+			// WorkOS organization_id is internal; only this claim can be used as X-Factory-Org-Id.
+			org-id claim="external_org_id"
+		}
+		after-exchange hook="factory-droid-region"
+	}
+	refresh {
+		token url="https://api.workos.com/user_management/authenticate" timeout-ms=15000 {
+			headers { Accept "application/json" }
+		}
+		after-refresh hook="factory-droid-region"
+	}
+}

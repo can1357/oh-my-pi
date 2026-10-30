@@ -93,7 +93,7 @@ describe("AuthStorage Kimi OAuth ranking", () => {
 
 	test("new sessions choose the Kimi account with more 5h and 7d headroom", async () => {
 		if (!authStorage) throw new Error("test setup failed");
-		await authStorage.set("kimi-code", [
+		await authStorage.credentials.set("kimi-code", [
 			{ type: "oauth", ...createCredential("loaded") },
 			{ type: "oauth", ...createCredential("fresh") },
 		]);
@@ -102,7 +102,7 @@ describe("AuthStorage Kimi OAuth ranking", () => {
 
 		const selected = new Set<string>();
 		for (let index = 0; index < 20; index += 1) {
-			const apiKey = await authStorage.getApiKey("kimi-code", `kimi-ranking-${index}`);
+			const apiKey = await authStorage.keys.get("kimi-code", `kimi-ranking-${index}`);
 			if (apiKey) selected.add(apiKey);
 		}
 
@@ -111,7 +111,7 @@ describe("AuthStorage Kimi OAuth ranking", () => {
 
 	test("usage-limit blocks last until the exhausted Kimi window resets", async () => {
 		if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
-		await authStorage.set("kimi-code", [
+		await authStorage.credentials.set("kimi-code", [
 			{ type: "oauth", ...createCredential("exhausted") },
 			{ type: "oauth", ...createCredential("sibling") },
 		]);
@@ -124,7 +124,7 @@ describe("AuthStorage Kimi OAuth ranking", () => {
 		});
 		if (!exhaustedRow) throw new Error("expected exhausted Kimi credential");
 
-		const result = await authStorage.markUsageLimitReached("kimi-code", undefined, {
+		const result = await authStorage.limits.markReached("kimi-code", undefined, {
 			credentialId: exhaustedRow.id,
 		});
 

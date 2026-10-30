@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/registry/oauth/callback-server";
 import type { OAuthAuthInfo, OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 
 class CallbackProbeFlow extends OAuthCallbackFlow {
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string }> {
@@ -14,6 +16,21 @@ class CallbackProbeFlow extends OAuthCallbackFlow {
 		return { access: code, refresh: "refresh", expires: Date.now() + 60_000 };
 	}
 }
+
+/**
+ * Whether this host can bind the IPv6 loopback at all. Probed with `Bun.serve`
+ * rather than the flow's own `os.networkInterfaces()` check, so a broken
+ * production probe fails loudly instead of skipping into a false green (same
+ * guard as `callback-server-dual-stack.test.ts`).
+ */
+const ipv6Loopback = (() => {
+	try {
+		Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response("probe") }).stop(true);
+		return true;
+	} catch {
+		return false;
+	}
+})();
 
 async function startFlow(): Promise<{
 	info: OAuthAuthInfo;
@@ -35,11 +52,76 @@ async function startFlow(): Promise<{
 	return { info, abort, login };
 }
 
+/** Record every hostname the flow hands to `Bun.serve` while still binding for real. */
+function recordBoundHostnames(): (string | undefined)[] {
+	const serve = Bun.serve;
+	const hostnames: (string | undefined)[] = [];
+	vi.spyOn(Bun, "serve").mockImplementation(options => {
+		hostnames.push(options.hostname);
+		return serve(options);
+	});
+	return hostnames;
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("OAuthCallbackFlow callback security", () => {
+	it.each([
+		["markup", "</ScRiPt><script id=injected>globalThis.callbackInjected=1</script><b>denied & retry</b>"],
+		["replacement patterns", "$& $' $" + "` $$"],
+	])("preserves %s in provider errors as inert page data without a valid state", async (_label, errorText) => {
+		const { info, abort, login } = await startFlow();
+		const redirectUri = new URL(info.url).searchParams.get("redirect_uri");
+		if (!redirectUri) throw new Error("OAuth test flow did not advertise its callback URI");
+
+		try {
+			const callback = new URL(redirectUri);
+			callback.searchParams.set("error", "access_denied");
+			callback.searchParams.set("error_description", errorText);
+			const response = await fetch(callback);
+			expect(response.status).toBe(500);
+			const { document } = parseHTML(await response.text());
+			expect(document.getElementById("injected")).toBeNull();
+			const stateElement = document.getElementById("server-state");
+			if (!stateElement) throw new Error("OAuth callback page is missing its state");
+			expect(JSON.parse(stateElement.textContent ?? "")).toEqual({
+				ok: false,
+				error: "Authorization failed: " + errorText,
+			});
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("preserves callback codes containing markup and replacement patterns", async () => {
+		const { info, abort, login } = await startFlow();
+		const authUrl = new URL(info.url);
+		const redirectUri = authUrl.searchParams.get("redirect_uri");
+		const state = authUrl.searchParams.get("state");
+		if (!redirectUri || !state) throw new Error("OAuth test flow did not advertise its callback parameters");
+		const code = "</script><script id=injected>globalThis.callbackInjected=1</script> $& $'";
+
+		try {
+			const callback = new URL(redirectUri);
+			callback.searchParams.set("code", code);
+			callback.searchParams.set("state", state);
+			const response = await fetch(callback);
+			expect(response.status).toBe(200);
+			expect((await login).access).toBe(code);
+			const { document } = parseHTML(await response.text());
+			expect(document.getElementById("injected")).toBeNull();
+			const stateElement = document.getElementById("server-state");
+			if (!stateElement) throw new Error("OAuth callback page is missing its state");
+			expect(JSON.parse(stateElement.textContent ?? "")).toEqual({ ok: true, code, state });
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
 	it("keeps waiting after invalid callback requests and accepts the legitimate callback", async () => {
 		const { info, abort, login } = await startFlow();
 		const authUrl = new URL(info.url);
@@ -87,23 +169,59 @@ describe("OAuthCallbackFlow callback security", () => {
 	});
 
 	it("binds localhost callback URLs to the loopback interfaces only", async () => {
-		const serve = Bun.serve;
-		const hostnames: (string | undefined)[] = [];
-		vi.spyOn(Bun, "serve").mockImplementation(options => {
-			hostnames.push(options.hostname);
-			return serve(options);
-		});
+		const hostnames = recordBoundHostnames();
 
 		const { abort, login } = await startFlow();
 		try {
 			// `localhost` resolves to both loopback families, so the flow binds one
-			// literal per family: IPv4 first (it resolves the port), then the IPv6
-			// companion that keeps a wildcard-bound dev server from receiving the
-			// authorization code. Never the `localhost` name itself, and never a
-			// routable interface.
+			// literal per family: IPv4 first (it resolves the port), then — on hosts
+			// that have an IPv6 loopback — the `::1` companion. Never the
+			// `localhost` name itself, and never a routable interface.
 			expect(hostnames[0]).toBe("127.0.0.1");
-			expect(hostnames).toContain("::1");
 			expect(hostnames.every(hostname => hostname === "127.0.0.1" || hostname === "::1")).toBe(true);
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it.skipIf(!ipv6Loopback)("binds the ::1 companion when the host has an IPv6 loopback", async () => {
+		const hostnames = recordBoundHostnames();
+
+		const { abort, login } = await startFlow();
+		try {
+			// The IPv6 companion keeps a wildcard-bound dev server (`next dev` on
+			// `*:<port>`) from answering `localhost` traffic that the browser
+			// resolved to `::1` (#8081).
+			expect(hostnames).toContain("::1");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("serves IPv4 alone without attempting ::1 when the host has no IPv6 loopback", async () => {
+		// Reproduce an IPv6-disabled kernel (ipv6.disable=1 / disable_ipv6=1): the
+		// loopback interface exposes only 127.0.0.1 (#8814).
+		vi.spyOn(os, "networkInterfaces").mockReturnValue({
+			lo: [
+				{
+					address: "127.0.0.1",
+					netmask: "255.0.0.0",
+					family: "IPv4",
+					mac: "00:00:00:00:00:00",
+					internal: true,
+					cidr: "127.0.0.1/8",
+				},
+			],
+		});
+		const hostnames = recordBoundHostnames();
+
+		const { abort, login } = await startFlow();
+		try {
+			// No `::1` attempt at all: a misleading Bun bind error can then never be
+			// misread as a port collision and tear down the healthy IPv4 listener.
+			expect(hostnames).toEqual(["127.0.0.1"]);
 		} finally {
 			abort.abort("test cleanup");
 			await login.catch(() => undefined);

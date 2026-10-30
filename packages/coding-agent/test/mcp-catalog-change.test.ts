@@ -5,9 +5,10 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { ExtensionDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-dashboard";
-import { snapshotMcpRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
+import { snapshotMcpRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
+import { createExtensionDashboardRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/dashboard-runtime";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { PROMPT_NAME, RESOURCE_NAME, RESOURCE_URI, TOOL_NAME } from "./fixtures/delayed-catalog-mcp";
 
@@ -113,9 +114,7 @@ describe("MCP catalog-change after connect", () => {
 	it("repaints after reconnect catalogs finish, then stops after dashboard dispose", async () => {
 		const settings = await Settings.init({ inMemory: true, cwd: workDir });
 		const dashboard = await ExtensionDashboard.create({
-			cwd: workDir,
-			settings,
-			mcpManager: manager,
+			runtime: createExtensionDashboardRuntime({ cwd: workDir, settings, mcpManager: manager }),
 		});
 		let paints = 0;
 		dashboard.onRequestRender = () => {

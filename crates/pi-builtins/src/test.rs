@@ -49,7 +49,7 @@ impl builtins::Command for TestCommand {
 			args = &args[0..args.len() - 1];
 		}
 
-		if execute_test(context.shell, &context.params, args)? {
+		if execute_test(context.shell, &context.params, args).await? {
 			Ok(ExecutionResult::success())
 		} else {
 			Ok(ExecutionResult::general_error())
@@ -57,12 +57,12 @@ impl builtins::Command for TestCommand {
 	}
 }
 
-fn execute_test(
+async fn execute_test(
 	shell: &mut Shell<impl brush_core::ShellExtensions>,
 	params: &ExecutionParameters,
 	args: &[String],
 ) -> Result<bool, brush_core::Error> {
 	let test_command =
 		brush_parser::test_command::parse(args).map_err(ErrorKind::TestCommandParseError)?;
-	tests::eval_expr(&test_command, shell, params)
+	tests::eval_expr(&test_command, shell, params).await
 }

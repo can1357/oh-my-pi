@@ -1,5 +1,5 @@
 /**
- * omp auth-gateway HTTP server.
+ * omp auth-gateway router and HTTP server.
  *
  * Accepts any provider-format request (OpenAI chat-completions, Anthropic
  * messages, OpenAI Responses) and dispatches through pi-ai's `streamSimple()`
@@ -16,66 +16,84 @@
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
+ *   POST /v1/pi/stream                     → native pi-ai stream in/out
+ *   POST /v1/systemone | /alpha/decisions  → TypeSafe System One judgments (routes/systemone)
+ *   POST /v1/images[/generations|/edits]   → image generation, OpenAI/OpenRouter wire (routes/images)
+ *   POST /v1/audio/speech                  → text-to-speech, raw audio out (routes/speech)
+ *   POST /v1/audio/transcriptions          → speech-to-text, multipart or JSON base64 in (routes/transcriptions)
+ *
+ * Chat routes live in this file; every other modality is a `routes/*` module
+ * built on the shared plumbing in `dispatch.ts`. {@link createAuthGatewayRouter}
+ * answers the `/v1/*` routes for any transport: {@link startAuthGateway}
+ * serves them over HTTP behind bearer auth, `stdio.ts` over JSON lines.
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthStorage } from "../auth-storage";
-import * as AIError from "../error";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
-import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
-import type { ClientUsageIdentity } from "../usage";
+import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
+import { resolvePeer } from "../utils/resolve-peer";
+import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
+import {
+	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
+	buildGatewayApiKeyResolver,
+	gatewayRequestLogFields,
+	mirrorRequestAbort,
+	normalizeClientSessionKey,
+	recordGatewayUsage,
+	resolveGatewayAccount,
+	resolveGatewayApiKey,
+} from "./dispatch";
 import {
 	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
+	hasMisplacedBearer,
 	isAuthorized,
 	json,
+	readBearerToken,
 	resolveClientIdentity,
-	resolvePeer,
 	withCors,
 } from "./http";
+import { handleEmbeddings } from "./routes/embeddings";
+import { handleImageEdits, handleImageGenerations } from "./routes/images";
+import { handleRerank } from "./routes/rerank";
+import { handleSpeech } from "./routes/speech";
+import { handleSystemOne } from "./routes/systemone";
+import { handleTranscriptions } from "./routes/transcriptions";
+import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes/video";
+import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
-	AuthGatewayServerOptions,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
 import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 
-// ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
-
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
-
-export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
-	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
-	storage: AuthStorage;
-	/**
-	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
-	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
-	 * dependency in `pi-ai`).
-	 */
-	resolveModel: ModelResolver;
-	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
-	listModels?: () => Iterable<Model<Api>>;
-}
-
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
-	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
-	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
-	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+/** A foreign chat wire the gateway translates: its codec, log label, and the pi-ai api it speaks natively. */
+interface FormatRoute {
+	module: FormatModule;
+	label: string;
+	api: Api;
+}
+
+const FORMAT_ROUTES: Record<string, FormatRoute> = {
+	"/v1/chat/completions": { module: openaiChat, label: "openai-chat", api: "openai-completions" },
+	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages", api: "anthropic-messages" },
+	"/v1/responses": { module: openaiResponses, label: "openai-responses", api: "openai-responses" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -106,14 +124,19 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
  * bucket and can't trample each other's prefix-tree entries.
  *
  * Anthropic-backed requests ignore `sessionId`; the key is harmless there.
+ *
+ * The derivation MUST stay byte-stable: AuthStorage persists credential pins
+ * under this id, so changing it re-routes every in-flight conversation.
+ * `toolsJson` lets the caller share one `JSON.stringify(context.tools)` with
+ * {@link AuthGatewaySessionStateStore.acquire}.
  */
-function deriveSessionId(modelId: string, context: Context): string {
+function deriveSessionId(modelId: string, context: Context, toolsJson = serializeTools(context)): string {
 	const parts: string[] = [modelId];
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		parts.push(context.systemPrompt.join("\n\n"));
 	}
-	if (context.tools && context.tools.length > 0) {
-		parts.push(JSON.stringify(context.tools));
+	if (toolsJson !== undefined) {
+		parts.push(toolsJson);
 	}
 	const first = context.messages?.[0];
 	if (first) {
@@ -128,24 +151,64 @@ function deriveSessionId(modelId: string, context: Context): string {
 	return deterministicUuid(seed);
 }
 
-function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
+/** `JSON.stringify(context.tools)`, or `undefined` when the request declares none. */
+function serializeTools(context: Context): string | undefined {
+	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
+}
+
+/**
+ * Fit a client-requested effort to the resolved model. Clients speak their own
+ * effort vocabulary: omp's `lowest-effort` reasoning-off sends `minimal` to a
+ * generic OpenAI-compatible endpoint, and Claude ladders have no `minimal`.
+ * `streamSimple` throws on an effort the model cannot serve, so clamp it to the
+ * nearest supported tier as in-process callers do. Efforts the model maps onto
+ * its wire values, and models without an effort ladder, pass through unchanged.
+ * Carry the requested tier's budget with a clamp unless the destination tier
+ * already has an explicit budget (including zero).
+ */
+function normalizeGatewayThinking(model: Model<Api>, options: SimpleStreamOptions): void {
+	const requested = options.reasoning;
+	if (requested === undefined) return;
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0 || efforts.includes(requested)) return;
+	if (model.thinking?.effortMap?.[requested] !== undefined) return;
+	if (
+		model.compat &&
+		"reasoningEffortMap" in model.compat &&
+		model.compat.reasoningEffortMap[requested] !== undefined
+	) {
+		return;
+	}
+	const reasoning = clampThinkingLevelForModel(model, requested) ?? requested;
+	options.reasoning = reasoning;
+	const budgets = options.thinkingBudgets;
+	if (reasoning !== requested && budgets?.[requested] !== undefined && budgets[reasoning] === undefined) {
+		options.thinkingBudgets = { ...budgets, [reasoning]: budgets[requested] };
+	}
+}
+
+function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
-	// Codex backend rejects every sampling control with
-	// `Unsupported parameter: …` (#3117). Strip the full set for that one
-	// provider; everything else is harmless to forward — `streamSimple` ignores
-	// what the underlying provider doesn't honour.
-	const isCodex = api === "openai-codex-responses";
+	// Backends that reject sampling controls (Codex: `Unsupported parameter: …`, #3117)
+	// get the full set stripped; everything else is harmless to forward —
+	// `streamSimple` ignores what the underlying provider doesn't honour.
+	const sampling = !(
+		model.compat &&
+		"supportsSamplingParams" in model.compat &&
+		model.compat.supportsSamplingParams === false
+	);
 	if (options.maxOutputTokens !== undefined) opts.maxTokens = options.maxOutputTokens;
-	if (options.temperature !== undefined && !isCodex) opts.temperature = options.temperature;
-	if (options.topP !== undefined && !isCodex) opts.topP = options.topP;
-	if (options.topK !== undefined && !isCodex) opts.topK = options.topK;
-	if (options.minP !== undefined && !isCodex) opts.minP = options.minP;
-	if (options.stopSequences !== undefined && !isCodex) opts.stopSequences = options.stopSequences;
-	if (options.presencePenalty !== undefined && !isCodex) opts.presencePenalty = options.presencePenalty;
-	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
-	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
+	if (options.temperature !== undefined && sampling) opts.temperature = options.temperature;
+	if (options.topP !== undefined && sampling) opts.topP = options.topP;
+	if (options.topK !== undefined && sampling) opts.topK = options.topK;
+	if (options.minP !== undefined && sampling) opts.minP = options.minP;
+	if (options.stopSequences !== undefined && sampling) opts.stopSequences = options.stopSequences;
+	if (options.presencePenalty !== undefined && sampling) opts.presencePenalty = options.presencePenalty;
+	if (options.frequencyPenalty !== undefined && sampling) opts.frequencyPenalty = options.frequencyPenalty;
+	if (options.repetitionPenalty !== undefined && sampling) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
+	if (options.userProfileId !== undefined) opts.userProfileId = options.userProfileId;
 	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
@@ -157,6 +220,10 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
+	if (options.forceReasoningOff !== undefined) {
+		opts.disableReasoning = options.forceReasoningOff;
+		opts.forceReasoningOff = options.forceReasoningOff;
+	}
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
 	if (options.anthropicPrefixMismatchBehavior !== undefined) {
@@ -168,18 +235,20 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
-	const promptCacheKey = options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const promptCacheKey =
+		normalizeClientSessionKey(options.promptCacheKey) ?? deriveSessionId(parsed.modelId, parsed.context);
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
 		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
+	normalizeGatewayThinking(model, opts);
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
 		// whichever effort the client requested (or High when unspecified) and
 		// ALSO sets the effort so providers that gate on `reasoning` actually
 		// surface the budget.
-		const effort = options.reasoning ?? Effort.High;
+		const effort = opts.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
 			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
@@ -200,7 +269,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		options.responseFormat !== undefined
 	) {
 		logger.debug("auth-gateway dropped unsupported typed options", {
-			api,
+			api: model.api,
 			parallelToolCalls: options.parallelToolCalls,
 			previousResponseId: options.previousResponseId,
 			seed: options.seed,
@@ -212,173 +281,36 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	return opts;
 }
 
-/**
- * Hook fired by {@link streamSimple} when the upstream request fails in a
- * way that's rotatable — today that's HTTP 401 (credential is bad) and
- * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
- * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
- * `resource_exhausted`, …). The two cases need different storage actions:
- *
- * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
- *   the current session's credential as temporarily blocked (honouring
- *   `retry-after` / `resets_at` hints when present) and returns `true` only
- *   when a sibling credential is still available. Burning the credential
- *   with `invalidateCredentialMatching` here would orphan accounts whose
- *   reset window is several hours away — exactly the bug this helper exists
- *   to avoid.
- * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
- *   Suspect/delete the row so it doesn't get re-picked next request.
- *
- * In both branches we return the next `getApiKey` result (sticky on the
- * same `sessionId`) so streamSimple can transparently retry the pre-emit
- * failure with a fresh credential. Returning `undefined` aborts the retry
- * and surfaces the original error to the caller.
- */
-async function refreshGatewayApiKeyAfterAuthError(
-	storage: AuthStorage,
-	model: Model<Api>,
-	sessionId: string,
-	provider: string,
-	oldKey: string,
-	error: unknown,
-	signal: AbortSignal,
-	format: string,
-	peer: string,
-): Promise<string | undefined> {
-	const message = error instanceof Error ? error.message : String(error);
-	const status = extractHttpStatusFromError(error);
-	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		const retryAfterMs = extractRetryHint(undefined, message);
-		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
-			retryAfterMs,
-			providerTimed: retryAfterMs !== undefined,
-			baseUrl: model.baseUrl,
-			modelId: model.id,
-			apiKey: oldKey,
-			signal,
-		});
-		logger.debug("auth-gateway retrying provider request after usage-limit block", {
-			format,
-			provider,
-			peer,
-			switched,
-			retryAfterMs,
-			retryAtMs,
-			error: message,
-		});
-		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
-	}
-	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
-	logger.debug("auth-gateway retrying provider request after credential invalidation", {
-		format,
-		provider,
-		peer,
-		error: message,
-	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
-}
-
-/**
- * Build the {@link ApiKeyResolver} handed to `streamSimple` for a gateway
- * request. Drives the central a/b/c auth-retry policy server-side:
- *
- * - initial resolve → the credential already resolved for this request.
- * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
- *   (a peer/broker may have rotated its token out from under our cached copy).
- * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
- *   to a sibling (usage-limit block vs credential invalidation by error class).
- *
- * `lastKey` tracks the most recent bearer so the switch step invalidates the
- * credential that actually failed.
- */
-function buildGatewayApiKeyResolver(
-	storage: AuthStorage,
-	model: Model<Api>,
-	sessionId: string,
-	initialKey: string,
-	requestSignal: AbortSignal,
-	format: string,
-	peer: string,
-): ApiKeyResolver {
-	let lastKey = initialKey;
-	return async ({ lastChance, error, signal }) => {
-		const sig = signal ?? requestSignal;
-		if (error === undefined) {
-			lastKey = initialKey;
-			return initialKey;
-		}
-		if (!lastChance) {
-			const refreshed = await storage.getApiKey(model.provider, sessionId, {
-				modelId: model.id,
-				signal: sig,
-				forceRefresh: true,
-			});
-			lastKey = refreshed ?? lastKey;
-			return refreshed;
-		}
-		const next = await refreshGatewayApiKeyAfterAuthError(
-			storage,
-			model,
-			sessionId,
-			model.provider,
-			lastKey,
-			error,
-			sig,
-			format,
-			peer,
-		);
-		lastKey = next ?? lastKey;
-		return next;
-	};
-}
-
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
 
-/**
- * Attribute one settled upstream request to the originating client via the
- * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
- * by the remote store). Error/aborted turns still record — the provider
- * billed whatever tokens the partial turn consumed; zero-usage messages
- * (pre-flight failures) are skipped.
- */
-function recordGatewayUsage(
-	storage: AuthStorage,
-	model: Model<Api>,
-	client: ClientUsageIdentity,
-	message: AssistantMessage,
-): void {
-	const usage = message.usage;
-	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.recordObservedUsage({
-		provider: model.provider,
-		model: model.id,
-		at: message.timestamp || Date.now(),
-		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
-		costUsd: usage.cost.total,
-		client,
-	});
-}
+/** Route that serves each non-chat catalog kind the gateway advertises. */
+const KIND_ROUTES: Partial<Record<ModelKind, string>> = {
+	judge: "POST /v1/systemone",
+	image: "POST /v1/images/generations",
+	tts: "POST /v1/audio/speech",
+	stt: "POST /v1/audio/transcriptions",
+	embedding: "POST /v1/embeddings",
+	rerank: "POST /v1/rerank",
+	video: "POST /v1/videos",
+};
 
-function mirrorRequestAbort(req: Request): AbortController {
-	const controller = new AbortController();
-	if (req.signal.aborted) {
-		controller.abort(req.signal.reason);
-	} else {
-		req.signal.addEventListener("abort", () => controller.abort(req.signal.reason), { once: true });
-	}
-	return controller;
+/** Chat routes cannot drive a non-chat model; name the route that does, or `undefined` for chat models. */
+function chatRouteRejection(model: Model<Api>): string | undefined {
+	const kind = modelKind(model);
+	const route = KIND_ROUTES[kind];
+	return route && `Model ${model.provider}/${model.id} is a ${kind} model; use ${route}`;
 }
 
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
-	route: { module: FormatModule; label: string },
-	bootOpts: AuthGatewayBootOptions,
+	route: FormatRoute,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -405,10 +337,12 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	const model = bootOpts.resolveModel(modelId, { api: route.api });
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
+	const kindRejection = chatRouteRejection(model);
+	if (kindRejection) return route.module.formatError(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -461,43 +395,45 @@ async function handleFormatEndpoint(
 	// supplied (so external session ids align), otherwise derive from
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
-	const sessionId = parsed.options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
-	parsed.options.promptCacheKey ??= sessionId;
+	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
+	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return route.module.formatError(classified.status, classified.type, classified.message);
-	}
+	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	if (!apiKey) {
-		return route.module.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
-		);
-	}
+	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
-	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
+	const streamOpts = buildStreamOptions(parsed, model, controller.signal);
+	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
+	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
+	// map is non-serializable, so no client can supply it and every turn would
+	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
+	// keeps the entry out of reach of eviction until this request is done with
+	// it, so it MUST be released on every exit path.
+	const lease = sessionStates.acquire({
+		clientKey,
+		model,
+		context: parsed.context,
+		toolsJson,
+		account: resolveGatewayAccount(apiKey),
+		client: bootOpts.client?.name,
+	});
+	streamOpts.providerSessionState = lease.states;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		apiKey,
 		controller.signal,
 		route.label,
 		peer,
+		resolved => lease.updateAccount(resolveGatewayAccount(resolved)),
 	);
 
 	logger.info("auth-gateway request", {
@@ -508,13 +444,14 @@ async function handleFormatEndpoint(
 		resolvedModel: model.id,
 		stream: parsed.stream,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message);
+			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -534,7 +471,7 @@ async function handleFormatEndpoint(
 			return json(
 				200,
 				route.module.encodeResponse(message, parsed.modelId),
-				gatewayResponseHeaders(model, { requestId, message, startedAt }),
+				gatewayResponseHeaders(model, { requestId, costUsd: message.usage.cost.total, startedAt }),
 			);
 		} catch (error) {
 			if (controller.signal.aborted) return clientClosedResponse(route);
@@ -545,45 +482,67 @@ async function handleFormatEndpoint(
 				peer,
 			});
 			return route.module.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			// Every non-streaming outcome — answered, upstream error, thrown,
+			// client gone — is done with the provider state here.
+			lease.release();
 		}
 	}
 
-	let events: AssistantMessageEventStream;
+	// A streamed turn outlives this function, so the lease, and a scoped
+	// client's hold on its account restriction, travel with the event stream and
+	// are released when the turn settles. Until that handoff happens, the
+	// `finally` below owns them.
+	const clientHold = bootOpts.client?.retain();
+	const settle = (): void => {
+		lease.release();
+		clientHold?.();
+	};
+	let streamOwnsLease = false;
 	try {
+		let events: AssistantMessageEventStream;
+		try {
+			if (controller.signal.aborted) return clientClosedResponse(route);
+			events = streamSimple(model, parsed.context, streamOpts);
+		} catch (error) {
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+			return route.module.formatError(classified.status, classified.type, classified.message);
+		}
 		if (controller.signal.aborted) return clientClosedResponse(route);
-		events = streamSimple(model, parsed.context, streamOpts);
-	} catch (error) {
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
-		return route.module.formatError(classified.status, classified.type, classified.message);
-	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
-	void events
-		.result()
-		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-		.catch(() => {});
+		void events
+			.result()
+			.then(message =>
+				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+			)
+			.catch(() => {})
+			.finally(settle);
+		streamOwnsLease = true;
 
-	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
-		signal: controller.signal,
-		onCancel: reason => {
-			if (!controller.signal.aborted) {
-				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
-			}
-		},
-	});
-	return new Response(sseStream, {
-		status: 200,
-		headers: {
-			...gatewayResponseHeaders(model, { requestId }),
-			"Content-Type": "text/event-stream; charset=utf-8",
-			"Cache-Control": "no-cache",
-			Connection: "keep-alive",
-			// Disable proxy buffering (nginx and ingress controllers honor this).
-			// Without it the SSE stream gets held until the buffer flushes, which
-			// stalls the long-thinking-budget calls we exist to support.
-			"X-Accel-Buffering": "no",
-		},
-	});
+		const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+			signal: controller.signal,
+			onCancel: reason => {
+				if (!controller.signal.aborted) {
+					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+				}
+			},
+		});
+		return new Response(sseStream, {
+			status: 200,
+			headers: {
+				...gatewayResponseHeaders(model, { requestId }),
+				"Content-Type": "text/event-stream; charset=utf-8",
+				"Cache-Control": "no-cache",
+				Connection: "keep-alive",
+				// Disable proxy buffering (nginx and ingress controllers honor this).
+				// Without it the SSE stream gets held until the buffer flushes, which
+				// stalls the long-thinking-budget calls we exist to support.
+				"X-Accel-Buffering": "no",
+			},
+		});
+	} finally {
+		if (!streamOwnsLease) settle();
+	}
 }
 
 /**
@@ -600,7 +559,12 @@ async function handleFormatEndpoint(
  * `parseRequest`/`encodeResponse`/`encodeStream` differ from the format-endpoint
  * path.
  */
-async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+async function handlePiNative(
+	bootOpts: AuthGatewayRouteOptions,
+	req: Request,
+	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
+): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -629,56 +593,58 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
+	const kindRejection = chatRouteRejection(model);
+	if (kindRejection) return piNative.formatError(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
 	// up with cache-prefix stickiness — same identity used for both means
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
-	const sessionId = parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
-	parsed.options.sessionId ??= sessionId;
+	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
+	parsed.options.sessionId = sessionId;
 
-	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
-		if (controller.signal.aborted) return aborted();
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return piNative.formatError(classified.status, classified.type, classified.message);
-	}
+	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (!apiKey) {
-		return piNative.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
-		);
-	}
+	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
 
-	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
-	// trust the client's options (already allow-listed by `parseRequest`) and
-	// only inject server-controlled fields. The codex sampling strip mirrors
-	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
+	// Per-session provider learning, owned by this gateway instance. The map is
+	// non-serializable, so `parseRequest` cannot accept one from the wire and
+	// every turn would otherwise re-learn each lesson from a fresh upstream
+	// rejection. The lease keeps the entry out of reach of eviction until this
+	// request is done with it, so it MUST be released on every exit path.
+	const lease = sessionStates.acquire({
+		clientKey,
+		model,
+		context: parsed.context,
+		toolsJson,
+		account: resolveGatewayAccount(apiKey),
+		client: bootOpts.client?.name,
+	});
+	// Build the SimpleStreamOptions actually handed to `streamSimple`, then
+	// normalize thinking against the resolved model. The sampling strip mirrors
+	// `buildStreamOptions` — backends with `supportsSamplingParams: false` 400 on them (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
-		apiKey,
 		signal: controller.signal,
 		cursorExternalToolExecutor: true,
+		providerSessionState: lease.states,
 	};
+	normalizeGatewayThinking(model, streamOpts);
+	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		apiKey,
 		controller.signal,
 		"pi-native",
 		peer,
+		resolved => lease.updateAccount(resolveGatewayAccount(resolved)),
 	);
-	if (model.api === "openai-codex-responses") {
+	if (model.compat && "supportsSamplingParams" in model.compat && model.compat.supportsSamplingParams === false) {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
 		delete streamOpts.topK;
@@ -692,7 +658,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
 	streamOpts.headers = { ...captured, ...streamOpts.headers };
-	streamOpts.sessionId ??= sessionId;
+	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -702,13 +668,14 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		resolvedModel: model.id,
 		stream: parsed.stream,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message);
+			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -725,48 +692,74 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
 			}
-			return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
+			return json(
+				200,
+				{ message },
+				gatewayResponseHeaders(model, { requestId, costUsd: message.usage.cost.total, startedAt }),
+			);
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
 			return piNative.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			// Every non-streaming outcome — answered, upstream error, thrown,
+			// client gone — is done with the provider state here.
+			lease.release();
 		}
 	}
 
-	let events: AssistantMessageEventStream;
+	// A streamed turn outlives this function, so the lease, and a scoped
+	// client's hold on its account restriction, travel with the event stream and
+	// are released when the turn settles. Until that handoff happens, the
+	// `finally` below owns them.
+	const clientHold = bootOpts.client?.retain();
+	const settle = (): void => {
+		lease.release();
+		clientHold?.();
+	};
+	let streamOwnsLease = false;
 	try {
+		let events: AssistantMessageEventStream;
+		try {
+			if (controller.signal.aborted) return aborted();
+			events = streamSimple(model, parsed.context, streamOpts);
+		} catch (error) {
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
+			return piNative.formatError(classified.status, classified.type, classified.message);
+		}
 		if (controller.signal.aborted) return aborted();
-		events = streamSimple(model, parsed.context, streamOpts);
-	} catch (error) {
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
-		return piNative.formatError(classified.status, classified.type, classified.message);
-	}
-	if (controller.signal.aborted) return aborted();
-	void events
-		.result()
-		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-		.catch(() => {});
+		void events
+			.result()
+			.then(message =>
+				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+			)
+			.catch(() => {})
+			.finally(settle);
+		streamOwnsLease = true;
 
-	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
-		signal: controller.signal,
-		onCancel: reason => {
-			if (!controller.signal.aborted) {
-				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
-			}
-		},
-	});
-	return new Response(sseStream, {
-		status: 200,
-		headers: {
-			...gatewayResponseHeaders(model, { requestId }),
-			"Content-Type": "text/event-stream; charset=utf-8",
-			"Cache-Control": "no-cache",
-			Connection: "keep-alive",
-			"X-Accel-Buffering": "no",
-		},
-	});
+		const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
+			signal: controller.signal,
+			onCancel: reason => {
+				if (!controller.signal.aborted) {
+					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+				}
+			},
+		});
+		return new Response(sseStream, {
+			status: 200,
+			headers: {
+				...gatewayResponseHeaders(model, { requestId }),
+				"Content-Type": "text/event-stream; charset=utf-8",
+				"Cache-Control": "no-cache",
+				Connection: "keep-alive",
+				"X-Accel-Buffering": "no",
+			},
+		});
+	} finally {
+		if (!streamOwnsLease) settle();
+	}
 }
 
 /**
@@ -775,12 +768,14 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
  * failure) inside `AuthStorage`, so this handler is a thin wrapper that
  * surfaces the same data to HTTP callers (notably the macOS usage widget).
  */
-async function handleUsage(storage: AuthStorage, signal: AbortSignal): Promise<Response> {
-	const reports = (await storage.fetchUsageReports?.({ signal })) ?? [];
+async function handleUsage(opts: AuthGatewayRouteOptions, signal: AbortSignal): Promise<Response> {
+	const reports = (await opts.storage.usage.reports?.({ signal })) ?? [];
 	// Drop the heavy provider-specific `raw` payload — UI consumers only need
 	// `limits` + `metadata`. Match the broker's `/v1/usage` shape so a single
 	// client struct (Swift widget, llm-git, ...) works against either endpoint.
-	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
+	const trimmed = reports
+		.filter(report => !opts.excludeProviders?.has(report.provider))
+		.map(({ raw: _raw, ...rest }) => rest);
 	return json(200, { generatedAt: Date.now(), reports: trimmed });
 }
 
@@ -795,8 +790,8 @@ async function handleUsage(storage: AuthStorage, signal: AbortSignal): Promise<R
  * endpoints. For multi-account pools that's the difference between getting
  * a clean diagnosis and getting a 429 storm.
  */
-async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal): Promise<Response> {
-	const credentials = await storage.checkCredentials({ signal });
+async function handleCredentialsCheck(opts: AuthGatewayRouteOptions, signal: AbortSignal): Promise<Response> {
+	const credentials = await opts.storage.health.check({ signal, excludeProviders: opts.excludeProviders });
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
@@ -806,13 +801,16 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal)
  * (omp's own proxy discovery, Zed's openai_compatible provider, ...) read to
  * size and capability-gate discovered models: `context_length`,
  * `max_output_tokens`, `input_modalities`, and `supports_tools` (only emitted
- * when the catalog explicitly reports `false`; absent means usable).
+ * when the catalog explicitly reports `false`; absent means usable). `kind` is
+ * emitted for non-chat rows (`judge`, `image`, `tts`, `stt`, `embedding`,
+ * `rerank`, `video`) so clients can keep them off chat routes; absent means chat.
  */
 interface ModelListRow {
 	id: string;
 	object: "model";
 	owned_by: string;
 	api: Api;
+	kind?: ModelKind;
 	display_name: string;
 	context_length?: number;
 	max_output_tokens?: number;
@@ -820,7 +818,7 @@ interface ModelListRow {
 	supports_tools?: boolean;
 }
 
-function handleModelsList(opts: AuthGatewayBootOptions): Response {
+function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 	const seen = new Set<string>();
 	const data: ModelListRow[] = [];
 	for (const model of opts.listModels?.() ?? []) {
@@ -835,6 +833,7 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 			display_name: model.name,
 			input_modalities: model.input,
 		};
+		if (modelKind(model) !== "chat") row.kind = modelKind(model);
 		if (model.contextWindow != null) row.context_length = model.contextWindow;
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
 		if (model.supportsTools === false) row.supports_tools = false;
@@ -843,75 +842,234 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 	return json(200, { object: "list", data });
 }
 
+/** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
+const VIDEO_JOB_PATH = /^\/v1\/videos\/([^/]+)(\/content)?$/;
+
+// Only exact static routes are safe to include in unauthorized request logs.
+// Dynamic video IDs and unknown paths may carry credentials.
+const LOGGABLE_PATHS: Record<string, true> = {
+	"/v1/usage": true,
+	"/v1/credentials/check": true,
+	"/v1/pi/stream": true,
+	"/v1/systemone": true,
+	"/alpha/decisions": true,
+	"/v1/images/generations": true,
+	"/v1/images": true,
+	"/v1/images/edits": true,
+	"/v1/audio/speech": true,
+	"/v1/audio/transcriptions": true,
+	"/v1/embeddings": true,
+	"/v1/rerank": true,
+	"/v1/videos": true,
+	"/v1/models": true,
+};
+
+/** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
+function loggablePath(pathname: string): string {
+	return Object.hasOwn(FORMAT_ROUTES, pathname) || Object.hasOwn(LOGGABLE_PATHS, pathname) ? pathname : "<unrouted>";
+}
+
+/** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
+export interface AuthGatewayRouter {
+	/**
+	 * Answers one request; `peer` names the caller in logs, `client` is the
+	 * scoped client the transport admitted, if any. Never rejects: a crashed
+	 * route answers 500.
+	 */
+	route(req: Request, peer: string, client?: AuthGatewayClientScope): Promise<Response>;
+	/**
+	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
+	 * workflows), whose sockets and timers would otherwise keep the process alive.
+	 */
+	close(): void;
+}
+
+/** Why a scoped client cannot read `/v1/usage` or `/v1/credentials/check`: both cover every account the gateway holds. */
+const GATEWAY_WIDE_ROUTE = "client tokens cannot read gateway-wide usage or credential health";
+
+/**
+ * Route options for a request from scoped `client`. Its models narrow
+ * `resolveModel` and `listModels`, so every route refuses a model outside them
+ * as unknown before any credential lookup; `client` itself binds the
+ * request's credential lookups (see `dispatch.ts`).
+ */
+function scopeRouteOptions(opts: AuthGatewayRouteOptions, client: AuthGatewayClientScope): AuthGatewayRouteOptions {
+	if (!client.limitsModels) return { ...opts, client };
+	const { resolveModel, listModels } = opts;
+	return {
+		...opts,
+		client,
+		resolveModel: (id, options) => {
+			const accepts = (model: Model<Api>): boolean => client.allows(model) && (options?.accepts?.(model) ?? true);
+			const model = resolveModel(id, { ...options, accepts });
+			// Checked again so a resolver that ignores `accepts` still never serves a refused model.
+			return model && accepts(model) ? model : undefined;
+		},
+		listModels: listModels && (() => [...listModels()].filter(model => client.allows(model))),
+	};
+}
+
+/**
+ * The gateway's routes over `hostOpts`, owning their per-session provider state:
+ * two routers in one process never share (or tear down) each other's.
+ */
+export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): AuthGatewayRouter {
+	const sessionStates = new AuthGatewaySessionStateStore();
+	const route = async (req: Request, peer: string, client?: AuthGatewayClientScope): Promise<Response> => {
+		const pathname = new URL(req.url).pathname;
+		const opts = client ? scopeRouteOptions(hostOpts, client) : hostOpts;
+		try {
+			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
+			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
+			// same client struct.
+			if (req.method === "GET" && pathname === "/v1/usage") {
+				if (client) return json(403, { error: GATEWAY_WIDE_ROUTE });
+				return await handleUsage(opts, req.signal);
+			}
+
+			// Per-credential auth probe — diagnoses which row in a multi-account
+			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
+			// credentials, so we need a separate endpoint that captures errors.
+			if (req.method === "GET" && pathname === "/v1/credentials/check") {
+				if (client) return json(403, { error: GATEWAY_WIDE_ROUTE });
+				return await handleCredentialsCheck(opts, req.signal);
+			}
+
+			// Provider-format dispatch.
+			const formatRoute = FORMAT_ROUTES[pathname];
+			if (formatRoute && req.method === "POST") {
+				return await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates);
+			}
+
+			// Pi-native fast path. Same auth + provider plumbing as the
+			// foreign-wire routes, just without the wire-format translation.
+			if (req.method === "POST" && pathname === "/v1/pi/stream") {
+				return await handlePiNative(opts, req, peer, sessionStates);
+			}
+
+			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
+			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
+			// reach the same handler through their Decisions path.
+			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
+				return await handleSystemOne(opts, req, peer);
+			}
+
+			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
+			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
+			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
+				return await handleImageGenerations(opts, req, peer);
+			}
+			if (req.method === "POST" && pathname === "/v1/images/edits") {
+				return await handleImageEdits(opts, req, peer);
+			}
+
+			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
+			if (req.method === "POST" && pathname === "/v1/audio/speech") {
+				return await handleSpeech(opts, req, peer);
+			}
+
+			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
+			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
+				return await handleTranscriptions(opts, req, peer);
+			}
+
+			// Embeddings, OpenAI wire (OpenRouter is compatible).
+			if (req.method === "POST" && pathname === "/v1/embeddings") {
+				return await handleEmbeddings(opts, req, peer);
+			}
+
+			// Rerank, OpenRouter wire.
+			if (req.method === "POST" && pathname === "/v1/rerank") {
+				return await handleRerank(opts, req, peer);
+			}
+
+			// Video generation, OpenRouter's asynchronous wire: submit, then poll
+			// and download by the gateway-issued job id (stateless — the id
+			// encodes provider, model, and upstream job).
+			if (req.method === "POST" && pathname === "/v1/videos") {
+				return await handleVideoSubmit(opts, req, peer);
+			}
+			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
+			if (videoJob) {
+				const gatewayId = decodeURIComponent(videoJob[1]);
+				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
+				return await handler(opts, req, peer, gatewayId);
+			}
+
+			// Model catalog.
+			if (req.method === "GET" && pathname === "/v1/models") {
+				return handleModelsList(opts);
+			}
+
+			// Route-table miss: no format module to defer to, so we emit a
+			// plain JSON 404 rather than guessing at a protocol-specific envelope.
+			return json(404, { error: `No route: ${req.method} ${pathname}` });
+		} catch (error) {
+			logger.error("auth-gateway handler crashed", {
+				method: req.method,
+				path: loggablePath(pathname),
+				peer,
+				error: String(error),
+			});
+			return json(500, { error: "internal error" });
+		}
+	};
+	return { route, close: () => sessionStates.close() };
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
+	const clients = new AuthGatewayClientTable(opts.storage.sessions, tokens);
+	if (opts.clients) clients.set(opts.clients);
+	// A client table, even an empty one, keeps bearer auth on without a gateway token.
+	let requireBearer = tokens.size > 0 || opts.clients !== undefined;
 	const version = opts.version;
+	const router = createAuthGatewayRouter(opts);
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
 		port: bind.port,
-		fetch: async (req): Promise<Response> => {
+		fetch: async (req, server): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
-			const peer = resolvePeer(req);
+			const socketPeer = server.requestIP(req)?.address ?? "unknown";
 			// CORS preflight is always answered without auth — browsers send
 			// preflights pre-authentication and a 401 here breaks the actual
 			// request before the bearer is ever attached.
 			if (req.method === "OPTIONS") {
 				return new Response(null, { status: 204, headers: corsHeaders(req) });
 			}
-			try {
-				if (req.method === "GET" && pathname === "/healthz") {
-					return withCors(json(200, { ok: true, version }), req);
-				}
-				if (!isAuthorized(req, tokens)) {
-					logger.info("auth-gateway request unauthorized", { method: req.method, path: pathname, peer });
+			if (req.method === "GET" && pathname === "/healthz") {
+				return withCors(json(200, { ok: true, version }), req);
+			}
+			let client: AuthGatewayClientScope | undefined;
+			let misplaceable: ReadonlySet<string> = tokens;
+			if (requireBearer && !(tokens.size > 0 && isAuthorized(req, tokens))) {
+				const bearer = readBearerToken(req);
+				client = bearer === undefined ? undefined : clients.authenticate(bearer);
+				if (bearer === undefined || client === undefined) {
+					logger.info("auth-gateway request unauthorized", {
+						method: req.method,
+						path: loggablePath(pathname),
+						peer: socketPeer,
+					});
 					return withCors(json(401, { error: "unauthorized" }), req);
 				}
-
-				// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
-				// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
-				// same client struct.
-				if (req.method === "GET" && pathname === "/v1/usage") {
-					return withCors(await handleUsage(opts.storage, req.signal), req);
-				}
-
-				// Per-credential auth probe — diagnoses which row in a multi-account
-				// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
-				// credentials, so we need a separate endpoint that captures errors.
-				if (req.method === "GET" && pathname === "/v1/credentials/check") {
-					return withCors(await handleCredentialsCheck(opts.storage, req.signal), req);
-				}
-
-				// Provider-format dispatch.
-				const formatRoute = FORMAT_ROUTES[pathname];
-				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer), req);
-				}
-
-				// Pi-native fast path. Same auth + provider plumbing as the
-				// foreign-wire routes, just without the wire-format translation.
-				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(opts, req, peer), req);
-				}
-
-				// Model catalog.
-				if (req.method === "GET" && pathname === "/v1/models") {
-					return withCors(handleModelsList(opts), req);
-				}
-
-				// Route-table miss: no format module to defer to, so we emit a
-				// plain JSON 404 rather than guessing at a protocol-specific envelope.
-				return withCors(json(404, { error: `No route: ${req.method} ${pathname}` }), req);
-			} catch (error) {
-				logger.error("auth-gateway handler crashed", {
-					method: req.method,
-					path: pathname,
-					peer,
-					error: String(error),
-				});
-				return withCors(json(500, { error: "internal error" }), req);
+				// Client tokens are configured as digests; the presented one is the only one held in full.
+				misplaceable = new Set([...tokens, bearer]);
+			}
+			if (hasMisplacedBearer(req, url, misplaceable)) {
+				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
+			}
+			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
+			if (!client) return withCors(await router.route(req, peer), req);
+			// Taken in the tick `authenticate` ran, so a reload cannot lift the restriction first.
+			const release = client.retain();
+			try {
+				return withCors(await router.route(req, peer, client), req);
+			} finally {
+				release();
 			}
 		},
 		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
@@ -927,6 +1085,15 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		hostname: boundHost,
 		close: async () => {
 			server.stop(true);
+			// Drain after the listener is down: the retained provider states own
+			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
+			// process can't settle until each one is closed.
+			router.close();
+			clients.close();
+		},
+		setClients: list => {
+			clients.set(list);
+			requireBearer = true;
 		},
 	};
 }

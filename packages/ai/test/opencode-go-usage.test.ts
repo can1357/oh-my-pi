@@ -99,15 +99,29 @@ describe("opencode-go usage provider", () => {
 		expect(calls[0]?.headers["x-opencode-session"]?.length).toBeGreaterThan(0);
 	});
 
-	it("normalizes both catalog baseUrl forms onto the usage route", async () => {
-		for (const baseUrl of ["https://opencode.ai/zen/go", "https://opencode.ai/zen/go/v1"]) {
+	it("maps bundled Go inference URLs to the Zen account endpoint", async () => {
+		for (const baseUrl of ["https://opencode.ai/inference/go", "https://opencode.ai/inference/go/v1"]) {
 			const calls: Array<{ url: string; headers: Record<string, string> }> = [];
-			await opencodeGoUsageProvider.fetchUsage(
+			const report = await opencodeGoUsageProvider.fetchUsage(
 				{ provider: "opencode-go", credential: { type: "api_key", apiKey: "sk-test" }, baseUrl },
 				{ fetch: fetchRecorder(calls, usagePayload()) },
 			);
 			expect(calls[0]?.url).toBe(DEFAULT_USAGE_URL);
+			expect(report?.limits.map(limit => limit.scope.windowId)).toEqual(["5h", "7d", "monthly"]);
 		}
+	});
+
+	it("preserves explicitly configured gateway paths for account polling", async () => {
+		const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+		await opencodeGoUsageProvider.fetchUsage(
+			{
+				provider: "opencode-go",
+				credential: { type: "api_key", apiKey: "sk-test" },
+				baseUrl: "https://gateway.example/opencode-go/v1",
+			},
+			{ fetch: fetchRecorder(calls, usagePayload()) },
+		);
+		expect(calls[0]?.url).toBe("https://gateway.example/opencode-go/v1/usage");
 	});
 
 	it("throws on 401 with the upstream error message so checkCredentials flags the key", async () => {

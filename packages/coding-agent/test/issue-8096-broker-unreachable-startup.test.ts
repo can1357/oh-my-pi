@@ -9,10 +9,11 @@
  * so an unreachable broker stays fatal — the fix is the recovery guidance, not
  * a silent fallback to local credentials.
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { describeAuthBrokerStartupError } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { setInteractiveHost } from "@oh-my-pi/pi-utils";
@@ -23,6 +24,11 @@ class ProcessExitSignal extends Error {
 		this.name = "ProcessExitSignal";
 	}
 }
+
+// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+afterEach(() => {
+	clearOmpExtensionCliRoots();
+});
 
 describe("describeAuthBrokerStartupError", () => {
 	it("turns a broker connection failure into recovery guidance", async () => {
@@ -69,6 +75,9 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		const previous = setInteractiveHost(false);
 		const parsed = parseArgs([]);
 		parsed.noExtensions = true;
+		// An interactive launch needs a terminal on stdin; without one it exits 2.
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 		const exitCodes: number[] = [];
 		let stderr = "";
@@ -92,6 +101,7 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 			thrown = err;
 		} finally {
 			vi.restoreAllMocks();
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			setInteractiveHost(previous);
 		}
 

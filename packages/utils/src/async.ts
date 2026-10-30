@@ -1,3 +1,34 @@
+import { scheduler } from "node:timers/promises";
+
+/**
+ * Largest delay `setTimeout` (and `timers/promises` `scheduler.wait`)
+ * accepts without 32-bit signed overflow: larger values wrap and fire
+ * almost immediately instead of sleeping. Chunk day-scale provider waits
+ * (e.g. a monthly quota reset parsed from an error hint) so the full
+ * duration elapses instead of overflowing the timer.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Abortable sleep for arbitrarily long delays. Waits longer than
+ * {@link MAX_TIMER_DELAY_MS} chunk the sleep into back-to-back timer waits
+ * so no single timer overflows; an abort during any chunk rejects like
+ * `scheduler.wait`.
+ *
+ * Uses a monotonic deadline so a timer that wakes prematurely is re-armed for
+ * the unelapsed duration instead of shortening the requested sleep.
+ */
+export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	const deadline = performance.now() + delayMs;
+	while (true) {
+		const remaining = deadline - performance.now();
+		if (!(remaining > 0)) return;
+		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
+		signal?.throwIfAborted();
+	}
+}
+
 /**
  * Wrap a promise with a timeout and optional abort signal.
  * Rejects with the given error or a new error containing the given message if
@@ -60,13 +91,22 @@ export function withTimeout<T>(
  * timer (`delayMs`, or a microtask at 0), and every push before it fires joins
  * the same batch and shares the same promise. Used to keep hot paths off
  * synchronous storage (prompt history, model perf).
+ *
+ * `unref` lets a long batch window not hold the process open; the owner must
+ * then {@link flush} on shutdown or the pending batch is lost.
  */
 export class AsyncDrain<T> {
 	#queue?: T[];
 	#promise = Promise.resolve();
 	#flush?: () => void;
+	readonly #unref: boolean;
 
-	constructor(readonly delayMs: number = 0) {}
+	constructor(
+		readonly delayMs: number = 0,
+		options?: { unref?: boolean },
+	) {
+		this.#unref = options?.unref === true;
+	}
 
 	/** Queue `value`; `hnd` receives the whole batch when the window closes. */
 	push(value: T, hnd: (values: T[]) => Promise<void> | void): Promise<void> {
@@ -88,6 +128,7 @@ export class AsyncDrain<T> {
 			};
 			if (this.delayMs > 0) {
 				const timer = setTimeout(exec, this.delayMs);
+				if (this.#unref) timer.unref();
 				this.#flush = () => {
 					clearTimeout(timer);
 					exec();

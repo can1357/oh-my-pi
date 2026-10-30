@@ -108,11 +108,12 @@ export default class Worktree extends Command {
 
 		await Settings.init({ cwd: getProjectDir() });
 		if (args.action === "clear") {
-			await clearWorktrees({
+			const { failed } = await clearWorktrees({
 				all: flags.all ?? false,
 				dryRun: flags["dry-run"] ?? false,
 				json: flags.json ?? false,
 			});
+			if (failed > 0) process.exitCode = 1;
 			return;
 		}
 		await listWorktrees({ json: flags.json ?? false });

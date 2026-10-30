@@ -1,21 +1,21 @@
 {
-  "name": "test-marketplace",
-  "owner": {
-    "name": "Test Author",
-    "email": "test@example.com"
-  },
-  "metadata": {
-    "description": "A test marketplace for unit tests",
-    "version": "1.0.0"
-  },
-  "plugins": [
-    {
-      "name": "hello-plugin",
-      "source": "./plugins/hello-plugin",
-      "description": "A test plugin that greets",
-      "version": "1.0.0",
-      "author": { "name": "Test Author" },
-      "keywords": ["test", "greeting"]
-    }
-  ]
+	"name": "test-marketplace",
+	"owner": {
+		"name": "Test Author",
+		"email": "test@example.com"
+	},
+	"metadata": {
+		"description": "A test marketplace for unit tests",
+		"version": "1.0.0"
+	},
+	"plugins": [
+		{
+			"name": "hello-plugin",
+			"source": "./plugins/hello-plugin",
+			"description": "A test plugin that greets",
+			"version": "1.0.0",
+			"author": { "name": "Test Author" },
+			"keywords": ["test", "greeting"]
+		}
+	]
 }

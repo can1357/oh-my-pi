@@ -7,7 +7,7 @@ import { prepareAgentBinaries } from "./agent";
 import { loadTasks, resolveDataset } from "./dataset";
 import { TbStore, type TbSummaryRow } from "./store";
 import { runTrial } from "./trial";
-import type { GatewayConfig, OpenRouterVariant, TbTask, TrialResult, TrialRow, VmonConfig } from "./types";
+import type { AgentConfig, GatewayConfig, OpenRouterVariant, TbTask, TrialResult, TrialRow, VmonConfig } from "./types";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 
@@ -20,6 +20,8 @@ const FLASH_POOL = [
 	"openrouter/tencent/hy3",
 	"openrouter/stepfun/step-3.7-flash",
 ];
+
+const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "grep", "glob"];
 
 const OPENROUTER_VARIANTS: Record<OpenRouterVariant, true> = {
 	default: true,
@@ -43,6 +45,7 @@ interface Config {
 	epochs: number;
 	forever: boolean;
 	budget: number | null;
+	agent: AgentConfig;
 	jobsDir: string;
 	gatewayUrl: string;
 	gatewayToken: string;
@@ -74,6 +77,8 @@ Options:
       --epochs <n>              Epochs to run (default 1)
       --forever                 Run epochs until interrupted
       --budget <usd>            Stop scheduling in an epoch after this spend
+      --tools <a,b,c>           omp tool allowlist (default ${DEFAULT_TOOLS.join(",")})
+      --env <KEY[=VALUE]>       Extra env for the omp process only (repeatable; bare KEY forwards the host value)
       --jobs-dir <path>         Artifacts directory (default <repo>/runs/tb)
       --gateway-url <url>       Local omp auth gateway (default http://127.0.0.1:4000)
       --gateway-token <token>   Gateway token (default no-auth)
@@ -96,6 +101,7 @@ export function parseArgs(argv: string[]): Config {
 		epochs: 1,
 		forever: false,
 		budget: null,
+		agent: { tools: [...DEFAULT_TOOLS], env: {} },
 		jobsDir: path.join(REPO_ROOT, "runs", "tb"),
 		gatewayUrl: "http://127.0.0.1:4000",
 		gatewayToken: "no-auth",
@@ -159,6 +165,22 @@ export function parseArgs(argv: string[]): Config {
 			case "--budget":
 				config.budget = Number(take());
 				break;
+			case "--tools":
+				config.agent.tools = take()
+					.split(",")
+					.map(tool => tool.trim())
+					.filter(tool => tool.length > 0);
+				break;
+			case "--env": {
+				const spec = take();
+				const equals = spec.indexOf("=");
+				const key = equals === -1 ? spec : spec.slice(0, equals);
+				const value = equals === -1 ? process.env[key] : spec.slice(equals + 1);
+				if (key.length === 0) throw new Error("--env requires a variable name");
+				if (value === undefined) throw new Error(`--env ${key}: variable is not set on the host`);
+				config.agent.env[key] = value;
+				break;
+			}
 			case "--jobs-dir":
 				config.jobsDir = path.resolve(take());
 				break;
@@ -213,6 +235,7 @@ export function parseArgs(argv: string[]): Config {
 	if (config.budget !== null && (!Number.isFinite(config.budget) || config.budget < 0)) {
 		throw new Error("--budget must be a non-negative number");
 	}
+	if (config.agent.tools.length === 0) throw new Error("--tools must name at least one tool");
 	return config;
 }
 
@@ -424,6 +447,7 @@ export async function main(argv: string[]): Promise<void> {
 							task: item.task,
 							model: item.model,
 							binaries,
+							agent: config.agent,
 							gateway,
 							vmon,
 							trialDir: absoluteTrialDir,

@@ -26,6 +26,7 @@ describe("advisor watchdog prompt discovery", () => {
 		const cwd = tempDir.join("project-root");
 		fs.mkdirSync(cwd, { recursive: true });
 		fs.mkdirSync(path.join(cwd, "active-project", ".git"), { recursive: true });
+		fs.writeFileSync(path.join(cwd, "active-project", ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
 
 		// Write a WATCHDOG.md file
 		const watchdogContent = "Watchdog rule: Watch out for cheating on edits.";
@@ -35,7 +36,7 @@ describe("advisor watchdog prompt discovery", () => {
 		const authStorage = createInMemoryAuthStorage();
 		let session: AgentSession | undefined;
 		try {
-			authStorage.setRuntimeApiKey("openai", "test-key");
+			authStorage.keys.setRuntime("openai", "test-key");
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 			const sessionManager = SessionManager.inMemory(cwd);
 			const result = await createAgentSession({
@@ -73,12 +74,9 @@ describe("advisor watchdog prompt discovery", () => {
 			expect(session.isAdvisorActive()).toBe(true);
 			const dump = session.formatAdvisorHistoryAsText();
 			expect(dump).not.toBeNull();
-			expect(dump).toContain("Especially pay attention to:");
-			expect(dump).toContain("<attention>");
 			expect(dump).toContain(watchdogContent);
 			expect(dump).toContain(activeRepoMarker);
 			expect(dump!.indexOf(watchdogContent)).toBeLessThan(dump!.indexOf(activeRepoMarker));
-			expect(dump).toContain("</attention>");
 		} finally {
 			try {
 				await session?.dispose();

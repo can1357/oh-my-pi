@@ -141,7 +141,7 @@ pub(crate) fn bpe_for(enc: Encoding) -> &'static BpeEncoding {
 		Encoding::DeepSeekV3 => &DEEPSEEK3,
 		Encoding::KimiK2 => &KIMI_K2,
 		Encoding::Glm5 => &GLM5,
-		_ => unreachable!("claude families never reach bpe_for"),
+		_ => unreachable!("count-only families (claude, jev) never reach bpe_for"),
 	}
 }
 
@@ -173,7 +173,7 @@ mod glm_scan_tests {
 		for _ in 0..n {
 			let len = (rng.next() % 300 + 1) as usize;
 			let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
-			out.push(String::from_utf8_lossy(&bytes).into_owned());
+			out.push(String::from_utf8_lossy_owned(bytes));
 		}
 		for _ in 0..n {
 			let len = (rng.next() % 120 + 1) as usize;

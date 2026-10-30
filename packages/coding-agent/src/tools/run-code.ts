@@ -1,4 +1,4 @@
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const NON_SERIALIZABLE_RUN_ARGUMENT = "Run argument is not JSON-serializable; pass plain data";
 
@@ -53,6 +53,11 @@ export function renderRunArg(value: unknown): string {
 	}
 	if (rendered === undefined) throw new ToolError(NON_SERIALIZABLE_RUN_ARGUMENT);
 	return rendered;
+}
+
+/** Renders a helper call chain (`id(5).click()`) with arguments as JavaScript literals. */
+export function renderCallChain(chain: readonly { method: string; args: readonly unknown[] }[]): string {
+	return chain.map(step => `${step.method}(${step.args.map(renderRunArg).join(", ")})`).join(".");
 }
 
 /** Renders a function invocation with the requested run scope and positional arguments. */

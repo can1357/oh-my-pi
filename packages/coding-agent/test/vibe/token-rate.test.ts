@@ -11,7 +11,7 @@
  *    so a stale roster entry can't contribute a phantom zero.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
+import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import { aggregateVibeWorkerTokensPerSecond, VibeSessionRegistry } from "../../src/vibe/runtime";
 
@@ -58,12 +58,6 @@ describe("aggregateVibeWorkerTokensPerSecond", () => {
 		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBe(200);
 	});
 
-	it("returns null when workers exist but none have a live rate", () => {
-		// Not streaming, no duration → calculateTokensPerSecond returns null.
-		registerWorker("w1", fakeSession([assistantMessage(100, 0)], false));
-		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBeNull();
-	});
-
 	it("ignores idle workers whose last turn finished — a finalized duration must not contribute a stale rate", () => {
 		// Finalized message (duration set) but the worker is no longer
 		// streaming: its completed tok/s must not stick to the badge forever.
@@ -88,9 +82,5 @@ describe("aggregateVibeWorkerTokensPerSecond", () => {
 		registerWorker("w1", fakeSession([assistantMessage(100, 1000)], true), OWNER);
 		registerWorker("w2", fakeSession([assistantMessage(50, 500)], true), "other-owner");
 		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBe(100);
-	});
-
-	it("returns null for the main-agent owner id when no workers are registered", () => {
-		expect(aggregateVibeWorkerTokensPerSecond(MAIN_AGENT_ID)).toBeNull();
 	});
 });

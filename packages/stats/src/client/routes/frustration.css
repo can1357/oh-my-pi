@@ -1,0 +1,123 @@
+.frustration-judge {
+	gap: 10px;
+	font-size: 13px;
+}
+
+.frustration-spacer {
+	flex: 1;
+}
+
+.frustration-progress {
+	gap: 8px;
+}
+
+.frustration-progress-head {
+	gap: 10px;
+}
+
+.frustration-progress-track {
+	height: 6px;
+	border-radius: 3px;
+}
+
+.frustration-progress-fill {
+	border-radius: 3px;
+	background: var(--accent-gradient);
+}
+
+.frustration-progress-meta {
+	flex-wrap: wrap;
+	gap: 4px 18px;
+}
+
+/* Cost quote headline in the confirm dialog. */
+.frustration-quote {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 12px 14px;
+	border: 1px solid var(--line-2);
+	border-radius: var(--r-control);
+	background: var(--hover);
+}
+
+.frustration-quote-value {
+	font-size: 22px;
+	font-weight: 600;
+	color: var(--ink-1);
+}
+
+.frustration-chart-body {
+	gap: 14px;
+}
+
+/* Many model classes: scroll sideways rather than wrap (the thumb tracks one row). */
+.frustration-classes {
+	overflow-x: auto;
+	scrollbar-width: none;
+}
+
+.frustration-filters {
+	flex-wrap: wrap;
+	align-items: flex-start;
+	gap: 8px 16px;
+}
+
+.frustration-filters .legend {
+	flex: 1 1 320px;
+}
+
+.frustration-key {
+	padding-top: 10px;
+	border-top: 1px solid var(--line-1);
+	color: var(--ink-3);
+}
+
+.frustration-key .frustration-key-wide {
+	max-width: none;
+}
+
+.frustration-key-swatch[data-variant="assistant"] {
+	background: var(--ink-2);
+}
+
+.frustration-key-swatch[data-variant="angry"] {
+	background: color-mix(in srgb, var(--ink-2) 55%, black);
+}
+
+.frustration-key-swatch[data-variant="other"] {
+	background: color-mix(in srgb, var(--ink-2) 32%, transparent);
+}
+
+.frustration-key-swatch[data-variant="hatch"] {
+	background: repeating-linear-gradient(
+		45deg,
+		var(--ink-2) 0 1.6px,
+		color-mix(in srgb, var(--ink-2) 14%, transparent) 1.6px 3.5px
+	);
+}
+
+.frustration-key-line {
+	width: 12px;
+	height: 2px;
+	border-radius: 1px;
+	background: var(--ink-1);
+}
+
+.frustration-chart-empty {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 340px;
+}
+
+.frustration-tooltip-extra {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.frustration-judged {
+	justify-content: flex-end;
+	gap: 6px;
+}

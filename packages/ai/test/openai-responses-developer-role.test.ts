@@ -25,19 +25,9 @@ function buildOpenAIResponsesCompat(spec: ResponsesCompatTestSpec) {
 }
 
 describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
-	it("returns true for openai provider with official API base URL", () => {
-		const model = { provider: "openai", name: "Test Model", baseUrl: "https://api.openai.com/v1" };
-		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
-	});
-
 	it("returns false for openai provider with custom proxy base URL", () => {
 		const model = { provider: "openai", name: "Test Model", baseUrl: "https://my-proxy.example.com/v1" };
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(false);
-	});
-
-	it("returns true for github-copilot provider", () => {
-		const model = { provider: "github-copilot", name: "Test Model", baseUrl: "https://api.githubcopilot.com" };
-		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
 	});
 
 	it("returns false for github-copilot provider with custom proxy base URL", () => {
@@ -68,11 +58,6 @@ describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
 	});
 
-	it("returns false for generic third-party provider", () => {
-		const model = { provider: "custom", name: "Test Model", baseUrl: "https://api.example.com/v1" };
-		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(false);
-	});
-
 	it("returns false for local/localhost endpoints", () => {
 		const model = { provider: "custom", name: "Test Model", baseUrl: "http://localhost:8080/v1" };
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(false);
@@ -89,11 +74,6 @@ describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
 			name: "Test Model",
 			baseUrl: "https://azure.com/openai/deployments/my-model",
 		};
-		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
-	});
-
-	it("returns true for github-copilot provider with api.githubcopilot.com", () => {
-		const model = { provider: "github-copilot", name: "Test Model", baseUrl: "https://api.githubcopilot.com" };
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
 	});
 

@@ -1007,8 +1007,8 @@ async function openClassifier(modelSpec: string): Promise<Classifier> {
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
-	const apiKey = await storage.getApiKey(provider);
+	await storage.credentials.reload();
+	const apiKey = await storage.keys.get(provider);
 	if (!apiKey) {
 		throw new Error(`no credentials for provider "${provider}" (omp login or env var required)`);
 	}

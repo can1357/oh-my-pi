@@ -1,26 +1,43 @@
 // Canonical grammar for the sloppy edit payload (constrained decoding).
 //
 // Shape:
-//   <SM:EDIT path="relative/path.ts">   open edits in that file (`all` attr: every match)
-//   <SM:EDIT>                           more edits in the same file
-//   <SM:FIND> ... </SM:FIND>           current-text block; … elides gaps
-//   <SM:PUT> ... </SM:PUT>             final text replacing the whole <SM:FIND> match
-//                                        (<SM:PUT></SM:PUT> on one line deletes the match)
-//   </SM:EDIT>                          optional block close
-// Content lines between tags are raw file bytes: no entity escaping, no CDATA.
-start: edit+
-edit: edit_open pair+ edit_close?
-edit_open: "<SM:EDIT" attr* ">" LF
-attr: WS_INLINE (path_attr | all_attr)
-path_attr: /(?:path|file)="[^"\n]*"/
-all_attr: "all"
-edit_close: "</SM:EDIT>" LF?
-pair: find put?
-find: "<SM:FIND>" LF content_line* "</SM:FIND>" LF
-put: "<SM:PUT>" LF content_line* "</SM:PUT>" LF
-   | "<SM:PUT></SM:PUT>" LF
-content_line: TEXT LF | LF
-TEXT: /[^\n]+/
+//   *** Edit File: relative/path.ts   open edits in that file
+//   *** Edit File: relative/path.ts all
+//                                     apply every match
+//   *** Edit File:                    continue with the same file
+//   *** Find                          current-text body; … elides gaps
+//   *** Replace                       final replacement body; empty deletes
+//   *** Insert Before                 lines inserted before the match
+//   *** Insert After                  lines inserted after the match
+// Headers are standalone and case-insensitive. A body continues until the
+// next recognized header or EOF; no closing delimiter is used. Insert bodies
+// treat foreign Begin/End Patch rows as literal insertion text, except a
+// trailing End Patch, which the parser drops as a wrapper closer.
+start: begin_patch? edit+
+
+begin_patch: BEGIN_PATCH LF
+
+edit: edit_open pair+
+edit_open: EDIT_HEADER LF
+pair: find (replace | insert)
+find: FIND_HEADER LF body_line*
+replace: REPLACE_HEADER action_body?
+insert: INSERT_HEADER insert_body?
+action_body: LF body_line* BODY_TEXT?
+insert_body: LF insert_body_line* INSERT_TEXT?
+
+body_line: BODY_TEXT LF | LF
+insert_body_line: INSERT_TEXT LF | LF
+
+BEGIN_PATCH: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*/
+END_PATCH: /[ \t]*\*{3}[ \t]+(?i:End[ \t]+Patch)[ \t]*/
+EDIT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Edit[ \t]+File:)(?:[ \t]+[^\r\n]*)?/
+FIND_HEADER: /[ \t]*\*{3}[ \t]+(?i:Find)[ \t]*/
+REPLACE_HEADER: /[ \t]*\*{3}[ \t]+(?i:Replace)[ \t]*/
+INSERT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Insert[ \t]+(?:Before|After))[ \t]*/
+
+// LLGuidance supports terminal intersection/complement, not priorities or lookarounds.
+BODY_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER | BEGIN_PATCH | END_PATCH)
+INSERT_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER)
 
 %import common.LF
-%import common.WS_INLINE

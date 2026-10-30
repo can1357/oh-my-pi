@@ -1,3 +1,12 @@
+import {
+	RESOLVE_DEVICE_NAME,
+	REJECT_DEVICE_NAME,
+	PROPOSE_DEVICE_NAME,
+	type ResolutionDeviceName,
+	type ResolveAction,
+	type ResolveDetails,
+	type ResolveInvocation,
+} from "@oh-my-pi/pi-tui/tools/resolve";
 /**
  * Resolution devices: staged work is finalized through plain-text writes to
  * always-available `xd://` URLs — no tool schema, no JSON protocol.
@@ -15,22 +24,17 @@
  * `resolve` tool transcripts draw the same block.
  */
 import type { AgentToolResult, CustomMessage } from "@oh-my-pi/pi-agent-core";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { parseXdUrl, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
-import type { Theme } from "../modes/theme/theme";
-import resolveReminderPrompt from "../prompts/system/resolve-device-reminder.md" with { type: "text" };
-import { Ellipsis, padToWidth, renderStatusLine, truncateToWidth } from "../tui";
-import type { ToolSession } from ".";
-import { replaceTabs } from "./render-utils";
-import { ToolError } from "./tool-errors";
-import type { XdevDispatch } from "./xdev";
 
-export const RESOLVE_DEVICE_NAME = "resolve";
-export const REJECT_DEVICE_NAME = "reject";
-export const PROPOSE_DEVICE_NAME = "propose";
+import { prompt } from "@oh-my-pi/pi-utils";
+
+import { parseXdUrl, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+
+import resolveReminderPrompt from "../prompts/system/resolve-device-reminder.md" with { type: "text" };
+
+import type { ToolSession } from ".";
+
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { XdevDispatch } from "./xdev";
 
 /** The plain-text resolution device URLs (`xd://resolve`, …). */
 export const RESOLVE_DEVICE_PATH = `${XD_URL_PREFIX}${RESOLVE_DEVICE_NAME}`;
@@ -44,13 +48,6 @@ export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
  * the result as an already-applied change.
  */
 export const PREVIEW_PENDING_NOTICE = `Staged as a proposal — files NOT modified yet. To apply: write a one-sentence reason to ${RESOLVE_DEVICE_PATH}. To discard: write to ${REJECT_DEVICE_PATH}.`;
-
-export type ResolutionDeviceName = typeof RESOLVE_DEVICE_NAME | typeof REJECT_DEVICE_NAME | typeof PROPOSE_DEVICE_NAME;
-
-/** Whether an xd:// device name is one of the plain-text resolution devices. */
-export function isResolutionDeviceName(name: string): name is ResolutionDeviceName {
-	return name === RESOLVE_DEVICE_NAME || name === REJECT_DEVICE_NAME || name === PROPOSE_DEVICE_NAME;
-}
 
 /** One-line usage string returned by `read xd://<device>` — the only "docs" these devices carry. */
 export function resolutionDeviceUsage(device: ResolutionDeviceName): string {
@@ -109,16 +106,6 @@ export function writeDeviceDispatch(toolName: string, result: unknown): XdevDisp
 /** Handler installed by plan mode; `xd://propose` dispatches the written plan title to it. */
 export type PlanProposalHandler = (title: string) => Promise<AgentToolResult<unknown>>;
 
-type ResolveAction = "apply" | "discard";
-
-/** Details payload carried on a resolve/reject dispatch result (`XdevDispatch.inner`). */
-export interface ResolveDetails {
-	action: ResolveAction;
-	reason: string;
-	sourceToolName?: string;
-	label?: string;
-	sourceResultDetails?: unknown;
-}
 /** Parse a completed `write` dispatch targeting `xd://resolve` or `xd://reject`. */
 export function resolveDispatchDetails(toolName: string, result: unknown): ResolveDetails | undefined {
 	const dispatch = writeDeviceDispatch(toolName, result);
@@ -137,12 +124,6 @@ export function resolveDispatchDetails(toolName: string, result: unknown): Resol
 		...("label" in inner && typeof inner.label === "string" ? { label: inner.label } : {}),
 		...("sourceResultDetails" in inner ? { sourceResultDetails: inner.sourceResultDetails } : {}),
 	};
-}
-
-/** Invoker input for queued pending-preview handlers. */
-interface ResolveInvocation {
-	action: ResolveAction;
-	reason: string;
 }
 
 /** Monotonic suffix making each staged preview's pending-invoker id UNIQUE, so
@@ -340,84 +321,3 @@ export async function dispatchResolutionDevice(
 	const result = (await invoker(invocation)) as AgentToolResult<ResolveDetails>;
 	return { result, xdev: { ...xdevBase, inner: result.details } };
 }
-
-/** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose: <text>`. */
-export function renderResolutionDeviceCall(device: ResolutionDeviceName, content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
-	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
-	const text = renderStatusLine(
-		{
-			icon: "pending",
-			title,
-			description: body ? truncateToWidth(body, 72, Ellipsis.Omit) : undefined,
-		},
-		uiTheme,
-	);
-	return new Text(text, 0, 0);
-}
-
-export const resolveRenderer = {
-	renderCall(args: Partial<ResolveInvocation>, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const reasonTrimmed = args.reason?.trim();
-		const reason = reasonTrimmed ? truncateToWidth(reasonTrimmed, 72, Ellipsis.Omit) : undefined;
-		const text = renderStatusLine(
-			{
-				icon: "pending",
-				title: "Resolve",
-				description: args.action,
-				badge: {
-					label: args.action === "apply" ? "proposed -> resolved" : "proposed -> rejected",
-					color: args.action === "apply" ? "success" : "warning",
-				},
-				meta: reason ? [uiTheme.fg("muted", reason)] : undefined,
-			},
-			uiTheme,
-		);
-		return new Text(text, 0, 0);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: ResolveDetails; isError?: boolean },
-		_options: RenderResultOptions,
-		uiTheme: Theme,
-	): Component {
-		const details = result.details;
-		const label = replaceTabs(details?.label ?? "pending action");
-		const reason = replaceTabs(details?.reason?.trim() || "No reason provided");
-		const action = details?.action ?? "apply";
-		const isApply = action === "apply" && !result.isError;
-		const isFailedApply = action === "apply" && result.isError;
-		const bgColor = result.isError ? "error" : isApply ? "success" : "warning";
-		// Bare symbol: the line is wrapped in inverse(fg(...)), so any embedded fg
-		// reset (styledSymbol/status glyphs carry their own \x1b[39m) would drop the
-		// inverse block back to the default background mid-line.
-		const icon = uiTheme.symbol(isApply ? "tool.resolve" : "status.error");
-		const verb = isApply ? "Accept" : isFailedApply ? "Failed" : "Discard";
-		const separator = ": ";
-		const separatorIndex = label.indexOf(separator);
-		const sourceLabel = separatorIndex > 0 ? label.slice(0, separatorIndex).trim() : undefined;
-		const summaryLabel = separatorIndex > 0 ? label.slice(separatorIndex + separator.length).trim() : label;
-		const sourceBadge = sourceLabel
-			? uiTheme.bold(`${uiTheme.format.bracketLeft}${sourceLabel}${uiTheme.format.bracketRight}`)
-			: undefined;
-		const headerLine = `${icon} ${uiTheme.bold(`${verb}:`)} ${summaryLabel}${sourceBadge ? ` ${sourceBadge}` : ""}`;
-		const lines = ["", headerLine, "", uiTheme.italic(reason), ""];
-
-		return {
-			render(width: number): readonly string[] {
-				const lineWidth = Math.max(3, width);
-				const innerWidth = Math.max(1, lineWidth - 2);
-				return lines.map(line => {
-					const truncated = truncateToWidth(line, innerWidth, Ellipsis.Omit);
-					const framed = ` ${padToWidth(truncated, innerWidth)} `;
-					const padded = padToWidth(framed, lineWidth);
-					return uiTheme.inverse(uiTheme.fg(bgColor, padded));
-				});
-			},
-			invalidate() {},
-		};
-	},
-
-	inline: true,
-	mergeCallAndResult: true,
-};

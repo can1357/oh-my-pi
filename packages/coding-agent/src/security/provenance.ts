@@ -1,4 +1,4 @@
-import type { SecurityAccountRef, SecurityProducer, SecurityProvenance, SecurityScan } from "./contracts";
+import type { SecurityAuthRef, SecurityProducer, SecurityProvenance, SecurityScan } from "./contracts";
 import { canonicalSecurityJson } from "./contracts";
 
 export const CODEX_SECURITY_UPSTREAM = {
@@ -19,7 +19,7 @@ export function createNativeSecurityProducer(): SecurityProducer {
 	};
 }
 
-export function createSecurityCredentialAffinity(account: SecurityAccountRef): string {
+export function createSecurityCredentialAffinity(account: SecurityAuthRef): string {
 	return `omp-security-credential/v1:sha256:${Bun.SHA256.hash(canonicalSecurityJson(account), "hex")}`;
 }
 const PRIVATE_SECURITY_KEYS = new Set([
@@ -70,7 +70,7 @@ export function createPublicSecurityScan(scan: SecurityScan, options: { includeP
 
 export function createNativeSecurityProvenance(options: {
 	createdAt: string;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	planFingerprint: string;
 	workflowFingerprint: string;
 	sessionId?: string;

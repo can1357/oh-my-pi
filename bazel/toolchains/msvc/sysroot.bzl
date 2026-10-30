@@ -104,10 +104,10 @@ def _xwin_sysroot_impl(rctx):
     )
     rctx.report_progress("Splatting MSVC CRT + Windows SDK via xwin (first fetch ~1 GiB from the Microsoft CDN)")
 
-    # OMP_XWIN_CACHE_DIR points at a persistent location (CI: the runner-cache
-    # PVC via --repo_env) so ephemeral pods reuse the ~1 GiB CDN download the
-    # repository cache cannot hold. Unset (dev machines): a repo-local cache,
-    # deleted after the --copy splat.
+    # OMP_XWIN_CACHE_DIR points at a persistent location (CI: the cache baked
+    # into the vmon omp-ci template, via --repo_env) so ephemeral runners reuse
+    # the ~1 GiB CDN download the repository cache cannot hold. Unset (dev
+    # machines): a repo-local cache, deleted after the --copy splat.
     cache_dir = rctx.os.environ.get("OMP_XWIN_CACHE_DIR", "")
     ephemeral_cache = cache_dir == ""
     if ephemeral_cache:
@@ -118,11 +118,12 @@ def _xwin_sysroot_impl(rctx):
             rctx.path("xwin"),
             "--accept-license",
             "--arch",
-            "x86_64",
+            rctx.attr.arch,
             "--variant",
             "desktop",
             "--manifest-version",
             _XWIN_MANIFEST_VERSION,
+        ] + (["--sdk-version", rctx.attr.sdk_version] if rctx.attr.sdk_version else []) + [
             "--cache-dir",
             cache_dir,
             "splat",
@@ -164,14 +165,30 @@ def _xwin_sysroot_impl(rctx):
     # Opt into the repo contents cache. The splat is channel-stable, not
     # bit-reproducible forever (see the module docstring) — caching freezes a
     # known-good splat, which also keeps remote action keys stable across
-    # pods until this file changes or the cache entry ages out (14 d GC).
-    # OMP_XWIN_CACHE_DIR is a predeclared input (environ attr), so kata and
+    # runners until this file changes or the cache entry ages out (14 d GC).
+    # OMP_XWIN_CACHE_DIR is a predeclared input (environ attr), so CI and
     # dev fetches key separate entries.
     return rctx.repo_metadata(reproducible = True)
 
 xwin_sysroot_repository = repository_rule(
     implementation = _xwin_sysroot_impl,
     doc = "MSVC CRT + Windows SDK sysroot splatted by a pinned xwin release.",
+    attrs = {
+        # One repo per arch (not --arch x86_64,aarch64 in one splat) so the
+        # x64 repo's splat and cache entry are unaffected by the arm64 target.
+        "arch": attr.string(
+            default = "x86_64",
+            values = ["x86_64", "aarch64"],
+            doc = "xwin --arch: target CRT/SDK library architecture.",
+        ),
+        # The newest SDK's arm64 MSIs reference no cab files, which xwin 0.6.5
+        # rejects ("no cab files were referenced by the MSI", Jake-Shadle/xwin#126);
+        # the arm64 splat pins an older SDK. Empty = xwin's default (latest).
+        "sdk_version": attr.string(
+            default = "",
+            doc = "xwin --sdk-version override (e.g. 10.0.22621).",
+        ),
+    },
     # Persistent splat cache location; changing it only changes where the CDN
     # payload lands, not the splat contents, but Bazel still refetches.
     environ = ["OMP_XWIN_CACHE_DIR"],

@@ -1,0 +1,23 @@
+// SingularityAPI reserved DeepSeek lanes (api.singularityapi.tech, a LiteLLM
+// front end in front of slot-reserved lanes) — the vendor's other product,
+// separated from api.singularityapi.dev because the two share no key, no
+// billing model, and no effort ladder. Usage here is charged against a booked
+// reservation slot rather than prepaid credit: a valid key with no active
+// slot answers 403 `permission_error` ("No active lane reservation for this
+// key", verified 2026-09-22), so login succeeds while a slot is idle and
+// inference needs one. Keys are lane-scoped `sk-...` bearer tokens issued
+// from the dashboard.
+// Key validation probes the non-billable `GET /v1/models`: it answers 401
+// for a missing, malformed, or unknown key (verified 2026-09-21), so a bad
+// key is rejected without spending.
+auth "singularityapi-tech" {
+	name "SingularityAPI Reserved Lanes"
+	env "SINGULARITYAPI_TECH_API_KEY"
+	login "api-key" {
+		auth-url "https://app.singularityapi.tech/compute/billing"
+		instructions "Create a key from the SingularityAPI lanes dashboard, then paste it here"
+		prompt "Paste your SingularityAPI lanes key" placeholder="sk-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="SingularityAPI Reserved Lanes" url="https://api.singularityapi.tech/v1/models"
+	}
+}

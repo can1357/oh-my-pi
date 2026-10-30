@@ -7,8 +7,7 @@
  */
 
 import * as fs from "node:fs";
-import inspector from "node:inspector";
-import { isMainThread } from "node:worker_threads";
+import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
 
@@ -28,8 +27,24 @@ interface CleanupRegistration {
 	id: string;
 	callback: (reason: Reason) => Promise<void> | void;
 	exitOnly: boolean;
+	/** How long a pass waits for this callback, when longer than {@link CLEANUP_DEADLINE_MS}. */
+	deadlineMs: number | undefined;
+	/** Printed to stderr when exit waits on this callback alone; see {@link CleanupRegistrationOptions.waitMessage}. */
+	waitMessage: string | undefined;
 	cancelled: boolean;
 	lastPass: number;
+}
+
+/** The deadline of one cleanup pass, which callbacks with their own `deadlineMs` hold open. */
+interface CleanupPassDeadline {
+	/**
+	 * Keep the pass open until `pending` settles, for at most `deadlineMs`. A
+	 * `waitMessage` is printed to stderr if the pass is still waiting on it once
+	 * every other callback has finished.
+	 */
+	extend(pending: Promise<unknown>, deadlineMs: number, waitMessage?: string): void;
+	/** Whether a callback with its own deadline still holds the pass open. */
+	extended(): boolean;
 }
 
 // Active cleanup callbacks in registration order. Registrations survive
@@ -43,6 +58,8 @@ let activeCleanupKeepAlive = false;
 // Promises of callbacks invoked late (registered while a pass runs), joined by
 // the active pass before it settles so `cleanup()`/signal exits await them.
 let activeLatePromises: Promise<void>[] | undefined;
+// Deadline of the running pass, so callbacks invoked late can extend it too.
+let activePassDeadline: CleanupPassDeadline | undefined;
 const CLEANUP_DEADLINE_MS = 10_000;
 /**
  * Symbol stamped by the extension-load guard onto the throwing replacement it
@@ -60,6 +77,26 @@ export const NATIVE_PROCESS_EXIT = Symbol.for("omp.postmortem.nativeProcessExit"
 type HardExitFn = (code?: number) => never;
 
 /**
+ * Walk a guarded exit primitive down to the native it shadows.
+ *
+ * `withHostGuard` stamps each throwing replacement with the primitive it
+ * shadows under {@link NATIVE_PROCESS_EXIT}; nested guard windows stack, so a
+ * single unwrap can still land on another throwing stub. Follow the chain
+ * (cycle-guarded) until a link carries no stamp — that link is native.
+ */
+function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
+	let current = fn;
+	const seen = new Set<HardExitFn>();
+	while (typeof current === "function" && !seen.has(current)) {
+		seen.add(current);
+		const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
+		if (typeof behind !== "function") return current;
+		current = behind as HardExitFn;
+	}
+	return typeof current === "function" ? current : undefined;
+}
+
+/**
  * Hard-exit the process through the native primitive, resolved on every call.
  *
  * The native exit is deliberately re-resolved here rather than bound at module
@@ -70,19 +107,40 @@ type HardExitFn = (code?: number) => never;
  * init could freeze the throwing stub forever and turn every later shutdown
  * (SIGHUP/SIGINT/fatal) into an unhandled-rejection loop (#7393). When the
  * guard is active the stub carries the native exit under
- * {@link NATIVE_PROCESS_EXIT}; unwrapping it lets a mid-guard signal still exit
- * (#6488). Otherwise the current `process.reallyExit`/`process.exit` is native.
+ * {@link NATIVE_PROCESS_EXIT} (#6488).
+ *
+ * Both globals are reinstalled to their natives before exiting: Bun's
+ * `process.exit` re-reads `process.reallyExit` at call time, so exiting through
+ * one primitive while its sibling still holds the throwing stub re-enters the
+ * guard and loops the rejection storm (#11789). After restoring, `reallyExit`
+ * (the low-level primitive) is preferred; `process.exit` and finally `SIGKILL`
+ * are fallbacks so a poisoned or absent chain can never leave the process alive.
+ *
+ * Buffered log records are written first: `reallyExit` skips the `exit` event
+ * the logger otherwise flushes on, which would drop the last batch on every
+ * signal and fatal exit.
  */
-function exitProcess(code: number): never {
-	const current: HardExitFn = typeof process.reallyExit === "function" ? process.reallyExit : process.exit;
-	const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
-	const nativeExit = typeof behind === "function" ? (behind as HardExitFn) : current;
-	return nativeExit.call(process, code) as never;
+export function exitProcess(code: number): never {
+	logger.flush();
+	const reallyExit = nativeHardExit(typeof process.reallyExit === "function" ? process.reallyExit : undefined);
+	const exit = nativeHardExit(process.exit as HardExitFn);
+	if (reallyExit) process.reallyExit = reallyExit as typeof process.reallyExit;
+	if (exit) process.exit = exit as typeof process.exit;
+	try {
+		reallyExit?.call(process, code);
+	} catch {}
+	try {
+		exit?.call(process, code);
+	} catch {}
+	try {
+		process.kill(process.pid, "SIGKILL");
+	} catch {}
+	throw new Error(`exitProcess(${code}) failed to terminate the process`);
 }
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
-/** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
+/** User-facing command printed after fatal or SIGTERM cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
 	/** Stable label identifying the recoverable session or process. */
 	label: string;
@@ -144,10 +202,75 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		}
 	};
 
+	// The pass ends once every callback settles, or at the deadline: CLEANUP_DEADLINE_MS,
+	// held open while a callback with a longer `deadlineMs` is still pending.
+	const deadline = Promise.withResolvers<void>();
+	const deadlineTimers: NodeJS.Timeout[] = [];
+	let baseDeadlineElapsed = false;
+	let openExtensions = 0;
+	let passDone = false;
+	const expireIfDue = (): void => {
+		if (passDone || !baseDeadlineElapsed || openExtensions > 0) return;
+		passDone = true;
+		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
+		settle();
+		deadline.resolve();
+	};
+	// Holds that still keep the pass open and have a message for the user. The
+	// message is printed once the pass waits on nothing else, so a terminal owner
+	// has already released the screen and the user sees why exit is slow.
+	const announced: { message: string; until: number; open: () => boolean }[] = [];
+	let othersSettled = false;
+	const announce = (): void => {
+		if (passDone || !othersSettled) return;
+		for (const hold of announced.splice(0)) {
+			if (!hold.open()) continue;
+			const seconds = Math.max(1, Math.ceil((hold.until - Date.now()) / 1000));
+			try {
+				fs.writeSync(2, `${hold.message} (up to ${seconds} s)…\n`);
+			} catch {}
+		}
+	};
+	const passDeadline: CleanupPassDeadline = {
+		extend(pending, deadlineMs, waitMessage) {
+			if (passDone || deadlineMs <= 0) return;
+			openExtensions++;
+			let open = true;
+			const close = (): void => {
+				if (!open) return;
+				open = false;
+				openExtensions--;
+				// Check on a later macrotask: when this was the last pending callback, the
+				// pass completes first and no deadline is reported.
+				deadlineTimers.push(setTimeout(expireIfDue, 0));
+			};
+			deadlineTimers.push(setTimeout(close, deadlineMs));
+			pending.then(close, close);
+			if (waitMessage !== undefined) {
+				announced.push({ message: waitMessage, until: Date.now() + deadlineMs, open: () => open });
+				// On a later macrotask, so a callback that is already done closes first.
+				if (othersSettled) deadlineTimers.push(setTimeout(announce, 0));
+			}
+		},
+		extended: () => !passDone && openExtensions > 0,
+	};
+	activePassDeadline = passDeadline;
+
 	// Snapshot the pass. Registrations added while a keep-alive cleanup runs are
 	// invoked by register() when appropriate and remain active for later passes.
-	const promises = callbackList.toReversed().map(registration => {
-		return Promise.try(() => invokeCleanup(registration, reason, keepAlive, pass));
+	const snapshot = callbackList.toReversed();
+	const promises = snapshot.map(registration => {
+		return Promise.try(() => {
+			const pending = invokeCleanup(registration, reason, keepAlive, pass);
+			if (pending && registration.deadlineMs !== undefined) {
+				passDeadline.extend(pending, registration.deadlineMs, registration.waitMessage);
+			}
+			return pending;
+		});
+	});
+	void Promise.allSettled(promises.filter((_, index) => snapshot[index]?.deadlineMs === undefined)).then(() => {
+		othersSettled = true;
+		deadlineTimers.push(setTimeout(announce, 0));
 	});
 
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
@@ -162,14 +285,20 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		while (late.length > 0) await Promise.allSettled(late.splice(0));
 		settle();
 	});
-	const deadline = Promise.withResolvers<void>();
-	const deadlineTimer = setTimeout(() => {
-		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
-		settle();
-		deadline.resolve();
-	}, CLEANUP_DEADLINE_MS);
+	deadlineTimers.push(
+		setTimeout(() => {
+			baseDeadlineElapsed = true;
+			// The pass no longer waits on the other callbacks, so a hold still open is
+			// what exit waits on; terminal owners released the screen synchronously.
+			othersSettled = true;
+			announce();
+			expireIfDue();
+		}, CLEANUP_DEADLINE_MS),
+	);
 	const passPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
-		clearTimeout(deadlineTimer);
+		passDone = true;
+		for (const timer of deadlineTimers) clearTimeout(timer);
+		if (activePassDeadline === passDeadline) activePassDeadline = undefined;
 		// A re-armed pass must drop only its own settled promise; an older
 		// deadline-limited pass may finish after a newer one has already started.
 		if (keepAlive && cleanupPass === pass && cleanupPromise === passPromise) cleanupPromise = undefined;
@@ -290,20 +419,104 @@ function faultWorkerIpcChannels(err: Error): void {
 }
 
 /**
- * Treat unhandled stdout EPIPE rejections as a graceful peer disconnect.
+ * Graceful shutdown driven by `process.stdout`'s own `error` event.
  *
- * Stdio protocol servers call this for their process lifetime so a closed
- * client pipe runs registered cleanup callbacks instead of the fatal path.
- * The returned callback removes the registration.
+ * A closed stdout consumer (`omp --help | head`, an ACP client dropping the
+ * pipe) delivers the broken-pipe write here — attributable to stdout by
+ * construction, unlike a process-wide `syscall: "write"` match that a closed
+ * subprocess stdin or socket would also satisfy — so it runs cleanup and exits
+ * 0 (Unix `| head` semantics).
+ *
+ * Only the broken-pipe case is claimed. A non-EPIPE stdout error (a revoked PTY
+ * reporting `EIO`) is left for other `error` listeners: the TUI installs its own
+ * stdout handler that treats a disconnect as SIGHUP/exit-129, and this listener
+ * is installed first on an interactive launch, so forcing a fatal exit here
+ * would preempt that established path. Attaching a listener already suppresses
+ * Node's default throw, so deferring is a safe no-op when no other listener runs.
+ */
+function onStdoutDisconnect(err: Error): void {
+	if (classifyBrokenPipe(err) !== "stdio-write") return;
+	logger.warn("Stdout peer disconnected; shutting down gracefully", { err });
+	void runQuit(0, "native", { drainStdout: false });
+}
+
+/**
+ * Treat a closed stdout consumer as a graceful peer disconnect for the caller's
+ * active lifetime. Attaches one shared `process.stdout` `error` listener,
+ * ref-counted across registrants (the ACP protocol server, the one-shot CLI
+ * entry). The returned callback removes the registration; the listener detaches
+ * when the last registrant unregisters.
  */
 export function registerStdioDisconnectHandling(): () => void {
 	let registered = true;
+	if (Bun.isMainThread && stdioDisconnectRegistrations === 0) {
+		process.stdout.on("error", onStdoutDisconnect);
+	}
 	stdioDisconnectRegistrations++;
 	return () => {
 		if (!registered) return;
 		registered = false;
 		stdioDisconnectRegistrations--;
+		if (Bun.isMainThread && stdioDisconnectRegistrations === 0) {
+			process.stdout.removeListener("error", onStdoutDisconnect);
+		}
 	};
+}
+
+/**
+ * Fail a process entry whose event loop drains while `work` is still pending.
+ *
+ * The CLI starts from a floating `runCli()` call because top-level await breaks
+ * `--bytecode` builds. When a one-shot command awaits a promise that never
+ * settles and holds no live handle, the loop drains and Bun exits 0 without
+ * output: an unfinished command reported as success. `beforeExit` fires in
+ * that state; explicit exits (`process.exit`, {@link quit},
+ * {@link exitProcess}, the signal handlers) never emit it.
+ *
+ * `beforeExit` alone is not the verdict: on Windows Bun emits it while I/O is
+ * still in flight and then keeps running the loop, so a command that goes on
+ * to complete must keep its own exit code (#13470). The verdict is taken at
+ * `exit` instead, and only when the last `beforeExit` was final: an unref'd
+ * timer armed there runs only if the loop turns again, clearing the mark
+ * before a later explicit exit. Any later drain emits `beforeExit` again and
+ * re-arms it, so other `beforeExit` listeners (LSP shutdown) still run before
+ * the process exits 1.
+ *
+ * `describe` names what was running (e.g. the resolved subcommand) at report
+ * time; it must return only a command name, never user arguments.
+ */
+export function reportUnsettledEntry(work: Promise<unknown>, describe?: () => string | undefined): void {
+	let pending = true;
+	let drained = false;
+	const settled = (): void => {
+		pending = false;
+	};
+	// Observe both outcomes without claiming the rejection: the caller's `.catch` still owns it.
+	void work.then(settled, settled);
+	process.on("beforeExit", () => {
+		if (!pending) return;
+		drained = true;
+		setTimeout(() => {
+			drained = false;
+		}, 0).unref();
+	});
+	process.once("exit", code => {
+		if (!pending || !drained) return;
+		// A non-zero code is already a failure verdict — an explicit
+		// `process.exit(n)` (possibly on the same loop turn as a Windows
+		// mid-I/O `beforeExit`, before the clearing timer runs) or an
+		// `exitCode` the command set. Overwriting it with 1 and a second
+		// "ended before completing" line only obscures the real error.
+		if (code !== 0) return;
+		const command = describe?.();
+		const subject = command ? `\`${APP_NAME} ${command}\`` : "command";
+		const message = `${subject} ended before completing: the event loop drained while it was still pending (rerun with PI_DEBUG_STARTUP=1 to see the last phase reached)`;
+		try {
+			fs.writeSync(2, `${APP_NAME}: ${message}\n`);
+		} catch {}
+		logger.error(message, { command });
+		process.exitCode = 1;
+	});
 }
 
 // Well-known key marking an error as an *expected* teardown artifact (e.g. a
@@ -356,7 +569,10 @@ export function interceptUnhandledRejections(interceptor: (reason: unknown) => b
 
 /**
  * Register a synchronous recovery command to print when the process exits
- * through an uncaught exception or unhandled rejection.
+ * through an uncaught exception, an unhandled rejection, or SIGTERM.
+ *
+ * Providers are read once cleanup finishes (or hits its deadline), so they
+ * report what teardown left behind: a session it saved or one it dropped.
  */
 export function registerFatalRecoveryHint(provider: FatalRecoveryHintProvider): () => void {
 	fatalRecoveryHintProviders.add(provider);
@@ -370,10 +586,10 @@ function escapeFatalHintText(value: string): string {
 	});
 }
 
-function formatFatalRecoveryHints(): string {
+function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>): string {
 	const lines: string[] = [];
 	const seenCommands = new Set<string>();
-	for (const provider of fatalRecoveryHintProviders) {
+	for (const provider of providers) {
 		try {
 			const hint = provider();
 			if (!hint?.command || seenCommands.has(hint.command)) continue;
@@ -395,25 +611,65 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/** Write a final report to stderr once terminal owners have handed the terminal back. */
+function writeTerminalReport(output: string): void {
+	restoreTerminalStderr();
+	// A revoked terminal can make stream writes raise another fatal error. Use
+	// the descriptor directly so failure stays synchronous and contained.
+	try {
+		fs.writeSync(2, output);
+	} catch {}
+}
+
+let recoveryHintsWritten = false;
+
+/**
+ * Print the recovery commands at most once per process. Callers snapshot the
+ * providers before cleanup, because a session's own cleanup unregisters its
+ * provider, and call this after cleanup, because teardown can still save the
+ * session (an unsent draft, an aborted first reply) or drop an empty one.
+ */
+function writeRecoveryHints(providers: readonly FatalRecoveryHintProvider[], heading = ""): void {
+	if (recoveryHintsWritten) return;
+	const hints = formatFatalRecoveryHints(providers);
+	if (!hints) return;
+	recoveryHintsWritten = true;
+	writeTerminalReport(`${heading}${hints}`);
+}
+
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
-	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
+	const hintProviders = [...fatalRecoveryHintProviders];
+	// The forced exit backs up the pass deadline, so it waits while a callback with
+	// its own `deadlineMs` holds the pass open; that pass still ends at its deadline.
+	const forceExit = (): void => {
+		if (activePassDeadline?.extended()) {
+			forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
+			return;
+		}
+		writeRecoveryHints(hintProviders);
+		exitProcess(1);
+	};
+	let forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
 	try {
 		// Cleanup callbacks are invoked synchronously before runCleanup returns its
 		// completion promise. TUI owners therefore hand the cursor back before the
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
-		restoreTerminalStderr();
-		// A revoked terminal can make stream writes raise another fatal error. Use
-		// the descriptor directly so failure stays synchronous and contained.
-		try {
-			fs.writeSync(2, output);
-		} catch {}
+		writeTerminalReport(output);
 		logger.error(logMessage, { err });
 		await cleanup;
+		writeRecoveryHints(hintProviders);
 	} finally {
 		clearTimeout(forcedExit);
 		exitProcess(1);
 	}
+}
+
+/** Contain an EPIPE from an optional worker IPC `send()` (#2997, #9158). */
+function handleWorkerSendEpipe(err: Error): boolean {
+	if (!isIpcSendEpipe(err)) return false;
+	logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
+	return true;
 }
 
 /**
@@ -421,43 +677,40 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
  */
 export async function fatal(error: unknown): Promise<never> {
 	const err = error instanceof Error ? error : new Error(String(error));
-	const output = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n${formatFatalRecoveryHints()}`;
-	if (!isMainThread) {
-		process.stderr.write(output);
+	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
+	if (!Bun.isMainThread) {
+		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
 		process.exit(1);
 	}
-	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
+	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
-if (isMainThread) {
+if (Bun.isMainThread) {
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
 			exitProcess(130); // 128 + SIGINT (2)
 		})
-		.on("SIGUSR1", () => {
+		.on("SIGUSR1", async () => {
 			if (inspectorOpened) return;
 			inspectorOpened = true;
+			// Signal-only boundary: successful startup never constructs inspector.
+			const { default: inspector } = await import("node:inspector");
 			inspector.open(undefined, undefined, false);
 			const url = inspector.url();
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
 		.on("uncaughtException", async thrown => {
-			// Only explicitly marked exceptions are safe here. Structural
-			// AbortError/socket classification is limited to promise rejections:
-			// a synchronously thrown error may indicate an application bug.
+			// Expected cleanup is safe globally; unrelated synchronous errors stay fatal.
 			if (hasExpectedCleanupMarker(thrown)) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
 			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
-			// Bun can surface a worker IPC send race through uncaughtException
-			// instead of unhandledRejection. Apply the same optional-worker
-			// containment in either global error channel.
-			if (isIpcSendEpipe(err)) {
-				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
-				return;
-			}
+			// A worker IPC `send()` race can surface through either global error event;
+			// contain it in both. Stdout write disconnects are attributed to stdout by
+			// registerStdioDisconnectHandling's `error` listener, not classified here.
+			if (handleWorkerSendEpipe(err)) return;
 			// A malformed advanced-serialization frame from a worker subprocess
 			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
 			// rather than in the channel's ipc() callback, and Bun gives no way to
@@ -466,7 +719,7 @@ if (isMainThread) {
 			// worker so its owning client rejects in-flight requests and recycles
 			// the subprocess — a worker that sent a bad frame but stays alive would
 			// otherwise never fire onExit and leave callers awaiting forever.
-			// Mirrors the ipc-send EPIPE containment below (#9158, #2997).
+			// See the analogous worker IPC containment in handleBrokenPipe (#9158, #2997).
 			if (isWorkerIpcDeserializeError(err)) {
 				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
 				faultWorkerIpcChannels(err);
@@ -479,7 +732,7 @@ if (isMainThread) {
 				return;
 			}
 			await exitAfterFatal(
-				`${formatFatalError("Uncaught Exception", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Uncaught Exception", err),
 				"Uncaught exception",
 				err,
 				Reason.UNCAUGHT_EXCEPTION,
@@ -487,25 +740,7 @@ if (isMainThread) {
 		})
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
-			const brokenPipeSource = classifyBrokenPipe(err);
-			// EPIPE from an IPC `send()` (`syscall: "send"`) originates from a
-			// worker subprocess whose pipe broke between the exit being observed
-			// and the next `proc.send()` — a race window that Bun surfaces as an
-			// async rejection rather than the synchronous "cannot be used after
-			// the process has exited" guard. Every `send()` target is an optional
-			// worker subsystem (TTS, STT, tiny-title, MCP servers), so a broken
-			// send pipe must never take down the whole session. Log and continue
-			// instead of exiting; the owning client detects the dead worker via
-			// its own `onExit`/error path and respawns or disables it. See #2997.
-			if (brokenPipeSource === "ipc-send") {
-				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
-				return;
-			}
-			if (brokenPipeSource === "stdio-write" && stdioDisconnectRegistrations > 0) {
-				logger.warn("Stdio peer disconnected; shutting down gracefully", { err });
-				await runQuit(0, "native");
-				return;
-			}
+			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;
@@ -520,7 +755,7 @@ if (isMainThread) {
 				}
 			}
 			await exitAfterFatal(
-				`${formatFatalError("Unhandled Rejection", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Unhandled Rejection", err),
 				"Unhandled rejection",
 				err,
 				Reason.UNHANDLED_REJECTION,
@@ -530,7 +765,12 @@ if (isMainThread) {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
 		})
 		.on("SIGTERM", async () => {
+			// A stopped session otherwise leaves its last frame above the shell prompt,
+			// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
+			// hints still print once.
+			const hintProviders = [...fatalRecoveryHintProviders];
 			await runCleanup(Reason.SIGTERM);
+			writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
 			exitProcess(143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
@@ -554,6 +794,20 @@ export interface CleanupRegistrationOptions {
 	 * The registration remains armed when a keep-alive pass skips it.
 	 */
 	exitOnly?: boolean;
+	/**
+	 * How long a pass waits for this callback, when that is longer than the
+	 * default 10 s cleanup deadline. It extends the pass only while the callback
+	 * is still pending: one that settles early ends its hold at once.
+	 */
+	deadlineMs?: number;
+	/**
+	 * With `deadlineMs`: a line printed to stderr, with the remaining wait
+	 * appended, if exit is still waiting on this callback once every other
+	 * callback has finished (a terminal owner has then released the screen), or
+	 * at the default 10 s deadline when another callback is still running.
+	 * Nothing is printed when the callback finishes first.
+	 */
+	waitMessage?: string;
 }
 
 /**
@@ -580,6 +834,8 @@ export function register(
 		id,
 		callback,
 		exitOnly: options.exitOnly ?? false,
+		deadlineMs: options.deadlineMs,
+		waitMessage: options.waitMessage,
 		cancelled: false,
 		lastPass: 0,
 	};
@@ -599,6 +855,9 @@ export function register(
 			// Join the active pass so cleanup()/signal exits await it; after a
 			// completed exit pass there is nothing left to join.
 			activeLatePromises?.push(tracked);
+			if (registration.deadlineMs !== undefined) {
+				activePassDeadline?.extend(tracked, registration.deadlineMs, registration.waitMessage);
+			}
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
@@ -656,7 +915,7 @@ export async function drainStdout(): Promise<void> {
 async function runQuit(code: number, exitMode: "guarded" | "native", options: QuitOptions = {}): Promise<void> {
 	await runCleanup(Reason.MANUAL);
 
-	if (!isMainThread) {
+	if (!Bun.isMainThread) {
 		return; // Workers: cleanup done, let worker exit naturally
 	}
 

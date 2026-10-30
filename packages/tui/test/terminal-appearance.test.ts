@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { extractPrintableText } from "@oh-my-pi/pi-tui/keys";
-import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { ProcessTerminal, type TerminalStartOptions } from "@oh-my-pi/pi-tui/terminal";
 import {
 	type CellDimensions,
 	getCellDimensions,
+	getTerminalBackgroundColor,
 	getTerminalInfo,
 	setCellDimensions,
+	setTerminalBackgroundColor,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
@@ -20,6 +22,7 @@ const originalWslInterop = Bun.env.WSL_INTEROP;
 const originalWtSession = Bun.env.WT_SESSION;
 const originalTermProgram = Bun.env.TERM_PROGRAM;
 const originalTmux = Bun.env.TMUX;
+const originalTerm = Bun.env.TERM;
 
 // These suites drive the real ProcessTerminal start()/probe pipeline, so they
 // opt out of the test-default headless suppression and restore it per case.
@@ -42,18 +45,26 @@ function restoreEnv(key: string, original: string | undefined): void {
 }
 
 describe("ProcessTerminal OSC 11 appearance detection", () => {
+	let originalColorFgbg: string | undefined;
+	let originalZellij: string | undefined;
+
 	beforeEach(() => {
+		originalColorFgbg = Bun.env.COLORFGBG;
+		originalZellij = Bun.env.ZELLIJ;
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		previousHeadless = setTerminalHeadless(false);
+		setTerminalBackgroundColor(undefined);
 		delete Bun.env.TMUX;
+		delete Bun.env.ZELLIJ;
 	});
 
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		setTerminalHeadless(previousHeadless);
+		setTerminalBackgroundColor(undefined);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
@@ -63,12 +74,17 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("WT_SESSION", originalWtSession);
 		restoreEnv("TERM_PROGRAM", originalTermProgram);
 		restoreEnv("TMUX", originalTmux);
+		restoreEnv("COLORFGBG", originalColorFgbg);
+		restoreEnv("ZELLIJ", originalZellij);
 	});
 
 	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
 	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
 	// ConPTY cases opt in explicitly.
-	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
+	function setupTerminal({
+		conpty = false,
+		startOptions,
+	}: { conpty?: boolean; startOptions?: TerminalStartOptions } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -84,6 +100,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.start(
 			data => received.push(data),
 			() => {},
+			undefined,
+			startOptions,
 		);
 
 		const queryCount = () => writes.filter(w => w === "\x1b]11;?\x07").length;
@@ -139,7 +157,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Seed the current appearance and drain all startup probe sentinels.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => {
@@ -198,7 +216,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// Complete the startup query and drain every startup probe sentinel before
 		// issuing explicit refreshes, so each response belongs to a real query cycle.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		terminal.refreshAppearance?.();
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
@@ -221,6 +239,136 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		]);
 		expect(selfUnsubscribeCalls).toBe(1);
 		expect(changes).toEqual(["dark", "light"]);
+	});
+
+	it.each([
+		["0/0/0", 0x000000],
+		["f/ff/fff", 0xffffff],
+		["7/7f/7fff", 0x777f7f],
+		["8/80/8000", 0x888080],
+		["0/800/0080", 0x008000],
+	] as const)("retains rounded variable-width OSC 11 RGB %s before report callbacks", (rgb, expected) => {
+		const { terminal } = setupTerminal();
+		const reportedColors: number[] = [];
+		terminal.onAppearanceReport(() => reportedColors.push(getTerminalBackgroundColor()));
+		process.stdin.emit("data", `\x1b]11;rgb:${rgb}\x07`);
+		const background = getTerminalBackgroundColor();
+		terminal.stop();
+
+		expect(background).toBe(expected);
+		expect(reportedColors).toEqual([expected]);
+	});
+
+	it("retains later dark RGB changes without changing appearance callback semantics", () => {
+		const { terminal } = setupTerminal();
+		const changes: string[] = [];
+		const reportedColors: number[] = [];
+		terminal.onAppearanceChange(appearance => changes.push(appearance));
+		terminal.onAppearanceReport(() => reportedColors.push(getTerminalBackgroundColor()));
+		process.stdin.emit("data", "\x1b]11;rgb:1010/2020/3030\x07");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		terminal.refreshAppearance();
+		process.stdin.emit("data", "\x1b]11;rgb:2020/3030/4040\x07");
+		const background = getTerminalBackgroundColor();
+		terminal.stop();
+
+		expect(background).toBe(0x203040);
+		expect(reportedColors).toEqual([0x102030, 0x203040]);
+		expect(changes).toEqual(["dark"]);
+	});
+
+	it("drops the previous session's RGB on stop and restart without an OSC 11 response", () => {
+		Bun.env.COLORFGBG = "15;0";
+		const { terminal, received } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+
+			terminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.start(
+				data => received.push(data),
+				() => {},
+			);
+			// The DA1 sentinel completes the unanswered query: consumers must use
+			// the environment fallback, not the previous session's OSC 11 RGB.
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			expect(terminal.appearance).toBeUndefined();
+
+			terminal.refreshAppearance();
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("resets stale RGB before a deferred-input prepaint and accepts the fresh reply", () => {
+		Bun.env.COLORFGBG = "15;0";
+		setTerminalBackgroundColor(0x112233);
+		const { terminal, queryCount, writes } = setupTerminal({ startOptions: { deferInput: true } });
+		try {
+			expect(queryCount()).toBe(0);
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.write("first paint");
+			expect(writes).toContain("first paint");
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+
+			terminal.enableInput();
+			expect(queryCount()).toBe(1);
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			terminal.stop();
+		}
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+	});
+
+	it("does not let an old terminal's stop erase the current owner's RGB", () => {
+		Bun.env.COLORFGBG = "15;0";
+		const { terminal: oldTerminal } = setupTerminal();
+		const terminal = new ProcessTerminal({ conpty: false });
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+			terminal.start(
+				() => {},
+				() => {},
+				undefined,
+				{ deferInput: true },
+			);
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			terminal.enableInput();
+			process.stdin.emit("data", "\x1b]11;rgb:4444/5555/6666\x07");
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+
+			oldTerminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x445566);
+		} finally {
+			oldTerminal.stop();
+			terminal.stop();
+		}
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+	});
+
+	it("leaves the real owner's RGB intact when a headless terminal starts and stops", () => {
+		const { terminal } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b]11;rgb:1111/2222/3333\x07");
+			setTerminalHeadless(true);
+			const headlessTerminal = new ProcessTerminal({ conpty: false });
+			headlessTerminal.start(
+				() => {},
+				() => {},
+			);
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+			headlessTerminal.stop();
+			expect(getTerminalBackgroundColor()).toBe(0x112233);
+		} finally {
+			setTerminalHeadless(false);
+			terminal.stop();
+		}
 	});
 
 	it("replays already detected OSC 11 appearance to late subscribers", () => {
@@ -321,8 +469,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?2031;0$y");
 		// Drain startup sentinels in send order: keyboard, OSC 11, DEC 2026,
-		// DEC 2048, DEC 2031, and xterm ?1010/?1011.
-		for (let i = 0; i < 7; i++) {
+		// DEC 2048, DEC 2031, DEC 2004, and xterm ?1010/?1011.
+		for (let i = 0; i < 8; i++) {
 			process.stdin.emit("data", "\x1b[?1;2c");
 		}
 		const afterStartup = queryCount();
@@ -337,11 +485,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	it("refreshAppearance() issues exactly one OSC 11 re-query per call (#5352)", () => {
 		const { terminal, queryCount } = setupTerminal();
 
-		// Drain the OSC 11 reply and all seven startup DA1 sentinels (keyboard,
-		// OSC 11, and the DECRQM probes for 2026/2048/2031/1010/1011) so the
+		// Drain the OSC 11 reply and all eight startup DA1 sentinels (keyboard,
+		// OSC 11, and the DECRQM probes for 2026/2048/2031/2004/1010/1011) so the
 		// probe FIFO is empty before the refresh gesture.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const afterInitial = queryCount();
 
 		// An explicit refresh gesture (Ctrl+L) issues one bounded probe.
@@ -372,12 +520,38 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes).toContain("\x1b[c");
 
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
 
 		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
 
 		terminal.stop();
+	});
+
+	// Herdr classifies before tmux, but the refresh follows whichever session
+	// caches OSC 11; a multiplexer without a cache keeps the refresh direct.
+	it.each([
+		["tmux nested inside a Herdr pane", "/tmp/tmux-1000/default,1234,0", true],
+		["a Herdr pane without tmux", undefined, false],
+	] as const)("routes an explicit refresh inside %s by the caching session", (_label, tmux, passthrough) => {
+		const originalHerdrPane = Bun.env.HERDR_PANE_ID;
+		Bun.env.HERDR_PANE_ID = "w1:p1";
+		if (tmux !== undefined) Bun.env.TMUX = tmux;
+		try {
+			const { terminal, writes, queryCount } = setupTerminal();
+			process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+			for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
+			const before = queryCount();
+			terminal.refreshAppearance?.();
+			terminal.stop();
+
+			expect(writes.includes("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\")).toBe(passthrough);
+			// A cache refresh defers its direct read; a direct refresh queries now.
+			expect(queryCount()).toBe(passthrough ? before : before + 1);
+		} finally {
+			if (originalHerdrPane === undefined) delete Bun.env.HERDR_PANE_ID;
+			else Bun.env.HERDR_PANE_ID = originalHerdrPane;
+		}
 	});
 
 	it("reads tmux's refreshed cache without passing a DA1 reply through tmux", () => {
@@ -386,7 +560,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, received, queryCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const reports: Array<{ appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => reports.push({ appearance, token }));
 		const beforeRefresh = queryCount();
@@ -419,7 +593,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, queryCount, sentinelCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const directQueriesBeforeRefresh = queryCount();
 		const directSentinelsBeforeRefresh = sentinelCount();
 
@@ -440,7 +614,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Startup classifies the terminal as light.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		expect(terminal.appearance).toBe("light");
 		expect(appearances).toEqual(["light"]);
 
@@ -464,7 +638,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// terminal may still never emit an appearance notification, so an explicit
 		// refresh must not be gated on advertised 2031 support.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?2031;2$y");
 		const afterInitial = queryCount();
 
@@ -615,10 +789,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes.some(w => w.includes("\x1b[>31u"))).toBe(false);
 		expect(writes).toContain("\x1b[?u\x1b[c");
 
-		// Seven DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
-		// the DECRQM probes for DEC 2026, 2048, 2031, 1010, and 1011 (each rides the
-		// shared FIFO). Consume them in send-order and verify none leaks to the input
-		// handler.
+		// Eight DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
+		// the DECRQM probes for DEC 2026, 2048, 2031, 2004, 1010, and 1011 (each
+		// rides the shared FIFO). Consume them in send-order and verify none leaks
+		// to the input handler.
+		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
@@ -628,7 +803,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// A ninth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
 		// exclusively a terminal->host report, never a keystroke, so a reply that
 		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
 		// into the composer as literal text (#8542).
@@ -675,6 +850,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("routes resize by the injected ConPTY override, not the ambient platform", () => {
+		// The override must gate every ConPTY-dependent path uniformly. Reading
+		// isConPTYHosted() here instead made a { conpty: false } terminal report
+		// non-ConPTY writes and kitty flags but ConPTY resize routing on Windows
+		// and WSL, so no test could model the opposite host.
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const posix = setupTerminal({ conpty: false });
+		expect(posix.terminal.hostOwnsGridOnResize).toBe(false);
+		posix.terminal.stop();
+
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		const conpty = setupTerminal({ conpty: true });
+		expect(conpty.terminal.hostOwnsGridOnResize).toBe(true);
+		conpty.terminal.stop();
+	});
+
 	it("shutdown balances the single kitty push performed on detection", () => {
 		const { terminal, writes } = setupTerminal();
 
@@ -699,6 +890,8 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		originalCellDims = { ...getCellDimensions() };
 		previousHeadless = setTerminalHeadless(false);
+		delete Bun.env.TMUX;
+		delete Bun.env.TERM;
 	});
 
 	afterEach(() => {
@@ -712,9 +905,11 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		restoreProperty(process.stdout, "columns", stdoutColumnsDescriptor);
 		restoreProperty(process.stdout, "rows", stdoutRowsDescriptor);
 		setCellDimensions(originalCellDims);
+		restoreEnv("TMUX", originalTmux);
+		restoreEnv("TERM", originalTerm);
 	});
 
-	function setup() {
+	function setup(startOptions?: TerminalStartOptions) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		let resizeCount = 0;
@@ -735,6 +930,8 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 			() => {
 				resizeCount++;
 			},
+			undefined,
+			startOptions,
 		);
 		return { terminal, writes, received, reports, resizeCount: () => resizeCount };
 	}
@@ -746,6 +943,116 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		expect(writes.some(w => w.includes("\x1b[?2031$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1010$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1011$p"))).toBe(true);
+		expect(writes.some(w => w.includes("\x1b[?2004$p"))).toBe(true);
+		terminal.stop();
+	});
+
+	it("decides each unbracketed multiline burst by the stall probe once DECRQM confirms 2004 (#13344, #12540)", () => {
+		let stalled = false;
+		const { terminal, received } = setup({ isLoopStalled: () => stalled });
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		received.length = 0;
+
+		// IME/dictation commits are typed input, never bracketed: on a responsive
+		// loop the block lands as one paste instead of one submit per line.
+		process.stdin.emit("data", "1. do xxx\r2. do yyy\r3. do zzz");
+		expect(received).toEqual(["\x1b[200~1. do xxx\r2. do yyy\r3. do zzz\x1b[201~"]);
+
+		// The same shape drained after an event-loop stall is batched typing:
+		// every Enter must still submit.
+		stalled = true;
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+		expect(received).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+		terminal.stop();
+	});
+
+	it("emits no output while idle after confirming bracketed paste", () => {
+		vi.useFakeTimers();
+		const { terminal, writes } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		// Let the one-shot keyboard fallback finish before measuring idle output.
+		vi.advanceTimersByTime(1000);
+		writes.length = 0;
+		vi.advanceTimersByTime(15000);
+		expect(writes).toEqual([]);
+		terminal.stop();
+		const stopped = writes.length;
+		vi.advanceTimersByTime(1000);
+		expect(writes).toHaveLength(stopped);
+	});
+
+	it("rearms bracketed paste on input so a subsequent multiline paste stays one input", () => {
+		const { terminal, writes, received } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		process.stdin.emit("data", "x");
+		expect(writes).toEqual(["\x1b[?2004h"]);
+		process.stdin.emit("data", "\x1b[200~first\nsecond\x1b[201~");
+		expect(received).toEqual(["x", "\x1b[200~first\nsecond\x1b[201~"]);
+		terminal.stop();
+	});
+
+	it("rearms once per paste, not once per read, when a paste spans many reads (#15757)", () => {
+		const { terminal, writes, received } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		const body = "log line\n".repeat(200);
+		process.stdin.emit("data", "\x1b[200~");
+		for (const char of body) process.stdin.emit("data", char);
+		process.stdin.emit("data", "\x1b[201~");
+		expect(writes).toEqual(["\x1b[?2004h"]);
+		expect(received).toEqual([`\x1b[200~${body}\x1b[201~`]);
+		// The next read after the paste reasserts the mode again.
+		process.stdin.emit("data", "x");
+		expect(writes).toEqual(["\x1b[?2004h", "\x1b[?2004h"]);
+		terminal.stop();
+	});
+
+	it("rearms confirmed bracketed paste in the same write as a render, only while active", () => {
+		const { terminal, writes } = setup();
+		terminal.write("before confirmation");
+		expect(writes.at(-1)).toBe("before confirmation");
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		terminal.write("frame");
+		expect(writes).toEqual(["\x1b[?2004hframe"]);
+		terminal.stop();
+		terminal.write("after stop");
+		expect(writes.at(-1)).toBe("after stop");
+	});
+
+	for (const { name, session } of [
+		{ name: "TMUX session", session: true },
+		{ name: "TERM fallback", session: false },
+	]) {
+		it(`rearms bracketed paste inside tmux via ${name} without DECRQM 2004 (#15596)`, () => {
+			// tmux <= 3.5a answers the DA1 sentinel but not `CSI ? 2004 $ p`, and it
+			// drops paste markers whenever the pane's own 2004 flag was cleared.
+			if (session) Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+			else Bun.env.TERM = "tmux-256color";
+			const { terminal, writes, reports } = setup();
+			// Answer exactly the DA1 sentinels startup sent; DECRQM 2004 stays unanswered.
+			const sentinels = writes.join("").split("\x1b[c").length - 1;
+			for (let i = 0; i < sentinels; i++) process.stdin.emit("data", "\x1b[?1;2c");
+			expect(reports).toContainEqual({ mode: 2004, supported: false });
+			writes.length = 0;
+			terminal.write("frame");
+			process.stdin.emit("data", "x");
+			expect(writes).toEqual(["\x1b[?2004hframe", "\x1b[?2004h"]);
+			terminal.stop();
+		});
+	}
+
+	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {
+		const { terminal, received } = setup();
+
+		// No DECRQM 2004 confirmation: the terminal may not bracket pastes, so the
+		// raw-burst heuristic stays on and re-wraps the burst with paste markers.
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+
+		expect(received).toEqual(["\x1b[200~aaa\rbbb\rccc\x1b[201~"]);
 		terminal.stop();
 	});
 

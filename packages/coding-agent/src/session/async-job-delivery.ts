@@ -11,9 +11,11 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "../task/types";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
-import { truncateMiddle } from "./streaming-output";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -25,6 +27,11 @@ export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
+/**
+ * Tail share of the preview when the link points at a raw capture: tools append
+ * notices (wall time, exit code, timeout) after the captured stream.
+ */
+export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
 export interface AsyncResultEntry {
 	jobId: string;
@@ -44,14 +51,19 @@ export interface AsyncResultEntry {
 type AsyncResultJobDetails = {
 	jobId: string;
 	type?: AsyncJobType;
+	status?: AsyncJob["status"];
+	agentId?: string;
 	label?: string;
 	durationMs?: number;
+	/** Source capture metadata belongs to this job, not to the enclosing delivery report. */
+	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
 };
 
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
+	meta?: OutputMeta;
 };
 
 /**
@@ -71,39 +83,82 @@ export function renderStructuredJson(structured: StructuredSubagentOutput): stri
 	return truncateMiddle(serialized, { maxBytes: ASYNC_PREVIEW_MAX_CHARS }).content;
 }
 
+/**
+ * Headline for the delivery's "Structured output:" line. `unavailable` means
+ * no payload was ever validated (the run failed before yielding, or the
+ * schema itself was unusable) — never a schema verdict, so it must not read
+ * as "schema unavailable"/"schema invalid".
+ */
+export function structuredStatusLabel(status: StructuredSubagentOutput["status"]): string {
+	return status === "unavailable" ? "unavailable" : `schema ${status}`;
+}
+
+/**
+ * Which agent handles a result for task job `jobId` names. A task job's id can
+ * differ from its agent id (a messaged agent's next turn, vibe turns, workpool
+ * batches, /tan) while its output and transcript stay under the agent id.
+ * `agent://` answers for this job only when it completed without reporting that
+ * it wrote no output; otherwise only `history://` resolves to its turn.
+ * `undefined`: the job id already is the agent id, or this is not a task job.
+ */
+export function taskAgentHandles(
+	jobId: string,
+	job: Pick<AsyncJob, "type" | "status" | "agentOutputPublished"> | undefined,
+	agentUrlId: string | undefined,
+): "agent" | "history" | undefined {
+	if (job?.type !== "task" || !agentUrlId || agentUrlId === jobId) return undefined;
+	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
+		// The job manager disambiguates a requested job id when it collides
+		// with another live job (e.g. a task job reusing a vibe turn's job
+		// id), suffixing `jobId` — but the task's artifacts are still
+		// written under its own agent id (`AsyncJob.agentId`). Build the
+		// advertised `agent://` URL from that, or the delivery would point
+		// at an id with no backing `<id>.md`/`.json` on disk.
+		const agentUrlId = entry.job?.agentId ?? entry.jobId;
+		const handles = taskAgentHandles(entry.jobId, entry.job, agentUrlId);
+		// Job output (a command's output, or a task's `<task-result>` around a
+		// subagent's output), a subagent's payload and its validation error are
+		// text the job controls: it must not close the `<system-notice>` it renders
+		// into or open a forged harness block.
 		return {
 			jobId: entry.jobId,
-			// The job manager disambiguates a requested job id when it collides
-			// with another live job (e.g. a task job reusing a vibe turn's job
-			// id), suffixing `jobId` — but the task's artifacts are still
-			// written under its own agent id (`AsyncJob.agentId`). Build the
-			// advertised `agent://` URL from that, or the delivery would point
-			// at an id with no backing `<id>.md`/`.json` on disk.
-			agentUrlId: entry.job?.agentId ?? entry.jobId,
-			result: entry.result,
+			agentUrlId,
+			showAgentUrl: handles === "agent",
+			showHistoryUrl: handles === "history",
+			result: escapeHarnessTags(entry.result),
 			type: entry.job?.type,
+			status: entry.job?.status,
+			agentId: entry.job?.agentId,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
+			meta: entry.job?.latestDetails?.meta,
 			structured,
-			structuredJson,
+			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
 			hasStructuredData,
 			schemaStatus: structured?.status,
-			schemaError: structured?.error,
+			schemaStatusLabel: structured ? structuredStatusLabel(structured.status) : undefined,
+			schemaError: structured?.error === undefined ? undefined : escapeHarnessTags(structured.error),
 			schemaValid: structured?.status === "valid",
 		};
 	});
 	const details: AsyncResultDetails = {
+		meta: { source: { type: "report", value: "background job delivery" } },
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			type: job.type,
+			status: job.status,
+			agentId: job.agentId,
 			label: job.label,
 			durationMs: job.durationMs,
+			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
 	};

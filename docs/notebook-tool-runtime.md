@@ -12,7 +12,9 @@ The critical distinction: **notebook support is file conversion/editing, not not
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
 - [`src/eval/py/kernel.ts`](../packages/coding-agent/src/eval/py/kernel.ts)
-- [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts)
+- [`src/eval/kernel-session-registry.ts`](../packages/coding-agent/src/eval/kernel-session-registry.ts)
+- [`src/eval/executor-base.ts`](../packages/coding-agent/src/eval/executor-base.ts)
+- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
 
 ## 1) Runtime boundary: editing vs executing
 
@@ -20,28 +22,28 @@ The critical distinction: **notebook support is file conversion/editing, not not
 
 - `read` treats `.ipynb` files as notebooks unless the selector is `:raw`.
 - The default notebook view is editable text with markers:
-  - `# %% [code] cell:N`
-  - `# %% [markdown] cell:N`
-  - `# %% [raw] cell:N`
+   - `# %% [code] cell:N`
+   - `# %% [markdown] cell:N`
+   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
 - The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
 - Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
 - A missing notebook passed to the serializer starts from an empty nbformat 4.5 notebook.
-- The standalone `write` tool is not notebook-aware: it replaces the file with the supplied bytes. Use it only with valid notebook JSON, not the virtual marker representation.
+- The standalone `write` tool is not notebook-aware: it replaces the file content rather than converting cell markers. Use it only with valid notebook JSON, not the virtual marker representation.
 
 No kernel lifecycle exists in this path:
 
 - no kernel session ID
 - no code execution
 - no stream chunks from Python
-- no rich display capture
+- no image or view capture
 - no output artifact pipeline from execution
 
 ## Kernel-backed execution path (`src/tools/eval.ts` + `src/eval/py/*`)
 
-When the agent needs to run cell-style Python code with persistent state and rich displays, that goes through one **`eval` tool** call per cell with `language: "py"`, not through notebook file handling.
+When the agent needs to run cell-style Python code with persistent state and rich output (images, table/JSON/Markdown views), that goes through one **`eval` tool** call per cell with `language: "py"`, not through notebook file handling.
 
-That path is where Python subprocess lifecycle, reset/cancel behavior, chunk streaming, rich displays, and output artifact truncation live.
+That path is where Python subprocess lifecycle, reset/cancel behavior, chunk streaming, rich print, and output artifact truncation live.
 
 ## 2) Notebook cell handling semantics
 
@@ -64,7 +66,7 @@ A source line that itself looks like a cell marker is escaped on render by addin
 - A non-empty representation must start with a marker; text before the first marker, including a blank line, is rejected. Empty text serializes to a notebook with no cells.
 - Markers must match `# %% [code|markdown|raw]` with optional `cell:N`.
 - If `cell:N` points at an unused existing cell, that cell is cloned, its `cell_type` and `source` are updated, and unrelated fields are preserved.
-- Existing code-cell `execution_count` and `outputs` are preserved rather than cleared; missing fields are initialized to `null` and `[]`.
+- Existing code-cell `execution_count` and `outputs` are preserved rather than cleared, even when source changes; missing or null fields are initialized to `null` and `[]`. Editing therefore does not make stored outputs current.
 - Markdown/raw cells remove `execution_count` and `outputs`.
 - If no valid unused original index is present, a new cell with empty metadata is created.
 - Notebook-level metadata, format fields, and unrelated top-level fields survive because serialization clones the original document and replaces only `cells`.
@@ -90,25 +92,25 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 `PythonKernelMode`:
 
 - `session` (default)
-  - kernels are cached by `(session id, cwd, interpreter)`
-  - multiple owners can share a retained kernel for the same key
-  - execution is serialized by the tool's exclusive concurrency and backend execution path
-  - dead kernels are replaced before execution
+   - kernels are cached by `(session id, cwd, interpreter)`
+   - multiple owners can share a retained kernel for the same key
+   - foreground eval tool calls use exclusive concurrency; this is not a blanket lock on background cells or kernel-defined tool requests
+   - dead kernels are replaced before execution
 - `per-call`
-  - creates a subprocess for the request
-  - executes
-  - always shuts down the subprocess in `finally`
+   - creates a subprocess for the request
+   - executes
+   - always shuts down the subprocess in `finally`
 
 ## Reset behavior
 
 Each eval call has an optional `reset` flag. `reset: true` resets the selected Python session before that call executes; it does not reset other enabled language runtimes.
 
-## Kernel death / restart / retry
+## Kernel death and restart
 
 In session mode:
 
 - if the retained subprocess is not alive before execution, it is replaced
-- if execution fails because the subprocess died, the kernel is replaced and the code is retried once
+- if the subprocess dies during execution, completion is uncertain and the cell is **not replayed**; the next call starts a fresh kernel
 - concurrent resets for the same session key coalesce: a reset already in flight is awaited instead of starting another, and runs queued behind it proceed on the freshly-restarted kernel
 
 ## 4) Environment/session variable injection
@@ -122,28 +124,19 @@ Kernel startup and per-execution environment patching can receive:
 - `PI_TOOL_BRIDGE_SESSION`
 - `PI_EVAL_LOCAL_ROOTS`
 
-The runner initializes process state so code executes in the requested cwd, managed env entries are reflected in `os.environ`, and cwd is available on `sys.path`.
+The runner applies the requested cwd and managed environment patch before each cell, with cwd placed first on `sys.path`. A `%cd` or `os.chdir()` inside a cell does not override the host session cwd for the next eval call. Managed entries omitted from the patch are removed from `os.environ`.
 
-## 5) Streaming/chunk and display handling (kernel-backed path)
+## 5) Streaming/chunk and rich output handling (kernel-backed path)
 
-The Python backend uses an NDJSON subprocess runner. The host processes frames per execution:
+The Python backend uses an NDJSON subprocess runner. There is no `display()`: `print` and the trailing-expression echo write plain text, and the runner adds frames for images, data frames, Markdown objects and large structures (see [Python backend: rich print](./python-repl.md#rich-print)). The host processes frames per execution:
 
-- `stdout` / `stderr` -> text chunks to `onChunk`
-- `display` / `result` -> MIME bundle rendering
+- `stdout` / `stderr` -> text chunks to `onChunk`; this text is all the model sees
+- `view` -> `onDisplay({type: "view", text, view})`, a table/JSON/Markdown rendering of text already streamed through `stdout`, shown to the user in place of that text
+- `image` -> `onDisplay` image output (with `detail` / `url` / `providerFile` metadata) for the model and the user
+- `status` -> `onDisplay({type: "status", event})` for the TUI status renderer
+- `reply` -> tool-request envelope, returned as `KernelExecuteResult.reply`
 - `error` -> traceback text and structured error metadata
 - `done` -> final status, execution count, cancellation state
-
-Display text MIME precedence:
-
-1. `text/markdown`
-2. `text/plain`
-3. converted `text/html`
-
-Structured outputs captured separately include:
-
-- `application/json` -> JSON display output
-- `image/png` / `image/jpeg` -> image output
-- `application/x-omp-status` -> status event
 
 Cancellation/timeout:
 
@@ -153,12 +146,14 @@ Cancellation/timeout:
 
 ## 6) Truncation and artifact behavior
 
-`OutputSink` in `src/session/streaming-output.ts` is used by kernel execution paths:
+`OutputSink` in `packages/tui/src/tools/streaming-output.ts` is used by kernel execution paths:
 
 - sanitizes every chunk
 - tracks total/output lines and bytes
 - optionally spills full output to an artifact file
-- keeps a UTF-8-safe in-memory tail buffer when output exceeds the configured threshold
+- keeps a UTF-8-safe head/tail view within one inline byte budget (50 KiB by default), eliding the middle when head retention is enabled
+- caps individual lines using `tools.outputMaxColumns`, while preserving uncapped sanitized text in the artifact
+- reports artifact I/O failures separately and withholds the artifact ID if full capture failed
 
 `eval` converts this metadata into result truncation notices and TUI warnings.
 

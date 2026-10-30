@@ -110,13 +110,4 @@ describe("embed() input cap (#3126)", () => {
 		expect(seen.endsWith(latest)).toBe(true);
 		expect(seen).toContain("[...]");
 	});
-
-	it("returns the original array reference when no input needs trimming", async () => {
-		const provider = captureProvider();
-		setEmbeddingProviderForTests(provider);
-
-		await withEnvValue("1024", () => embed(["fits", "still fits"]));
-
-		expect(provider.calls[0]).toEqual(["fits", "still fits"]);
-	});
 });

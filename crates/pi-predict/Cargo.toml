@@ -1,0 +1,31 @@
+[package]
+name = "pi-predict"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rayon.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+
+# SmolLM2 runs on the GPU through candle's Metal backend on macOS; the
+# portable CPU decoder (src/smollm/cpu.rs) needs no ML framework.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { workspace = true, features = ["metal"] }
+candle-nn = { workspace = true, features = ["metal"] }
+# The `apple` engine and the process-wide AppKit spelling thread
+# (`apple::appkit`, shared with `pi_natives::spelling`).
+flume.workspace = true
+objc2 = "=0.6.4"
+objc2-app-kit = "=0.3.2"
+objc2-foundation = "=0.3.2"

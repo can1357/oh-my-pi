@@ -14,6 +14,7 @@ import type {
 	Context,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
@@ -35,7 +36,8 @@ async function collectSse(stream: ReadableStream<Uint8Array>): Promise<string[]>
 		buf += decoder.decode(value, { stream: true });
 	}
 	buf += decoder.decode();
-	return buf.split("\n\n").filter(s => s.length > 0);
+	// SSE comment frames (`: keepalive`) carry no event; spec-compliant clients skip them.
+	return buf.split("\n\n").filter(s => s.length > 0 && !s.startsWith(":"));
 }
 
 function parseSseLine(line: string): unknown {
@@ -154,16 +156,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
-	it("forwards an explicit statefulResponses disablement to the native stream", () => {
-		const parsed = parseRequest({
-			modelId: "openai/gpt-5",
-			context: baseContext,
-			options: { promptCacheKey: "bench-cache-pair", statefulResponses: false },
-		});
-		expect(parsed.options.promptCacheKey).toBe("bench-cache-pair");
-		expect(parsed.options.statefulResponses).toBe(false);
-	});
-
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",
@@ -217,16 +209,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
 	});
 
-	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {
-		const parsed = parseRequest({
-			modelId: "gpt-5.6",
-			context: baseContext,
-			options: { promptCache: { mode: "explicit", ttl: "30m", breakpoint: "none" } },
-		});
-
-		expect(parsed.options.promptCache).toEqual({ mode: "explicit", ttl: "30m", breakpoint: "none" });
-	});
-
 	it("rejects missing required fields", () => {
 		expect(() => parseRequest({ context: baseContext })).toThrow(/modelId/);
 		expect(() => parseRequest({ modelId: "x" })).toThrow(/context/);
@@ -263,7 +245,7 @@ describe("pi-native gateway cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -301,13 +283,109 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+describe("pi-native gateway retry budgets", () => {
+	it("limits upstream OpenAI requests on persistent 429", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-retry-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openai", "test-key");
+		const model = buildModel({
+			id: "memory-429",
+			name: "Memory 429",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 4096,
+		});
+		let upstreamRequests = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+			fetch: async () => {
+				upstreamRequests++;
+				return Response.json(
+					{ error: { message: "rate limited", type: "rate_limit_error" } },
+					{ status: 429, headers: { "retry-after": "0" } },
+				);
+			},
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "openai/memory-429",
+					context: baseContext,
+					options: { maxHttpAttempts: 3 },
+					stream: false,
+				}),
+			});
+			expect(response.ok).toBe(false);
+			expect(upstreamRequests).toBe(3);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("pi-native gateway reasoning flags", () => {
+	it("delivers a forced reasoning-off to the provider stream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push({ content: ["ok"] });
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "pi-native-reasoning",
+					context: baseContext,
+					options: { reasoning: Effort.Medium, forceReasoningOff: true },
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(mock.calls).toHaveLength(1);
+			// A gateway-routed side turn must be able to force reasoning off, not
+			// only disable it — dropping the flag here silently re-enables thinking.
+			expect(mock.calls[0]?.options).toMatchObject({ reasoning: Effort.Medium, forceReasoningOff: true });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
 
 describe("pi-native gateway usage attribution", () => {
 	it("records observed usage under the caller's x-omp-* identity, host-fallback when absent", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-usage-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const recorded: Array<{
 			provider: string;
 			model: string;
@@ -315,7 +393,7 @@ describe("pi-native gateway usage attribution", () => {
 			costUsd?: number;
 			client?: { installId: string; hostname?: string; app?: string };
 		}> = [];
-		const spy = vi.spyOn(storage, "recordObservedUsage").mockImplementation(entry => {
+		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });
@@ -417,21 +495,6 @@ describe("pi-native encodeStream", () => {
 		expect(parsed[parsed.length - 1]).toBe("[DONE]");
 	});
 
-	it("preserves the rolling `partial` on every delta (sanity: no shrink)", async () => {
-		// Guards against an accidental re-introduction of partial-stripping
-		// optimization. Clients depend on `partial` being present.
-		const final = baseAssistant({ content: [{ type: "text", text: "abc" }] });
-		const events: AssistantMessageEvent[] = [
-			{ type: "text_delta", contentIndex: 0, delta: "abc", partial: final },
-			{ type: "done", reason: "stop", message: final },
-		];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, final)))).map(parseSseLine) as Array<
-			Record<string, unknown>
-		>;
-		expect(parsed[0]).toHaveProperty("partial");
-		expect((parsed[0] as { partial: AssistantMessage }).partial.content).toEqual([{ type: "text", text: "abc" }]);
-	});
-
 	it("stops streaming after a terminal `done` and emits [DONE] once", async () => {
 		const final = baseAssistant();
 		const events: AssistantMessageEvent[] = [
@@ -472,6 +535,33 @@ describe("pi-native encodeStream", () => {
 		expect((parsed[0] as { type: string }).type).toBe("start");
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
+	});
+
+	it("puts a keepalive on the wire before a silent source yields its first event", async () => {
+		// A model thinking for minutes must not leave the connection byte-less:
+		// Bun fetch and proxies cut silent responses at ~300 s (issue #17363).
+		const { promise: firstEvent, resolve: releaseFirstEvent } = Promise.withResolvers<void>();
+		const final = baseAssistant();
+		const silent = (async function* () {
+			await firstEvent;
+			yield { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		})() as unknown as AssistantMessageEventStream;
+		(silent as { result(): Promise<AssistantMessage> }).result = async () => final;
+
+		const reader = encodeStream(silent).getReader();
+		const first = await reader.read();
+		expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n");
+
+		releaseFirstEvent();
+		const rest: string[] = [];
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			rest.push(new TextDecoder().decode(value));
+		}
+		expect(rest.join("")).toBe(
+			`data: ${JSON.stringify({ type: "done", reason: "stop", message: final })}\n\ndata: [DONE]\n\n`,
+		);
 	});
 });
 

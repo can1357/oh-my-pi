@@ -40,6 +40,10 @@ pub enum OpenFile {
 	PipeWriter(std::io::PipeWriter),
 	/// A custom stream.
 	Stream(Box<dyn Stream>),
+	/// A file owned by an injected virtual filesystem provider. Handles the
+	/// provider reports as native are unwrapped into [`OpenFile::File`] on
+	/// conversion, so this variant never carries a native descriptor.
+	Vfs(pi_vfs::File),
 }
 
 #[cfg(feature = "serde")]
@@ -56,6 +60,7 @@ impl serde::Serialize for OpenFile {
 			Self::PipeReader(_) => serializer.serialize_str("pipe_reader"),
 			Self::PipeWriter(_) => serializer.serialize_str("pipe_writer"),
 			Self::Stream(_) => serializer.serialize_str("stream"),
+			Self::Vfs(_) => serializer.serialize_str("vfs"),
 		}
 	}
 }
@@ -74,6 +79,7 @@ impl<'de> serde::Deserialize<'de> for OpenFile {
 			"pipe_reader" => (),
 			"pipe_writer" => (),
 			"stream" => (),
+			"vfs" => (),
 			_ => return Err(serde::de::Error::custom("invalid open file")),
 		}
 
@@ -108,6 +114,7 @@ impl std::fmt::Display for OpenFile {
 			Self::PipeReader(_) => write!(f, "pipe reader"),
 			Self::PipeWriter(_) => write!(f, "pipe writer"),
 			Self::Stream(_) => write!(f, "stream"),
+			Self::Vfs(_) => write!(f, "virtual file"),
 		}
 	}
 }
@@ -123,9 +130,18 @@ impl OpenFile {
 			Self::PipeReader(f) => f.try_clone()?.into(),
 			Self::PipeWriter(f) => f.try_clone()?.into(),
 			Self::Stream(s) => Self::Stream(s.clone_box()),
+			Self::Vfs(f) => Self::Vfs(f.try_clone()?),
 		};
 
 		Ok(result)
+	}
+
+	/// Returns the virtual filesystem handle backing this open file, if any.
+	pub const fn as_vfs(&self) -> Option<&pi_vfs::File> {
+		match self {
+			Self::Vfs(file) => Some(file),
+			_ => None,
+		}
 	}
 
 	/// Converts the open file into an `OwnedFd`.
@@ -141,6 +157,7 @@ impl OpenFile {
 			Self::PipeReader(r) => Ok(std::os::fd::OwnedFd::from(r)),
 			Self::PipeWriter(w) => Ok(std::os::fd::OwnedFd::from(w)),
 			Self::Stream(s) => s.try_clone_to_owned(),
+			Self::Vfs(_) => Err(error::ErrorKind::VirtualFileHasNoNativeFd.into()),
 		}
 	}
 
@@ -162,6 +179,7 @@ impl OpenFile {
 			Self::PipeReader(r) => Ok(r.as_fd()),
 			Self::PipeWriter(w) => Ok(w.as_fd()),
 			Self::Stream(s) => s.try_borrow_as_fd(),
+			Self::Vfs(_) => Err(error::ErrorKind::VirtualFileHasNoNativeFd.into()),
 		}
 	}
 
@@ -182,16 +200,71 @@ impl OpenFile {
 				Self::PipeReader(f) => f.into(),
 				Self::PipeWriter(f) => f.into(),
 				Self::Stream(_) => return Err(error::ErrorKind::CannotConvertToNativeFd.into()),
+				Self::Vfs(_) => return Err(error::ErrorKind::VirtualFileHasNoNativeFd.into()),
 			};
 			Ok(stdio)
 		}
 	}
 
-	pub(crate) fn is_dir(&self) -> bool {
+	pub(crate) async fn is_dir(&self) -> bool {
 		match self {
 			Self::Stdin(_) | Self::Stdout(_) | Self::Stderr(_) => false,
 			Self::File(file) => file.metadata().is_ok_and(|m| m.is_dir()),
+			Self::Vfs(file) => file.metadata_async().await.is_ok_and(|m| m.is_dir()),
 			Self::PipeReader(_) | Self::PipeWriter(_) | Self::Stream(_) => false,
+		}
+	}
+
+	/// Reads from the open file without blocking the async runtime on a
+	/// virtual filesystem provider. Other kinds read as [`std::io::Read`] does.
+	///
+	/// # Errors
+	///
+	/// Returns the underlying read error.
+	pub async fn read_async(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		match self {
+			Self::Vfs(file) => file.read_async(buf).await,
+			other => std::io::Read::read(other, buf),
+		}
+	}
+
+	/// Reads the rest of the open file into `buf`, awaiting virtual filesystem
+	/// providers instead of blocking the async runtime on them.
+	///
+	/// # Errors
+	///
+	/// Returns the underlying read error.
+	pub async fn read_to_end_async(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+		match self {
+			Self::Vfs(file) => file.read_to_end_async(buf).await,
+			other => std::io::Read::read_to_end(other, buf),
+		}
+	}
+
+	/// Writes all of `buf`, awaiting virtual filesystem providers instead of
+	/// blocking the async runtime on them. Other kinds write as
+	/// [`std::io::Write::write_all`] does.
+	///
+	/// # Errors
+	///
+	/// Returns the underlying write error.
+	pub async fn write_all_async(&mut self, buf: &[u8]) -> std::io::Result<()> {
+		match self {
+			Self::Vfs(file) => file.write_all_async(buf).await,
+			other => std::io::Write::write_all(other, buf),
+		}
+	}
+
+	/// Flushes the open file, awaiting virtual filesystem providers instead of
+	/// blocking the async runtime on them.
+	///
+	/// # Errors
+	///
+	/// Returns the underlying flush error.
+	pub async fn flush_async(&mut self) -> std::io::Result<()> {
+		match self {
+			Self::Vfs(file) => file.flush_async().await,
+			other => std::io::Write::flush(other),
 		}
 	}
 
@@ -211,8 +284,29 @@ impl OpenFile {
 			Self::Stream(s) => s.try_borrow_as_fd().is_ok_and(|fd| fd.is_terminal()),
 			#[cfg(not(unix))]
 			Self::Stream(_) => false,
+			Self::Vfs(_) => false,
 		}
 	}
+}
+
+/// Copies everything readable from `reader` into `writer`, awaiting virtual
+/// filesystem providers on either side rather than blocking the async runtime.
+///
+/// # Errors
+///
+/// Returns the first read or write error.
+pub async fn copy_async(reader: &mut OpenFile, writer: &mut OpenFile) -> std::io::Result<()> {
+	let mut buf = vec![0u8; 64 * 1024];
+	loop {
+		let n = match reader.read_async(&mut buf).await {
+			Ok(0) => break,
+			Ok(n) => n,
+			Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+			Err(error) => return Err(error),
+		};
+		writer.write_all_async(&buf[..n]).await?;
+	}
+	writer.flush_async().await
 }
 
 impl From<std::io::Stdin> for OpenFile {
@@ -239,6 +333,17 @@ impl From<std::io::Stderr> for OpenFile {
 impl From<std::fs::File> for OpenFile {
 	fn from(file: std::fs::File) -> Self {
 		Self::File(file)
+	}
+}
+
+impl From<pi_vfs::File> for OpenFile {
+	/// Native handles become [`OpenFile::File`], keeping descriptor
+	/// inheritance and the platform fast paths; provider handles stay virtual.
+	fn from(file: pi_vfs::File) -> Self {
+		match file.into_native() {
+			Ok(native) => Self::File(native),
+			Err(virtual_file) => Self::Vfs(virtual_file),
+		}
 	}
 }
 
@@ -270,6 +375,7 @@ impl std::io::Read for OpenFile {
 				Err(std::io::Error::other(error::ErrorKind::OpenFileNotReadable("pipe writer")))
 			},
 			Self::Stream(s) => s.read(buf),
+			Self::Vfs(f) => f.read(buf),
 		}
 	}
 }
@@ -288,6 +394,7 @@ impl std::io::Write for OpenFile {
 			},
 			Self::PipeWriter(writer) => writer.write(buf),
 			Self::Stream(s) => s.write(buf),
+			Self::Vfs(f) => f.write(buf),
 		}
 	}
 
@@ -300,6 +407,7 @@ impl std::io::Write for OpenFile {
 			Self::PipeReader(_) => Ok(()),
 			Self::PipeWriter(writer) => writer.flush(),
 			Self::Stream(s) => s.flush(),
+			Self::Vfs(f) => f.flush(),
 		}
 	}
 }
@@ -467,5 +575,123 @@ where
 	fn from(iter: I) -> Self {
 		let files = iter.map(|(fd, file)| (fd, Some(file))).collect();
 		Self { files }
+	}
+}
+
+/// A path that names one of the calling process's own descriptors, or its
+/// controlling terminal, rather than a file.
+///
+/// Opening such a path for real reaches the *process's* descriptor table. A
+/// shell embedded in a larger host shares that process, so `/dev/stdin` would
+/// be the host's terminal rather than the command's input. Callers resolve
+/// these paths against the shell's descriptors instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DescriptorPath {
+	/// `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `N` under `/dev/fd`,
+	/// `/proc/self/fd`, `/proc/thread-self/fd`, or `/proc/<this pid>/fd`.
+	Fd(ShellFd),
+	/// `/dev/tty`.
+	Terminal,
+}
+
+impl DescriptorPath {
+	/// Classifies an absolute path; `None` for every other path, including
+	/// relative paths and the descriptor directories themselves.
+	pub fn parse(path: &std::path::Path) -> Option<Self> {
+		use std::path::Component;
+
+		let mut components = path.components();
+		if components.next() != Some(Component::RootDir) {
+			return None;
+		}
+		let mut names = [""; 4];
+		let mut len = 0;
+		for component in components {
+			let Component::Normal(name) = component else {
+				return None;
+			};
+			*names.get_mut(len)? = name.to_str()?;
+			len += 1;
+		}
+
+		match names[..len] {
+			["dev", "stdin"] => Some(Self::Fd(OpenFiles::STDIN_FD)),
+			["dev", "stdout"] => Some(Self::Fd(OpenFiles::STDOUT_FD)),
+			["dev", "stderr"] => Some(Self::Fd(OpenFiles::STDERR_FD)),
+			["dev", "tty"] => Some(Self::Terminal),
+			["dev", "fd", fd] | ["proc", "self" | "thread-self", "fd", fd] => decimal(fd).map(Self::Fd),
+			["proc", pid, "fd", fd] if decimal::<u32>(pid) == Some(std::process::id()) => {
+				decimal(fd).map(Self::Fd)
+			},
+			_ => None,
+		}
+	}
+
+	/// The error opening this path fails with in a process that lacks the
+	/// descriptor (`ENOENT`) or has no controlling terminal (`ENXIO`).
+	pub fn unavailable_error(self) -> std::io::Error {
+		#[cfg(unix)]
+		{
+			let errno = match self {
+				Self::Fd(_) => nix::errno::Errno::ENOENT,
+				Self::Terminal => nix::errno::Errno::ENXIO,
+			};
+			std::io::Error::from_raw_os_error(errno as i32)
+		}
+		#[cfg(not(unix))]
+		{
+			std::io::Error::from(std::io::ErrorKind::NotFound)
+		}
+	}
+}
+
+/// Parses an unsigned decimal path component, as the kernel spells
+/// descriptor numbers and pids; signs and other text are not numbers here.
+fn decimal<T: std::str::FromStr>(name: &str) -> Option<T> {
+	if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+		return None;
+	}
+	name.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use super::DescriptorPath::{self, Fd, Terminal};
+
+	fn parse(path: &str) -> Option<DescriptorPath> {
+		DescriptorPath::parse(Path::new(path))
+	}
+
+	#[test]
+	fn descriptor_paths_name_this_process_only() {
+		let own = std::process::id();
+		for (path, expected) in [
+			("/dev/stdin", Fd(0)),
+			("/dev/stdout", Fd(1)),
+			("/dev/stderr", Fd(2)),
+			("/dev/tty", Terminal),
+			("/dev/fd/63", Fd(63)),
+			("//dev/./fd/7", Fd(7)),
+			("/proc/self/fd/3", Fd(3)),
+			("/proc/thread-self/fd/4", Fd(4)),
+			(&format!("/proc/{own}/fd/5"), Fd(5)),
+		] {
+			assert_eq!(parse(path), Some(expected), "{path}");
+		}
+
+		for path in [
+			"/dev/fd",
+			"/dev/fd/-1",
+			"/dev/fd/+3",
+			"/dev/fd/3/x",
+			"/dev/null",
+			"dev/stdin",
+			"/dev/../dev/stdin",
+			&format!("/proc/{}/fd/3", own.wrapping_add(1)),
+		] {
+			assert_eq!(parse(path), None, "{path}");
+		}
 	}
 }

@@ -1,6 +1,33 @@
 // Provider-wire compat for "gmi-cloud"; regenerated from the frozen census using deployment contract selectors.
 
 provider "gmi-cloud" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash"
+	env "GMI_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="GMI Cloud"
+
+	// Bundled seed for GMI Cloud. Generation has no `GMI_API_KEY`, so a regen
+	// without credentials would leave the provider slice empty and the declared seed
+	// `default-model` unresolvable on a fresh install before the async runtime
+	// discovery fires. Live `/v1/models` discovery is authoritative for the model
+	// ID set and overrides context/max-token limits, but `mapWithBundledReference`
+	// keeps the reference's cost/reasoning/thinking — so these fields carry GMI's
+	// direct-tariff values: V4-Flash at $0.14/$0.28 per 1M with Think High/Max
+	// modes per GMI's launch post
+	// (https://www.gmicloud.ai/en/blog/deepseek-v4-is-here-we-tested-it), not
+	// discounted gateway-route pricing. GMI publishes no cache-read tariff, so
+	// cache-read stays 0 until a direct source confirms cached-token billing.
+	seed api="openai-completions" base-url="https://api.gmi-serving.com/v1" bundle="fallback" {
+		model "deepseek-ai/DeepSeek-V4-Flash" name="DeepSeek V4 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.14 output=0.28 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=384000
+			thinking-mode "effort"
+			thinking-efforts "high" "max"
+		}
+	}
+
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-ai/DeepSeek-V4-Flash" {
 		thinking-mode "effort"

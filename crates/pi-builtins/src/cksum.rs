@@ -7,7 +7,6 @@ use std::{
 	borrow::Borrow,
 	ffi::{OsStr, OsString},
 	fmt::{Display, Formatter},
-	fs::File,
 	io::{self, BufReader, Read, Write},
 };
 
@@ -793,6 +792,9 @@ where
 	let mut files = files.peekable();
 
 	while let Some(filename) = files.next() {
+		if host.is_cancelled() {
+			break;
+		}
 		// Check that in raw mode, we are not provided with several files.
 		if options.output_format.is_raw() && files.peek().is_some() {
 			return Err(failure(ChecksumError::RawMultipleFiles));
@@ -802,7 +804,7 @@ where
 		let resolved_filepath = host.resolve(filepath);
 		let stdin_buf;
 		let file_buf;
-		if resolved_filepath.is_dir() {
+		if host.fs().is_dir(&resolved_filepath) {
 			host.error(format!("{}: Is a directory", filepath.display()), 1);
 			continue;
 		}
@@ -814,10 +816,10 @@ where
 				stdin_buf = &mut host.stdin;
 				Box::new(stdin_buf) as Box<dyn Read>
 			} else {
-				file_buf = match File::open(&resolved_filepath) {
+				file_buf = match host.fs().open(&resolved_filepath) {
 					Ok(file) => file,
 					Err(err) => {
-						host.error(format!("{}: {err}", filepath.to_string_lossy()), 1);
+						host.error(format!("{}: {err}", filepath.display()), 1);
 						continue;
 					},
 				};
@@ -1109,7 +1111,7 @@ impl LineFormat {
 		// openssl's tagged format does not put a space before (filename)
 
 		let par_idx = rest.iter().position(|&b| b == b'(')?;
-		let sub_case = if rest[par_idx - 1] == b' ' {
+		let sub_case = if par_idx > 0 && rest[par_idx - 1] == b' ' {
 			SubCase::Posix
 		} else {
 			SubCase::OpenSSL
@@ -1335,19 +1337,19 @@ fn forgiving_base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 	}
 
 	let mut output = Vec::with_capacity(input.len() / 4 * 3 + 2);
-	let mut chunks = input.chunks_exact(4);
-	for chunk in &mut chunks {
-		let a = sextet(chunk[0])?;
-		let b = sextet(chunk[1])?;
-		let c = sextet(chunk[2])?;
-		let d = sextet(chunk[3])?;
+	let (chunks, remainder) = input.as_chunks::<4>();
+	for &[a, b, c, d] in chunks {
+		let a = sextet(a)?;
+		let b = sextet(b)?;
+		let c = sextet(c)?;
+		let d = sextet(d)?;
 		output.extend_from_slice(&[
 			(a << 2) | (b >> 4),
 			(b << 4) | (c >> 2),
 			(c << 6) | d,
 		]);
 	}
-	match chunks.remainder() {
+	match remainder {
 		[] => {},
 		[a, b] => output.push((sextet(*a)? << 2) | (sextet(*b)? >> 4)),
 		[a, b, c] => {
@@ -1415,11 +1417,11 @@ fn get_file_to_check<'a>(
 		return Ok(Box::new(&mut host.stdin));
 	}
 
-	match File::open(host.resolve(filename)) {
+	match host.fs().open(host.resolve(filename)) {
 		Ok(file) => {
 			if file.metadata().map_err(|_| LineCheckError::CantOpenFile)?.is_dir() {
 				let escaped = locale_aware_escape_name(filename, QuotingStyle::SHELL_ESCAPE);
-				host.error(format!("{}: Is a directory", escaped.to_string_lossy()), 1);
+				host.error(format!("{}: Is a directory", escaped.display()), 1);
 				write_file_report(
 					&mut host.stdout,
 					filename_bytes,
@@ -1435,7 +1437,7 @@ fn get_file_to_check<'a>(
 		Err(error) => {
 			if !opts.ignore_missing {
 				let escaped = locale_aware_escape_name(filename, QuotingStyle::SHELL_ESCAPE);
-				host.error(format!("{}: {error}", escaped.to_string_lossy()), 1);
+				host.error(format!("{}: {error}", escaped.display()), 1);
 				write_file_report(
 					&mut host.stdout,
 					filename_bytes,
@@ -1451,7 +1453,7 @@ fn get_file_to_check<'a>(
 
 /// Returns a reader to the list of checksums.
 fn get_input_file(host: &Host, filename: &OsStr) -> ExecResult<Box<dyn Read>> {
-	match File::open(host.resolve(filename)) {
+	match host.fs().open(host.resolve(filename)) {
 		Ok(file) => {
 			if file.metadata()?.is_dir() {
 				Err(failure(format!("{}: Is a directory", filename.maybe_quote())))
@@ -1496,12 +1498,7 @@ fn identify_algo_name_and_length(
 
 	let bytes = if let Some(bitlen) = line_info.algo_bit_len {
 		match line_algo {
-			algo @ (ak::Blake2b | ak::Blake3) => {
-				match parse_blake_length(algo, BlakeLength::Int(bitlen)) {
-					Ok(len) => Some(len),
-					Err(_) => return Err(LineCheckError::ImproperlyFormatted),
-				}
-			},
+			algo @ (ak::Blake2b | ak::Blake3) if let Ok(len) = parse_blake_length(algo, BlakeLength::Int(bitlen)) => Some(len),
 			ak::Sha2 | ak::Sha3 if [224, 256, 384, 512].contains(&bitlen) => Some(bitlen),
 			ak::Shake128 | ak::Shake256 => Some(bitlen),
 			// Either
@@ -1552,7 +1549,7 @@ fn compute_and_check_digest_from_file(
 				&real_filename_to_check,
 				QuotingStyle::SHELL_ESCAPE,
 			);
-			host.error(format!("{}: {error}", escaped.to_string_lossy()), 1);
+			host.error(format!("{}: {error}", escaped.display()), 1);
 			write_file_report(
 				&mut host.stdout,
 				filename,
@@ -1578,7 +1575,7 @@ fn compute_and_check_digest_from_file(
 		opts.verbose,
 	);
 
-	if checksum_correct { Ok(()) } else { Err(LineCheckError::DigestMismatch) }
+	checksum_correct.ok_or(LineCheckError::DigestMismatch)
 }
 
 /// Check a digest checksum with non-algo based pre-treatment.
@@ -1722,6 +1719,10 @@ fn process_checksum_file(
 	let mut cached_line_format = None;
 	let mut last_algo = None;
 	for (i, line) in lines.into_iter().enumerate() {
+		// An aborted check reports no summary for the lines it skipped.
+		if host.is_cancelled() {
+			return Err(FileCheckError::Failed);
+		}
 		let line_result = process_checksum_line(
 			host,
 			&line,
@@ -1811,6 +1812,10 @@ where
 {
 	let mut failed = false;
 	for filename_input in files {
+		if host.is_cancelled() {
+			failed = true;
+			break;
+		}
 		use FileCheckError::*;
 		match process_checksum_file(host, filename_input, algo_kind, length_input, opts) {
 			Err(Critical(error)) => return Err(error),
@@ -2227,6 +2232,22 @@ mod tests {
             let (code, capture) = run_util::<Cksum>(&["-c", "list"], "", dir.path());
             assert_eq!(code, 0, "stderr: {}", capture.err());
             assert_eq!(capture.out(), "data: OK\n");
+        }
+
+        /// Failure mode: a leading '(' used to underflow the tagged parser's
+        /// index instead of reporting an invalid checksum list.
+        #[test]
+        fn check_rejects_a_leading_parenthesis_without_panicking() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("list"), b"(data)= abcdef\n").unwrap();
+            let (code, capture) = run_util::<Cksum>(&["-c", "list"], "", dir.path());
+            assert_eq!(code, 1);
+            assert_eq!(capture.out(), "");
+            assert!(
+                capture.err().contains("no properly formatted checksum lines found"),
+                "stderr: {}",
+                capture.err()
+            );
         }
 
         /// Failure mode: real GNU 9.x treats `-c -b` as a fatal usage error

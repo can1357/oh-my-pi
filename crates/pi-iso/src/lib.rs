@@ -31,11 +31,13 @@ use async_trait::async_trait;
 
 mod apfs;
 mod btrfs;
+pub mod cow;
 mod diff;
 mod linux_reflink;
 mod overlayfs;
 mod projfs;
 mod rcopy;
+mod tree;
 mod windows_block_clone;
 mod zfs;
 
@@ -58,7 +60,8 @@ pub enum BackendKind {
 	/// Kernel `overlay` filesystem (Linux), with optional `fuse-overlayfs`
 	/// fallback.
 	Overlayfs,
-	/// Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE` block clone tree (NTFS/ReFS).
+	/// Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE` block clone tree (`ReFS`,
+	/// including Dev Drive).
 	WindowsBlockClone,
 	/// Windows Projected File System.
 	Projfs,
@@ -227,6 +230,24 @@ pub(crate) fn command_failed(
 ) -> IsoError {
 	let stderr = String::from_utf8_lossy(stderr);
 	IsoError::other(format!("{what} (exit {code}): {}", stderr.trim()))
+}
+
+/// The filesystem magic `statfs(2)` reports for `path` (e.g. btrfs
+/// `0x9123683E`), or `None` when the call fails. Magics are 32-bit; libc's
+/// `f_type` width varies by target and C library.
+#[cfg(target_os = "linux")]
+pub(crate) fn statfs_magic(path: &Path) -> Option<u32> {
+	use std::os::unix::ffi::OsStrExt;
+
+	let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+	let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+	// SAFETY: `path` is NUL-terminated and outlives the call; `stat` is a
+	// writable out-pointer of the right type.
+	if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+		return None;
+	}
+	// SAFETY: `statfs` returned 0, so it initialized `stat`.
+	Some(unsafe { stat.assume_init() }.f_type as u32)
 }
 
 /// Backend contract.

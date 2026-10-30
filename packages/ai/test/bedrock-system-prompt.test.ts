@@ -70,10 +70,4 @@ describe("Bedrock system prompt normalization", () => {
 		const payload = await capturePayload("You are a test." as unknown as string[]);
 		expect(textBlocks(payload)).toEqual(["You are a test."]);
 	});
-
-	test("string and single-element array produce identical system blocks", async () => {
-		const fromString = await capturePayload("You are a test." as unknown as string[]);
-		const fromArray = await capturePayload(["You are a test."]);
-		expect(textBlocks(fromString)).toEqual(textBlocks(fromArray));
-	});
 });

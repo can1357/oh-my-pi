@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createLspWritethrough, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
+import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
+import { FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { LinterClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";

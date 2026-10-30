@@ -1,6 +1,6 @@
 /**
  * Compat-rule compiler entry: reads a `rules/` tree (taxonomy, classes,
- * providers, runtime) and compiles it into one {@link CompiledCompatRules}
+ * providers, runtime, auth) and compiles it into one {@link CompiledCompatRules}
  * value. Pure — importable from tests; the `gen:compat` CLI
  * (`scripts/compile-compat.ts`) persists the result as `rules.json`.
  */
@@ -10,8 +10,10 @@ import type { CompiledAuth, CompiledCompatRules } from "../../src/compat/types";
 import { compileAuth } from "./compile-auth";
 import { compileBehavior } from "./compile-behavior";
 import { compileCascade } from "./compile-cascade";
+import { compileProviders } from "./compile-providers";
 import { compileTaxonomy } from "./compile-taxonomy";
 
+export { renderProviderIds } from "./compile-providers";
 export { CompatCompileError } from "./kdl-reader";
 
 interface RuleSource {
@@ -54,6 +56,7 @@ export async function compileCompatRules(rulesDir: string): Promise<CompiledComp
 		cascade: compileCascade([...classes, ...providers]),
 		behavior: compileBehavior(behaviorSource),
 		auth: compileAuth(auth),
+		providers: compileProviders(providers),
 	};
 }
 

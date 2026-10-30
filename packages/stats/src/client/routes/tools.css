@@ -1,0 +1,14 @@
+.tools-filter {
+	width: 200px;
+}
+
+.tools-name {
+	max-width: 220px;
+}
+
+.tools-share {
+	display: inline-block;
+	min-width: 32px;
+	margin-left: 8px;
+	text-align: right;
+}

@@ -1,5 +1,6 @@
 auth "anthropic" {
 	name "Anthropic (Claude Pro/Max)"
+	org-scoped-identity #true
 	// Foundry mode optionally switches Anthropic auth to enterprise gateway credentials.
 	env hook="anthropic-foundry"
 	login "oauth-code" {

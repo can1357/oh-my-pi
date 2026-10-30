@@ -1,7 +1,10 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
+import { contextLocalProtocolOptions } from "../internal-urls/context";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalDisplayOutput } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -21,6 +24,12 @@ export interface ExecutorBackendExecOptions {
 	 */
 	idleTimeoutMs?: number;
 	reset: boolean;
+	/** Absolute filename for file-backed cells; preserves import and traceback locations. */
+	filename?: string;
+	/** Explicit distribution requirements installed before executing the cell. */
+	packages?: string[];
+	/** Managed scratch environment by default; project mutations require explicit selection. */
+	environment?: "managed" | "project";
 	onChunk: (chunk: string) => void;
 	/**
 	 * Live status events (read/write/agent/…) delivered as they are emitted,
@@ -38,11 +47,21 @@ export interface ExecutorBackendResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
+	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
+}
+
+/** Outcome of {@link ExecutorBackend.checkAvailability}. */
+export interface BackendAvailability {
+	ok: boolean;
+	/** Why the backend cannot run (e.g. which interpreters failed to start); surfaced in the eval error. */
+	reason?: string;
 }
 
 /** Pluggable language backend for the eval tool. */
@@ -51,22 +70,26 @@ export interface ExecutorBackend {
 	readonly label: string;
 	/** Source language identifier passed to the syntax highlighter (e.g. "python", "javascript"). */
 	readonly highlightLang: string;
-	/** Cheap availability check. Used by fallback resolution and bounded by the caller's probe options. */
-	isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean>;
+	/** Cheap availability check. Used by backend resolution and bounded by the caller's probe options. */
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability>;
 	/** Execute one cell. Caller invokes once per cell and aggregates results. */
 	execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult>;
 }
 
 /**
  * Resolve the on-disk roots that the eval helpers substitute for internal-URL
- * schemes (currently `local://`). Prefers the session's own
- * {@link LocalProtocolOptions} — the exact mapping `read local://…` uses — so an
- * eval `write("local://x")` and a later `read local://x` agree on the location.
+ * schemes from {@link contextLocalProtocolOptions}, resolved the way the
+ * protocol handlers do, so an eval `write("local://x")` and a later
+ * `read local://x` agree on the location. `local://` maps to its root;
+ * `artifact://` maps to the session's artifacts dir, the dir `read artifact://<id>`
+ * searches first, so `read("artifact://<id>")` returns the artifact's text.
+ * A scheme is absent when its root does not resolve (read would fail the same way).
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
-		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-		getSessionId: () => session.getSessionId?.() ?? null,
-	};
-	return buildEvalUrlRoots(options);
+	const protocolOptions = contextLocalProtocolOptions(session);
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: protocolOptions });
+	const roots = options ? buildEvalUrlRoots(options) : {};
+	const artifactsDir = protocolOptions?.getArtifactsDir?.();
+	if (artifactsDir) roots.artifact = artifactsDir;
+	return roots;
 }

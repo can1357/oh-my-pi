@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import {
 	formatCurrentBranchFullHistory,
 	HistoryProtocolHandler,
@@ -25,9 +26,12 @@ import {
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -63,12 +67,12 @@ function makeToolSession(
 }
 
 /** Minimal current-version session JSONL: header + a linear user/assistant chain. */
-function sessionFixtureJsonl(): string {
+function sessionFixtureJsonl(userText = "parked hello", headerId = "fixture-session"): string {
 	const timestamp = new Date().toISOString();
 	const header = {
 		type: "session",
 		version: CURRENT_SESSION_VERSION,
-		id: "fixture-session",
+		id: headerId,
 		timestamp,
 		cwd: "/tmp",
 	};
@@ -77,7 +81,7 @@ function sessionFixtureJsonl(): string {
 		id: "m1",
 		parentId: null,
 		timestamp,
-		message: { role: "user", content: "parked hello", timestamp: 1 },
+		message: { role: "user", content: userText, timestamp: 1 },
 	};
 	const assistantEntry = {
 		type: "message",
@@ -368,7 +372,7 @@ describe("history:// protocol", () => {
 
 	it("read applies selectors to caller-bound full history", async () => {
 		const settings = Settings.isolated();
-		settings.set("compaction.experimentalContextManagement", true);
+		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = currentBranchFixture();
 		const manager = {
 			getBranch: () => branch,
@@ -408,6 +412,25 @@ describe("history:// protocol", () => {
 		if (output?.type !== "text") throw new Error("Expected text output");
 		expect(output.text).toContain("# HubAgent (idle)");
 		expect(output.text).not.toContain("hello from live");
+	});
+
+	it("reads a closed raw history range without appending paging text", async () => {
+		AgentRegistry.global().register({
+			id: "HubAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "hello from live", timestamp: 1 }]),
+			status: "idle",
+		});
+		const resource = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		const result = await new ReadTool(makeToolSession(os.tmpdir())).execute("history-raw-range", {
+			path: "history://HubAgent:raw:1-2",
+		});
+		const output = result.content.find(content => content.type === "text");
+
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toBe(resource.content.split("\n").slice(0, 2).join("\n"));
 	});
 
 	it("resolves agent ids case-insensitively", async () => {
@@ -485,6 +508,26 @@ describe("history:// protocol", () => {
 			);
 
 		expect(error?.message).toContain("no transcript");
+	});
+
+	it("history://<id> reports a just-registered running worker instead of erroring", async () => {
+		AgentRegistry.global().register({
+			id: "FreshWorker",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+			createdAt: Date.now() - 5_000,
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://FreshWorker");
+
+		expect(resource.contentType).toBe("text/markdown");
+		expect(resource.content).toContain("# FreshWorker (running)");
+		expect(resource.content).toContain("No transcript has been written yet.");
+		expect(resource.content).toMatch(/Started \d+s ago\./);
+		expect(resource.notes).toContain("Source: agent registry (no transcript yet)");
 	});
 
 	it("hides advisor transcripts from the index and direct lookup", async () => {
@@ -654,6 +697,115 @@ describe("history:// protocol", () => {
 		});
 	});
 
+	it("serves a seance only the consulted source's transcript tree, read in place", async () => {
+		using tempDir = TempDir.createSync("@omp-history-seance-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const sourceArtifacts = path.join(dir, "source", "source");
+		const childFile = path.join(sourceArtifacts, "Sub1.jsonl");
+		const grandchildFile = path.join(sourceArtifacts, "Sub1", "Sub1.Grandchild.jsonl");
+		await Bun.write(childFile, sessionFixtureJsonl("source child history"));
+		await Bun.write(grandchildFile, sessionFixtureJsonl("source grandchild history", "grandchild"));
+		const externalArtifacts = path.join(dir, "external-artifacts");
+		await Bun.write(path.join(externalArtifacts, "ExternalOnly.jsonl"), sessionFixtureJsonl("external transcript"));
+		registerArtifactsDir(externalArtifacts);
+		AgentRegistry.global().register({
+			id: "ForeignOnly",
+			displayName: "foreign only",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "outside the source", timestamp: 1 }]),
+			status: "running",
+		});
+		const forkFile = path.join(dir, "forks", "Seance.jsonl");
+		const context = {
+			session: makeToolSession(cwd, forkFile, { seanceSourceArtifactsDir: sourceArtifacts }),
+			sessionFile: forkFile,
+		};
+		const router = InternalUrlRouter.instance();
+
+		const child = await router.resolve("history://Sub1", context);
+		expect(child.content).toContain("source child history");
+		expect(child.sourcePath).toBe(childFile);
+		expect(await router.locate("history://Sub1.Grandchild", context)).toBe(grandchildFile);
+		const index = await router.resolve("history://", context);
+		expect(index.content).toContain("| Sub1 | on disk |");
+		expect(index.content).toContain("| Sub1.Grandchild | on disk |");
+		expect(index.content).not.toContain("ForeignOnly");
+		expect(index.content).not.toContain("ExternalOnly");
+		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
+		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
+
+		// The editor binds the seance scope as a scalar, without a tool session.
+		const seanceSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
+			cwd,
+			sessionFile: forkFile,
+			seanceSourceArtifactsDir: sourceArtifacts,
+		}));
+		expect(seanceSuggestions?.items.map(item => item.value).toSorted()).toEqual([
+			"history://Sub1",
+			"history://Sub1.Grandchild",
+		]);
+		const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({ cwd }));
+		const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
+		expect(ordinaryValues).toContain("history://ForeignOnly");
+		expect(ordinaryValues).toContain("history://ExternalOnly");
+	});
+
+	it("keeps a seance fork's foreign source children out of the parent's history", async () => {
+		using tempDir = TempDir.createSync("@omp-history-seance-parent-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const foreignSource = path.join(dir, "foreign", "source.jsonl");
+		await Bun.write(foreignSource, sessionFixtureJsonl("foreign root history", "foreign-root"));
+		await Bun.write(
+			path.join(dir, "foreign", "source", "ForeignChild.jsonl"),
+			sessionFixtureJsonl("foreign child history"),
+		);
+		const parentFile = path.join(dir, "parent", "main.jsonl");
+		await Bun.write(parentFile, sessionFixtureJsonl("parent history", "parent-root"));
+		const seance = await SessionManager.forkFrom(foreignSource, cwd, undefined, undefined, {
+			seance: true,
+			suppressBreadcrumb: true,
+			sessionFile: path.join(dir, "parent", "main", "Seance.jsonl"),
+		});
+		await seance.close();
+
+		const context = { session: makeToolSession(cwd, parentFile), sessionFile: parentFile };
+		const router = InternalUrlRouter.instance();
+		const index = await router.resolve("history://", context);
+		expect(index.content).toMatch(/\| Seance \| parked \|/);
+		expect(index.content).not.toContain("ForeignChild");
+		await expect(router.resolve("history://ForeignChild", context)).rejects.toThrow("Unknown agent: ForeignChild");
+	});
+
+	it("does not infer seance scope from a custom agent name", async () => {
+		await withTempDir(async dir => {
+			const cwd = path.join(dir, "project");
+			await fs.mkdir(cwd, { recursive: true });
+			const rootFile = path.join(dir, "ordinary-root.jsonl");
+			await Bun.write(rootFile, sessionFixtureJsonl("ordinary root history", "ordinary-root"));
+			AgentRegistry.global().register({
+				id: "ForeignOnly",
+				displayName: "foreign",
+				kind: "sub",
+				session: fakeLiveSession([{ role: "user", content: "outside the fork", timestamp: 1 }]),
+				status: "running",
+			});
+
+			const session = Object.assign(makeToolSession(cwd, rootFile), {
+				agentName: "seance",
+				restrictToolNames: true,
+			});
+			const context = { session, sessionFile: rootFile };
+			const index = await InternalUrlRouter.instance().resolve("history://", context);
+			expect(index.content).toContain("| ForeignOnly | running");
+			const transcript = await InternalUrlRouter.instance().resolve("history://ForeignOnly", context);
+			expect(transcript.content).toContain("outside the fork");
+			const completions = await new HistoryProtocolHandler().complete(undefined, context);
+			expect(completions.map(completion => completion.value)).toContain("ForeignOnly");
+		});
+	});
+
 	it("skips a registered artifact candidate that is a file", async () => {
 		await withTempDir(async dir => {
 			const candidate = path.join(dir, "not-a-directory");
@@ -718,6 +870,38 @@ describe("history:// protocol", () => {
 			expect(output.text).toContain("hello from root A");
 			expect(output.text).not.toContain("hello from root B");
 			expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childA);
+		});
+	});
+
+	it("bare read history:// lists the caller root's persisted agents like history://<id> finds them", async () => {
+		await withTempDir(async dir => {
+			const rootA = path.join(dir, "a", "main.jsonl");
+			const rootB = path.join(dir, "b", "main.jsonl");
+			const header = JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "fixture",
+				timestamp: new Date().toISOString(),
+				cwd: "/tmp",
+			});
+			await Bun.write(rootA, `${header}\n`);
+			await Bun.write(rootB, `${header}\n`);
+			await Bun.write(path.join(dir, "a", "main", "Scanner.jsonl"), sessionFixtureJsonl());
+			// The process-global Main ref belongs to another root; the caller is root A.
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: null,
+				sessionFile: rootB,
+				status: "running",
+			});
+
+			const tool = new ReadTool(makeToolSession(dir, rootA));
+			const result = await tool.execute("history-index-a", { path: "history://" });
+			const output = result.content.find(part => part.type === "text");
+			if (output?.type !== "text") throw new Error("Expected text output");
+			expect(output.text).toMatch(/\| Scanner \| parked \|/);
 		});
 	});
 });

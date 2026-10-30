@@ -6,7 +6,6 @@ import {
 	InternalUrlRouter,
 	parseInternalUrl,
 	parseVaultUrl,
-	resolveVaultUrlToPath,
 	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as vaultProtocol from "@oh-my-pi/pi-coding-agent/internal-urls/vault-protocol";
@@ -106,7 +105,7 @@ describe("VaultProtocolHandler", () => {
 		expect(() => parseVaultUrl("vault://Work?op=eval")).toThrow("Unsupported vault:// vault op: eval");
 	});
 
-	it("rejects traversal and symlink escapes for reads and writes", async () => {
+	it("rejects traversal and symlink escapes for reads and write targets", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
 			await fs.mkdir(root, { recursive: true });
@@ -119,9 +118,9 @@ describe("VaultProtocolHandler", () => {
 			await expect(handler.resolve(resourceUrl("vault://Work/%2E%2E/secret.md"))).rejects.toThrow(
 				"Path traversal (..) is not allowed in vault:// URLs",
 			);
-			await expect(handler.write(resourceUrl("vault://Work//absolute.md"), "x")).rejects.toThrow(
-				"Absolute paths are not allowed in vault:// URLs",
-			);
+			await expect(
+				handler.locate(resourceUrl("vault://Work//absolute.md"), undefined, { create: true }),
+			).rejects.toThrow("Absolute paths are not allowed in vault:// URLs");
 
 			if (process.platform === "win32") return;
 
@@ -133,8 +132,33 @@ describe("VaultProtocolHandler", () => {
 			await expect(handler.resolve(resourceUrl("vault://Work/linked/secret.md"))).rejects.toThrow(
 				"vault:// URL escapes vault root",
 			);
-			await expect(handler.write(resourceUrl("vault://Work/linked/new.md"), "new")).rejects.toThrow(
-				"vault:// URL escapes vault root",
+			for (const target of ["vault://Work/linked/new.md", "vault://Work/linked/newdir/new.md"]) {
+				await expect(handler.locate(resourceUrl(target), undefined, { create: true })).rejects.toThrow(
+					"vault:// URL escapes vault root",
+				);
+			}
+			await fs.symlink(path.join(outside, "victim.md"), path.join(root, "dangling.md"));
+			await expect(
+				handler.locate(resourceUrl("vault://Work/dangling.md"), undefined, { create: true }),
+			).rejects.toThrow("dangling symlink");
+		});
+	});
+
+	it("refuses write targets that address a directory", async () => {
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			await fs.mkdir(path.join(root, "Folder"), { recursive: true });
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+
+			for (const target of ["vault://Work/Folder", "vault://Work/Folder/", "vault://Work/New/"]) {
+				await expect(handler.locate(resourceUrl(target), undefined, { create: true })).rejects.toThrow(
+					`vault:// URL must resolve to a file: ${target}`,
+				);
+			}
+			// Reads still locate the directory.
+			expect(await handler.locate(resourceUrl("vault://Work/Folder"))).toBe(
+				await fs.realpath(path.join(root, "Folder")),
 			);
 		});
 	});
@@ -203,7 +227,7 @@ describe("VaultProtocolHandler", () => {
 			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault=Work", "vault", "info"]);
 		});
 	});
-	it("writes files through the protocol hook and resolves cached vault paths for edit plumbing", async () => {
+	it("locates create targets and existing files from the cached vault root", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
 			await fs.mkdir(root, { recursive: true });
@@ -215,14 +239,14 @@ describe("VaultProtocolHandler", () => {
 			});
 			const handler = testHandler(vaultProtocol.spawnObsidian);
 
-			await handler.write(resourceUrl("vault://Work/scratch.md"), "new body");
-			const resource = await handler.resolve(resourceUrl("vault://Work/scratch.md"));
+			const url = resourceUrl("vault://Work/notes/scratch.md");
+			expect(await handler.locate(url)).toBeNull();
+			const target = path.join(await fs.realpath(root), "notes", "scratch.md");
+			expect(await handler.locate(url, undefined, { create: true })).toBe(target);
+			await Bun.write(target, "new body");
 
-			expect(await Bun.file(path.join(root, "scratch.md")).text()).toBe("new body");
-			expect(resource.content).toBe("new body");
-			expect(resolveVaultUrlToPath("vault://Work/scratch.md")).toBe(
-				await fs.realpath(path.join(root, "scratch.md")),
-			);
+			expect((await handler.resolve(url)).content).toBe("new body");
+			expect(await handler.locate(url)).toBe(await fs.realpath(path.join(root, "notes", "scratch.md")));
 			expect(spawnSpy).not.toHaveBeenCalled();
 		});
 	});
@@ -410,21 +434,20 @@ describe("VaultProtocolHandler", () => {
 		});
 	});
 
-	it("refuses resolve, write, and path resolution when vault.enabled is false", async () => {
+	it("refuses resolve and locate when vault.enabled is false", async () => {
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		const handler = testHandler(vaultProtocol.spawnObsidian);
 
 		await expect(handler.resolve(resourceUrl("vault://Work/foo.md"))).rejects.toThrow(
 			vaultProtocol.VaultDisabledError,
 		);
-		await expect(handler.write(resourceUrl("vault://Work/foo.md"), "body")).rejects.toThrow(
+		await expect(handler.locate(resourceUrl("vault://Work/foo.md"), undefined, { create: true })).rejects.toThrow(
 			vaultProtocol.VaultDisabledError,
 		);
-		expect(() => resolveVaultUrlToPath("vault://Work/foo.md")).toThrow(vaultProtocol.VaultDisabledError);
 	});
 
 	it("reports hasObsidian() as false when the gate is off, even if the binary is on disk", () => {
-		// hasObsidian feeds Handlebars `{{#if hasObsidian}}` in the system prompt.
+		// hasObsidian gates the vault:// promptDoc in the system prompt's Internal URLs list.
 		// Disabling the gate MUST hide vault:// from the prompt regardless of binary presence.
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue("/test/obsidian");
@@ -439,5 +462,26 @@ describe("VaultProtocolHandler", () => {
 
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue(null);
 		expect(vaultProtocol.hasObsidian()).toBe(false);
+	});
+
+	it("resolves and locates the same vault root file to one spelling", async () => {
+		// On Windows hosts whose TEMP/profile is an 8.3 short-name alias, a vault
+		// root can have two absolute-path spellings; the read and the edit/write
+		// target must agree on one.
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			const note = path.join(root, "Folder", "note.md");
+			await fs.mkdir(path.dirname(note), { recursive: true });
+			await fs.writeFile(note, "# Note\nbody");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+			const resource = await handler.resolve(resourceUrl("vault://Work/Folder/note.md"));
+
+			// os.tmpdir() is short-name on some Windows setups; whatever the
+			// spelling of `root`, both paths must agree on the same file.
+			expect(resource.sourcePath).toBeString();
+			expect(await handler.locate(resourceUrl("vault://Work/Folder/note.md"))).toBe(resource.sourcePath ?? null);
+		});
 	});
 });

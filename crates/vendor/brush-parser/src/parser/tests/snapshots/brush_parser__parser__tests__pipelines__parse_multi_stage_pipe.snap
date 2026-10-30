@@ -1,0 +1,55 @@
+---
+source: brush-parser/src/parser/tests/pipelines.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "cat file | grep pattern | wc -l",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cat",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  Word(Word(
+                    value: "file",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "grep",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  Word(Word(
+                    value: "pattern",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "wc",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  Word(Word(
+                    value: "-l",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

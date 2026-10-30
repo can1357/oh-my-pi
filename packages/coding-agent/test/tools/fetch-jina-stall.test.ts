@@ -134,7 +134,7 @@ describe("renderHtmlToText: Jina response validation", () => {
 		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
 			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
-			storage.replaceAuthCredentialsForProvider("jina", [{ type: "api_key", key: "stored-jina-key" }]);
+			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);
 			const settings = Settings.isolated({ "providers.fetch": "jina" });
 			let requestHeaders: Headers | undefined;
 			const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();

@@ -4,15 +4,12 @@
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{
 	ffi::{OsStr, OsString},
-	fs::{self, Metadata},
 	fmt,
 	io::{self, Read, Write},
 	ops::BitOr,
-	path::{MAIN_SEPARATOR, Path},
+	path::{Component, MAIN_SEPARATOR, Path, PathBuf, Prefix},
 };
 
 use clap::{
@@ -23,6 +20,7 @@ use clap::{
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
 use parking_lot::Mutex;
 use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use pi_vfs::{Metadata, child_path, is_virtual_path, normalize_lexically, parent_path};
 use thiserror::Error;
 use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValueParser};
 
@@ -67,18 +65,27 @@ mod platform {
 // file that was distributed with this source code.
 
 // Unix-specific implementations for the rm utility
+//
+// Descriptor-relative traversal (`openat`/`unlinkat`) only applies to paths
+// the injected filesystem confirms are native host paths; every other path
+// goes through the provider operations in the parent module.
 
 
-use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+	collections::HashSet,
+	ffi::{OsStr, OsString},
+	os::unix::ffi::OsStrExt,
+	path::{Path, PathBuf},
+};
 
 use indicatif::ProgressBar;
 use uucore::{display::Quotable, safe_traversal::{DirFd, SymlinkBehavior}};
 
 use super::{
 	Host,
-	InteractiveMode, Options, is_dir_empty, is_readable_metadata, prompt_descend, remove_file,
-	show_permission_denied_error, show_removal_error, verbose_removed_directory,
-	verbose_removed_file,
+	InteractiveMode, Options, handle_error_with_force, is_dir_empty, is_missing_under_force, prompt_descend,
+	remove_dir_with_special_cases, remove_file, show_permission_denied_error, show_removal_error,
+	verbose_removed_directory, verbose_removed_file,
 };
 
 #[inline]
@@ -155,24 +162,35 @@ fn prompt_dir_with_mode(host: &mut Host, path: &Path, mode: libc::mode_t, option
 	}
 }
 
-/// Whether the given file or directory is readable.
-pub fn is_readable(host: &mut Host, path: &Path) -> bool {
-	fs::metadata(host.resolve(path)).is_ok_and(|metadata| is_readable_metadata(&metadata))
+/// The host directory containing `path` and the entry name within it, when the
+/// injected filesystem confirms the resolved operand is a native host path.
+///
+/// The operand itself is checked, never a lexical parent: a URL such as
+/// `mem://victim` has the std parent `mem:`, which would name the unrelated
+/// host directory `<cwd>/mem:`.
+fn native_entry(host: &Host, path: &Path) -> Option<(PathBuf, OsString)> {
+	let resolved = host.resolve(path);
+	if !host.fs().is_native_local(&resolved) {
+		return None;
+	}
+	let parent = resolved.parent()?.to_path_buf();
+	let name = resolved.file_name()?.to_os_string();
+	Some((parent, name))
 }
 
-/// Remove a single file using safe traversal
+/// Remove a single file using safe traversal.
+///
+/// Returns `None` when `path` is not a native host path, so the caller
+/// removes the file through the injected filesystem instead.
 pub fn safe_remove_file(host: &mut Host, 
 	path: &Path,
 	options: &Options,
 	progress_bar: Option<&ProgressBar>,
 ) -> Option<bool> {
-	// If there is no parent (path is directly under cwd), unlinkat relative to "."
-	let parent = path.parent().unwrap_or(Path::new("."));
-	let file_name = path.file_name()?;
+	let (parent, file_name) = native_entry(host, path)?;
+	let dir_fd = DirFd::open(&parent, SymlinkBehavior::Follow).ok()?;
 
-	let dir_fd = DirFd::open(&host.resolve(parent), SymlinkBehavior::Follow).ok()?;
-
-	match dir_fd.unlink_at(file_name, false) {
+	match dir_fd.unlink_at(&file_name, false) {
 		Ok(_) => {
 			// Update progress bar for file removal
 			if let Some(pb) = progress_bar {
@@ -181,6 +199,7 @@ pub fn safe_remove_file(host: &mut Host,
 			verbose_removed_file(host, path, options);
 			Some(false)
 		},
+		Err(e) if is_missing_under_force(&e, options) => Some(false),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::PermissionDenied {
 				show_error!(host, "cannot remove {}: Permission denied", path.quote());
@@ -192,18 +211,19 @@ pub fn safe_remove_file(host: &mut Host,
 	}
 }
 
-/// Remove an empty directory using safe traversal
+/// Remove an empty directory using safe traversal.
+///
+/// Returns `None` when `path` is not a native host path, so the caller
+/// removes the directory through the injected filesystem instead.
 pub fn safe_remove_empty_dir(host: &mut Host, 
 	path: &Path,
 	options: &Options,
 	progress_bar: Option<&ProgressBar>,
 ) -> Option<bool> {
-	let parent = path.parent().unwrap_or(Path::new("."));
-	let dir_name = path.file_name()?;
+	let (parent, dir_name) = native_entry(host, path)?;
+	let dir_fd = DirFd::open(&parent, SymlinkBehavior::Follow).ok()?;
 
-	let dir_fd = DirFd::open(&host.resolve(parent), SymlinkBehavior::Follow).ok()?;
-
-	match dir_fd.unlink_at(dir_name, true) {
+	match dir_fd.unlink_at(&dir_name, true) {
 		Ok(_) => {
 			// Update progress bar for directory removal
 			if let Some(pb) = progress_bar {
@@ -212,26 +232,12 @@ pub fn safe_remove_empty_dir(host: &mut Host,
 			verbose_removed_directory(host, path, options);
 			Some(false)
 		},
+		Err(e) if is_missing_under_force(&e, options) => Some(false),
 		Err(e) => {
 			show_error!(host, "cannot remove {}: {e}", path.quote());
 			Some(true)
 		},
 	}
-}
-
-/// Helper to handle errors with force mode consideration
-fn handle_error_with_force(host: &mut Host, e: std::io::Error, path: &Path, options: &Options) -> bool {
-	// Permission denied errors should be shown even in force mode
-	// This matches GNU rm behavior
-	if e.kind() == std::io::ErrorKind::PermissionDenied {
-		show_permission_denied_error(host, path);
-		return true;
-	}
-
-	if !options.force {
-		show_error!(host, "cannot remove {}: {e}", path.quote());
-	}
-	!options.force
 }
 
 /// Helper to handle permission denied errors
@@ -244,7 +250,10 @@ fn handle_permission_denied(host: &mut Host,
 	// When we can't open a subdirectory due to permission denied,
 	// try to remove it directly (it might be empty).
 	// This matches GNU rm behavior with -f flag.
-	if let Err(_remove_err) = dir_fd.unlink_at(entry_name, true) {
+	if let Err(remove_err) = dir_fd.unlink_at(entry_name, true) {
+		if is_missing_under_force(&remove_err, options) {
+			return false;
+		}
 		// The directory is not empty (or another error) and we can't read it
 		// to remove its contents. Report the original permission denied error.
 		// This matches GNU rm behavior — the real problem is we lack
@@ -266,6 +275,9 @@ fn handle_unlink(host: &mut Host,
 	options: &Options,
 ) -> bool {
 	if let Err(e) = dir_fd.unlink_at(entry_name, is_dir) {
+		if is_missing_under_force(&e, options) {
+			return false;
+		}
 		show_error!(host, "cannot remove {}: {e}", entry_path.quote());
 		true
 	} else {
@@ -278,37 +290,9 @@ fn handle_unlink(host: &mut Host,
 	}
 }
 
-/// Helper function to remove directory handling special cases
-pub fn remove_dir_with_special_cases(host: &mut Host, path: &Path, options: &Options, error_occurred: bool) -> bool {
-	match fs::remove_dir(host.resolve(path)) {
-		Err(_) if !error_occurred && !is_readable(host, path) => {
-			// For compatibility with GNU test case
-			// `tests/rm/unread2.sh`, show "Permission denied" in this
-			// case instead of "Directory not empty".
-			show_permission_denied_error(host, path);
-			true
-		},
-		Err(_) if !error_occurred && host.resolve(path).read_dir().is_err() => {
-			// For compatibility with GNU test case on Linux
-			// Check if directory is readable by attempting to read it
-			show_permission_denied_error(host, path);
-			true
-		},
-		Err(e) if !error_occurred => show_removal_error(host, e, path),
-		Err(_) => {
-			// If we already had errors while
-			// trying to remove the children, then there is no need to
-			// show another error message as we return from each level
-			// of the recursion.
-			error_occurred
-		},
-		Ok(_) => {
-			verbose_removed_directory(host, path, options);
-			false
-		},
-	}
-}
-
+/// Removes a native host directory tree with descriptor-relative traversal.
+///
+/// Callers MUST have confirmed that `path` resolves to a native host path.
 pub fn safe_remove_dir_recursive(host: &mut Host, 
 	path: &Path,
 	options: &Options,
@@ -318,39 +302,45 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 		return true;
 	}
 
+	let path_fs = host.resolve(path);
 	// Base case 1: this is a file or a symbolic link.
 	// Use lstat to avoid race condition between check and use
-	let initial_mode = match fs::symlink_metadata(host.resolve(path)) {
+	let initial_mode = match host.fs().symlink_metadata(&path_fs) {
 		Ok(metadata) if !metadata.is_dir() => {
 			return remove_file(host, path, options, progress_bar);
 		},
 		Ok(metadata) => metadata.permissions().mode(),
+		Err(e) if is_missing_under_force(&e, options) => return false,
 		Err(e) => {
 			return show_removal_error(host, e, path);
 		},
 	};
 
 	// Try to open the directory using DirFd for secure traversal
-	let dir_fd = match DirFd::open(&host.resolve(path), SymlinkBehavior::Follow) {
+	let dir_fd = match DirFd::open(&path_fs, SymlinkBehavior::Follow) {
 		Ok(fd) => fd,
+		Err(e) if is_missing_under_force(&e, options) => return false,
 		Err(e) => {
 			// If we can't open the directory for safe traversal,
 			// handle the error appropriately and try to remove if possible
 			if e.kind() == std::io::ErrorKind::PermissionDenied {
 				// Try to remove the directory directly if it's empty
-				if fs::remove_dir(host.resolve(path)).is_ok() {
-					verbose_removed_directory(host, path, options);
-					return false;
+				match host.fs().remove_dir(&path_fs) {
+					Ok(()) => {
+						verbose_removed_directory(host, path, options);
+						return false;
+					},
+					Err(gone) if is_missing_under_force(&gone, options) => return false,
+					// If we can't read the directory AND can't remove it,
+					// show permission denied error for GNU compatibility
+					Err(_) => return show_permission_denied_error(host, path),
 				}
-				// If we can't read the directory AND can't remove it,
-				// show permission denied error for GNU compatibility
-				return show_permission_denied_error(host, path);
 			}
 			return show_removal_error(host, e, path);
 		},
 	};
 
-	let error = safe_remove_dir_recursive_impl(host, path, &dir_fd, options);
+	let error = safe_remove_dir_recursive_impl(host, path, dir_fd, options);
 
 	// After processing all children, remove the directory itself
 	if error {
@@ -388,11 +378,98 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 	}
 }
 
+/// A directory suspended while one of its entries is being emptied. Together
+/// with the directory being walked, only the deepest [`OPEN_DIR_FDS`] keep
+/// their descriptor; the others get it back through ".." on the way up, so
+/// depth costs memory, not file descriptors.
 #[cfg(not(target_os = "redox"))]
-pub fn safe_remove_dir_recursive_impl(host: &mut Host, path: &Path, dir_fd: &DirFd, options: &Options) -> bool {
+struct Frame {
+	dir_fd:     Option<DirFd>,
+	dev:        u64,
+	ino:        u64,
+	entries:    std::vec::IntoIter<OsString>,
+	error:      bool,
+	/// The entry being emptied, removed once that is done.
+	entry_name: OsString,
+	entry_mode: libc::mode_t,
+	/// Length of this directory's own path, to cut the entry back off with.
+	path_len:   usize,
+}
+
+#[cfg(not(target_os = "redox"))]
+const OPEN_DIR_FDS: usize = 16;
+
+/// The path of the directory being walked, kept as raw bytes so that stepping
+/// into an entry and back out again is a truncation rather than a fresh
+/// allocation.
+#[cfg(not(target_os = "redox"))]
+fn path_of(buf: &[u8]) -> &Path {
+	Path::new(OsStr::from_bytes(buf))
+}
+
+#[cfg(not(target_os = "redox"))]
+fn path_push(buf: &mut Vec<u8>, name: &OsStr) {
+	if !buf.is_empty() && buf.last() != Some(&b'/') {
+		buf.push(b'/');
+	}
+	buf.extend_from_slice(name.as_bytes());
+}
+
+/// Whether `name` is an empty directory in `dir_fd`, asked through the
+/// descriptor rather than the path: past `PATH_MAX` a path-based check fails,
+/// and a failure counts as non-empty. An unreadable directory still counts as
+/// non-empty.
+#[cfg(not(target_os = "redox"))]
+fn is_subdir_empty(dir_fd: &DirFd, name: &OsStr) -> bool {
+	dir_fd
+		.open_subdir(name, SymlinkBehavior::NoFollow)
+		.and_then(|fd| fd.read_dir())
+		.is_ok_and(|entries| entries.is_empty())
+}
+
+/// GNU's warning for a directory that is its own ancestor.
+#[cfg(not(target_os = "redox"))]
+fn show_cycle_error(host: &mut Host, path: &Path) {
+	show_error!(
+		host,
+		"WARNING: Circular directory structure.\nThis almost certainly means that you have a \
+		 corrupted file system.\nNOTIFY YOUR SYSTEM MANAGER.\nThe following directory is part of \
+		 the cycle:\n  {}\n",
+		path.maybe_quote()
+	);
+}
+
+/// Reopen the parent of `child_fd` through "..", checking it is still the
+/// directory we descended from and not one swapped in mid-walk.
+#[cfg(not(target_os = "redox"))]
+fn reopen_parent(child_fd: &DirFd, dev: u64, ino: u64) -> std::io::Result<DirFd> {
+	let parent_fd = child_fd.open_subdir(OsStr::new(".."), SymlinkBehavior::NoFollow)?;
+	let info = parent_fd.metadata()?.file_info();
+	if info.device() == dev && info.inode() == ino {
+		Ok(parent_fd)
+	} else {
+		Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+	}
+}
+
+/// Empties the directory open as `cur_fd`, whose path is `path`, leaving the
+/// directory itself for the caller. Returns whether any error occurred.
+///
+/// Walks with an explicit stack: recursing once per level overflows the
+/// thread's stack on a tree tens of thousands of levels deep, and that kills
+/// the whole process rather than failing the command.
+#[cfg(not(target_os = "redox"))]
+pub fn safe_remove_dir_recursive_impl(host: &mut Host, path: &Path, mut cur_fd: DirFd, options: &Options) -> bool {
+	let (mut dev, mut ino) = match cur_fd.metadata() {
+		Ok(metadata) => {
+			let info = metadata.file_info();
+			(info.device(), info.inode())
+		},
+		Err(e) => return show_removal_error(host, e, path),
+	};
 	// Read directory entries using safe traversal
-	let entries = match dir_fd.read_dir() {
-		Ok(entries) => entries,
+	let mut entries = match cur_fd.read_dir() {
+		Ok(entries) => entries.into_iter(),
 		Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
 			if !options.force {
 				show_permission_denied_error(host, path);
@@ -405,80 +482,142 @@ pub fn safe_remove_dir_recursive_impl(host: &mut Host, path: &Path, dir_fd: &Dir
 	};
 
 	let mut error = false;
+	let mut path_buf = path.as_os_str().as_bytes().to_vec();
+	let mut stack: Vec<Frame> = Vec::new();
+	// Identities of the directories on the walk's path: a directory that is
+	// its own ancestor (a bind mount inside itself) would otherwise be walked
+	// until memory runs out, since descriptors let the walk pass PATH_MAX.
+	let mut ancestors = HashSet::from([(dev, ino)]);
 
-	// Process each entry
-	for entry_name in entries {
+	loop {
 		if host.is_cancelled() {
 			return true;
 		}
 
-		let entry_path = path.join(&entry_name);
+		let Some(entry_name) = entries.next() else {
+			// This directory is done: resume its parent, which removes it.
+			let Some(parent) = stack.pop() else {
+				return error;
+			};
+			cur_fd = if let Some(fd) = parent.dir_fd {
+				fd
+			} else {
+				match reopen_parent(&cur_fd, parent.dev, parent.ino) {
+					Ok(fd) => fd,
+					Err(e) => {
+						// Name the parent, not the entry we came up from.
+						path_buf.truncate(parent.path_len);
+						return show_removal_error(host, e, path_of(&path_buf));
+					},
+				}
+			};
+			let child_error = error;
+			ancestors.remove(&(dev, ino));
+			(dev, ino, entries) = (parent.dev, parent.ino, parent.entries);
+			error = parent.error | child_error;
 
-		// Get metadata for the entry using fstatat
-		let entry_stat = match dir_fd.stat_at(&entry_name, SymlinkBehavior::NoFollow) {
-			Ok(stat) => stat,
-			Err(e) => {
-				error |= handle_error_with_force(host, e, &entry_path, options);
-				continue;
-			},
+			// Ask user permission if needed for this subdirectory, then remove
+			// the now-empty subdirectory using safe unlinkat.
+			if !child_error
+				&& (options.interactive != InteractiveMode::Always
+					|| prompt_dir_with_mode(host, path_of(&path_buf), parent.entry_mode, options))
+			{
+				error |= handle_unlink(host, &cur_fd, &parent.entry_name, path_of(&path_buf), true, options);
+			}
+			path_buf.truncate(parent.path_len);
+			continue;
 		};
 
-		// Check if it's a directory
-		let is_dir = ((entry_stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFDIR;
-
-		if is_dir {
-			// Ask user if they want to descend into this directory
-			if options.interactive == InteractiveMode::Always
-				&& !is_dir_empty(host, &entry_path)
-				&& !prompt_descend(host, &entry_path)
-			{
-				continue;
-			}
-
-			// Recursively remove subdirectory using safe traversal
-			let child_dir_fd = match dir_fd.open_subdir(&entry_name, SymlinkBehavior::Follow) {
-				Ok(fd) => fd,
+		let parent_len = path_buf.len();
+		path_push(&mut path_buf, &entry_name);
+		let descended = 'entry: {
+			// Get metadata for the entry using fstatat
+			let entry_stat = match cur_fd.stat_at(&entry_name, SymlinkBehavior::NoFollow) {
+				Ok(stat) => stat,
 				Err(e) => {
-					// If we can't open the subdirectory for safe traversal,
-					// try to handle it as best we can with safe operations
-					if e.kind() == std::io::ErrorKind::PermissionDenied {
-						error |=
-							handle_permission_denied(host, dir_fd, entry_name.as_ref(), &entry_path, options);
-					} else {
-						error |= handle_error_with_force(host, e, &entry_path, options);
-					}
-					continue;
+					error |= handle_error_with_force(host, e, path_of(&path_buf), options);
+					break 'entry false;
 				},
 			};
 
-			let child_error = safe_remove_dir_recursive_impl(host, &entry_path, &child_dir_fd, options);
-			error |= child_error;
+			let is_dir = ((entry_stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFDIR;
+			if !is_dir {
+				// Remove file - check if user wants to remove it first
+				if prompt_file_with_stat(host, path_of(&path_buf), &entry_stat, options) {
+					error |= handle_unlink(host, &cur_fd, &entry_name, path_of(&path_buf), false, options);
+				}
+				break 'entry false;
+			}
 
-			// Ask user permission if needed for this subdirectory
-			if !child_error
-				&& options.interactive == InteractiveMode::Always
-				&& !prompt_dir_with_mode(host, &entry_path, entry_stat.st_mode as libc::mode_t, options)
+			// st_dev's type varies by platform (i32 on macOS, u64 on Linux).
+			#[allow(clippy::unnecessary_cast)]
+			let entry_id = (entry_stat.st_dev as u64, entry_stat.st_ino as u64);
+			if ancestors.contains(&entry_id) {
+				show_cycle_error(host, path_of(&path_buf));
+				error = true;
+				break 'entry false;
+			}
+
+			// Ask user if they want to descend into this directory
+			if options.interactive == InteractiveMode::Always
+				&& !is_subdir_empty(&cur_fd, &entry_name)
+				&& !prompt_descend(host, path_of(&path_buf))
 			{
-				continue;
+				break 'entry false;
 			}
 
-			// Remove the now-empty subdirectory using safe unlinkat
-			if !child_error {
-				error |= handle_unlink(host, dir_fd, entry_name.as_ref(), &entry_path, true, options);
+			// Open the just-stat'd subdirectory without following a symlink: one
+			// swapped in since the stat makes the open fail instead of taking the
+			// walk off the tree.
+			let child_fd = match cur_fd.open_subdir(&entry_name, SymlinkBehavior::NoFollow) {
+				Ok(fd) => fd,
+				Err(e) => {
+					if e.kind() == std::io::ErrorKind::PermissionDenied {
+						error |= handle_permission_denied(host, &cur_fd, &entry_name, path_of(&path_buf), options);
+					} else {
+						error |= handle_error_with_force(host, e, path_of(&path_buf), options);
+					}
+					break 'entry false;
+				},
+			};
+
+			let (child_entries, child_error) = match child_fd.read_dir() {
+				Ok(child_entries) => (child_entries.into_iter(), false),
+				Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+					if !options.force {
+						show_permission_denied_error(host, path_of(&path_buf));
+					}
+					(Vec::new().into_iter(), !options.force)
+				},
+				Err(e) => (Vec::new().into_iter(), handle_error_with_force(host, e, path_of(&path_buf), options)),
+			};
+
+			// Suspend this directory and empty the subdirectory first.
+			stack.push(Frame {
+				dir_fd: Some(std::mem::replace(&mut cur_fd, child_fd)),
+				dev,
+				ino,
+				entries: std::mem::replace(&mut entries, child_entries),
+				error: std::mem::replace(&mut error, child_error),
+				entry_name,
+				entry_mode: entry_stat.st_mode as libc::mode_t,
+				path_len: parent_len,
+			});
+			if let Some(closable) = stack.len().checked_sub(OPEN_DIR_FDS) {
+				stack[closable].dir_fd = None;
 			}
-		} else {
-			// Remove file - check if user wants to remove it first
-			if prompt_file_with_stat(host, &entry_path, &entry_stat, options) {
-				error |= handle_unlink(host, dir_fd, entry_name.as_ref(), &entry_path, false, options);
-			}
+			ancestors.insert(entry_id);
+			(dev, ino) = entry_id;
+			true
+		};
+		if !descended {
+			path_buf.truncate(parent_len);
 		}
 	}
-
-	error
 }
 
 #[cfg(target_os = "redox")]
-pub fn safe_remove_dir_recursive_impl(host: &mut Host, _path: &Path, _dir_fd: &DirFd, _options: &Options) -> bool {
+pub fn safe_remove_dir_recursive_impl(host: &mut Host, _path: &Path, _dir_fd: DirFd, _options: &Options) -> bool {
 	// safe_traversal stat_at is not supported on Redox
 	// This shouldn't be called on Redox, but provide a stub for compilation
 	true // Return error
@@ -508,22 +647,27 @@ enum RmError {
 	MayNotAbbreviateNoPreserveRoot,
 }
 
+/// Lexically normalized operand for verbose output; URL operands keep their
+/// `scheme://` root.
+fn display_path(path: &Path) -> PathBuf {
+	if is_virtual_path(path) {
+		normalize_lexically(path)
+	} else {
+		uucore::fs::normalize_path(path)
+	}
+}
+
 /// Helper function to print verbose message for removed file
 fn verbose_removed_file(host: &mut Host, path: &Path, options: &Options) {
 	if options.verbose {
-		let _ =
-			writeln!(host.stdout, "removed {}", uucore::fs::normalize_path(path).quote());
+		let _ = writeln!(host.stdout, "removed {}", display_path(path).quote());
 	}
 }
 
 /// Helper function to print verbose message for removed directory
 fn verbose_removed_directory(host: &mut Host, path: &Path, options: &Options) {
 	if options.verbose {
-		let _ = writeln!(
-			host.stdout,
-			"removed directory {}",
-			uucore::fs::normalize_path(path).quote()
-		);
+		let _ = writeln!(host.stdout, "removed directory {}", display_path(path).quote());
 	}
 }
 
@@ -543,13 +687,111 @@ fn show_permission_denied_error(host: &mut Host, path: &Path) -> bool {
 	true
 }
 
+/// Whether `e` says the entry is already gone, which `-f` ignores as GNU rm
+/// does: another process may remove part of the tree while it is walked.
+///
+/// As in GNU rm, a later `-i`, `-I` or `--interactive=always|once` cancels
+/// that; the parser then leaves an interactive mode other than `Never`.
+fn is_missing_under_force(e: &io::Error, options: &Options) -> bool {
+	options.force
+		&& !matches!(options.interactive, InteractiveMode::Always | InteractiveMode::Once)
+		&& matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+}
+
+/// Helper to handle errors with force mode consideration
+fn handle_error_with_force(host: &mut Host, e: io::Error, path: &Path, options: &Options) -> bool {
+	// Permission denied errors should be shown even in force mode
+	// This matches GNU rm behavior
+	if e.kind() == io::ErrorKind::PermissionDenied {
+		show_permission_denied_error(host, path);
+		return true;
+	}
+
+	if !options.force {
+		show_error!(host, "cannot remove {}: {e}", path.quote());
+	}
+	!options.force
+}
+
+/// Removes the empty directory `fs_path`.
+///
+/// On Windows a directory carrying the read-only attribute refuses removal,
+/// although on Unix only the parent's permissions decide; the attribute is
+/// cleared for one more attempt and put back if that fails too.
+fn remove_empty_dir(host: &mut Host, fs_path: &Path) -> io::Result<()> {
+	let result = host.fs().remove_dir(fs_path);
+	#[cfg(windows)]
+	if result
+		.as_ref()
+		.is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
+	{
+		// A step that finds the directory gone reports that, which `-f`
+		// ignores, rather than the stale `PermissionDenied`.
+		let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(e);
+		let metadata = match host.fs().symlink_metadata(fs_path) {
+			Ok(metadata) => metadata,
+			Err(e) => return Err(gone(e).unwrap_or_else(|| result.unwrap_err())),
+		};
+		// Not a symlink or junction: set_permissions would follow it.
+		if metadata.is_dir() && metadata.permissions().readonly() {
+			let mut writable = metadata.permissions();
+			writable.set_readonly(false);
+			if let Err(e) = host.fs().set_permissions(fs_path, writable) {
+				return Err(gone(e).unwrap_or_else(|| result.unwrap_err()));
+			}
+			let retry = host.fs().remove_dir(fs_path);
+			if retry.is_err() {
+				// Best effort: the retry's error is the one to report.
+				let _ = host.fs().set_permissions(fs_path, metadata.permissions());
+			}
+			return retry;
+		}
+	}
+	result
+}
+
+/// Helper function to remove directory handling special cases
+fn remove_dir_with_special_cases(host: &mut Host, path: &Path, options: &Options, error_occurred: bool) -> bool {
+	let path_fs = host.resolve(path);
+	match remove_empty_dir(host, &path_fs) {
+		Err(e) if is_missing_under_force(&e, options) => false,
+		Err(_) if !error_occurred && !is_readable(host, path) => {
+			// For compatibility with GNU test case
+			// `tests/rm/unread2.sh`, show "Permission denied" in this
+			// case instead of "Directory not empty".
+			show_permission_denied_error(host, path);
+			true
+		},
+		Err(_) if !error_occurred && host.fs().read_dir(&path_fs).is_err() => {
+			// For compatibility with GNU test case on Linux
+			// Check if directory is readable by attempting to read it
+			show_permission_denied_error(host, path);
+			true
+		},
+		Err(e) if !error_occurred => show_removal_error(host, e, path),
+		Err(_) => {
+			// If we already had errors while
+			// trying to remove the children, then there is no need to
+			// show another error message as we return from each level
+			// of the recursion.
+			error_occurred
+		},
+		Ok(()) => {
+			verbose_removed_directory(host, path, options);
+			false
+		},
+	}
+}
+
 /// Helper function to remove a directory and handle results
 fn remove_dir_with_feedback(host: &mut Host, path: &Path, options: &Options) -> bool {
-	match fs::remove_dir(host.resolve(path)) {
+	let path_fs = host.resolve(path);
+	match remove_empty_dir(host, &path_fs) {
 		Ok(_) => {
 			verbose_removed_directory(host, path, options);
 			false
 		},
+		Err(e) if is_missing_under_force(&e, options) => false,
 		Err(e) => show_removal_error(host, e, path),
 	}
 }
@@ -689,8 +931,7 @@ impl Utility for Rm {
 fn run_matches(host: &mut Host, matches: &ArgMatches) -> i32 {
 	let files: Vec<_> = matches
 		.get_many::<OsString>(ARG_FILES)
-		.map(|v| v.map(OsString::as_os_str).collect())
-		.unwrap_or_default();
+		.map_or_default(|v| v.map(OsString::as_os_str).collect());
 
 	let force_flag = matches.get_flag(OPT_FORCE);
 	if files.is_empty() && !force_flag {
@@ -981,7 +1222,7 @@ fn count_files(host: &mut Host, paths: &[&OsStr], recursive: bool) -> u64 {
 			continue;
 		}
 		let path = Path::new(p);
-		if let Ok(md) = fs::symlink_metadata(host.resolve(path)) {
+		if let Ok(md) = host.fs().symlink_metadata(&host.resolve(path)) {
 			if md.is_dir() && !is_symlink_dir(&md) {
 				if recursive {
 					total += count_files_in_directory(host, path);
@@ -1002,7 +1243,7 @@ fn count_files_in_directory(host: &mut Host, p: &Path) -> u64 {
 		return 0;
 	}
 	let mut entries_count = 0;
-	let Ok(entries) = fs::read_dir(host.resolve(p)) else {
+	let Ok(entries) = host.fs().read_dir(&host.resolve(p)) else {
 		return 1;
 	};
 	for entry in entries.flatten() {
@@ -1060,14 +1301,14 @@ pub fn remove(host: &mut Host, files: &[&OsStr], options: &Options) -> bool {
 		if uucore::fs::path_ends_with_terminator(file)
 			&& options.recursive
 			&& options.preserve_root
-			&& is_root_path(host, file)
+			&& let Some(root) = is_root_path(host, file)
 		{
-			show_preserve_root_error(host, file);
+			show_preserve_root_error(host, file, &root);
 			had_err = true;
 			continue;
 		}
 
-		had_err = match host.resolve(file).symlink_metadata() {
+		had_err = match host.fs().symlink_metadata(&host.resolve(file)) {
 			Ok(metadata) => {
 				// Create progress bar on first successful file metadata read
 				if options.progress && progress_bar.is_none() {
@@ -1115,7 +1356,9 @@ pub fn remove(host: &mut Host, files: &[&OsStr], options: &Options) -> bool {
 /// `path` must be a directory. If there is an error reading the
 /// contents of the directory, this returns `false`.
 fn is_dir_empty(host: &mut Host, path: &Path) -> bool {
-	fs::read_dir(host.resolve(path)).is_ok_and(|mut iter| iter.next().is_none())
+	host.fs()
+		.read_dir(&host.resolve(path))
+		.is_ok_and(|mut iter| iter.next().is_none())
 }
 
 #[cfg(unix)]
@@ -1125,7 +1368,15 @@ fn is_readable_metadata(metadata: &Metadata) -> bool {
 }
 
 /// Whether the given file or directory is readable.
-#[cfg(any(not(unix), target_os = "redox"))]
+#[cfg(unix)]
+fn is_readable(host: &mut Host, path: &Path) -> bool {
+	host.fs()
+		.metadata(&host.resolve(path))
+		.is_ok_and(|metadata| is_readable_metadata(&metadata))
+}
+
+/// Whether the given file or directory is readable.
+#[cfg(not(unix))]
 fn is_readable(_host: &mut Host, _path: &Path) -> bool {
 	true
 }
@@ -1163,10 +1414,20 @@ fn remove_dir_recursive(host: &mut Host,
 	// avoids an infinite recursion in the case of a link to the current
 	// directory, like `ln -s . link`.
 	let fs_path = host.resolve(path);
-	if !fs_path.is_dir() || fs_path.is_symlink() {
+	if !host
+		.fs()
+		.symlink_metadata(&fs_path)
+		.is_ok_and(|metadata| metadata.is_dir())
+	{
 		return remove_file(host, path, options, progress_bar);
 	}
 
+	remove_dir_tree(host, path, options, progress_bar)
+}
+
+/// Removes the directory `path`, known not to be a symlink to one, and
+/// everything in it.
+fn remove_dir_tree(host: &mut Host, path: &Path, options: &Options, progress_bar: Option<&ProgressBar>) -> bool {
 	// Base case 2: this is a non-empty directory, but the user
 	// doesn't want to descend into it.
 	if options.interactive == InteractiveMode::Always && !is_dir_empty(host, path) && !prompt_descend(host, path)
@@ -1174,106 +1435,148 @@ fn remove_dir_recursive(host: &mut Host,
 		return false;
 	}
 
-	// Use secure traversal on Unix (except Redox) for all recursive directory
-	// removals
+	// Native host trees use descriptor-relative traversal on Unix (except
+	// Redox); every other filesystem is walked through its provider.
 	#[cfg(all(unix, not(target_os = "redox")))]
-	{
-		safe_remove_dir_recursive(host, path, options, progress_bar)
+	if host.fs().is_native_local(&host.resolve(path)) {
+		return safe_remove_dir_recursive(host, path, options, progress_bar);
 	}
 
-	// Fallback for non-Unix, Redox, or use fs::remove_dir_all for very long paths
-	#[cfg(any(not(unix), target_os = "redox"))]
-	{
-		if let Some(s) = path.to_str() {
-			if s.len() > 1000 {
-				match fs::remove_dir_all(host.resolve(path)) {
-					Ok(_) => return false,
-					Err(e) => {
-						show_error!(host, "cannot remove {}: {e}", path.quote());
-						return true;
-					},
-				}
-			}
-		}
-
-		// Recursive case: this is a directory.
-		let mut error = false;
-		match fs::read_dir(host.resolve(path)) {
-			Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-				// This is not considered an error.
-			},
-			Err(_) => error = true,
-			Ok(iter) => {
-				for entry in iter {
-					if host.is_cancelled() {
-						error = true;
-						break;
-					}
-					match entry {
-						Err(_) => error = true,
-						Ok(entry) => {
-							let child_error = remove_dir_recursive(host, &entry.path(), options, progress_bar);
-							error = error || child_error;
-						},
-					}
-				}
-			},
-		}
-
-		// Ask the user whether to remove the current directory.
-		if options.interactive == InteractiveMode::Always && !prompt_dir(host, path, options) {
-			return false;
-		}
-
-		// Try removing the directory itself.
-		match fs::remove_dir(host.resolve(path)) {
-			Err(_) if !error && !is_readable(host, path) => {
-				// For compatibility with GNU test case
-				// `tests/rm/unread2.sh`, show "Permission denied" in this
-				// case instead of "Directory not empty".
-				show_permission_denied_error(host, path);
-				error = true;
-			},
-			Err(e) if !error => {
-				show_error!(host, "cannot remove {}: {e}", path.quote());
-				error = true;
-			},
-			Err(_) => {
-				// If there has already been at least one error when
-				// trying to remove the children, then there is no need to
-				// show another error message as we return from each level
-				// of the recursion.
-			},
-			Ok(_) => verbose_removed_directory(host, path, options),
-		}
-
-		error
-	}
+	remove_dir_recursive_with_provider(host, path, options, progress_bar)
 }
 
-/// Check if a path resolves to the root directory.
-/// Returns true if the path is root, false otherwise.
-fn is_root_path(host: &mut Host, path: &Path) -> bool {
-	// Check simple case: literal "/" path
-	if path.has_root() && path.parent().is_none() {
+/// Removes the directory tree at `path` through the injected filesystem.
+///
+/// `path` must name a directory (not a symlink to one). Children are removed
+/// by the type their listing reports, so prompts, verbose output and
+/// progress apply per entry exactly as for top-level operands.
+fn remove_dir_recursive_with_provider(
+	host: &mut Host,
+	path: &Path,
+	options: &Options,
+	progress_bar: Option<&ProgressBar>,
+) -> bool {
+	let filesystem = host.fs().clone();
+	let fs_path = host.resolve(path);
+
+	// Very long Windows paths are removed in one call.
+	#[cfg(not(unix))]
+	if path.to_str().is_some_and(|s| s.len() > 1000) {
+		match filesystem.remove_dir_all(&fs_path) {
+			Ok(()) => return false,
+			// Something vanished under the call; the walk below removes
+			// whatever is left, and finds nothing if the tree is gone.
+			Err(e) if is_missing_under_force(&e, options) => {},
+			Err(e) => {
+				show_error!(host, "cannot remove {}: {e}", path.quote());
+				return true;
+			},
+		}
+	}
+
+	let entries = match filesystem.read_dir(&fs_path) {
+		Ok(entries) => entries,
+		Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+			// An unreadable directory may still be empty and removable.
+			match filesystem.remove_dir(&fs_path) {
+				Ok(()) => {
+					verbose_removed_directory(host, path, options);
+					return false;
+				},
+				Err(gone) if is_missing_under_force(&gone, options) => return false,
+				Err(_) => return show_permission_denied_error(host, path),
+			}
+		},
+		Err(e) if is_missing_under_force(&e, options) => return false,
+		Err(e) => return show_removal_error(host, e, path),
+	};
+
+	let mut error = false;
+	for entry in entries {
+		if host.is_cancelled() {
+			return true;
+		}
+		match entry {
+			Ok(entry) => {
+				let child = child_path(path, &entry.file_name());
+				// Only a real directory is descended into, never a symlink
+				// or junction to one; an entry of unknown type is looked up.
+				error |= match entry.file_type() {
+					Ok(file_type) if file_type.is_dir() => remove_dir_tree(host, &child, options, progress_bar),
+					Ok(_) => remove_file(host, &child, options, progress_bar),
+					Err(_) => remove_dir_recursive(host, &child, options, progress_bar),
+				};
+			},
+			Err(e) => {
+				error |= handle_error_with_force(host, e, path, options);
+				break;
+			},
+		}
+	}
+
+	if error {
+		// Children already reported their failures.
 		return true;
 	}
 
-	// Check if path resolves to "/" after following symlinks
-	if let Ok(canonical) = host.resolve(path).canonicalize() {
-		canonical.has_root() && canonical.parent().is_none()
+	if options.interactive == InteractiveMode::Always {
+		// Ask the user whether to remove the current directory.
+		if !prompt_dir(host, path, options) {
+			return false;
+		}
+		// Children the user declined to remove keep the directory populated.
+		if !is_dir_empty(host, path) {
+			return false;
+		}
+	}
+
+	if let Some(pb) = progress_bar {
+		pb.inc(1);
+	}
+	remove_dir_with_special_cases(host, path, options, false)
+}
+
+/// Whether `path` is spelled as a filesystem root: `/` on the host, or a
+/// virtual filesystem's `scheme://` root.
+fn is_literal_root(path: &Path) -> bool {
+	if is_virtual_path(path) {
+		parent_path(path).is_none()
 	} else {
-		false
+		path.has_root() && path.parent().is_none()
 	}
 }
 
-/// Show error message for attempting to remove root.
-fn show_preserve_root_error(host: &mut Host, path: &Path) {
-	let path_looks_like_root = path.has_root() && path.parent().is_none();
+/// Check if a path resolves to a filesystem root.
+/// Returns the root it resolves to, if any.
+fn is_root_path(host: &mut Host, path: &Path) -> Option<PathBuf> {
+	// Check simple case: literal root path
+	if is_literal_root(path) {
+		return Some(path.to_path_buf());
+	}
 
-	if path_looks_like_root {
-		// Path is literally "/"
-		show_error!(host, "{}", RmError::DangerousRecursiveOperation);
+	// Check if path resolves to a root after following symlinks
+	host.fs()
+		.canonicalize(host.resolve(path))
+		.ok()
+		.filter(|canonical| is_literal_root(canonical))
+}
+
+/// Show error message for attempting to remove root.
+fn show_preserve_root_error(host: &mut Host, path: &Path, root: &Path) {
+	if is_literal_root(path) {
+		if is_virtual_path(path) {
+			show_error!(host, "it is dangerous to operate recursively on {}", path.quote());
+		} else {
+			// Path is literally "/"
+			show_error!(host, "{}", RmError::DangerousRecursiveOperation);
+		}
+	} else if is_virtual_path(root) {
+		show_error!(
+			host,
+			"it is dangerous to operate recursively on '{}' (same as '{}')",
+			path.display(),
+			root.display()
+		);
 	} else {
 		// Path resolves to root but isn't literally "/" (e.g., symlink to /)
 		show_error!(host, "it is dangerous to operate recursively on '{}' (same as '/')", path.display());
@@ -1290,13 +1593,14 @@ fn handle_dir(host: &mut Host, path: &Path, options: &Options, progress_bar: Opt
 		return true;
 	}
 
-	let is_root = is_root_path(host, path);
+	let root = is_root_path(host, path);
+	let is_root = root.is_some();
 	if options.recursive && (!is_root || !options.preserve_root) {
 		had_err = remove_dir_recursive(host, path, options, progress_bar);
 	} else if options.dir && (!is_root || !options.preserve_root) {
 		had_err = remove_dir(host, path, options, progress_bar).bitor(had_err);
-	} else if options.recursive {
-		show_preserve_root_error(host, path);
+	} else if let Some(root) = root.filter(|_| options.recursive) {
+		show_preserve_root_error(host, path, &root);
 		had_err = true;
 	} else {
 		show_error!(host, "{}", RmError::CannotRemoveIsDirectory(path.as_os_str().to_os_string()));
@@ -1353,11 +1657,13 @@ fn remove_file(host: &mut Host, path: &Path, options: &Options, progress_bar: Op
 			}
 		}
 
-		// Fallback method for non-Unix, Redox, or when safe traversal is unavailable
-		match fs::remove_file(host.resolve(path)) {
+		// Provider removal for non-native paths, non-Unix, Redox, or when safe
+		// traversal is unavailable
+		match host.fs().remove_file(&host.resolve(path)) {
 			Ok(_) => {
 				verbose_removed_file(host, path, options);
 			},
+			Err(e) if is_missing_under_force(&e, options) => {},
 			Err(e) => {
 				if e.kind() == io::ErrorKind::PermissionDenied {
 					// GNU compatibility (rm/fail-eacces.sh)
@@ -1384,7 +1690,7 @@ fn prompt_dir(host: &mut Host, path: &Path, options: &Options) -> bool {
 
 	// We can't use metadata.permissions.readonly for directories because it only
 	// works on files So we have to handle whether a directory is writable manually
-	if let Ok(metadata) = fs::metadata(host.resolve(path)) {
+	if let Ok(metadata) = host.fs().metadata(&host.resolve(path)) {
 		handle_writable_directory(host, path, options, &metadata)
 	} else {
 		true
@@ -1392,12 +1698,16 @@ fn prompt_dir(host: &mut Host, path: &Path, options: &Options) -> bool {
 }
 
 fn prompt_file(host: &mut Host, path: &Path, options: &Options) -> bool {
-	// If interactive is Never we never want to send prompts
-	if options.interactive == InteractiveMode::Never {
+	// If interactive is Never we never want to send prompts, and the
+	// default mode only asks about write-protected files on a terminal.
+	let stdin_ok = options.__presume_input_tty.unwrap_or(false);
+	if options.interactive == InteractiveMode::Never
+		|| (options.interactive == InteractiveMode::PromptProtected && !stdin_ok)
+	{
 		return true;
 	}
 
-	let Ok(metadata) = fs::symlink_metadata(host.resolve(path)) else {
+	let Ok(metadata) = host.fs().symlink_metadata(&host.resolve(path)) else {
 		return true;
 	};
 
@@ -1431,8 +1741,17 @@ fn prompt_file_permission_readonly(host: &mut Host, path: &Path, options: &Optio
 
 /// Checks if the path is referring to current or parent directory , if it is
 /// referring to current or any parent directory in the file tree e.g  '/../..'
-/// , '../..'
+/// , '../..'. A Windows drive-relative operand counts by its remainder: `C:`
+/// alone names that drive's current directory, so it is refused like `.`.
 fn path_is_current_or_parent_directory(path: &Path) -> bool {
+	let mut components = path.components();
+	if let Some(Component::Prefix(prefix)) = components.next()
+		&& matches!(prefix.kind(), Prefix::Disk(_))
+		&& !path.has_root()
+	{
+		let rest = components.as_path();
+		return rest.is_empty() || path_is_current_or_parent_directory(rest);
+	}
 	let path_str = os_bytes(path.as_os_str());
 	let dir_separator = MAIN_SEPARATOR as u8;
 	if let Some(path_bytes) = path_str {
@@ -1479,10 +1798,8 @@ fn handle_writable_directory(host: &mut Host, path: &Path, options: &Options, me
 // directory is readonly
 #[cfg(windows)]
 fn handle_writable_directory(host: &mut Host, path: &Path, options: &Options, metadata: &Metadata) -> bool {
-	use std::os::windows::prelude::MetadataExt;
-
-	use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
-	let not_user_writable = (metadata.file_attributes() & FILE_ATTRIBUTE_READONLY) != 0;
+	// Native Windows permissions mirror FILE_ATTRIBUTE_READONLY.
+	let not_user_writable = metadata.permissions().readonly();
 	let stdin_ok = options.__presume_input_tty.unwrap_or(false);
 	match (stdin_ok, not_user_writable, options.interactive) {
 		(false, _, InteractiveMode::PromptProtected) => true,
@@ -1508,6 +1825,10 @@ fn handle_writable_directory(host: &mut Host, path: &Path, options: &Options, _m
 /// Removes trailing slashes, for example 'd/../////' yield 'd/../' required to
 /// fix rm-r4 GNU test
 fn clean_trailing_slashes(path: &Path) -> &Path {
+	// A virtual root (`scheme://`) keeps both slashes of its authority marker.
+	if is_virtual_path(path) && parent_path(path).is_none() {
+		return path;
+	}
 	let path_str = os_bytes(path.as_os_str());
 	let dir_separator = MAIN_SEPARATOR as u8;
 
@@ -1551,22 +1872,21 @@ fn is_symlink_dir(_metadata: &Metadata) -> bool {
 
 #[cfg(windows)]
 fn is_symlink_dir(metadata: &Metadata) -> bool {
-	use std::os::windows::prelude::MetadataExt;
-
-	use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
-
-	metadata.file_type().is_symlink()
-		&& ((metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY) != 0)
+	metadata.file_type().is_symlink_dir()
 }
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
+	use std::{
+		path::Path,
+		sync::atomic::{AtomicBool, Ordering},
+	};
 
+	use clap::Parser;
 	use tempfile::{Builder, tempdir};
 
 	use super::{Rm, clean_trailing_slashes};
-	use crate::host::run_util;
+	use crate::host::{Host, Utility, run_util};
 
 	#[test]
 	fn collapses_repeated_root_slashes() {
@@ -1603,6 +1923,28 @@ mod tests {
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(!host_file.exists());
 		assert!(process_file.path().exists());
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn drive_relative_operands_resolve_against_host_cwd() {
+		let cwd = tempdir().unwrap();
+		let sentinel = cwd.path().join("sentinel");
+		std::fs::write(&sentinel, b"keep me").unwrap();
+		std::fs::create_dir(cwd.path().join("child")).unwrap();
+		// `C:` for a cwd of `C:\...`.
+		let drive = cwd.path().components().next().unwrap().as_os_str().to_str().unwrap().to_owned();
+
+		let (code, capture) = run_util::<Rm>(&["-rf", drive.as_str()], "", cwd.path());
+		assert_eq!(code, 1);
+		assert!(capture.err().contains("refusing to remove '.' or '..' directory"), "{}", capture.err());
+		assert!(sentinel.is_file());
+
+		let child = format!("{drive}child");
+		let (code, capture) = run_util::<Rm>(&["-r", child.as_str()], "", cwd.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert!(!cwd.path().join("child").exists());
+		assert!(sentinel.is_file());
 	}
 
 	#[test]
@@ -1672,5 +2014,275 @@ mod tests {
 		let (code, capture) = run_util::<Rm>(&["-f"], "", "/");
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn cancellation_stops_a_recursive_removal_midway() {
+		let cwd = tempdir().unwrap();
+		let tree = cwd.path().join("tree");
+		for i in 0..3000 {
+			let dir = tree.join(format!("d{i:04}"));
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(dir.join("f"), b"").unwrap();
+		}
+		// rm walks in listing order, so the first listed child goes first;
+		// cancelling the moment it is gone must leave most of the tree.
+		let first = std::fs::read_dir(&tree).unwrap().next().unwrap().unwrap().path();
+		let (mut host, _capture) = Host::for_test(Rm::NAME, "", cwd.path());
+		let cancel = host.cancel_flag_for_test();
+		let done = AtomicBool::new(false);
+		let rm = Rm::try_parse_from(["rm", "-rf", "tree"]).unwrap();
+
+		let code = std::thread::scope(|scope| {
+			scope.spawn(|| {
+				while first.exists() && !done.load(Ordering::Relaxed) {}
+				cancel.store(true, Ordering::Relaxed);
+			});
+			let code = rm.run(&mut host);
+			done.store(true, Ordering::Relaxed);
+			code
+		});
+
+		assert_eq!(code, 1);
+		assert!(tree.is_dir(), "rm ran to completion despite cancellation");
+	}
+
+	// Unix only: Windows reports a file another process is already deleting
+	// (delete pending) as access denied, not as gone, so the race still
+	// surfaces there.
+	#[cfg(unix)]
+	#[test]
+	fn concurrent_forced_removals_both_succeed() {
+		let cwd = tempdir().unwrap();
+		let tree = cwd.path().join("tree");
+		for i in 0..3000 {
+			let dir = tree.join(format!("d{i:04}"));
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(dir.join("f"), b"").unwrap();
+		}
+		let start = std::sync::Barrier::new(2);
+		let remove = || {
+			start.wait();
+			let (code, capture) = run_util::<Rm>(&["-rf", "tree"], "", cwd.path());
+			(code, capture.err())
+		};
+
+		// Both walks race over the same entries; under -f an entry the other
+		// one removed first is already gone, which is success.
+		let (a, b) = std::thread::scope(|scope| {
+			let a = scope.spawn(remove);
+			let b = scope.spawn(remove);
+			(a.join().unwrap(), b.join().unwrap())
+		});
+
+		assert_eq!(a, (0, String::new()));
+		assert_eq!(b, (0, String::new()));
+		assert!(!tree.exists());
+	}
+
+	/// Answers every prompt "y", deleting `path` first, as another process
+	/// might while the prompt waits.
+	#[derive(Clone)]
+	struct DeleteThenYes {
+		path:    std::path::PathBuf,
+		pending: std::collections::VecDeque<u8>,
+	}
+
+	impl std::io::Read for DeleteThenYes {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			if self.pending.is_empty() {
+				let _ = std::fs::remove_file(&self.path);
+				self.pending.extend(b"y\n");
+			}
+			buf[0] = self.pending.pop_front().unwrap();
+			Ok(1)
+		}
+	}
+
+	impl std::io::Write for DeleteThenYes {
+		fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+			Err(std::io::ErrorKind::Unsupported.into())
+		}
+
+		fn flush(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+
+	impl brush_core::openfiles::Stream for DeleteThenYes {
+		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+			Box::new(self.clone())
+		}
+
+		#[cfg(unix)]
+		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+
+		#[cfg(unix)]
+		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+	}
+
+	#[test]
+	fn interactive_after_force_still_reports_a_vanished_file() {
+		// GNU rm: a later -i cancels -f's "ignore missing files"; an earlier
+		// one is overridden by -f, which removes without asking.
+		for (flags, expected) in [("-fi", 1), ("-if", 0)] {
+			let cwd = tempdir().unwrap();
+			let file = cwd.path().join("file");
+			std::fs::write(&file, b"").unwrap();
+			let stdin = Box::new(DeleteThenYes { path: file.clone(), pending: Default::default() });
+			let (mut host, capture) = Host::for_test_with_stdin(Rm::NAME, stdin, cwd.path());
+			let code = Rm::try_parse_from(["rm", flags, "file"]).unwrap().run(&mut host);
+
+			assert_eq!(code, expected, "{flags}: {}", capture.err());
+			assert!(!file.exists(), "{flags}");
+			if expected == 1 {
+				assert!(capture.err().contains("cannot remove 'file'"), "{flags}: {}", capture.err());
+			}
+		}
+	}
+
+	/// A directory chain deeper than the removal could recurse through on a
+	/// small stack, whose paths pass `PATH_MAX`, and which one descriptor per
+	/// level would take past Linux's default limit of 1024. Every level also
+	/// holds a file, so the walk keeps listing a directory after coming back up
+	/// out of its subdirectory. Redox removes through the provider walk rather
+	/// than the descriptor walk, so it is not covered.
+	///
+	/// Keep the chain shallow beyond that: on macOS every file operation slows
+	/// with its directory's depth, so building and removing the chain grows
+	/// quadratically, and 5,000 levels took over five minutes.
+	#[cfg(all(unix, not(target_os = "redox")))]
+	#[test]
+	fn removes_a_directory_chain_deeper_than_the_stack() {
+		use std::ffi::OsStr;
+
+		use uucore::safe_traversal::{DirFd, SymlinkBehavior};
+
+		const DEPTH: usize = 1_100;
+		const NAME: &str = "level";
+		const { assert!(DEPTH * (NAME.len() + 1) > libc::PATH_MAX as usize) };
+		let cwd = tempdir().unwrap();
+		let root = cwd.path().join("deep");
+		std::fs::create_dir(&root).unwrap();
+		let mut dir = DirFd::open(&root, SymlinkBehavior::NoFollow).unwrap();
+		for _ in 0..DEPTH {
+			dir.open_file_at(OsStr::new("f")).unwrap();
+			dir.mkdir_at(OsStr::new(NAME), 0o755).unwrap();
+			dir = dir.open_subdir(OsStr::new(NAME), SymlinkBehavior::NoFollow).unwrap();
+		}
+		drop(dir);
+
+		let cwd_path = cwd.path().to_path_buf();
+		let (code, err) = std::thread::Builder::new()
+			.stack_size(256 * 1024)
+			.spawn(move || {
+				let (code, capture) = run_util::<Rm>(&["-rf", "deep"], "", cwd_path);
+				(code, capture.err())
+			})
+			.unwrap()
+			.join()
+			.unwrap();
+
+		assert_eq!((code, err.as_str()), (0, ""));
+		assert!(!root.exists(), "rm -rf left the chain behind");
+	}
+
+	/// A directory bind-mounted inside itself is a cycle: rm must report it
+	/// with GNU's warning and leave the tree, instead of descending into it.
+	///
+	/// Ignored by default because it needs the privilege to bind-mount: run it
+	/// as root with `--ignored`. Without the mount there is no cycle, so a
+	/// silent early return would report a pass that proves nothing.
+	#[cfg(target_os = "linux")]
+	#[test]
+	#[ignore = "bind-mounts a directory; run as root with --ignored"]
+	fn reports_a_directory_that_is_its_own_ancestor() {
+		let cwd = tempdir().unwrap();
+		let loop_dir = cwd.path().join("a/d/loop");
+		std::fs::create_dir_all(&loop_dir).unwrap();
+		let mounted = std::process::Command::new("mount")
+			.arg("--bind")
+			.arg(cwd.path().join("a"))
+			.arg(&loop_dir)
+			.stderr(std::process::Stdio::null())
+			.status()
+			.is_ok_and(|status| status.success());
+		assert!(mounted, "mount --bind failed: run this test as root");
+
+		let (code, capture) = run_util::<Rm>(&["-rf", "a"], "", cwd.path());
+		let unmounted = std::process::Command::new("umount").arg(&loop_dir).status();
+
+		assert_eq!(code, 1);
+		assert_eq!(
+			capture.err(),
+			"rm: WARNING: Circular directory structure.\nThis almost certainly means that you have a \
+			 corrupted file system.\nNOTIFY YOUR SYSTEM MANAGER.\nThe following directory is part of \
+			 the cycle:\n  a/d/loop\n\n"
+		);
+		assert!(unmounted.is_ok_and(|status| status.success()));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unremovable_entry_is_reported_once_and_the_rest_removed() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let run = |flags: &str| {
+			let cwd = tempdir().unwrap();
+			let locked = cwd.path().join("tree/locked");
+			std::fs::create_dir_all(&locked).unwrap();
+			std::fs::write(locked.join("file"), b"").unwrap();
+			std::fs::write(cwd.path().join("tree/other"), b"").unwrap();
+			std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+			// A privileged user writes into it regardless; nothing to test then.
+			if std::fs::write(locked.join("probe"), b"").is_ok() {
+				return None;
+			}
+
+			let (code, capture) = run_util::<Rm>(&[flags, "tree"], "", cwd.path());
+			std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+			assert!(locked.join("file").exists(), "{flags}");
+			assert!(!cwd.path().join("tree/other").exists(), "{flags}");
+			Some((code, capture.err()))
+		};
+		let Some((code, err)) = run("-rf") else {
+			return;
+		};
+
+		assert_eq!(code, 1);
+		assert_eq!(err.lines().count(), 1, "{err}");
+		assert!(err.starts_with("rm: cannot remove 'tree/locked/file': Permission denied"), "{err}");
+		// Without -f (and without a terminal to prompt on) the removal must
+		// report exactly the same.
+		assert_eq!(run("-r"), Some((code, err)));
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn removes_directories_with_the_read_only_attribute() {
+		let set_read_only = |path: &Path| {
+			let mut permissions = std::fs::metadata(path).unwrap().permissions();
+			permissions.set_readonly(true);
+			std::fs::set_permissions(path, permissions).unwrap();
+		};
+		for flags in ["-rf", "-r", "-d"] {
+			let cwd = tempdir().unwrap();
+			let dir = cwd.path().join("dir");
+			std::fs::create_dir(&dir).unwrap();
+			if flags != "-d" {
+				std::fs::write(dir.join("file"), b"").unwrap();
+			}
+			set_read_only(&dir);
+
+			let (code, capture) = run_util::<Rm>(&[flags, "dir"], "", cwd.path());
+
+			assert_eq!(code, 0, "{flags}: {}", capture.err());
+			assert!(!dir.exists(), "{flags}");
+		}
 	}
 }

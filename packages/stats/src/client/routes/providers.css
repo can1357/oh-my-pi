@@ -1,0 +1,28 @@
+.providers-select {
+	max-width: 220px;
+}
+
+.providers-mix {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px 16px 14px;
+	background: var(--bg);
+	border-top: 1px solid var(--line-1);
+}
+
+/* Keeps account names aligned whether or not the row has a chart swatch. */
+.providers-swatch-slot {
+	display: inline-flex;
+	width: 10px;
+	flex: none;
+}
+
+.providers-account {
+	max-width: 280px;
+}
+
+.providers-accounts {
+	margin: 0 -16px -16px;
+	border-top: 1px solid var(--line-1);
+}

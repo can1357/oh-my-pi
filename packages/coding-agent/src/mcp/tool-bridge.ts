@@ -1,3 +1,9 @@
+import {
+	formatMCPProgress,
+	MCP_TOOL_NAME_PREFIX,
+	type MCPProgress,
+	type MCPToolDetails,
+} from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP to CustomTool bridge.
  *
@@ -15,23 +21,24 @@ import type {
 	CustomToolResult,
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
-import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
-import type { Theme } from "../modes/theme/theme";
-import type { OutputMeta } from "../tools/output-meta";
-import { normalizeLocalScheme } from "../tools/path-utils";
+import { extractUriScheme } from "../internal-urls/parse";
+import { InternalUrlRouter } from "../internal-urls/router";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { renderMCPCall, renderMCPResult } from "./render";
+import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
-	MCPContent,
+	MCPRequestOptions,
 	MCPServerConnection,
 	MCPToolCallParams,
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
+import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
@@ -108,8 +115,9 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
 /**
  * Drop the harness-internal intent field (`INTENT_FIELD`) before forwarding
  * args to an MCP server. The harness injects `i` into every tool's wire
- * schema; the direct model tool-call path strips it via `extractIntent`, but
- * the `eval` `tool.*` bridge and any other in-process caller forwards args
+ * schema; the direct model tool-call path strips it via `extractIntent` and
+ * the `eval` `tool.*` bridge drops it in `callSessionTool`, but other
+ * in-process callers (Task proxies, `ctx.invokeTool`) may still forward args
  * verbatim. Strict-schema servers (Linear, anything with
  * `additionalProperties:false` / Zod `.strict()`) reject every call that
  * carries `i`. The MCP boundary is the authoritative guard so callers don't
@@ -125,20 +133,28 @@ function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["i
 	return rest;
 }
 
-async function resolveOutboundLocalUrlArgs(
+/** Replace string args that are file-backed internal URLs with the local path backing them. */
+async function resolveOutboundUrlArgs(
 	value: unknown,
 	context: CustomToolContext,
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
-		const normalized = normalizeLocalScheme(value);
-		if (!normalized.startsWith("local://")) return value;
-		const localFile = await resolveLocalUrlToFile(normalized, {
+		// Only arguments that are themselves URLs: the router's repair of a
+		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
+		// mentions one.
+		if (!extractUriScheme(value)) return value;
+		const router = InternalUrlRouter.instance();
+		const url = router.normalize(value);
+		if (!router.canHandle(url)) return value;
+		const scheme = extractUriScheme(url);
+		if (!scheme || router.spec(scheme)?.backing !== "file") return value;
+		const located = await router.locate(url, {
 			cwd: context.sessionManager?.getCwd?.(),
 			settings: context.settings,
 			localProtocolOptions: context.localProtocolOptions,
 		});
-		return localFile?.path ?? value;
+		return located ?? value;
 	}
 	if (typeof value !== "object" || value === null) return value;
 	if (seen.has(value)) return value;
@@ -148,7 +164,7 @@ async function resolveOutboundLocalUrlArgs(
 		let resolved: unknown[] | undefined;
 		for (let index = 0; index < value.length; index++) {
 			const item = value[index];
-			const next = await resolveOutboundLocalUrlArgs(item, context, seen);
+			const next = await resolveOutboundUrlArgs(item, context, seen);
 			if (next === item && !resolved) continue;
 			resolved ??= value.slice();
 			resolved[index] = next;
@@ -160,7 +176,7 @@ async function resolveOutboundLocalUrlArgs(
 	let resolved: Record<string, unknown> | undefined;
 	for (const key in input) {
 		const item = input[key];
-		const next = await resolveOutboundLocalUrlArgs(item, context, seen);
+		const next = await resolveOutboundUrlArgs(item, context, seen);
 		if (next === item && !resolved) continue;
 		resolved ??= { ...input };
 		resolved[key] = next;
@@ -171,7 +187,7 @@ async function resolveOutboundLocalUrlArgs(
 /**
  * Normalize raw tool params into the outbound `tools/call` arguments: strip
  * the harness intent field, drop optional empty placeholders the server
- * declares but doesn't require, then translate session-local files to paths
+ * declares but doesn't require, then translate file-backed internal URLs to paths
  * external MCP servers can read.
  */
 async function prepareOutboundArgs(
@@ -180,28 +196,9 @@ async function prepareOutboundArgs(
 	context: CustomToolContext,
 ): Promise<MCPToolArgs> {
 	const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
-	return (await resolveOutboundLocalUrlArgs(args, context)) as MCPToolArgs;
+	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
 }
 
-/** Details included in MCP tool results for rendering */
-export interface MCPToolDetails {
-	/** Server name */
-	serverName: string;
-	/** Original MCP tool name */
-	mcpToolName: string;
-	/** Whether the call resulted in an error */
-	isError?: boolean;
-	/** Raw content from MCP response */
-	rawContent?: MCPContent[];
-	/** Structured metadata from the MCP response */
-	mcpMeta?: Record<string, unknown>;
-	/** Provider ID (e.g., "claude", "mcp-json") */
-	provider?: string;
-	/** Provider display name (e.g., "Claude Code", "MCP Config") */
-	providerName?: string;
-	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
-	meta?: OutputMeta;
-}
 /**
  * Convert MCP content to agent content while retaining image payloads.
  */
@@ -244,6 +241,7 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * reaches the model through the standard content channel — and the eval
  * `tool.*` and subagent proxy bridges that read the same result. Subject to the
  * usual spill/byte-cap machinery like any other text block.
+ * Programmatic consumers use details.structuredContent instead of parsing this rendering.
  */
 function formatStructuredContent(structured: Record<string, unknown>): string {
 	let json: string;
@@ -302,6 +300,7 @@ function buildResult(
 		}
 	}
 	const structured = result.structuredContent;
+	if (structured !== undefined) details.structuredContent = structured;
 	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
 		const rendered = formatStructuredContent(structured);
 		if (rendered.length > 0) {
@@ -337,6 +336,63 @@ type MCPToolCallAttempt = {
 	error?: unknown;
 };
 
+/** Minimum spacing between one call's progress updates; a burst coalesces to its newest progress. */
+export const PROGRESS_UPDATE_INTERVAL_MS = 50;
+
+interface ProgressUpdater {
+	onProgress: NonNullable<MCPRequestOptions["onProgress"]>;
+	/** Stop updating once the call settles; a coalesced update still waiting is dropped. */
+	close(): void;
+}
+
+/**
+ * Turn a call's progress notifications into tool updates. The first progress
+ * shows immediately; progress inside the following interval waits and only
+ * the newest is shown when it ends. Heartbeats that repeat the displayed text
+ * (the same phase message) emit nothing.
+ */
+function progressUpdater(
+	onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+	serverName: string,
+	mcpToolName: string,
+	provider?: string,
+	providerName?: string,
+): ProgressUpdater | undefined {
+	if (!onUpdate) return undefined;
+	let lastText: string | undefined;
+	let waiting: MCPProgress | undefined;
+	let cooldown: NodeJS.Timeout | undefined;
+	let closed = false;
+	const show = (progress: MCPProgress) => {
+		const text = formatMCPProgress(progress);
+		if (text === lastText) return;
+		lastText = text;
+		onUpdate({
+			content: [{ type: "text", text }],
+			details: { serverName, mcpToolName, provider, providerName, progress },
+		});
+		cooldown = setTimeout(() => {
+			cooldown = undefined;
+			const next = waiting;
+			waiting = undefined;
+			if (next) show(next);
+		}, PROGRESS_UPDATE_INTERVAL_MS);
+	};
+	return {
+		onProgress: progress => {
+			if (closed) return;
+			if (cooldown) waiting = progress;
+			else show(progress);
+		},
+		close: () => {
+			closed = true;
+			clearTimeout(cooldown);
+			cooldown = undefined;
+			waiting = undefined;
+		},
+	};
+}
+
 function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | undefined {
 	if (!result.isError) return undefined;
 	const values = result._meta?.["mcp/www_authenticate"];
@@ -351,8 +407,9 @@ async function callToolWithAuthRetry(
 	args: MCPToolArgs,
 	reconnect: MCPReconnect | undefined,
 	signal?: AbortSignal,
+	onProgress?: MCPRequestOptions["onProgress"],
 ): Promise<MCPToolCallAttempt> {
-	const result = await callTool(connection, toolName, args, { signal });
+	const result = await callTool(connection, toolName, args, { signal, onProgress });
 	const authChallenge = getMcpAuthChallenge(result);
 	if (!authChallenge || !reconnect) return { connection, result };
 
@@ -368,7 +425,7 @@ async function callToolWithAuthRetry(
 	try {
 		return {
 			connection: newConnection,
-			result: await callTool(newConnection, toolName, args, { signal }),
+			result: await callTool(newConnection, toolName, args, { signal, onProgress }),
 		};
 	} catch (error) {
 		rethrowIfAborted(error, signal);
@@ -404,14 +461,50 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
-function sanitizeMCPToolNamePart(value: string, fallback: string): string {
+function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: boolean): string {
 	const sanitized = value
 		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
+		.replace(keepDigits ? /[^a-z0-9_]+/g : /[^a-z_]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 
 	return sanitized.length > 0 ? sanitized : fallback;
+}
+
+/**
+ * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
+ * current mint keeps `0-9`, the legacy variant strips them exactly as the
+ * pre-fix `sanitizeMCPToolNamePart` did. Both halves route through this one
+ * function so the two mints can only ever differ by that character class —
+ * if the prefix-strip or cap rules change, the legacy alias changes with them.
+ */
+function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
+	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+
+	// Strip redundant server name prefix from tool name if present
+	const prefixWithUnderscore = `${sanitizedServerName}_`;
+
+	let normalizedToolName = sanitizedToolName;
+	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
+		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
+	}
+
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+}
+
+/**
+ * Mint the name {@link createMCPToolName} produced before digits were kept in
+ * sanitized parts (`[^a-z_]+` collapsed to `_`). Digit-bearing servers/tools
+ * were renamed by that fix, so user config keys written against the old form
+ * (`tools.approval`, `tools.xdevInlineDevices`) would no longer match.
+ * Approval resolution consults this legacy key as a fail-closed fallback.
+ * Returns `undefined` when minting is unchanged (no digits involved).
+ */
+export function createLegacyMCPToolName(serverName: string, toolName: string): string | undefined {
+	const legacyName = mintMCPToolName(serverName, toolName, false);
+	const currentName = createMCPToolName(serverName, toolName);
+	return legacyName !== currentName ? legacyName : undefined;
 }
 
 /**
@@ -438,18 +531,118 @@ function capMCPToolNameLength(name: string): string {
 }
 
 export function createMCPToolName(serverName: string, toolName: string): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
+	return mintMCPToolName(serverName, toolName, true);
+}
 
-	// Strip redundant server name prefix from tool name if present
-	const prefixWithUnderscore = `${sanitizedServerName}_`;
+/**
+ * Registry keys a model-emitted MCP tool name may have meant, in priority
+ * order. Empty when the name is not `mcp__`-prefixed or is already canonical.
+ *
+ * {@link createMCPToolName} joins the sanitized server and tool with a SINGLE
+ * underscore, but OMP presents itself as Claude Code, whose convention is
+ * `mcp__<server>__<tool>` — so a primed model reliably emits the doubled
+ * separator, often keeping the raw unsanitized server spelling as well
+ * (`mcp__seedpatch-client__bank` for a server named `seedpatch-client`). Those
+ * names are strictly unregistered, so dispatch dead-ends on a tool the session
+ * really does expose.
+ *
+ * Candidates, because the doubled separator carries information the collapsed
+ * form loses:
+ *
+ * 1. Split at a `__` and re-mint through the whole of `createMCPToolName`.
+ *    Re-minting (rather than only sanitizing) is what reproduces
+ *    redundant-server-prefix stripping — server `puppeteer` + tool
+ *    `puppeteer_screenshot` registers as `mcp__puppeteer_screenshot`, not
+ *    `mcp__puppeteer_puppeteer_screenshot` — and the 64-char
+ *    {@link capMCPToolNameLength} hash. EVERY `__` is tried as the boundary:
+ *    a *sanitized* server segment can never contain one, but the model
+ *    routinely emits the RAW server name, which can (`foo__bar`), so the first
+ *    occurrence is not necessarily the split. Earlier boundaries rank first
+ *    since a server name without `__` is overwhelmingly the common case.
+ * 2. Sanitize the whole suffix, for a single-separator name whose punctuation
+ *    still differs from the minted key (`mcp__seedpatch-client_bank`). This
+ *    candidate is capped too: without a boundary there is nothing to re-mint,
+ *    but the registered key was still length-capped, so an overlong spelling
+ *    would otherwise never match its hashed form. Unlike a split, it has no
+ *    minted fallback shape to reproduce, so a suffix that sanitizes away yields
+ *    nothing.
+ *
+ * This is normalization, not fuzzy matching: every candidate is derived from
+ * the emitted name by the same rules that minted the registry, never selected
+ * from siblings. `sanitizeMCPToolNamePart` is idempotent and registry keys are
+ * already in its output form, so an already-registered name yields no
+ * candidates at all and stays on the exact-match path. Callers try each
+ * candidate as an exact lookup and keep failing when none is registered.
+ */
+export function canonicalMCPToolNameCandidates(name: string): string[] {
+	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return [];
+	const suffix = name.slice(MCP_TOOL_NAME_PREFIX.length);
+	if (suffix.length === 0) return [];
+	const candidates: string[] = [];
+	const add = (candidate: string): void => {
+		if (candidate !== name && !candidates.includes(candidate)) candidates.push(candidate);
+	};
 
-	let normalizedToolName = sanitizedToolName;
-	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
-		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
+	// A split needs both halves NONEMPTY — not to survive sanitization.
+	// `createMCPToolName` substitutes its `server`/`tool` placeholder for a part
+	// that sanitizes away, and it is the same function registration uses, so a
+	// server named `123` (valid per `validateServerName`) really does register as
+	// `mcp__server_bank`. Re-minting therefore reproduces that key instead of
+	// inventing one, and requiring the halves to survive sanitization would drop
+	// exactly the names that need recovering. Only a genuinely absent half
+	// (`mcp____bank`, `mcp__srv__`) describes no split at all.
+	for (let boundary = suffix.indexOf("__"); boundary >= 0; boundary = suffix.indexOf("__", boundary + 1)) {
+		const serverName = suffix.slice(0, boundary);
+		const toolName = suffix.slice(boundary + 2);
+		if (serverName.length > 0 && toolName.length > 0) add(createMCPToolName(serverName, toolName));
 	}
+	// The whole-suffix candidate has no boundary, so there is no minted fallback
+	// shape to reproduce: a suffix that sanitizes away is a dead end.
+	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
+	if (sanitizedSuffix.length > 0) {
+		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
+	}
+	return candidates;
+}
 
-	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+/**
+ * Resolve a Claude Code-spelled MCP call through an EXPLICIT lookup.
+ *
+ * The lookup is a required argument rather than something read from ambient
+ * state, because the set a call must resolve against is the one offered to the
+ * agent that emitted it. A resolver closing over one agent's tools and then
+ * shared with another — the primary session's resolver also handed to the
+ * isolated auto-learn capture agent, say — would let a capture response reach a
+ * main-session tool it was never offered. Naming the source at every call site
+ * makes that mistake unrepresentable.
+ *
+ * A caller whose tools span several presentation sets (mounted `xd://` devices
+ * plus advertised top-level tools) MUST pass one lookup covering the union.
+ * Checking each set with its own call and taking the first hit would let set
+ * order silently break the uniqueness rule below.
+ *
+ * Resolution requires a UNIQUE match. Two different boundaries can both name a
+ * registered tool — server `foo` + tool `bar__foo_bar_baz` and server
+ * `foo__bar` + tool `foo_bar_baz` mint distinct keys yet share the spelling
+ * `mcp__foo__bar__foo_bar_baz` — and nothing in the emitted name says which was
+ * meant. Picking whichever boundary sorts first would execute an MCP operation
+ * the model did not ask for, side effects included, so an ambiguous alias
+ * resolves to nothing and the call stays a recoverable `not found`.
+ *
+ * Returns `undefined` unless exactly one {@link canonicalMCPToolNameCandidates}
+ * entry resolves, so an already-registered name never reaches here and a
+ * non-MCP name can never resolve at all.
+ */
+export function resolveMCPToolAlias<T extends { readonly name: string }>(
+	name: string,
+	lookup: (candidate: string) => T | undefined,
+): T | undefined {
+	const matches: T[] = [];
+	for (const candidate of canonicalMCPToolNameCandidates(name)) {
+		const match = lookup(candidate);
+		if (match !== undefined && !matches.some(seen => seen.name === match.name)) matches.push(match);
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface MCPToolOriginSource {
@@ -513,29 +706,16 @@ export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: 
 }
 
 /**
- * Parse an MCP tool name back to server and tool components.
- *
- * Note: This returns the normalized tool name (with server prefix stripped).
- * The original MCP tool name may have had the server name as a prefix.
- */
-export function parseMCPToolName(name: string): { serverName: string; toolName: string } | null {
-	if (!name.startsWith("mcp__")) return null;
-
-	const rest = name.slice(5);
-	const underscoreIdx = rest.indexOf("_");
-	if (underscoreIdx === -1) return null;
-
-	return {
-		serverName: rest.slice(0, underscoreIdx),
-		toolName: rest.slice(underscoreIdx + 1),
-	};
-}
-
-/**
  * CustomTool wrapping an MCP tool with an active connection.
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/**
+	 * Name this tool had before digits were kept in minted names, if different.
+	 * Approval resolution honors `deny`/`prompt` user policies written against
+	 * this key so the rename cannot silently unblock a restricted MCP server.
+	 */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -543,6 +723,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** Server-declared read-only behavior for prewalk; approval stays conservative. */
+	readonly mcpReadOnlyHint: boolean | undefined;
 	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
@@ -553,6 +735,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	 * explicit `false`; an omitted flag would leave nothing to preserve.
 	 */
 	readonly strict = false as const;
+	readonly formatApprovalDetails = formatApprovalArguments;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
@@ -565,11 +748,13 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
+		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${connection.name}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
 		this.mcpToolName = tool.name;
 		this.mcpServerName = connection.name;
+		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
 	}
 
 	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
@@ -580,10 +765,18 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
 	}
 
+	describeCall(args: unknown, options: RenderResultOptions) {
+		return describeMCPCall(normalizeToolArgs(args), this.label, options);
+	}
+
+	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+		return describeMCPResult(result, options, normalizeToolArgs(args));
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: unknown,
-		_onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
 		_ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
@@ -591,9 +784,18 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
+		const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
+		const onProgress = progress?.onProgress;
 
 		try {
-			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, signal);
+			const attempt = await callToolWithAuthRetry(
+				this.connection,
+				this.tool.name,
+				args,
+				this.reconnect,
+				signal,
+				onProgress,
+			);
 			if (attempt.error !== undefined) {
 				return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
 			}
@@ -624,7 +826,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 					const retryProvider = newConn._source?.provider ?? provider;
 					const retryProviderName = newConn._source?.providerName ?? providerName;
 					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal });
+						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
 						return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
 					} catch (retryError) {
 						rethrowIfAborted(retryError, signal);
@@ -639,6 +841,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+		} finally {
+			progress?.close();
 		}
 	}
 }
@@ -648,6 +852,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
  */
 export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/** See {@link MCPTool.legacyName}. */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -655,11 +861,14 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** See {@link MCPTool.mcpReadOnlyHint}. */
+	readonly mcpReadOnlyHint: boolean | undefined;
 	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
 	/** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
 	readonly strict = false as const;
+	readonly formatApprovalDetails = formatApprovalArguments;
 
 	readonly #fallbackProvider: string | undefined;
 	readonly #fallbackProviderName: string | undefined;
@@ -683,11 +892,13 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
+		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${serverName}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
 		this.mcpToolName = tool.name;
 		this.mcpServerName = serverName;
+		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
 		this.#fallbackProvider = source?.provider;
 		this.#fallbackProviderName = source?.providerName;
 	}
@@ -700,10 +911,18 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
 	}
 
+	describeCall(args: unknown, options: RenderResultOptions) {
+		return describeMCPCall(normalizeToolArgs(args), this.label, options);
+	}
+
+	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+		return describeMCPResult(result, options, normalizeToolArgs(args));
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: unknown,
-		_onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
 		_ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
@@ -711,12 +930,21 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
+		const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
+		const onProgress = progress?.onProgress;
 
 		try {
 			const connection = await untilAborted(signal, () => this.getConnection());
 			throwIfAborted(signal);
 			try {
-				const attempt = await callToolWithAuthRetry(connection, this.tool.name, args, this.reconnect, signal);
+				const attempt = await callToolWithAuthRetry(
+					connection,
+					this.tool.name,
+					args,
+					this.reconnect,
+					signal,
+					onProgress,
+				);
 				if (attempt.error !== undefined) {
 					return buildErrorResult(
 						attempt.error,
@@ -750,7 +978,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 						const retryProvider = newConn._source?.provider ?? provider;
 						const retryProviderName = newConn._source?.providerName ?? providerName;
 						try {
-							const result = await callTool(newConn, this.tool.name, args, { signal });
+							const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
 							return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
 						} catch (retryError) {
 							rethrowIfAborted(retryError, signal);
@@ -775,7 +1003,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				const newConn = await reconnectWithAbort(this.reconnect, signal);
 				if (newConn) {
 					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal });
+						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
 						return buildResult(
 							result,
 							this.serverName,
@@ -790,6 +1018,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
+		} finally {
+			progress?.close();
 		}
 	}
 }

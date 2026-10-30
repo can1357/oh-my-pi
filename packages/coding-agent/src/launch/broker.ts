@@ -1,14 +1,27 @@
 import * as fs from "node:fs/promises";
+// node:net only serves the TCP readiness probe for user daemons (`connectPort`).
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
-import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
+import {
+	truncateHead,
+	truncateHeadBytes,
+	truncateTail,
+	truncateTailBytes,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import {
+	DAEMON_META_FILE,
+	DAEMON_SPEC_FILE,
+	daemonBrokerEndpoint,
+	readStoredDaemonRecord,
+	writeDaemonScopeMeta,
+} from "./paths";
+import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -18,11 +31,8 @@ import {
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
 	type DaemonOperation,
-	type DaemonReadySpec,
 	type DaemonRpcResult,
 	type DaemonSignal,
-	type DaemonSnapshot,
-	type DaemonSpec,
 	type DaemonWireRequest,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
@@ -31,6 +41,7 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
+import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -40,6 +51,12 @@ const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
 /**
+ * How often a broker checks that its Unix socket still exists. Something that
+ * deletes the runtime dir leaves the broker holding the scope lease while no
+ * client can reach it, so the broker gives the scope up instead.
+ */
+const ENDPOINT_CHECK_MS = 5_000;
+/**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
  * are always shown in full; older history is truncated so the response stays
  * bounded over a long-lived project (issue #6517).
@@ -47,7 +64,13 @@ const RESTART_BACKOFF_BASE_MS = 1_000;
 const MAX_TERMINAL_DAEMONS_LISTED = 10;
 const TOKEN_FILE = "broker.token";
 const PID_FILE = "broker.pid";
-const META_FILE = "meta.json";
+/**
+ * How long a live lease left by a broker without the native lock is given to
+ * bind its endpoint before the lease is treated as stale (issue #11080).
+ */
+const LEASE_HANDOFF_GRACE_MS = 500;
+/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
+const LEASE_PROBE_TIMEOUT_MS = 250;
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
 const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
@@ -90,21 +113,22 @@ interface ManagedDaemon {
 	pendingCompletions: DaemonCompletionNotification[];
 	completionSubscriptionId?: string;
 	persistQueue: Promise<void>;
+	/** Serialized spec last written (or recovered); a write is skipped while unchanged. */
+	persistedSpec?: string;
+	/** Serialized metadata last written (or recovered); a write is skipped while unchanged. */
+	persistedMeta?: string;
 }
 
 interface BrokerLease {
 	path: string;
-	instanceId: string;
+	/** Process-owned native lock; the OS drops it however this broker exits. */
+	lock: FileLock;
 }
 
 interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
-}
-
-function quoteShellArg(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -166,6 +190,13 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
+/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+	const tempPath = `${filePath}.${process.pid}.tmp`;
+	await Bun.write(tempPath, content);
+	await fs.rename(tempPath, filePath);
+}
+
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
 	try {
 		const stat = await fs.stat(filePath);
@@ -188,6 +219,7 @@ class DaemonLog {
 	#currentBytes = 0;
 	#queue: Promise<void> = Promise.resolve();
 	#closed = false;
+	#closing: Promise<void> | undefined;
 
 	constructor(logPath: string, previousPath: string, file: Bun.BunFile, writer: Bun.FileSink) {
 		this.#path = logPath;
@@ -196,6 +228,17 @@ class DaemonLog {
 		this.#writer = writer;
 	}
 
+	/** Opens an empty log for a newly started daemon, discarding output from any earlier daemon of the same name. */
+	static async create(dir: string): Promise<DaemonLog> {
+		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		const logPath = path.join(dir, LOG_FILE);
+		const previousPath = path.join(dir, PREVIOUS_LOG_FILE);
+		await Promise.all([fs.rm(previousPath, { force: true }), fs.rm(logPath, { force: true })]);
+		const file = Bun.file(logPath);
+		return new DaemonLog(logPath, previousPath, file, file.writer());
+	}
+
+	/** Opens a log for a relaunch of the same daemon, keeping the prior generation's output as the previous log. */
 	static async open(dir: string): Promise<DaemonLog> {
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		const logPath = path.join(dir, LOG_FILE);
@@ -237,11 +280,12 @@ class DaemonLog {
 		return snapshot;
 	}
 
-	async close(): Promise<void> {
-		if (this.#closed) return;
+	close(): Promise<void> {
 		this.#closed = true;
-		await this.#queue;
-		await this.#writer.end();
+		this.#closing ??= this.#queue.then(async () => {
+			await this.#writer.end();
+		});
+		return this.#closing;
 	}
 
 	static async readFiles(
@@ -287,47 +331,77 @@ class DaemonLog {
 	}
 }
 
-async function acquireBrokerLease(runtimeDir: string): Promise<BrokerLease | null> {
-	const pidPath = path.join(runtimeDir, PID_FILE);
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const handle = await fs.open(pidPath, "wx", 0o600);
-			const instanceId = crypto.randomUUID();
-			try {
-				await handle.writeFile(JSON.stringify({ pid: process.pid, instanceId }), "utf8");
-			} finally {
-				await handle.close();
-			}
-			return { path: pidPath, instanceId };
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			try {
-				const raw: unknown = await Bun.file(pidPath).json();
-				if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") {
-					try {
-						process.kill(raw.pid, 0);
-						return null;
-					} catch {
-						// Stale PID file; the next loop iteration claims it.
-					}
-				}
-			} catch {
-				// Malformed or partially-written PID files are stale.
-			}
-			await fs.rm(pidPath, { force: true });
-		}
+/** Whether a broker is accepting connections on the scope endpoint right now. */
+async function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
+	try {
+		const connection = await IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: LEASE_PROBE_TIMEOUT_MS });
+		connection.destroy();
+		return true;
+	} catch {
+		return false;
 	}
-	return null;
+}
+
+/**
+ * Whether a live lease left by a broker that predates the native lock still
+ * owns this scope. The recorded PID alone cannot answer it: PID reuse by an
+ * unrelated process looks exactly like a live broker, while a real broker only
+ * becomes observable when it binds the endpoint — milliseconds after writing
+ * the lease. Probe, allow one startup grace, then probe again.
+ */
+async function holdsLiveForeignLease(pidPath: string, endpoint: string): Promise<boolean> {
+	let pid: number | undefined;
+	try {
+		// `fs.readFile` (libuv) rather than `Bun.file().json()`: the CLI entry runs
+		// as a floating promise, so an await that completes without an active
+		// libuv handle lets Bun exit this worker before it ever listens — exactly
+		// what happens on the cold-start path when broker.pid is absent.
+		const raw: unknown = JSON.parse(await fs.readFile(pidPath, "utf8"));
+		if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") pid = raw.pid;
+	} catch {
+		// Missing or torn lease: nothing to honor.
+	}
+	if (pid === undefined || pid === process.pid) return false;
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false; // Dead PID: the lease outlived its broker.
+	}
+	if (await probeBrokerEndpoint(endpoint)) return true;
+	await Bun.sleep(LEASE_HANDOFF_GRACE_MS);
+	return probeBrokerEndpoint(endpoint);
+}
+
+/**
+ * Claim the one-broker-per-scope lease. The native lock is process-owned, so
+ * the OS releases it however the broker dies — a crashed broker can never wedge
+ * the scope behind a stale lease again (issue #11080). `broker.pid` stays as
+ * human-readable metadata for `omp ps` and dead-scope pruning.
+ */
+async function acquireBrokerLease(runtimeDir: string, endpoint: string): Promise<BrokerLease | null> {
+	const pidPath = path.join(runtimeDir, PID_FILE);
+	const lock = FileLock.tryAcquire(pidPath);
+	if (!lock.acquired) return null;
+	try {
+		// A broker from a build without the native lock cannot be seen through it;
+		// adopt the scope instead of starting a duplicate supervisor.
+		if (await holdsLiveForeignLease(pidPath, endpoint)) {
+			lock.release();
+			return null;
+		}
+		await fs.writeFile(pidPath, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+		return { path: pidPath, lock };
+	} catch (error) {
+		lock.release();
+		throw error;
+	}
 }
 
 async function releaseBrokerLease(lease: BrokerLease): Promise<void> {
 	try {
-		const raw: unknown = await Bun.file(lease.path).json();
-		if (typeof raw === "object" && raw !== null && "instanceId" in raw && raw.instanceId === lease.instanceId) {
-			await fs.rm(lease.path, { force: true });
-		}
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
+		await fs.rm(lease.path, { force: true });
+	} finally {
+		lease.lock.release();
 	}
 }
 
@@ -354,6 +428,8 @@ class DaemonBroker {
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
+	readonly #endpointCheckMs: number;
+	#endpointTimer: NodeJS.Timeout | undefined;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -364,13 +440,15 @@ class DaemonBroker {
 	 * profile lock) or keeps running untracked.
 	 */
 	readonly #startingNames = new Set<string>();
-	readonly #clients = new Set<net.Socket>();
-	readonly #ownerSockets = new Map<string, { socket: net.Socket; subscriptionId: string | undefined }>();
+	readonly #clients = new Set<IpcConnection>();
+	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #finished = Promise.withResolvers<void>();
-	readonly #sockets = new Set<net.Socket>();
-	#server: net.Server | undefined;
+	readonly #sockets = new Set<IpcConnection>();
+	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
+	readonly #inFlight = new Map<string, { socket: IpcConnection; controller: AbortController }>();
+	#server: IpcServer | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
@@ -380,27 +458,27 @@ class DaemonBroker {
 		token: string,
 		idleGraceMs: number,
 		restartBackoffBaseMs: number,
+		endpointCheckMs: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
-		this.#endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		this.#endpoint = daemonBrokerEndpoint(runtimeDir);
 		this.#token = token;
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
+		this.#endpointCheckMs = endpointCheckMs;
 	}
 
-	async run(): Promise<void> {
+	async run(onListening?: () => void): Promise<void> {
 		await this.#recoverRecords();
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
-		server.once("listening", resolve);
-		server.once("error", reject);
-		server.listen(this.#endpoint);
-		await listening;
-		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
+		this.#server = await IpcServer.listen(
+			this.#endpoint,
+			{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
+			socket => this.#accept(socket),
+		);
+		if (process.platform !== "win32") this.#watchEndpoint();
 		this.#scheduleIdleShutdown();
+		onListening?.();
 		await this.#finished.promise;
 	}
 
@@ -409,9 +487,15 @@ class DaemonBroker {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
+		clearInterval(this.#endpointTimer);
+		this.#endpointTimer = undefined;
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
 			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
+			// The detached daemon outlives this broker and the next one recovers it from
+			// metadata. Retire this broker's generation so a late exit or readiness
+			// callback cannot settle the stale record over the new owner's metadata.
+			if (detached) record.generation++;
 			clearTimeout(record.restartTimer);
 			await record.log?.close();
 			await record.persistQueue;
@@ -420,32 +504,16 @@ class DaemonBroker {
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
-		if (this.#server) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			this.#server.close(() => resolve());
-			await promise;
-		}
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
+		await this.#server?.close();
 		this.#finished.resolve();
 	}
 
-	#accept(socket: net.Socket): void {
+	#accept(socket: IpcConnection): void {
 		this.#sockets.add(socket);
 		let authenticated = false;
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", chunk => {
-			buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-			if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
-				socket.destroy(new Error("Daemon broker request exceeds size limit"));
-				return;
-			}
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				if (!line) continue;
+		// Oversized requests (> MAX_REQUEST_BYTES) close the connection natively.
+		socket.start(
+			line => {
 				void this.#handleLine(socket, line, () => {
 					if (authenticated) return;
 					authenticated = true;
@@ -453,28 +521,34 @@ class DaemonBroker {
 					clearTimeout(this.#idleTimer);
 					this.#idleTimer = undefined;
 				});
-			}
-		});
-		socket.on("error", () => {
-			// Socket closure performs client accounting.
-		});
-		socket.on("close", () => {
-			this.#sockets.delete(socket);
-			if (!authenticated) return;
-			this.#clients.delete(socket);
-			this.#scheduleIdleShutdown();
-			for (const [owner, registration] of this.#ownerSockets) {
-				if (registration.socket === socket) this.#ownerSockets.delete(owner);
-			}
-		});
+			},
+			() => {
+				this.#sockets.delete(socket);
+				if (!authenticated) return;
+				this.#clients.delete(socket);
+				this.#scheduleIdleShutdown();
+				for (const [owner, registration] of this.#ownerSockets) {
+					if (registration.socket === socket) this.#ownerSockets.delete(owner);
+				}
+				// Nobody can read these answers any more; stop polling for them.
+				for (const [requestId, inFlight] of this.#inFlight) {
+					if (inFlight.socket !== socket) continue;
+					this.#inFlight.delete(requestId);
+					inFlight.controller.abort();
+				}
+			},
+		);
 	}
 
-	async #handleLine(socket: net.Socket, line: string, onAuthenticated: () => void): Promise<void> {
+	async #handleLine(socket: IpcConnection, line: string, onAuthenticated: () => void): Promise<void> {
 		let id = "unknown";
 		try {
 			const decoded: unknown = JSON.parse(line);
+			// Correlate before validating: an operation this broker cannot parse (a newer omp
+			// reaching a broker that predates it) must fail the caller's request, not strand it
+			// until the client-side timeout.
+			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
-			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
@@ -535,7 +609,7 @@ class DaemonBroker {
 					});
 					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
-						socket.write(`${JSON.stringify(completion)}\n`);
+						socket.send(JSON.stringify(completion));
 					}
 				}
 				for (const owner of detachedOwners) {
@@ -549,21 +623,29 @@ class DaemonBroker {
 					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
-			const result = await this.#dispatch(request.operation);
-			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
+			const abortable = request.operation.op === "wait" || request.operation.op === "logs";
+			const controller = abortable ? new AbortController() : undefined;
+			if (controller) this.#inFlight.set(id, { socket, controller });
+			let result: DaemonRpcResult;
+			try {
+				result = await this.#dispatch(request.operation, socket, controller?.signal);
+			} finally {
+				if (controller && this.#inFlight.get(id)?.controller === controller) this.#inFlight.delete(id);
+			}
+			socket.send(JSON.stringify({ id, ok: true, result }));
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
+			socket.send(JSON.stringify({ id, ok: false, error: message }));
 		}
 	}
 
-	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
+	async #dispatch(operation: DaemonOperation, socket: IpcConnection, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
 			case "start":
-				return this.#start(operation.spec, operation.owner);
+				return this.#start(operation.spec, operation.owner, operation.replace, operation.awaitReady);
 			case "list": {
 				await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
 				return {
@@ -572,18 +654,29 @@ class DaemonBroker {
 				};
 			}
 			case "logs":
-				return this.#logs(operation);
+				return this.#logs(operation, signal);
 			case "wait":
-				return this.#wait(operation);
+				return this.#wait(operation, signal);
+			case "cancel": {
+				const inFlight = this.#inFlight.get(operation.requestId);
+				if (!inFlight || inFlight.socket !== socket) return { op: "cancel", cancelled: false };
+				this.#inFlight.delete(operation.requestId);
+				inFlight.controller.abort();
+				return { op: "cancel", cancelled: true };
+			}
 			case "send":
 				return this.#send(operation);
 			case "stop": {
 				const record = this.#record(operation.name);
-				await this.#stopRecord(record, operation.timeoutMs);
+				if (operation.id === undefined || operation.id === record.snapshot.id) {
+					await this.#stopRecord(record, operation.timeoutMs);
+				}
 				return { op: "stop", daemon: record.snapshot };
 			}
 			case "restart":
 				return this.#restart(operation.name);
+			case "mode":
+				return this.#mode(operation);
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
@@ -594,7 +687,7 @@ class DaemonBroker {
 		}
 	}
 
-	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
+	async #start(spec: DaemonSpec, owner?: string, replace = false, awaitReady = true): Promise<DaemonRpcResult> {
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -617,11 +710,15 @@ class DaemonBroker {
 			const existing = this.#records.get(spec.name);
 			if (existing) await this.#refreshDetached(existing);
 			if (existing && !terminalState(existing.snapshot.state)) {
-				throw new Error(`Daemon ${spec.name} is already ${existing.snapshot.state}`);
+				if (!replace) throw new Error(`Daemon ${spec.name} is already ${existing.snapshot.state}`);
+				await this.#stopRecord(existing, 2_000);
+				if (!terminalState(existing.snapshot.state)) throw new Error(`Daemon ${spec.name} did not stop`);
 			}
-			if (existing && existing.pendingCompletions.length > 0) {
+			if (existing && existing.pendingCompletions.length > 0 && !replace) {
 				throw new Error(`Daemon ${spec.name} has unacknowledged completion notifications`);
 			}
+			// The replaced generation's log writer must finish before its files are discarded.
+			await existing?.log?.close();
 			if (spec.ready?.log) {
 				try {
 					new RegExp(spec.ready.log, "u");
@@ -648,7 +745,7 @@ class DaemonBroker {
 					detached: spec.detached,
 				},
 				dir,
-				log: await DaemonLog.open(dir),
+				log: await DaemonLog.create(dir),
 				generation: 0,
 				stopRequested: false,
 				logReady: !spec.ready?.log,
@@ -660,7 +757,7 @@ class DaemonBroker {
 				persistQueue: Promise.resolve(),
 				completionCapable: owner !== undefined && this.#completionSubscriptions.has(owner),
 				completionSubscriptionId: owner === undefined ? undefined : this.#completionSubscriptions.get(owner),
-				pendingCompletions: [],
+				pendingCompletions: replace ? (existing?.pendingCompletions ?? []) : [],
 			};
 			syncReadyPending(record);
 			this.#records.set(spec.name, record);
@@ -669,7 +766,7 @@ class DaemonBroker {
 		}
 		await this.#launch(record);
 		let readyTimedOut = false;
-		if (spec.ready && !terminalState(record.snapshot.state)) {
+		if (spec.ready && awaitReady && !terminalState(record.snapshot.state)) {
 			// Wake on the sticky readyAt marker or any terminal state, not the live
 			// state: a fast process flips starting→ready→exited within one poll
 			// interval, so sampling `state === "ready"` never observes readiness even
@@ -691,6 +788,8 @@ class DaemonBroker {
 		const generation = record.generation;
 		record.stopRequested = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
+		record.snapshot.persist = record.spec.persist;
+		record.snapshot.detached = record.spec.detached;
 		record.snapshot.startedAt = Date.now();
 		record.snapshot.readyAt = undefined;
 		record.snapshot.exitedAt = undefined;
@@ -729,7 +828,19 @@ class DaemonBroker {
 		// Nothing plays terminal for a supervised PTY, so a program probing for
 		// cursor position or device attributes would block on the reply. Answer
 		// the queries from the output stream and write the replies to its stdin.
-		const responder = new TerminalQueryResponder();
+		//
+		// On Windows ConPTY sits in between and forwards a program's probes
+		// rather than answering them (current conhost leaves replies to the
+		// terminal; older builds answer from the console buffer and never put
+		// the probe on this stream). ConPTY also sends queries of its own and
+		// consumes their replies: device attributes at session start and cursor
+		// resyncs later, all answered here. The one exception is its
+		// INHERIT_CURSOR handshake, the first `CSI 6 n` on the stream, which the
+		// PTY layer answers before the child owns stdin
+		// (crates/pi-natives/src/pty.rs). ConPTY consumes one report for it;
+		// replying again would put a second report on the program's stdin,
+		// where the console decodes it as a keypress.
+		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
@@ -766,7 +877,7 @@ class DaemonBroker {
 			);
 		} else {
 			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${argv.map(quoteShellArg).join(" ")}`;
+			const command = `exec ${quotePosixArgv(argv)}`;
 			const shell = procmgr.getShellConfig().shell;
 			run = session.start({ command, shell, ...options }, onChunk, onStart);
 		}
@@ -943,8 +1054,8 @@ class DaemonBroker {
 		pending.set(completion.completionId, completion);
 		this.#pendingCompletions.set(completion.owner, pending);
 		const registration = this.#ownerSockets.get(completion.owner);
-		if (!registration || registration.socket.destroyed) return;
-		registration.socket.write(`${JSON.stringify(completion)}\n`);
+		if (!registration || registration.socket.closed) return;
+		registration.socket.send(JSON.stringify(completion));
 	}
 
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
@@ -1025,7 +1136,7 @@ class DaemonBroker {
 		this.#scheduleIdleShutdown();
 	}
 
-	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>): Promise<DaemonRpcResult> {
+	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
 		await this.#refreshDetached(record);
 		const cursor = operation.cursor ?? record.snapshot.outputBytes;
@@ -1035,7 +1146,9 @@ class DaemonBroker {
 				record,
 				() => record.snapshot.outputBytes > cursor || terminalState(record.snapshot.state),
 				operation.timeoutMs,
+				signal,
 			);
+			if (signal?.aborted) throw new Error(`Daemon ${operation.name} logs request cancelled`);
 			timedOut = !changed;
 		}
 		const lines = Math.max(1, Math.min(1_000, Math.floor(operation.lines)));
@@ -1069,7 +1182,7 @@ class DaemonBroker {
 		};
 	}
 
-	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>): Promise<DaemonRpcResult> {
+	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
 		// A wait observes exactly one launch generation. Automatic or explicit
 		// relaunches reuse the managed record, so polling the record without this
@@ -1097,16 +1210,21 @@ class DaemonBroker {
 			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
-				if (!match) return false;
-				matched = match[0].slice(0, 500);
-				return true;
+				if (match) {
+					matched = match[0].slice(0, 500);
+					return true;
+				}
+				// No further output can arrive once the process is gone; blocking
+				// for the full window would hide the exit behind a bogus timeout.
+				return terminalState(record.snapshot.state);
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
 			// Wake on observed readiness or any terminal state so the wait never
 			// blocks for the full timeout; success is judged by readyObserved below.
 			return readyObserved() || terminalState(record.snapshot.state);
 		};
-		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs, signal));
+		if (signal?.aborted) throw new Error(`Daemon ${operation.name} wait cancelled`);
 		if (generationEnded()) {
 			const exit = record.snapshot.exitCode === undefined ? "" : ` with exit code ${record.snapshot.exitCode}`;
 			throw new Error(
@@ -1133,7 +1251,8 @@ class DaemonBroker {
 		if (operation.data !== undefined) {
 			if (record.pty) record.pty.write(operation.data);
 			else if (record.input) {
-				record.input.write(operation.data);
+				// PTYs interpret Enter as CR; pipe-backed shells require LF to end a line.
+				record.input.write(operation.data.endsWith("\r") ? `${operation.data.slice(0, -1)}\n` : operation.data);
 				await record.input.flush();
 			} else throw new Error(`Daemon ${operation.name} stdin is unavailable`);
 		}
@@ -1179,14 +1298,48 @@ class DaemonBroker {
 		await record.log?.close();
 		record.log = await DaemonLog.open(record.dir);
 		record.stopRequested = false;
+		// Settled history does not need subscription writes, but a new generation
+		// must persist the owner's current capability for crash recovery.
+		const owner = record.snapshot.owner;
+		record.completionCapable = owner !== undefined && this.#completionSubscriptions.has(owner);
+		record.completionSubscriptionId = owner === undefined ? undefined : this.#completionSubscriptions.get(owner);
 		await this.#launch(record);
 		await record.persistQueue;
 		return { op: "restart", daemon: record.snapshot };
 	}
 
-	async #waitUntil(record: ManagedDaemon, condition: () => boolean, timeoutMs: number): Promise<boolean> {
+	async #mode(operation: Extract<DaemonOperation, { op: "mode" }>): Promise<DaemonRpcResult> {
+		const record = this.#record(operation.name);
+		await this.#refreshDetached(record);
+		if (terminalState(record.snapshot.state) || record.snapshot.state === "stopping") {
+			throw new Error(`Daemon ${operation.name} is ${record.snapshot.state}`);
+		}
+		if (operation.mode === "detached") {
+			if (!record.spec.detached) {
+				record.spec = { ...record.spec, detached: true, pty: false, persist: true };
+				await this.#restart(operation.name);
+			}
+		} else {
+			if (record.spec.detached && operation.mode === "session") {
+				throw new Error(`Detached daemon ${operation.name} must remain persistent`);
+			}
+			record.spec = { ...record.spec, persist: operation.mode === "persist" };
+			record.snapshot.persist = record.spec.persist;
+			this.#persist(record);
+		}
+		await record.persistQueue;
+		return { op: "mode", daemon: record.snapshot };
+	}
+
+	async #waitUntil(
+		record: ManagedDaemon,
+		condition: () => boolean,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		const deadline = Date.now() + Math.max(0, timeoutMs);
 		while (Date.now() < deadline) {
+			if (signal?.aborted) return condition();
 			await this.#refreshDetached(record);
 			if (condition()) return true;
 			if (this.#shuttingDown && terminalState(record.snapshot.state)) return condition();
@@ -1203,12 +1356,9 @@ class DaemonBroker {
 		throw new Error(`Unknown daemon ${name}${names.length ? `. Available: ${names.join(", ")}` : ""}`);
 	}
 
-	#persist(record: ManagedDaemon): void {
-		const metaPath = path.join(record.dir, META_FILE);
-		const tempPath = `${metaPath}.${process.pid}.tmp`;
-		const metadata = {
+	#serializeMetadata(record: ManagedDaemon): string {
+		return JSON.stringify({
 			daemon: { ...record.snapshot },
-			spec: record.spec,
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
 			completionPending: record.pendingCompletions.length > 0,
@@ -1217,13 +1367,27 @@ class DaemonBroker {
 				...completion,
 				daemon: { ...completion.daemon },
 			})),
-		};
+		});
+	}
+
+	#persist(record: ManagedDaemon): void {
+		const spec = JSON.stringify(record.spec);
+		const metadata = this.#serializeMetadata(record);
+		const writeSpec = spec !== record.persistedSpec;
+		const writeMeta = metadata !== record.persistedMeta;
+		if (!writeSpec && !writeMeta) return;
+		record.persistedSpec = spec;
+		record.persistedMeta = metadata;
 		record.persistQueue = record.persistQueue
 			.then(async () => {
-				await Bun.write(tempPath, JSON.stringify(metadata));
-				await fs.rename(tempPath, metaPath);
+				// Spec first: recovery must never find metadata whose spec is not on disk.
+				if (writeSpec) await writeFileAtomic(path.join(record.dir, DAEMON_SPEC_FILE), spec);
+				if (writeMeta) await writeFileAtomic(path.join(record.dir, DAEMON_META_FILE), metadata);
 			})
 			.catch(error => {
+				// Unknown on-disk state: force the next persist to write both files.
+				record.persistedSpec = undefined;
+				record.persistedMeta = undefined;
 				logger.warn("Failed to persist daemon metadata", {
 					name: record.snapshot.name,
 					error: error instanceof Error ? error.message : String(error),
@@ -1235,6 +1399,9 @@ class DaemonBroker {
 		const subscriptionId = capable ? this.#completionSubscriptions.get(owner) : undefined;
 		const persistence: Promise<void>[] = [];
 		for (const record of this.#records.values()) {
+			// A settled record has no future completion to deliver once its pending
+			// events are acknowledged. Rebinding the owner must not rewrite its history.
+			if (terminalState(record.snapshot.state) && record.pendingCompletions.length === 0) continue;
 			const clearPendingCompletions = !capable && record.pendingCompletions.length > 0;
 			if (
 				record.snapshot.owner !== owner ||
@@ -1263,12 +1430,11 @@ class DaemonBroker {
 			if (!entry.isDirectory()) continue;
 			const dir = path.join(root, entry.name);
 			try {
-				const decoded: unknown = await Bun.file(path.join(dir, META_FILE)).json();
-				if (typeof decoded !== "object" || decoded === null || !("daemon" in decoded) || !("spec" in decoded)) {
-					continue;
-				}
+				const stored = await readStoredDaemonRecord(dir);
+				if (!stored) continue;
+				const { meta: decoded, spec: storedSpec, legacyLayout } = stored;
 				const snapshot = parseDaemonSnapshot(decoded.daemon);
-				const spec = parseDaemonSpec(decoded.spec);
+				const spec = parseDaemonSpec(storedSpec);
 				const processRef = snapshot.pid === undefined ? null : Process.fromPid(snapshot.pid);
 				const recoverableExit = !terminalState(snapshot.state) && snapshot.state !== "stopping";
 				const detached = spec.detached && recoverableExit && processRef?.status() === "running";
@@ -1299,6 +1465,9 @@ class DaemonBroker {
 					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
+					// Legacy files are rewritten once into the split layout.
+					persistedSpec: legacyLayout ? undefined : JSON.stringify(storedSpec),
+					persistedMeta: legacyLayout ? undefined : JSON.stringify(decoded),
 					completionCapable: "completionEvents" in decoded && decoded.completionEvents === true,
 					completionSubscriptionId:
 						"completionSubscriptionId" in decoded && typeof decoded.completionSubscriptionId === "string"
@@ -1357,6 +1526,8 @@ class DaemonBroker {
 						});
 					});
 				}
+				// Recovery may only change a subset of records; #persist writes only
+				// the files whose serialized form differs from what was read.
 				this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {
@@ -1385,11 +1556,47 @@ class DaemonBroker {
 			})();
 		}, this.#idleGraceMs);
 	}
+
+	/**
+	 * Give up the scope once the socket file is gone. The native lease outlives a
+	 * deleted runtime dir, so a broker that kept running would hold the scope
+	 * while every new broker exits on the held lease and every new client fails
+	 * with `connect ENOENT`. Shutting down releases the lease, and the next client
+	 * spawns a broker that rebuilds the scope.
+	 */
+	#watchEndpoint(): void {
+		this.#endpointTimer = setInterval(() => {
+			void fs
+				.stat(this.#endpoint)
+				.then(
+					() => undefined,
+					error => {
+						if (!isEnoent(error) || this.#shuttingDown) return;
+						logger.warn("Daemon broker socket was deleted; releasing the scope", { endpoint: this.#endpoint });
+						return this.shutdown();
+					},
+				)
+				.catch(error => {
+					logger.warn("Daemon broker shutdown after socket loss failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}, this.#endpointCheckMs);
+		this.#endpointTimer.unref();
+	}
 }
 
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
+	/** How often the broker checks that its socket file still exists. */
+	endpointCheckMs?: number;
+	/**
+	 * Called once the broker accepts connections. An embedding host connects its
+	 * clients after this; a client that connects earlier finds no endpoint and
+	 * spawns a competing broker process.
+	 */
+	onListening?: () => void;
 }
 
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
@@ -1409,11 +1616,14 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const lease = await acquireBrokerLease(runtimeDir);
+	const endpoint = daemonBrokerEndpoint(runtimeDir);
+	// Hold the lease for the whole broker lifetime: it is a native lock the OS
+	// releases on exit, so keeping `lease` referenced keeps the scope owned.
+	const lease = await acquireBrokerLease(runtimeDir, endpoint);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
 	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
-	// dir back to its project (and derive the Windows pipe name) offline.
+	// dir back to its project offline.
 	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
 		logger.warn("Failed to record daemon scope metadata", {
 			error: error instanceof Error ? error.message : String(error),
@@ -1428,10 +1638,17 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	});
 	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
 	if (!token) throw new Error("Daemon broker token is empty");
-	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
+	const broker = new DaemonBroker(
+		projectDir,
+		runtimeDir,
+		token,
+		idleGraceMs,
+		restartBackoffBaseMs,
+		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
+	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
-		await broker.run();
+		await broker.run(options.onListening);
 	} finally {
 		cancelCleanup();
 		await releaseBrokerLease(lease);

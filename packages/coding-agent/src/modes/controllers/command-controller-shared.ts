@@ -9,10 +9,10 @@
  */
 import { Text } from "@oh-my-pi/pi-tui";
 import type { SourceMeta } from "../../capability/types";
-import { shortenPath } from "../../tools/render-utils";
-import { DynamicBorder } from "../components/dynamic-border";
-import { TranscriptBlock } from "../components/transcript-container";
-import { parseCommandArgs } from "../shared";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { parseCommandArgs } from "../../utils/command-args";
 import type { InteractiveModeContext } from "../types";
 
 export type ScopeValue = "project" | "user";

@@ -5,8 +5,8 @@
  * this interceptor provides helpful error messages directing them to use
  * the specialized tools instead.
  */
-import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../config/settings-schema";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
+import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */

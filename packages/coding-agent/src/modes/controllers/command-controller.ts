@@ -10,8 +10,20 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Loader,
+	Markdown,
+	padding,
+	parseSgrMouse,
+	Spacer,
+	Text,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -29,20 +41,34 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
-import { BorderedLoader } from "../../modes/components/bordered-loader";
-import { DynamicBorder } from "../../modes/components/dynamic-border";
-import { EvalExecutionComponent } from "../../modes/components/eval-execution";
-import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
-import { TranscriptBlock } from "../../modes/components/transcript-container";
-import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
+import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
+import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
+import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { moveDirectorySource } from "../move-directory-source";
+import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
-import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
-import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
+import { continuesConversation } from "../utils/conversation-position";
+import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
+import type { OverlayHandle } from "@oh-my-pi/pi-tui";
+import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
+import type { TspText } from "@oh-my-pi/pi-wire";
+import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { buildSessionContextView } from "../../session/context-view";
+import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
+import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
+import {
+	currentRuntimeIdentity,
+	formatRuntimeIdentity,
+	runtimeIdentityHistory,
+	sameRuntimeIdentity,
+} from "../../session/runtime-identity";
 import type { NewSessionOptions } from "../../session/session-entries";
 import {
 	cleanSourceCheckoutIfConfigured,
@@ -52,37 +78,230 @@ import {
 	type SessionWorktree,
 } from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
-import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
-import { formatProviderName } from "../../slash-commands/helpers/format";
+import {
+	codexUsagePlan,
+	formatActiveAccountLabel,
+	formatCodexUsageReportLabel,
+	limitMatchesActiveAccount,
+} from "../../slash-commands/helpers/active-oauth-account";
+import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
+import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { resolveTernPane } from "../../tools/browser/tern/kind";
+import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
-	RECENT_CHANGELOG_ENTRY_LIMIT,
+	parseChangelogView,
 	renderChangelogEntries,
+	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { formatDumpArchiveReport, type SessionDumpArchive } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
+import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import {
+	collapseSharedUsageReports,
+	formatLimitTitle,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
+import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+
+import { cfgTerminalShowImages } from "../settings";
+import { cfgProviderAppendOnlyContext } from "../../session/settings";
+import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
+import {
+	createDefaultTerminalLaunchRequest,
+	getTerminalLaunchPlacement,
+	launchTerminal,
+	TerminalLaunchError,
+	type TerminalLaunchRequest,
+	type TerminalLaunchResult,
+} from "../../subprocess/terminal-launch";
+import { resolveCliEntryCmd } from "../../subprocess/worker-client";
+
+/** How long `/fork` waits for Tern to open the fork's pane. */
+const TERN_FORK_TIMEOUT_MS = 10_000;
+
+/** Fork failures after which Tern may still open the pane, so `/fork` must not also fork in place. */
+const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: true, timeout: true, protocol: true };
+
+/** Rows `/session` spends on the builds that wrote the session, including the elision row. */
+const MAX_LISTED_BUILDS = 5;
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
-	const block = new TranscriptBlock();
-	block.addChild(new DynamicBorder());
-	block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-	block.addChild(new Spacer(1));
-	block.addChild(new Markdown(markdown.trim(), 1, 1, getMarkdownTheme()));
-	block.addChild(new DynamicBorder());
-	ctx.presentCommandOutput(block);
+interface ForkTerminalDependencies {
+	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
+	environment: () => NodeJS.ProcessEnv;
+	launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
+	resolveCliEntryCmd: typeof resolveCliEntryCmd;
+	getActiveProfile: typeof getActiveProfile;
+	argv: () => string[];
+}
+
+/**
+ * Startup flags the fork child re-supplies from the parent's live state
+ * (`--profile`, `--model`, `--thinking`, `--prompt-cache-key`) or that would
+ * re-point it at a stale scope (`--config`/`--cwd`/`--provider`; the child
+ * gets the effective overlays via `PI_CONFIG_FILES` and the session cwd).
+ */
+const FORK_LAUNCH_OVERRIDES: Readonly<Record<string, true>> = {
+	"--config": true,
+	"--cwd": true,
+	"--model": true,
+	"--profile": true,
+	"--prompt-cache-key": true,
+	"--provider": true,
+	"--thinking": true,
+};
+
+/**
+ * `env` prefix pinning each scope variable for the fork child. Multiplexer
+ * servers keep stale environment snapshots, so every variable is pinned:
+ * defined values are assigned, absent (or empty) ones are unset with `-u`
+ * (which must precede the assignments) rather than exported as empty strings
+ * that `??`-style consumers would treat as a set, relative path.
+ */
+function forkScopeEnvCommand(scope: Readonly<Record<string, string | undefined>>): string[] {
+	const unset: string[] = [];
+	const assignments: string[] = [];
+	for (const [name, value] of Object.entries(scope)) {
+		if (value) assignments.push(`${name}=${value}`);
+		else unset.push("-u", name);
+	}
+	return ["env", ...unset, ...assignments];
+}
+
+function hasForkApiKeyOverride(argv: string[]): boolean {
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "--api-key" || arg.startsWith("--api-key=")) return true;
+		if (flagConsumesValue(arg, argv[i + 1])) i++;
+	}
+	return false;
 }
 
 export class CommandController {
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	/** The open native report sheet and the component it shows. */
+	#reportSheet: { handle: OverlayHandle; component: Component } | undefined;
+	#forkTerminalDependencies: ForkTerminalDependencies;
+	/** The watcher serving the queued `/compact`, while one runs. */
+	#yieldCompactionWatcher: Promise<void> | undefined;
+
+	constructor(
+		private readonly ctx: InteractiveModeContext,
+		forkTerminalDependencies: Partial<ForkTerminalDependencies> = {},
+	) {
+		this.#forkTerminalDependencies = {
+			classifyTerminalMultiplexer,
+			environment: () => process.env,
+			launchTerminal,
+			resolveCliEntryCmd,
+			getActiveProfile,
+			argv: () => process.argv.slice(2),
+			...forkTerminalDependencies,
+		};
+	}
+
+	/** Esc: take away the report shown above the editor (text mode); false when none is shown. */
+	dismissCommandReport(): boolean {
+		return this.#clearReport();
+	}
+
+	/**
+	 * Drop any report — the one above the editor, or a focused sheet/page —
+	 * because the transcript or session under it was reset, and its contents
+	 * describe what is gone.
+	 */
+	clearCommandReport(): void {
+		this.#clearReport();
+		this.#closeReportSheet();
+	}
+
+	#clearReport(): boolean {
+		const docked = this.ctx.reportContainer;
+		if (docked.children.length === 0) return false;
+		docked.dispose();
+		docked.clear();
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
+	#closeReportSheet(): void {
+		const sheet = this.#reportSheet;
+		if (!sheet) return;
+		this.#reportSheet = undefined;
+		sheet.handle.hide();
+		// Like the docked report, a closed sheet is never shown again.
+		sheet.component.dispose?.();
+		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
+	/** Open `component` as a focused full-screen page; callers close any previous sheet first. */
+	#showFullscreenSheet(component: Component): void {
+		const handle = this.ctx.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.#reportSheet = { handle, component };
+		this.ctx.ui.setFocus(component);
+	}
+
+	/**
+	 * Show a read-only report, replacing the previous one. In text mode one that
+	 * fits the rows above the editor shows there like `/btw`: the editor keeps
+	 * focus and its Esc takes the report away. A taller one opens as a
+	 * full-screen page on the terminal's alternate screen, scrolled with the
+	 * arrow/page keys and the wheel, so the main screen is never touched and
+	 * Esc returns to it as it was. Natively it is a focused sheet like
+	 * `/usage`, its body scrolled by the terminal once it is long, closed by
+	 * Esc or Close.
+	 */
+	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+		this.#clearReport();
+		this.#closeReportSheet();
+		const terminal = this.ctx.ui.terminal;
+		const inline = this.ctx.commandReportRows() ?? terminal.rows;
+		let fullScreen = false;
+		const report = new ReportPanel({
+			...options,
+			closeKey: appKey(this.ctx.keybindings, "app.interrupt"),
+			onClose: () => this.#closeReportSheet(),
+			maxRows: () => (fullScreen ? terminal.rows : this.ctx.commandReportRows()),
+		});
+		if (isNativeRendering()) {
+			report.holdFocus();
+			this.#reportSheet = {
+				handle: this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" }),
+				component: report,
+			};
+			this.ctx.ui.setFocus(report);
+		} else if (report.heightAt(terminal.columns) > inline) {
+			fullScreen = true;
+			report.holdFocus();
+			this.#showFullscreenSheet(report);
+		} else {
+			this.ctx.reportContainer.addChild(report);
+		}
+		this.ctx.ui.requestRender();
+	}
+
+	/** A titled markdown report; see {@link showCommandReport}. */
+	#showMarkdownPanel(title: string, markdown: string): void {
+		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+	}
 
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
@@ -146,7 +365,9 @@ export class CommandController {
 				return;
 			}
 
-			const filePath = await this.ctx.session.exportToHtml(outputPath, useUserThemes);
+			// The viewed session: the focused subagent's transcript (plus its own
+			// subagents) from a focused view, otherwise the main session.
+			const filePath = await this.ctx.viewSession.exportToHtml(outputPath, useUserThemes);
 			this.ctx.showStatus(`Session exported to: ${filePath}`);
 			this.openInBrowser(filePath);
 		} catch (error: unknown) {
@@ -198,6 +419,30 @@ export class CommandController {
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+
+	handleDumpAllCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpSessionArchiveToTmpDir());
+	}
+
+	handleDumpAnonCommand(): Promise<void> {
+		return this.#writeDumpArchive(() => this.ctx.session.dumpAnonymizedArchiveToTmpDir());
+	}
+
+	async #writeDumpArchive(write: () => Promise<SessionDumpArchive | undefined>): Promise<void> {
+		try {
+			const archive = await write();
+			if (!archive) {
+				this.ctx.showError("No messages to dump yet.");
+				return;
+			}
+			await copyToClipboard(archive.path);
+			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Failed to write session dump: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -303,10 +548,10 @@ export class CommandController {
 		// server; the key rides in the link fragment and never leaves the client.
 		try {
 			const result = await shareSession(this.ctx.session.sessionManager, {
-				serverUrl: this.ctx.settings.get("share.serverUrl"),
-				store: this.ctx.settings.get("share.store"),
+				serverUrl: cfgShareServerUrl.get(this.ctx.settings),
+				store: cfgShareStore.get(this.ctx.settings),
 				state: this.ctx.session.state,
-				obfuscator: this.ctx.settings.get("share.redactSecrets") ? this.ctx.session.obfuscator : undefined,
+				obfuscator: cfgShareRedactSecrets.get(this.ctx.settings) ? this.ctx.session.obfuscator : undefined,
 			});
 			if (loader.signal.aborted) return;
 			restoreEditor();
@@ -335,16 +580,30 @@ export class CommandController {
 		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
+		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
+		const running = currentRuntimeIdentity();
+		// A source checkout's diff hash changes with each edit, so a long-lived session can collect
+		// many builds: keep the first and the latest few. Every row is keyed so the overlay never
+		// mistakes a colourless continuation row for a section heading.
+		const hidden = builds.length > MAX_LISTED_BUILDS ? builds.length - MAX_LISTED_BUILDS + 1 : 0;
+		for (const [index, build] of builds.entries()) {
+			if (hidden > 0 && index > 0 && index <= hidden) {
+				if (index === 1) info += `${theme.fg("dim", `Builds 2–${hidden + 1}:`)} ${hidden} more\n`;
+				continue;
+			}
+			const key = builds.length === 1 ? "Build:" : `Build ${index + 1}:`;
+			info += `${theme.fg("dim", key)} ${replaceTabs(sanitizeText(formatRuntimeIdentity(build)))}\n`;
+		}
+		if (!sameRuntimeIdentity(builds[builds.length - 1], running)) {
+			info += `${theme.fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
+		}
 		info += `\n${theme.bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
 			info += `${theme.fg("dim", "No model selected")}\n`;
 		} else {
 			const authMode = resolveProviderAuthMode(this.ctx.session.modelRegistry.authStorage, model.provider);
-			const openaiWebsocketSetting = this.ctx.settings.get("providers.openaiWebsockets") ?? "auto";
-			const preferOpenAICodexWebsockets =
-				openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-			const credentialSource = this.ctx.session.modelRegistry.authStorage.describeCredentialSource(
+			const credentialSource = this.ctx.session.modelRegistry.authStorage.keys.describe(
 				model.provider,
 				stats.sessionId,
 			);
@@ -353,7 +612,7 @@ export class CommandController {
 				sessionId: stats.sessionId,
 				authMode,
 				credentialSource,
-				preferWebsockets: preferOpenAICodexWebsockets,
+				preferWebsockets: this.ctx.session.preferWebsockets,
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
 			info += renderProviderSection(providerDetails, theme);
@@ -372,10 +631,20 @@ export class CommandController {
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
 		info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
+		if (stats.editRejections !== undefined) {
+			const kinds = Object.entries(stats.editRejections).sort(
+				([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind),
+			);
+			const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+			const breakdown = kinds
+				.map(([kind, count]) => `${replaceTabs(sanitizeText(kind.replaceAll("_", " ")))} ${count}`)
+				.join(", ");
+			info += `${theme.fg("dim", "Edit Rejections:")} ${total} ${theme.fg("dim", `(${breakdown})`)}\n`;
+		}
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{
-			const setting = this.ctx.settings.get("provider.appendOnlyContext") ?? "auto";
+			const setting = cfgProviderAppendOnlyContext.get(this.ctx.settings);
 			const model = this.ctx.session.model;
 			const mode = shouldEnableAppendOnlyContext(setting, model);
 			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");
@@ -439,7 +708,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info);
+		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage());
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -461,33 +730,29 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.ctx.presentCommandOutput([new Spacer(1), new Text("Advisor is disabled.", 1, 0)]);
+			this.showCommandReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
 			return;
 		}
-		// Fetch live quota data (cached 5 min by the auth-gateway) so we can show
-		// real usage windows/reset timers per advisor provider. Non-fatal when absent.
-		const usageProvider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
-		let usageReports: UsageReport[] | null = null;
-		if (usageProvider.fetchUsageReports) {
-			try {
-				usageReports = await usageProvider.fetchUsageReports();
-			} catch {
-				// Network/auth failure is non-fatal — just skip the quota line.
-			}
-		}
+		// Render cached quota data without waiting for the network. Quota lines
+		// are optional, and the refresh below serves the next invocation.
+		const usageProvider = this.ctx.session as {
+			cachedUsageReports?: UsageReport[];
+			fetchUsageReports?: () => Promise<UsageReport[] | null>;
+		};
+		const usageReports: UsageReport[] | null = usageProvider.cachedUsageReports ?? null;
+		// Warm the snapshot for the next invocation. The fetch logs its own
+		// failures, and a missing quota line is non-fatal by design.
+		void usageProvider.fetchUsageReports?.().catch(() => {});
 		// Resolve the active OAuth identity for each advisor's provider so quota
 		// filtering matches the credential actually in use (not sibling accounts).
 		const resolveActiveAdvisorAccount = (provider: string, sessionId?: string): OAuthAccountIdentity | undefined =>
-			this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-				provider,
-				sessionId ?? this.ctx.session.sessionId,
-			);
+			this.ctx.session.modelRegistry.authStorage.oauth.identity(provider, sessionId ?? this.ctx.session.sessionId);
 		const nowMs = Date.now();
 		// Roster view: show every configured advisor with its status, even when
 		// none are live (all paused/no-model). The old code returned a generic
 		// message that hid the per-advisor state the user needs to act on.
 		if (stats.advisors.length > 1 || (stats.configured && !stats.active)) {
-			let info = `${theme.bold("Advisor Status")} (${stats.advisors.length} advisors)\n`;
+			let info = "";
 			for (const a of stats.advisors) {
 				const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
 				const label = CommandController.#advisorStatusLabel[a.status] ?? a.status;
@@ -502,11 +767,12 @@ export class CommandController {
 					info += `${theme.fg("dim", "Model:")} ${a.model.provider}/${a.model.id}\n`;
 				}
 				if (a.model && usageReports) {
+					const identity = resolveActiveAdvisorAccount(a.model.provider, a.sessionId);
 					const quota = formatCompactQuota(
 						a.model.provider,
-						usageReports,
+						collapseSharedUsageReports(usageReports),
 						nowMs,
-						resolveActiveAdvisorAccount(a.model.provider, a.sessionId),
+						(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 					);
 					if (quota) info += `${theme.fg("dim", quota)}\n`;
 				}
@@ -527,12 +793,15 @@ export class CommandController {
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
 				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.showCommandReport({
+				title: `Advisor Status (${stats.advisors.length} advisors)`,
+				body: new Text(info.trim(), 0, 0),
+			});
 			return;
 		}
 		// Single active advisor — detailed view.
 		const model = stats.model;
-		let info = `${theme.bold("Advisor Status")}\n\n`;
+		let info = "";
 		if (stats.advisors.length === 1) {
 			const a = stats.advisors[0];
 			const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
@@ -544,11 +813,12 @@ export class CommandController {
 			info += `${theme.fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
 		}
 		if (model && usageReports) {
+			const identity = resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId);
 			const quota = formatCompactQuota(
 				model.provider,
-				usageReports,
+				collapseSharedUsageReports(usageReports),
 				nowMs,
-				resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId),
+				(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 			);
 			if (quota) {
 				info += `\n${theme.bold("Quota")}\n`;
@@ -573,44 +843,68 @@ export class CommandController {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		this.showCommandReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
 	}
 
-	async handleJobsCommand(): Promise<void> {
-		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
-		if (!snapshot) {
+	/**
+	 * `/jobs`: natively the live jobs sheet the jobs pill opens (inspect and
+	 * cancel included); `/jobs full`, and text mode, a report of the running
+	 * and recent jobs (see {@link showCommandReport}). Both list the viewed
+	 * session's jobs and its subagents' as a tree (see {@link buildJobTree}).
+	 */
+	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
+		const full = options?.full === true;
+		const tree = this.ctx.viewSession.getAsyncJobTree();
+		if (!tree) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+		if (isNativeRendering() && !full) {
+			this.ctx.showJobsSheet();
 			return;
 		}
 
 		const now = Date.now();
-		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		let info = `${theme.bold("Background Jobs")}\n\n`;
-		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
-
-		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
-			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		const columns = this.ctx.ui.terminal.columns ?? 100;
+		let info = `${theme.fg("dim", "Running:")} ${tree.running.length}\n`;
+		if (tree.running.length === 0 && tree.recent.length === 0) {
+			info += `\n${theme.fg("dim", "No async jobs yet.")}`;
+			this.showCommandReport({ title: "Background Jobs", body: new Text(info, 0, 0) });
 			return;
 		}
 
-		if (snapshot.running.length > 0) {
-			info += `\n${theme.bold("Running Jobs")}\n`;
-			for (const job of snapshot.running) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+		// Lines under a row hang off its tree rails. Full mode wraps here so
+		// every line, including heredoc lines and wrap continuations, keeps that
+		// indent inside the report box.
+		info += "\n";
+		for (const row of buildJobTree([...tree.running, ...tree.recent], tree.agents, tree.rootId)) {
+			const guide = theme.fg("dim", jobTreeGuide(row, theme));
+			if (row.kind === "agent") {
+				info += `${guide}${theme.bold(row.agent.id)}\n`;
+				continue;
+			}
+			const { job } = row;
+			// A spawned subagent's task job takes the agent's id as its id and label: name it once.
+			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
+			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
+			const text = full ? (job.command ?? job.label) : job.label;
+			if (text === job.id) continue;
+			const indent = jobTreeIndent(row, theme);
+			const prefix = theme.fg("dim", indent);
+			if (!full) {
+				const label = truncateJobLabel(text, Math.max(24, columns - 22 - visibleWidth(indent)));
+				info += `${prefix}${theme.fg("dim", label)}\n`;
+				continue;
+			}
+			for (const line of wrapTextWithAnsi(
+				replaceTabs(sanitizeText(text)),
+				Math.max(1, columns - 4 - visibleWidth(indent)),
+			)) {
+				info += `${prefix}${theme.fg("dim", line)}\n`;
 			}
 		}
 
-		if (snapshot.recent.length > 0) {
-			info += `\n${theme.bold("Recent Jobs")}\n`;
-			for (const job of snapshot.recent) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
-			}
-		}
-
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		this.showCommandReport({ title: "Background Jobs", body: new Text(info.trimEnd(), 0, 0) });
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -625,41 +919,56 @@ export class CommandController {
 				usageReports = await provider.fetchUsageReports();
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
-				return;
 			}
 		}
 
-		if (!usageReports || usageReports.length === 0) {
-			this.ctx.showWarning("No usage data available.");
-			return;
-		}
-
-		this.ctx.showUsageDashboard(usageReports);
+		this.ctx.showUsageDashboard(usageReports ?? []);
 	}
 
-	async handleChangelogCommand(showFull = false): Promise<void> {
+	async handleChangelogCommand(args = ""): Promise<void> {
+		const view = parseChangelogView(args);
+		if ("error" in view) {
+			this.ctx.showWarning(view.error);
+			return;
+		}
 		const changelogPath = getChangelogPath();
 		const allEntries = await parseChangelog(changelogPath);
-		const entriesToShow = showFull ? allEntries : allEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
+		const entriesToShow = selectChangelogEntries(allEntries, view);
 		const changelogMarkdown =
 			entriesToShow.length > 0 ? renderChangelogEntries(entriesToShow).markdown : "No changelog entries found.";
-		const title = showFull ? "Full Changelog" : "Recent Changes";
-		const hint = showFull
-			? ""
-			: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
+		const shown = entriesToShow.length;
+		const titleCount = shown > 0 ? shown : view.kind === "last" ? view.count : shown;
+		const title =
+			view.kind === "full"
+				? "Full Changelog"
+				: view.kind === "last"
+					? titleCount === 1
+						? "Last Release"
+						: `Last ${titleCount} Releases`
+					: "Recent Changes";
+		const hint =
+			view.kind === "full"
+				? ""
+				: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
 
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.#showMarkdownPanel(title, changelogMarkdown + hint);
 	}
 
 	handleHotkeysCommand(): void {
-		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
+		const bindings = { keybindings: this.ctx.keybindings };
+		if (isNativeRendering()) {
+			// A native terminal gets a dismissable sheet with keycaps instead of a markdown table.
+			const sheet = new HotkeysSheetComponent(bindings, () => {
+				handle.hide();
+				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+				this.ctx.ui.requestRender();
+			});
+			const handle = this.ctx.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.ctx.ui.setFocus(sheet);
+			this.ctx.ui.requestRender();
+			return;
+		}
+		this.#showMarkdownPanel("Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
 	}
 
 	handleToolsCommand(): void {
@@ -667,23 +976,31 @@ export class CommandController {
 			tools: this.ctx.session.agent.state.tools,
 			xdevTools: this.ctx.session.getXdevToolEntries(),
 		});
-		showMarkdownPanel(this.ctx, "Available Tools", tools);
+		this.#showMarkdownPanel("Available Tools", tools);
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
-		if (breakdown.contextWindow <= 0) {
+		const session = this.ctx.session;
+		if (!session.model) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Text(output, 1, 0));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		// Validate capacity before tokenizing the whole history into a snapshot.
+		const breakdown = computeSessionContextBreakdown(session, { snapcompactSavings: true });
+		if (!(breakdown.contextWindow > 0) || !Number.isFinite(breakdown.contextWindow)) {
+			this.ctx.showWarning("Context usage is unavailable: the model's context window is unknown or invalid.");
+			return;
+		}
+		const data = buildSessionContextView(session, breakdown);
+		this.#clearReport();
+		this.#closeReportSheet();
+		const viewer = new ContextViewer(data, {
+			onClose: () => this.#closeReportSheet(),
+			requestRender: () => this.ctx.ui.requestRender(),
+			getRows: () => this.ctx.ui.terminal.rows,
+		});
+		this.#showFullscreenSheet(viewer);
+		this.ctx.ui.requestRender();
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -693,18 +1010,17 @@ export class CommandController {
 		const backend = await resolveMemoryBackend(this.ctx.settings);
 
 		if (action === "view") {
-			const payload = await backend.buildDeveloperInstructions(agentDir, this.ctx.settings, this.ctx.session);
+			const payload = await backend.buildDeveloperInstructions(
+				agentDir,
+				this.ctx.sessionManager.getCwd(),
+				this.ctx.settings,
+				this.ctx.session,
+			);
 			if (!payload) {
 				this.ctx.showWarning("Memory payload is empty (memory backend off, disabled, or no memory available).");
 				return;
 			}
-			const block = new TranscriptBlock();
-			block.addChild(new DynamicBorder());
-			block.addChild(new Text(theme.bold(theme.fg("accent", "Memory Injection Payload")), 1, 0));
-			block.addChild(new Spacer(1));
-			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
-			block.addChild(new DynamicBorder());
-			this.ctx.presentCommandOutput(block);
+			this.#showMarkdownPanel("Memory Injection Payload", payload);
 			return;
 		}
 
@@ -739,7 +1055,7 @@ export class CommandController {
 					this.ctx.showWarning(`Memory queue is not available for the ${backend.id} backend.`);
 					return;
 				}
-				showMarkdownPanel(this.ctx, "Memory Queue", payload);
+				this.#showMarkdownPanel("Memory Queue", payload);
 			} catch (error) {
 				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -764,7 +1080,7 @@ export class CommandController {
 					this.ctx.showWarning(memoryStatsUnavailableMessage(backend.id, action));
 					return;
 				}
-				showMarkdownPanel(this.ctx, `Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
+				this.#showMarkdownPanel(`Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
 			} catch (error) {
 				this.ctx.showError(`Memory ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -840,7 +1156,7 @@ export class CommandController {
 				.slice()
 				.sort((a, b) => a.id.localeCompare(b.id))
 				.map(summarizeMentalModel);
-			showMarkdownPanel(this.ctx, `Mental Models — ${state.bankId}`, lines.join("\n"));
+			this.#showMarkdownPanel(`Mental Models — ${state.bankId}`, lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`mm list failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -857,11 +1173,7 @@ export class CommandController {
 			const refreshed = model.last_refreshed_at ? `\n_last refreshed: ${model.last_refreshed_at}_` : "";
 			const sourceQuery = model.source_query ? `\n\n**Source query:** ${model.source_query}` : "";
 			const content = (model.content ?? "_(empty — background reflect may still be running)_").trim();
-			showMarkdownPanel(
-				this.ctx,
-				model.name,
-				`**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`,
-			);
+			this.#showMarkdownPanel(model.name, `**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`);
 		} catch (error) {
 			this.ctx.showError(`mm show failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -948,7 +1260,7 @@ export class CommandController {
 				const diff = diffMentalModelContent(before, after);
 				sections.push(`### ${history[i].changed_at}\n\n\`\`\`diff\n${diff}\n\`\`\``);
 			}
-			showMarkdownPanel(this.ctx, `History — ${model.name}`, sections.join("\n\n"));
+			this.#showMarkdownPanel(`History — ${model.name}`, sections.join("\n\n"));
 		} catch (error) {
 			this.ctx.showError(`mm history failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1101,15 +1413,25 @@ export class CommandController {
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
-	async handleDropCommand(): Promise<void> {
+	async handleDeleteCommand(): Promise<void> {
 		if (!this.ctx.sessionManager.getSessionFile()) {
-			this.ctx.showError("Nothing to drop (in-memory session)");
+			this.ctx.showError("Nothing to delete (in-memory session)");
 			return;
 		}
-		await this.#runNewSessionFlow({ drop: true }, "Session dropped");
+		await this.#runNewSessionFlow({ drop: true }, "Session deleted");
 	}
 
-	async handleForkCommand(): Promise<void> {
+	async handleForkCommand(placement?: "pane" | "window"): Promise<void> {
+		if (placement !== undefined) {
+			await this.#handleForkTerminalCommand(placement);
+			return;
+		}
+
+		// A Tern pane fork leaves this session untouched, so it may run mid-turn.
+		if (await this.#forkIntoTernPane()) return;
+
+		// An in-place fork moves this process onto the new file; a running turn
+		// would finish there and leave the original transcript cut mid-turn.
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
 			return;
@@ -1120,6 +1442,12 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
+		// After a `/fork`, the current session ID is changed to the forked one,
+		// so the session ID before the fork is the one we want to show in the hint.
+		const previousSessionId = this.ctx.sessionManager.isSessionOnDisk()
+			? this.ctx.sessionManager.getSessionId()
+			: undefined;
+
 		const success = await this.ctx.session.fork();
 		if (!success) {
 			this.ctx.showError("Fork failed (session not persisted or cancelled)");
@@ -1129,12 +1457,195 @@ export class CommandController {
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 
-		const sessionFile = this.ctx.session.sessionFile;
-		const shortPath = sessionFile ? sessionFile.split("/").pop() : "new session";
 		this.ctx.present([
 			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Session forked to ${shortPath}`)}`, 1, 1),
+			new Text(
+				theme.fg(
+					"accent",
+					previousSessionId
+						? `${theme.status.success} Session forked · return to original: ${resumeCommand(previousSessionId)} or /resume ${previousSessionId}`
+						: `${theme.status.success} Session forked`,
+				),
+				1,
+				1,
+			),
 		]);
+	}
+
+	async #handleForkTerminalCommand(placement: "pane" | "window"): Promise<void> {
+		const dependencies = this.#forkTerminalDependencies;
+		const environment = dependencies.environment();
+		const multiplexer = dependencies.classifyTerminalMultiplexer(environment);
+		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
+		if ("error" in placementInfo) {
+			this.ctx.showError(placementInfo.error);
+			return;
+		}
+
+		if (this.ctx.session.isStreaming) {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Fork while a response is running?",
+				"The child may not include the partial response. Continue opening a fork? The current session will keep running here.",
+			);
+			if (!confirmed) return;
+		}
+
+		const initialSessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!initialSessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session has not been persisted yet.");
+			return;
+		}
+
+		const childArgs = restartArgv(dependencies.argv(), undefined, FORK_LAUNCH_OVERRIDES);
+		if (hasForkApiKeyOverride(childArgs)) {
+			this.ctx.showError(
+				"Cannot open a fork in another terminal when --api-key was supplied at startup; the key cannot be forwarded without exposing it in the multiplexer command. Configure provider credentials in the auth store and retry.",
+			);
+			return;
+		}
+		const shellGrammar = placementInfo.shellGrammar;
+		if (shellGrammar === "posix") {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Confirm destination shell compatibility",
+				"This fork command uses POSIX shell syntax. Continue only if the destination's configured interactive shell accepts POSIX syntax; this cannot be inferred from the current terminal.",
+			);
+			if (!confirmed) {
+				this.ctx.showWarning("Fork cancelled: POSIX shell compatibility was not confirmed for the destination.");
+				return;
+			}
+		}
+
+		try {
+			await this.ctx.sessionManager.flush();
+		} catch (error) {
+			logger.error("Failed to flush the session before opening a terminal fork", { error });
+			this.ctx.showError("Cannot open a fork in another terminal: failed to save the current session.");
+			return;
+		}
+
+		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session is no longer persisted.");
+			return;
+		}
+		const sourceSessionFile = path.resolve(sessionFile);
+		try {
+			await fs.access(sourceSessionFile);
+		} catch {
+			this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
+			return;
+		}
+
+		try {
+			const activeProfile = dependencies.getActiveProfile();
+			const activeModel = this.ctx.session.model;
+			if (activeProfile) childArgs.push("--profile", activeProfile);
+			if (activeModel) childArgs.push("--model", `${activeModel.provider}/${activeModel.id}`);
+			const activeThinkingLevel = this.ctx.session.configuredThinkingLevel();
+			if (activeThinkingLevel !== undefined) childArgs.push("--thinking", activeThinkingLevel);
+			// Forcing --model/--thinking marks the fork's cache shape as changed, which would
+			// drop the inherited key. Automatic candidates travel in the source header;
+			// forwarding them as --prompt-cache-key would bypass their model gate.
+			if (
+				this.ctx.session.agent.promptCacheKey !== undefined ||
+				this.ctx.sessionManager.getHeader()?.taskPromptCacheKey === undefined
+			) {
+				childArgs.push("--prompt-cache-key", this.ctx.session.agent.promptCacheKey ?? this.ctx.session.sessionId);
+			}
+			childArgs.push("--fork", sourceSessionFile);
+			// Pin only non-secret scope variables.
+			const command = [
+				...forkScopeEnvCommand({
+					PI_CODING_AGENT_DIR: this.ctx.settings.getAgentDir(),
+					PI_CONFIG_DIR: getConfigDirName(),
+					OMP_PROFILE: activeProfile,
+					PI_PROFILE: activeProfile,
+					PI_CONFIG_FILES: this.ctx.settings.getConfigFiles().join(path.delimiter),
+					PI_CODING_AGENT_SESSION_DIR: environment.PI_CODING_AGENT_SESSION_DIR,
+					XDG_DATA_HOME: environment.XDG_DATA_HOME,
+					XDG_STATE_HOME: environment.XDG_STATE_HOME,
+					XDG_CACHE_HOME: environment.XDG_CACHE_HOME,
+				}),
+				...dependencies.resolveCliEntryCmd(),
+				...childArgs,
+			];
+			const launchPlan = createDefaultTerminalLaunchRequest(
+				multiplexer,
+				placement,
+				command,
+				this.ctx.sessionManager.getCwd(),
+				shellGrammar,
+			);
+			if ("error" in launchPlan) {
+				this.ctx.showError(launchPlan.error);
+				return;
+			}
+
+			const result = await dependencies.launchTerminal(launchPlan.request);
+			if (result.warning) {
+				this.ctx.showWarning(
+					`Opened a fork in ${placementInfo.displayName}, but ${result.warning} This session continues here.`,
+				);
+				return;
+			}
+			this.ctx.showStatus(
+				`Opened a fork in ${placementInfo.displayName} (${placementInfo.placementLabel}); this session continues here.`,
+			);
+		} catch (error) {
+			logger.error("Failed to open a terminal fork", { multiplexer, error });
+			this.ctx.showError(
+				error instanceof TerminalLaunchError
+					? `Could not open a fork in ${placementInfo.displayName}: ${error.message}`
+					: `Could not open a fork in ${placementInfo.displayName}. See logs for details.`,
+			);
+		}
+	}
+
+	/**
+	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
+	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
+	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 */
+	async #forkIntoTernPane(): Promise<boolean> {
+		const tern = resolveTernPane();
+		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+		const client = new TernSocketClient({ socketPath: tern.socketPath });
+		try {
+			try {
+				await client.connect();
+			} catch (error) {
+				logger.debug("Tern unreachable for /fork; forking in place", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			if (!client.supports("fork")) return false;
+			// The new pane's omp reads the session file as it starts.
+			await this.ctx.session.flushToDisk();
+			try {
+				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+			} catch (error) {
+				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
+					const details = { kind: error.kind, error: error.message };
+					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
+					else logger.debug("Tern refused the fork; forking in place", details);
+					return false;
+				}
+				this.ctx.showError(
+					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return true;
+			}
+		} finally {
+			client.close();
+		}
+		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
+		this.ctx.present([
+			new Spacer(1),
+			new Text(theme.fg("accent", `${theme.status.success} Session forked into a new pane${note}`), 1, 1),
+		]);
+		return true;
 	}
 
 	/**
@@ -1157,7 +1668,8 @@ export class CommandController {
 		// No argument in TUI mode: open the path autocomplete overlay.
 		if (!input) {
 			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) => new MoveOverlay(this.ctx.sessionManager.getCwd(), done),
+				(_tui, _theme, _keybindings, done) =>
+					new MoveOverlay(this.ctx.sessionManager.getCwd(), done, moveDirectorySource),
 				{ overlay: true },
 			);
 			if (!result) return; // cancelled
@@ -1193,19 +1705,24 @@ export class CommandController {
 				this.ctx.showError(`Cannot create "${path.basename(resolvedPath)}": parent directory does not exist`);
 				return;
 			}
-			const confirmed = await this.ctx.showHookConfirm(
-				"Create directory?",
-				`"${path.basename(resolvedPath)}" does not exist. Create it?`,
-			);
-			if (!confirmed) return;
-			try {
-				await fs.mkdir(resolvedPath, { recursive: true });
-			} catch (err) {
-				this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
-				return;
-			}
 		}
-		if (await this.#relocateSession(resolvedPath)) {
+		const moved = await this.#withSessionMove(async () => {
+			if (!isDirectory) {
+				const confirmed = await this.ctx.showHookConfirm(
+					"Create directory?",
+					`"${path.basename(resolvedPath)}" does not exist. Create it?`,
+				);
+				if (!confirmed) return false;
+				try {
+					await fs.mkdir(resolvedPath, { recursive: true });
+				} catch (err) {
+					this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
+					return false;
+				}
+			}
+			return this.#relocateSession(resolvedPath);
+		});
+		if (moved) {
 			this.ctx.present([
 				new Spacer(1),
 				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
@@ -1215,41 +1732,53 @@ export class CommandController {
 
 	/**
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
-	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
-	 * then relocate the session there like `/move`.
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
+	 * unless `keepChanges` is false, then relocate the session there like `/move`.
+	 * Returns the worktree only when the session now lives in it.
 	 */
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(
+		branch?: string,
+		options: { keepChanges?: boolean } = {},
+	): Promise<SessionWorktree | undefined> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
-			return;
+			return undefined;
 		}
-		const branchName = branch?.trim() || defaultSessionWorktreeBranch();
-		const cwd = this.ctx.sessionManager.getCwd();
-		this.ctx.statusContainer.disposeChildren();
-		const loader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			`Creating worktree on ${branchName}…`,
-			getSymbolTheme().spinnerFrames,
-		);
-		this.ctx.statusContainer.addChild(loader);
-		this.ctx.ui.requestRender();
-		let worktree: SessionWorktree;
-		try {
-			worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
-		} catch (err) {
-			this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
-			return;
-		} finally {
-			loader.stop();
+		let created: SessionWorktree | undefined;
+		await this.#withSessionMove(async () => {
+			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
+			const cwd = this.ctx.sessionManager.getCwd();
 			this.ctx.statusContainer.disposeChildren();
-		}
-		if (worktree.cloneError) {
-			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
-		}
-		if (await this.#relocateSession(worktree.path)) {
-			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			const loader = new Loader(
+				this.ctx.ui,
+				spinner => theme.fg("accent", spinner),
+				text => theme.fg("muted", text),
+				`Creating worktree on ${branchName}…`,
+				getSymbolTheme().spinnerFrames,
+			);
+			this.ctx.statusContainer.addChild(loader);
+			this.ctx.ui.requestRender();
+			let worktree: SessionWorktree;
+			try {
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+			} catch (err) {
+				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+				return false;
+			} finally {
+				loader.stop();
+				this.ctx.statusContainer.disposeChildren();
+			}
+			if (worktree.cloneError) {
+				logger.warn("worktree clone fell back to plain checkout", {
+					path: worktree.path,
+					error: worktree.cloneError,
+				});
+			}
+			if (!(await this.#relocateSession(worktree.path))) return false;
+			created = worktree;
+			const cleanup = worktree.keptChanges
+				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
@@ -1261,20 +1790,26 @@ export class CommandController {
 					1,
 				),
 			]);
-		}
+			return true;
+		});
+		return created;
 	}
 
-	/**
-	 * Move the session and process cwd to an existing directory, rolling back
-	 * on failure. Returns true when the session now lives at `resolvedPath`.
-	 */
-	async #relocateSession(resolvedPath: string): Promise<boolean> {
+	/** Save source settings before acquiring the gate for a complete relocation operation. */
+	async #withSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
 		}
+
+		return this.ctx.withBtwSessionMove(operation);
+	}
+
+	/** Relocate only while #withSessionMove holds the BTW gate; false means no successful move. */
+	async #relocateSession(resolvedPath: string): Promise<boolean> {
+		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
 
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
@@ -1302,15 +1837,30 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
+		const session = this.ctx.session;
+		const sessionManager = this.ctx.sessionManager;
+		const sessionId = sessionManager.getSessionId();
+		const signal = session.titleGenerationSignal;
+		let titleRevision = sessionManager.titleRevision;
+		const isCurrent = () =>
+			this.ctx.session === session &&
+			this.ctx.sessionManager === sessionManager &&
+			!signal.aborted &&
+			sessionManager.getSessionId() === sessionId &&
+			sessionManager.titleRevision === titleRevision;
 		try {
-			const stored = await this.ctx.sessionManager.setSessionName(title, "user");
+			const persistence = sessionManager.setSessionName(title, "user");
+			titleRevision = sessionManager.titleRevision;
+			const stored = await persistence;
+			if (!isCurrent()) return;
 			if (!stored) {
 				this.ctx.showError("Session name cannot be empty.");
 				return;
 			}
-			const name = this.ctx.sessionManager.getSessionName()!;
+			const name = sessionManager.getSessionName()!;
 			this.ctx.showStatus(`Session renamed to "${name}".`);
 		} catch (err) {
+			if (!isCurrent()) return;
 			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
@@ -1323,7 +1873,24 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.bashComponent = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		if (shouldPersistCwd) {
+			await this.#withSessionMove(() => this.#executeBashCommand(command, excludeFromContext, isDeferred, true));
+		} else {
+			await this.#executeBashCommand(command, excludeFromContext, isDeferred, false);
+		}
+	}
+
+	/** Returns whether shell execution committed a cwd relocation, not whether the shell command succeeded. */
+	async #executeBashCommand(
+		command: string,
+		excludeFromContext: boolean,
+		isDeferred: boolean,
+		shouldPersistCwd: boolean,
+	): Promise<boolean> {
+		const component = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		this.ctx.bashComponent = component;
+		let detachInput: (() => void) | undefined;
+		let finished = false;
 
 		if (isDeferred) {
 			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
@@ -1349,6 +1916,15 @@ export class CommandController {
 					pty: {
 						...bashPtyViewport(this.ctx.ui),
 						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+						onStdin: write => {
+							if (finished) return;
+							// A TSP field without a mode handles printable keys itself and sends
+							// `edit` packets instead of raw input. Label it while the PTY owns
+							// the keyboard so Tern delivers those keys to the input listener.
+							detachInput = this.#forwardKeysToPty(component, write);
+							this.ctx.editor.nativeKeyPassthrough = true;
+							this.ctx.ui.requestRender();
+						},
 					},
 				},
 			);
@@ -1357,12 +1933,13 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					artifactError: meta?.artifactError,
 					images: result.images,
-					showImages: this.ctx.settings.get("terminal.showImages"),
+					showImages: cfgTerminalShowImages.get(this.ctx.settings),
 				});
 			}
 			try {
-				if (shouldPersistCwd) await this.#applyBashResultCwd(result);
+				if (shouldPersistCwd) return await this.#applyBashResultCwd(result);
 			} catch (error) {
 				this.ctx.showError(
 					`Bash command completed, but OMP failed to update its working directory: ${
@@ -1375,37 +1952,41 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(undefined, false);
 			}
 			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+		} finally {
+			finished = true;
+			detachInput?.();
+			if (detachInput) this.ctx.editor.nativeKeyPassthrough = false;
+			this.ctx.bashComponent = undefined;
+			this.ctx.ui.requestRender();
 		}
-
-		this.ctx.bashComponent = undefined;
-		this.ctx.ui.requestRender();
+		return false;
 	}
 
-	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
-		const previousState = this.ctx.sessionManager.captureState();
-		await this.ctx.sessionManager.moveTo(resolvedPath);
-		let applied = false;
-		try {
-			applied = await this.ctx.applyCwdChange(resolvedPath);
-		} catch (error) {
-			await this.#restoreAfterMoveFailure(previousState, error);
-			return;
-		}
-		if (!applied) {
-			await this.#restoreAfterMoveFailure(previousState);
-			return;
-		}
-
-		this.ctx.updateEditorBorderColor();
-		await this.ctx.reloadTodos();
+	/**
+	 * Routes composer keystrokes to a running `!` command's PTY so it can answer
+	 * its own prompts (`read`, shell-startup questions), like a foreground job.
+	 * The interrupt key still cancels; focused dialogs and mouse reports keep
+	 * their input. Returns the detach function.
+	 */
+	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
+		return this.ctx.ui.addInputListener(
+			data => {
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
+				const bytes = component.encodePtyInput(data);
+				if (bytes) write(bytes);
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
 	}
 
-	async #applyBashResultCwd(result: BashResult): Promise<void> {
-		if (result.cancelled || result.exitCode !== 0 || !result.workingDir) return;
-		if (!path.isAbsolute(result.workingDir)) return;
+	async #applyBashResultCwd(result: BashResult): Promise<boolean> {
+		if (result.cancelled || result.exitCode !== 0 || !result.workingDir) return false;
+		if (!path.isAbsolute(result.workingDir)) return false;
 
 		const resolvedPath = path.resolve(result.workingDir);
-		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return;
+		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
 
 		let isDirectory = false;
 		try {
@@ -1413,9 +1994,9 @@ export class CommandController {
 		} catch {
 			isDirectory = false;
 		}
-		if (!isDirectory) return;
+		if (!isDirectory) return false;
 
-		await this.#moveInteractiveCwd(resolvedPath);
+		return this.#relocateSession(resolvedPath);
 	}
 
 	async handlePythonCommand(code: string, excludeFromContext = false): Promise<void> {
@@ -1446,6 +2027,7 @@ export class CommandController {
 				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					artifactError: meta?.artifactError,
 				});
 			}
 		} catch (error) {
@@ -1478,11 +2060,93 @@ export class CommandController {
 		// `customInstructions` channel of the `session_before_compact` extension
 		// hook — extensions treat that field as user focus and would otherwise
 		// bias the summary toward the plan boilerplate (issue #4359). Ride it
-		// through as a CompactOptions field instead.
+		// through as a CompactOptions field instead. That caller also dispatches
+		// the execution turn itself, so the compaction must not resume the
+		// plan-approval turn it aborted.
 		if (internalGuidance) {
-			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, false, beforeFlush, mode);
+			return this.executeCompaction(
+				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
+				false,
+				beforeFlush,
+				mode,
+			);
 		}
 		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+	}
+
+	/**
+	 * Run the `/compact` queued for the next yield once the session goes quiet. One watcher serves the
+	 * request from the moment it is queued, so no single event (an `agent_end` that a stale-settle guard
+	 * skips, a setup that bails without one) can strand it; later calls join the running watcher.
+	 * Follow-ups queued behind the request wait in `compactionQueuedMessages` and flush once it ends.
+	 */
+	runYieldCompaction(): Promise<void> {
+		this.#yieldCompactionWatcher ??= this.#watchYieldCompaction().finally(() => {
+			this.#yieldCompactionWatcher = undefined;
+		});
+		return this.#yieldCompactionWatcher;
+	}
+
+	async #watchYieldCompaction(): Promise<void> {
+		let request = this.ctx.yieldCompaction;
+		if (!request) return;
+		const session = this.ctx.session;
+		while (true) {
+			await session.waitForIdle();
+			// Input sent before the request reaches the session first, also while it is still dispatching.
+			await this.ctx.waitForSubmissionDispatches();
+			await session.waitForAdmittedSubmissions();
+			// Let a session switch commit or roll back before judging which conversation is live.
+			if (session.isSessionTransitioning) await session.waitForSessionTransition();
+			if (session.hasPendingAsyncWork()) await session.settleAsyncWork();
+			if (this.ctx.session !== session) return;
+			if (this.ctx.yieldCompaction !== request) {
+				// Dequeued (and maybe queued again): serve whatever request is pending now.
+				if (!this.ctx.yieldCompaction) return;
+				request = this.ctx.yieldCompaction;
+				continue;
+			}
+			// The run yielded only once nothing can continue it: no turn, retry, queued input, pending
+			// submission, background job, or transition. Otherwise something is mid-flight; look again.
+			if (
+				!session.isStreaming &&
+				!session.isRetrying &&
+				!session.isSessionTransitioning &&
+				!session.hasAdmittedSubmission &&
+				!session.hasPendingAsyncWork() &&
+				session.queuedMessageCount === 0 &&
+				!this.ctx.hasPendingSubmission()
+			) {
+				break;
+			}
+			await Bun.sleep(10);
+		}
+		if (!continuesConversation(this.ctx.sessionManager, request)) {
+			// Switched sessions or navigated the tree (both may reuse this `AgentSession`): nothing queued
+			// for the old position may compact or run here.
+			this.ctx.restoreCompactionQueueToEditor();
+			return;
+		}
+		this.ctx.yieldCompaction = undefined;
+		// The request leaves; its position stays with the follow-ups it held until they flush.
+		this.ctx.compactionQueueOrigin = { sessionId: request.sessionId, leafId: request.leafId };
+		this.ctx.updatePendingMessagesDisplay();
+		if (session.isCompacting) {
+			// Another pass (auto, or an extension's `ctx.compact()`) already compacts.
+			this.ctx.showStatus("Skipped queued compaction: context is already compacting");
+			while (session.isCompacting) {
+				await Bun.sleep(10);
+			}
+			await this.ctx.flushCompactionQueue({ willRetry: false });
+			return;
+		}
+		// `executeCompaction` calls the hook right before it flushes the queue; "Nothing to compact"
+		// returns before both, so the held follow-ups are released here instead.
+		let compactionFlushes = false;
+		await this.handleCompactCommand(request.instructions, request.mode, () => {
+			compactionFlushes = true;
+		});
+		if (!compactionFlushes) await this.ctx.flushCompactionQueue({ willRetry: false });
 	}
 
 	/**
@@ -1510,7 +2174,7 @@ export class CommandController {
 		}
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.statusLine.invalidate();
-		this.ctx.ui.requestRender();
+		this.ctx.ui.requestRender(true, { clearScrollback: true });
 		this.ctx.showStatus(formatShakeSummary(result));
 	}
 
@@ -1526,13 +2190,24 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
-		const label = isAuto ? "Auto-compacting context... (esc to cancel)" : "Compacting context... (esc to cancel)";
+		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
+		const label = isAuto ? `Auto-compacting context... ${cancelHint}` : `Compacting context... ${cancelHint}`;
 		const compactingLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
 			label,
 			getSymbolTheme().spinnerFrames,
+		);
+		const compactionStartMs = Date.now();
+		compactingLoader.setWorkingRow(
+			() => ({
+				label: isAuto ? "Auto-compacting context…" : "Compacting context…",
+				startedAt: compactionStartMs,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(compactingLoader);
 		this.ctx.ui.requestRender();
@@ -1558,15 +2233,12 @@ export class CommandController {
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
 			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
-			if (this.ctx.settings.get("display.collapseCompacted")) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			// Same pairing as the auto-compaction arm in event-controller: the
+			// rebuild clears the container's emission ledger, so every block
+			// re-emits on this frame while the previous copy is still in native
+			// scrollback — without a clear the collapse-disabled path appends a
+			// duplicate transcript, exactly as `/compact` reproduced (#12140).
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
@@ -1594,6 +2266,10 @@ export class CommandController {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before handing off.");
 			return;
 		}
+		if (this.ctx.session.isCompacting) {
+			this.ctx.showWarning("Wait for context compaction to finish or cancel it before handing off.");
+			return;
+		}
 
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -1613,7 +2289,7 @@ export class CommandController {
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			"Generating handoff… (esc to cancel)",
+			`Generating handoff… (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(handoffLoader);
@@ -1661,10 +2337,34 @@ export class CommandController {
 				this.ctx.showError(`Handoff failed: ${message}`);
 			}
 		} finally {
-			handoffLoader.stop();
-			this.ctx.statusContainer.disposeChildren();
+			this.#finishHandoffUi(handoffLoader);
+			await this.ctx.flushCompactionQueue({ willRetry: false });
 		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+	}
+
+	#finishHandoffUi(handoffLoader: Loader): void {
+		handoffLoader.stop();
+		// A retry/compaction event may replace the handoff overlay while transcript
+		// replay yields. Preserve it only while it still owns the status row; a
+		// reference to a loader disposed earlier must not retain the handoff overlay.
+		const maintenanceLoader = this.ctx.autoCompactionLoader ?? this.ctx.retryLoader;
+		if (maintenanceLoader && this.ctx.statusContainer.children.includes(maintenanceLoader)) return;
+		this.ctx.statusContainer.disposeChildren();
+		// `disposeChildren()` disposed any working loader mounted by a delayed
+		// `agent_start` during transcript replay, which stops its animation timer.
+		// Drop the now-frozen reference so the reconciler below never reattaches it
+		// (`ensureLoadingAnimation()` only re-adds an existing instance, never
+		// restarts it).
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		if (this.ctx.session.isStreaming) {
+			// A new turn won the race with handoff cleanup; mount a fresh, running
+			// loader for it now that the stale reference is cleared.
+			this.ctx.ensureLoadingAnimation();
+		}
 	}
 }
 
@@ -1672,7 +2372,7 @@ const BAR_WIDTH_MAX = 24;
 const COLUMN_WIDTH_MIN = 4;
 
 function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
-	const duration = formatDuration(Math.max(0, now - job.startTime));
+	const duration = formatDuration(Math.max(0, (job.endTime ?? now) - job.startTime));
 	const status = formatJobStatus(job.status);
 	return `${theme.fg("dim", job.id)} ${theme.fg("dim", `[${job.type}]`)} ${status} ${theme.fg("dim", `(${duration})`)}`;
 }
@@ -1703,22 +2403,22 @@ function formatNumber(value: number, maxFractionDigits = 1): string {
 }
 
 function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): string {
-	if (authStorage.hasOAuth(provider)) {
+	if (authStorage.credentials.hasOAuth(provider)) {
 		return "oauth";
 	}
-	if (authStorage.has(provider)) {
+	if (authStorage.credentials.has(provider)) {
 		return "api key";
 	}
 	if (getEnvApiKey(provider)) {
 		return "env api key";
 	}
-	if (authStorage.hasAuth(provider)) {
+	if (authStorage.keys.source(provider) !== undefined) {
 		return "runtime/fallback";
 	}
 	return "unknown";
 }
 
-export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<typeof theme, "fg">): string {
+export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<Theme, "fg">): string {
 	const lines: string[] = [];
 	lines.push(`${uiTheme.fg("dim", "Name:")} ${details.provider}`);
 	for (const field of details.fields) {
@@ -1734,15 +2434,7 @@ function resolveProviderUsageTotal(reports: UsageReport[]): number {
 		.reduce((sum, value) => sum + value, 0);
 }
 
-function formatLimitTitle(limit: UsageLimit): string {
-	const tier = limit.scope.tier;
-	if (tier && !limit.label.toLowerCase().includes(tier.toLowerCase())) {
-		return `${limit.label} (${tier})`;
-	}
-	return limit.label;
-}
-
-function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof theme): string {
+function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
 	const normalizedLabel = label.toLowerCase();
 	const normalizedWindow = windowLabel.toLowerCase();
 	if (normalizedWindow === "quota window") return "";
@@ -1750,7 +2442,7 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof 
 	return uiTheme.fg("dim", `(${windowLabel})`);
 }
 
-/** ` (org)` suffix when the report is org-attributed — two subscriptions can share one email. */
+/** ` (org)` suffix for providers whose orgName is an organization. */
 function orgSuffix(report: UsageReport): string {
 	const orgName = report.metadata?.orgName;
 	const orgId = report.metadata?.orgId;
@@ -1758,30 +2450,50 @@ function orgSuffix(report: UsageReport): string {
 	return org ? ` (${org})` : "";
 }
 
-function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: number): string {
+/** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
+function formatCodexTuiLabel(report: UsageReport, peers: readonly UsageReport[], base: string): string {
+	const identity = formatCodexUsageReportLabel(report, peers, base, undefined, false);
+	const plan = codexUsagePlan(report);
+	return plan ? `${identity} (${plan})` : identity;
+}
+
+function formatAccountLabel(
+	limit: UsageLimit,
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	index: number,
+): string {
+	const codex = report.provider === "openai-codex";
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
+	if (typeof email === "string" && email)
+		return codex ? formatCodexTuiLabel(report, peers, email) : `${email}${orgSuffix(report)}`;
 	const accountId =
 		typeof report.metadata?.accountId === "string" && report.metadata.accountId
 			? report.metadata.accountId
 			: limit.scope.accountId || undefined;
-	if (accountId) return `${accountId}${orgSuffix(report)}`;
+	if (accountId) return codex ? formatCodexTuiLabel(report, peers, accountId) : `${accountId}${orgSuffix(report)}`;
 	const projectId =
 		typeof report.metadata?.projectId === "string" && report.metadata.projectId
 			? report.metadata.projectId
 			: limit.scope.projectId || undefined;
-	if (projectId) return projectId;
-	return `account ${index + 1}`;
+	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
+	return codex ? formatCodexTuiLabel(report, peers, base) : base;
 }
 
-function formatUnlimitedReportLabel(report: UsageReport, index: number): string {
+function formatUnlimitedReportLabel(report: UsageReport, peers: readonly UsageReport[], index: number): string {
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
+	if (typeof email === "string" && email)
+		return report.provider === "openai-codex"
+			? formatCodexTuiLabel(report, peers, email)
+			: `${email}${orgSuffix(report)}`;
 	const accountId = report.metadata?.accountId;
-	if (typeof accountId === "string" && accountId) return `${accountId}${orgSuffix(report)}`;
+	if (typeof accountId === "string" && accountId)
+		return report.provider === "openai-codex"
+			? formatCodexTuiLabel(report, peers, accountId)
+			: `${accountId}${orgSuffix(report)}`;
 	const projectId = report.metadata?.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
+	return report.provider === "openai-codex" ? formatCodexTuiLabel(report, peers, base) : base;
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -1796,20 +2508,22 @@ function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined 
 function formatAccountHeaderRow(
 	limits: UsageLimit[],
 	reports: UsageReport[],
+	peers: readonly UsageReport[],
 	nowMs: number,
 	columnWidth: number,
-	uiTheme: typeof theme,
+	uiTheme: Theme,
 	activeAccount?: OAuthAccountIdentity,
 ): string[] {
 	const parts = limits.map((limit, index) => {
 		const reset = formatResetShort(limit, nowMs);
 		const report = reports[index];
 		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
-		const label = formatAccountLabel(limit, report, index);
+		const label = formatAccountLabel(limit, report, peers, index);
 		return {
 			label: active ? `● ${label}` : label,
 			suffix: reset ? `(${reset})` : "",
 			active,
+			daybreak: report?.metadata?.daybreak === true,
 		};
 	});
 	const maxSuffixWidth = parts.reduce((max, p) => Math.max(max, visibleWidth(p.suffix)), 0);
@@ -1819,19 +2533,21 @@ function formatAccountHeaderRow(
 	// If suffix can't share the cell with at least `x…`, fall back to whole-label truncation.
 	if (prefixBudget < 2) {
 		return parts.map(p => {
-			const full = p.suffix ? `${p.label} ${p.suffix}` : p.label;
+			const full = `${p.label}${p.daybreak ? " daybreak" : ""}${p.suffix ? ` ${p.suffix}` : ""}`;
 			const cell = padColumn(truncateJobLabel(full, columnWidth), columnWidth);
 			return p.active ? uiTheme.fg("accent", cell) : cell;
 		});
 	}
 
 	return parts.map(p => {
-		const prefix = truncateJobLabel(p.label, prefixBudget);
+		// Keep the full badge visible by taking its columns from the account label.
+		const badge = p.daybreak && prefixBudget >= 10 ? " daybreak" : "";
+		const label = truncateJobLabel(p.label, prefixBudget - visibleWidth(badge));
+		const prefix = `${p.active ? uiTheme.fg("accent", label) : label}${badge ? uiTheme.fg("success", badge) : ""}`;
 		const prefixCell = prefix + " ".repeat(prefixBudget - visibleWidth(prefix));
-		const styledPrefix = p.active ? uiTheme.fg("accent", prefixCell) : prefixCell;
-		if (!p.suffix) return styledPrefix + " ".repeat(maxSuffixWidth + gap);
+		if (!p.suffix) return prefixCell + " ".repeat(maxSuffixWidth + gap);
 		const suffixPad = " ".repeat(maxSuffixWidth - visibleWidth(p.suffix));
-		return `${styledPrefix} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
+		return `${prefixCell} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
 	});
 }
 
@@ -1842,19 +2558,6 @@ function padColumn(text: string, width: number): string {
 }
 
 type AggregateDisplayStatus = NonNullable<UsageLimit["status"]> | "neutral";
-
-function isUsedOnlyAbsoluteAmount(limit: UsageLimit): boolean {
-	const amount = limit.amount;
-	return (
-		amount.unit !== "percent" &&
-		amount.unit !== "unknown" &&
-		amount.used !== undefined &&
-		Number.isFinite(amount.used) &&
-		amount.limit === undefined &&
-		amount.remaining === undefined &&
-		resolveUsedFraction(limit) === undefined
-	);
-}
 
 function resolveAggregateStatus(limits: UsageLimit[]): AggregateDisplayStatus {
 	const hasOk = limits.some(limit => limit.status === "ok");
@@ -1892,6 +2595,12 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 
 	if (limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "";
 
+	// Prepaid balances have no total to divide by. `totalRemainingOnly`
+	// collapses account-wide pools seen once per stored key and sums only
+	// genuinely distinct ones, so a multi-key provider is never double-counted.
+	const remaining = formatRemainingOnlyTotal(limits);
+	if (remaining !== undefined) return remaining;
+
 	// Count unique accounts from limit scopes — not limits.length.
 	const uniqueAccountIds = new Set(
 		limits.map(limit => limit.scope.accountId).filter((id): id is string => typeof id === "string" && id.length > 0),
@@ -1922,59 +2631,8 @@ function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
 	}
 	return `${verb} in ${formatDuration(minReset)}`;
 }
-/**
- * Compact one-line quota summary for a single advisor's provider.
- * Returns `null` when the provider has no usage data.
- * When `activeAccount` is provided, only limits matching that credential
- * are shown (mirrors `renderUsageReports`'s account-stickiness filtering).
- * Example output: `Quota: 7d window · 67% used · resets in 3.2d`
- */
-export function formatCompactQuota(
-	provider: string,
-	reports: UsageReport[],
-	nowMs: number,
-	activeAccount?: OAuthAccountIdentity,
-): string | null {
-	const providerReports = reports.filter(r => r.provider === provider);
-	if (providerReports.length === 0) return null;
-	// Group limits by window id so we show BOTH the 5-hour and 7-day windows
-	// (or any other distinct windows the provider exposes). Within each window,
-	// pick the highest used fraction across accounts — that's the most pressing.
-	const byWindow = new Map<string, { limit: UsageLimit; fraction: number }>();
-	for (const report of providerReports) {
-		for (const limit of report.limits) {
-			// Skip limits that belong to a different credential than the one
-			// the advisor is actually using, so we don't alarm the user with
-			// an exhausted account that isn't theirs.
-			if (activeAccount && !limitMatchesActiveAccount(report, limit, activeAccount)) continue;
-			const fraction = resolveUsedFraction(limit);
-			if (fraction === undefined) continue;
-			const key = limit.window?.id ?? limit.scope.windowId ?? "—";
-			const existing = byWindow.get(key);
-			if (!existing || fraction > existing.fraction) byWindow.set(key, { limit, fraction });
-		}
-	}
-	if (byWindow.size === 0) return null;
-	// Sort windows by urgency (highest fraction first) so the most pressing
-	// quota is always the first thing the user sees.
-	const entries = [...byWindow.values()].sort((a, b) => b.fraction - a.fraction);
-	const lines: string[] = [];
-	for (const { limit, fraction } of entries) {
-		const pct = Math.round(fraction * 100);
-		const windowLabel = limit.window?.label ?? limit.scope.windowId ?? "—";
-		// Include the limit label (account/tier) when it carries identity beyond
-		// the window name, so the user can tell which credential's quota is shown.
-		const identity = limit.label.trim();
-		const header = identity && identity !== windowLabel ? `${windowLabel} (${identity})` : windowLabel;
-		const parts = [`${header}: ${pct}% used`];
-		const reset = resolveResetRange([limit], nowMs);
-		if (reset) parts.push(reset);
-		lines.push(parts.join(" · "));
-	}
-	return `Quota: ${lines.join(" │ ")}`;
-}
 
-function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: typeof theme): string {
+function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
 	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
 	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
 	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
@@ -1989,7 +2647,7 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 	return "dim";
 }
 
-function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: number): string {
+function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): string {
 	const usedAmount = limit.amount.used;
 	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
 		const used =
@@ -2031,21 +2689,26 @@ function resolveColumnWidth(count: number, available: number, trailing: number):
 
 export function renderUsageReports(
 	reports: UsageReport[],
-	uiTheme: typeof theme,
+	uiTheme: Theme,
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
 ): string {
+	const displayReports = collapseSharedUsageReports(reports);
 	const lines: string[] = [];
-	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
+	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
 	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of reports) {
+	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);
+	}
+	for (const account of unavailableAccounts) {
+		if (!grouped.has(account.provider)) grouped.set(account.provider, []);
 	}
 	const providerEntries = Array.from(grouped.entries())
 		.map(([provider, providerReports]) => ({
@@ -2070,7 +2733,14 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
-				const key = `${formatLimitTitle(limit)}|${windowId}`;
+				// Distinct buckets can share a label and window (Antigravity's Gemini
+				// vs Gemini (Argon) weekly) and must stay separate rows instead of
+				// averaging into "50% free", so the id joins the key. Label and window
+				// stay in it too: some providers build ids positionally or per plan
+				// (kimi's `${index}`, copilot's allowance), where ids differ across
+				// accounts for the same quota. `sharedGroup` keeps the routing copies
+				// of one shared bucket together.
+				const key = limit.scope.sharedGroup ?? `${formatLimitTitle(limit)}|${windowId}|${limit.id}`;
 				const windowLabel = limit.window?.label ?? windowId;
 				const entry = limitGroups.get(key) ?? {
 					label: formatLimitTitle(limit),
@@ -2085,7 +2755,33 @@ export function renderUsageReports(
 		}
 
 		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
-		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
+		const activeReport =
+			provider === "openai-codex" && activeAccount
+				? ((activeAccount.accountId
+						? providerReports.find(
+								report =>
+									report.metadata?.orgId === activeAccount.orgId &&
+									report.metadata?.accountId === activeAccount.accountId,
+							)
+						: undefined) ??
+					providerReports.find(
+						report =>
+							report.metadata?.orgId === activeAccount.orgId &&
+							!!activeAccount.email &&
+							report.metadata?.email === activeAccount.email &&
+							(!activeAccount.accountId || !report.metadata?.accountId),
+					))
+				: undefined;
+		const activeAccountLabel =
+			provider === "openai-codex"
+				? activeReport
+					? formatCodexTuiLabel(
+							activeReport,
+							providerReports,
+							activeAccount?.email || activeAccount?.accountId || "account",
+						)
+					: activeAccount?.email || activeAccount?.accountId || activeAccount?.projectId
+				: formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
 		}
@@ -2095,6 +2791,13 @@ export function renderUsageReports(
 			for (const selector of reportingModels) {
 				lines.push(`    ${replaceTabs(truncateToWidth(sanitizeText(selector), availableWidth - 4))}`);
 			}
+		}
+		for (const account of unavailableAccounts) {
+			if (account.provider !== provider) continue;
+			const label = replaceTabs(sanitizeText(account.label.replace(/[\r\n]+/g, " ")));
+			const status = " — usage unavailable";
+			const boundedLabel = truncateToWidth(label, Math.max(0, availableWidth - 2 - visibleWidth(status)));
+			lines.push(`  ${uiTheme.fg("dim", truncateToWidth(`${boundedLabel}${status}`, availableWidth - 2))}`);
 		}
 
 		// Provider-wide disclaimers (e.g. "OMP-observed spend only") render once
@@ -2108,37 +2811,53 @@ export function renderUsageReports(
 
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
-			const count = report.resetCredits?.availableCount ?? 0;
-			if (count <= 0) continue;
-			const label =
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			if (!resets || resets.bankedCount <= 0) continue;
+			const identityLabel =
 				typeof report.metadata?.email === "string" && report.metadata.email
 					? report.metadata.email
 					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
 						? report.metadata.accountId
 						: "account";
+			const orgName = report.metadata?.orgName;
+			const orgId = report.metadata?.orgId;
+			const orgLabel =
+				typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
+			const rawLabel =
+				provider === "openai-codex"
+					? formatCodexTuiLabel(report, providerReports, identityLabel)
+					: orgLabel && orgLabel !== identityLabel
+						? `${identityLabel} (${orgLabel})`
+						: identityLabel;
+			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+			const activeOrg = activeAccount?.orgId;
+			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
+			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
 			const isActive =
-				!!activeAccount &&
-				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
-					(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+				provider === "openai-codex"
+					? activeReport === report
+					: orgMatches &&
+						!!activeAccount &&
+						((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
+							(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+			const availability =
+				resets.redeemableCount === resets.bankedCount ? "" : ` · ${resets.redeemableCount} usable now`;
 			resetAccountLines.push(
-				`    • ${label}: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
+				`    • ${label}: ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}${availability}${isActive ? " (active)" : ""}`,
 			);
-			const credits = report.resetCredits?.credits;
-			if (credits) {
-				for (const credit of credits) {
-					if (credit.expiresAt) {
-						const expiryMs = Date.parse(credit.expiresAt);
-						if (!Number.isNaN(expiryMs)) {
-							const remaining = expiryMs - nowMs;
-							const expiryDate = credit.expiresAt.slice(0, 10);
-							if (remaining > 0) {
-								resetAccountLines.push(`        expires in ${formatDuration(remaining)} (${expiryDate})`);
-							} else {
-								resetAccountLines.push(`        expired (${expiryDate})`);
-							}
-						}
-					}
+			if (resets.soonestExpiry) {
+				const expiryMs = Date.parse(resets.soonestExpiry);
+				const remaining = expiryMs - nowMs;
+				const expiryDate = resets.soonestExpiry.slice(0, 10);
+				if (remaining > 0) {
+					resetAccountLines.push(`        soonest expires in ${formatDuration(remaining)} (${expiryDate})`);
+				} else {
+					resetAccountLines.push(`        expired (${expiryDate})`);
 				}
+			}
+			if (resets.redeemableCount === 0 && resets.unavailableReason) {
+				const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
+				resetAccountLines.push(`        unavailable: ${reason}`);
 			}
 		}
 		if (resetAccountLines.length > 0) {
@@ -2197,6 +2916,7 @@ export function renderUsageReports(
 			const accountLabels = formatAccountHeaderRow(
 				sortedLimits,
 				sortedReports,
+				providerReports,
 				nowMs,
 				sectionColumnWidth,
 				uiTheme,
@@ -2222,11 +2942,12 @@ export function renderUsageReports(
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
 		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, 0);
-			const tier = report.metadata?.planType;
+			const label = formatUnlimitedReportLabel(report, providerReports, 0);
+			const tier = report.provider === "openai-codex" ? undefined : report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
+			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
 			lines.push(
-				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
 		}
 		// No per-provider footer; global header shows last check.

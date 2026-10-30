@@ -1,6 +1,11 @@
 //! Filesystem listing and search filters.
 
-use std::{collections::BTreeMap, path::Path, sync::LazyLock};
+use std::{
+	collections::{BTreeMap, HashSet},
+	fmt::NumBuffer,
+	path::Path,
+	sync::LazyLock,
+};
 
 use regex::Regex;
 
@@ -31,10 +36,12 @@ fn find_outputs_paths_only(command: &str) -> bool {
 			"-print0"
 				| "-printf"
 				| "-fprintf"
-				| "-ls" | "-fls"
+				| "-ls"
+				| "-fls"
 				| "-exec"
 				| "-execdir"
-				| "-ok" | "-okdir"
+				| "-ok"
+				| "-okdir"
 		)
 	})
 }
@@ -174,7 +181,7 @@ fn compact_grep_grouped(
 		}
 		if matches.len() > 4 {
 			out.push_str("  […");
-			out.push_str(&(matches.len() - 4).to_string());
+			out.push_str((matches.len() - 4).format_into(&mut NumBuffer::new()));
 			out.push_str(" matches in file elided…]\n");
 		}
 	}
@@ -183,11 +190,11 @@ fn compact_grep_grouped(
 	let omitted_matches = match_count.saturating_sub(shown_matches);
 	if omitted_files > 0 || omitted_matches > 0 {
 		out.push_str("\n[…");
-		out.push_str(&omitted_matches.to_string());
+		out.push_str(omitted_matches.format_into(&mut NumBuffer::new()));
 		out.push_str(" matches");
 		if omitted_files > 0 {
 			out.push_str(" in ");
-			out.push_str(&omitted_files.to_string());
+			out.push_str(omitted_files.format_into(&mut NumBuffer::new()));
 			out.push_str(" files");
 		}
 		out.push_str(" elided…]\n");
@@ -231,15 +238,17 @@ fn center_truncate_match(text: &str, max_chars: usize) -> String {
 	}
 
 	// Heuristic:
-	// - If the line has significant leading whitespace, bias toward the code region
-	//   shortly after indentation (common for grep hits inside indented code).
-	// - If the line is effectively one long token, bias earlier so identifiers that
-	//   appear before a long suffix still remain visible.
+	// - If the line has significant leading whitespace, bias toward the code
+	//   region shortly after indentation (common for grep hits inside indented
+	//   code).
+	// - If the line is effectively one long token, bias earlier so identifiers
+	//   that appear before a long suffix still remain visible.
 	// - Otherwise center in the middle of the full line.
 	// Count leading whitespace in CHARS, not bytes: this value is compared and
-	// combined with char-based quantities (`char_count`, `max_chars`) and used as
-	// a char-stepping floor below. `str::find` returns a byte offset, which would
-	// overstate the index for any multibyte leading whitespace (NBSP, U+3000).
+	// combined with char-based quantities (`char_count`, `max_chars`) and used
+	// as a char-stepping floor below. `str::find` returns a byte offset, which
+	// would overstate the index for any multibyte leading whitespace (NBSP,
+	// U+3000).
 	let first_non_ws = text.chars().take_while(|c| c.is_whitespace()).count();
 	let has_whitespace = text.chars().any(char::is_whitespace);
 	let anchor = if first_non_ws > 0 && first_non_ws < char_count / 3 {
@@ -366,12 +375,12 @@ fn compact_find_output_inner(input: &str, paths: &[&str]) -> String {
 	}
 	if grouped.len() > 16 {
 		out.push_str("\n[…");
-		out.push_str(&(grouped.len() - 16).to_string());
+		out.push_str((grouped.len() - 16).format_into(&mut NumBuffer::new()));
 		out.push_str(" dirs elided…]\n");
 	}
 	if skipped_noise > 0 {
 		out.push_str("[…");
-		out.push_str(&skipped_noise.to_string());
+		out.push_str(skipped_noise.format_into(&mut NumBuffer::new()));
 		out.push_str(" noisy paths elided…]\n");
 	}
 	out
@@ -397,7 +406,7 @@ fn push_wrapped_names(out: &mut String, names: &[String], per_line: usize, max_n
 	let shown = names.len().min(max_names);
 	for (idx, name) in names.iter().take(shown).enumerate() {
 		if idx > 0 {
-			if idx % per_line == 0 {
+			if idx.is_multiple_of(per_line) {
 				out.push_str("\n  ");
 			} else {
 				out.push(' ');
@@ -408,7 +417,7 @@ fn push_wrapped_names(out: &mut String, names: &[String], per_line: usize, max_n
 	out.push('\n');
 	if names.len() > max_names {
 		out.push_str("  […");
-		out.push_str(&(names.len() - max_names).to_string());
+		out.push_str((names.len() - max_names).format_into(&mut NumBuffer::new()));
 		out.push_str(" names elided…]\n");
 	}
 }
@@ -454,13 +463,13 @@ fn compact_ls_output(input: &str) -> Option<String> {
 	let shown = dir_count.min(12) + file_count.min(36);
 	if entries.len() > shown {
 		out.push_str("[…");
-		out.push_str(&(entries.len() - shown).to_string());
+		out.push_str((entries.len() - shown).format_into(&mut NumBuffer::new()));
 		out.push_str(" entries elided…]\n");
 	}
 	out.push('\n');
-	out.push_str(&file_count.to_string());
+	out.push_str(file_count.format_into(&mut NumBuffer::new()));
 	out.push_str(" files, ");
-	out.push_str(&dir_count.to_string());
+	out.push_str(dir_count.format_into(&mut NumBuffer::new()));
 	out.push_str(" dirs");
 	if !ext_counts.is_empty() {
 		let ext_summary = ext_counts
@@ -614,7 +623,7 @@ fn summarize_cargo_toml(input: &str) -> Option<String> {
 	}
 	out.push('\n');
 	out.push_str("dependencies: ");
-	out.push_str(&dependencies.len().to_string());
+	out.push_str(dependencies.len().format_into(&mut NumBuffer::new()));
 	out.push('\n');
 	for dep in dependencies.iter().take(15) {
 		out.push_str("  ");
@@ -623,7 +632,7 @@ fn summarize_cargo_toml(input: &str) -> Option<String> {
 	}
 	if dependencies.len() > 15 {
 		out.push_str("  […");
-		out.push_str(&(dependencies.len() - 15).to_string());
+		out.push_str((dependencies.len() - 15).format_into(&mut NumBuffer::new()));
 		out.push_str(" dependencies elided…]\n");
 	}
 	Some(out)
@@ -697,7 +706,7 @@ fn summarize_package_json(input: &str) -> Option<String> {
 	}
 	out.push('\n');
 	out.push_str("dependencies: ");
-	out.push_str(&deps.len().to_string());
+	out.push_str(deps.len().format_into(&mut NumBuffer::new()));
 	out.push('\n');
 	for dep in deps.iter().take(15) {
 		out.push_str("  ");
@@ -706,7 +715,7 @@ fn summarize_package_json(input: &str) -> Option<String> {
 	}
 	if deps.len() > 15 {
 		out.push_str("  […");
-		out.push_str(&(deps.len() - 15).to_string());
+		out.push_str((deps.len() - 15).format_into(&mut NumBuffer::new()));
 		out.push_str(" dependencies elided…]\n");
 	}
 	Some(out)
@@ -744,7 +753,7 @@ fn summarize_go_mod(input: &str) -> Option<String> {
 	}
 	out.push('\n');
 	out.push_str("dependencies: ");
-	out.push_str(&deps.len().to_string());
+	out.push_str(deps.len().format_into(&mut NumBuffer::new()));
 	out.push('\n');
 	for dep in deps.iter().take(15) {
 		out.push_str("  ");
@@ -753,7 +762,7 @@ fn summarize_go_mod(input: &str) -> Option<String> {
 	}
 	if deps.len() > 15 {
 		out.push_str("  […");
-		out.push_str(&(deps.len() - 15).to_string());
+		out.push_str((deps.len() - 15).format_into(&mut NumBuffer::new()));
 		out.push_str(" dependencies elided…]\n");
 	}
 	Some(out)
@@ -785,15 +794,21 @@ fn is_source_path(path: &str) -> bool {
 	matches!(
 		ext,
 		"rs"
-			| "ts" | "tsx"
-			| "js" | "jsx"
-			| "py" | "go"
+			| "ts"
+			| "tsx"
+			| "js"
+			| "jsx"
+			| "py"
+			| "go"
 			| "java"
-			| "c" | "cc"
+			| "c"
+			| "cc"
 			| "cpp"
-			| "h" | "hpp"
+			| "h"
+			| "hpp"
 			| "swift"
-			| "kt" | "rb"
+			| "kt"
+			| "rb"
 	)
 }
 
@@ -825,7 +840,7 @@ fn compact_source_outline(input: &str, path: &str, level: OutlineLevel) -> Strin
 		}
 	}
 
-	if has_content(&out) {
+	if primitives::has_content(&out) {
 		out.push('\n');
 	}
 
@@ -851,7 +866,7 @@ fn compact_source_outline(input: &str, path: &str, level: OutlineLevel) -> Strin
 	}
 	if lines.len() > emitted + declarations {
 		out.push_str("… ");
-		out.push_str(&lines.len().to_string());
+		out.push_str(lines.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" lines summarized\n");
 	}
 	out
@@ -1152,38 +1167,31 @@ fn strip_python_bodies(input: &str) -> String {
 }
 
 fn compact_summary_output(input: &str, program: &str) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let mut lines: Vec<&str> = input.lines().collect();
 	if lines.len() <= 30 {
 		return input.to_string();
 	}
 
-	let input = if program == "df" {
-		let kept: Vec<&str> = lines
-			.into_iter()
-			.filter(|line| {
-				let trimmed = line.trim_start();
-				if trimmed.starts_with("overlay") || trimmed.starts_with("none") {
-					// Keep container root: overlay/none mounted at "/"
-					return trimmed.split_whitespace().last() == Some("/");
-				}
-				!trimmed.starts_with("tmpfs")
-					&& !trimmed.starts_with("devtmpfs")
-					&& !trimmed.starts_with("udev")
-					&& !trimmed.starts_with("shm")
-			})
-			.collect();
-		kept.join("\n")
-	} else {
-		lines.join("\n")
-	};
+	if program == "df" {
+		lines.retain(|line| {
+			let trimmed = line.trim_start();
+			if trimmed.starts_with("overlay") || trimmed.starts_with("none") {
+				// Keep container root: overlay/none mounted at "/"
+				return trimmed.split_whitespace().last() == Some("/");
+			}
+			!trimmed.starts_with("tmpfs")
+				&& !trimmed.starts_with("devtmpfs")
+				&& !trimmed.starts_with("udev")
+				&& !trimmed.starts_with("shm")
+		});
+	}
 
-	let lines: Vec<&str> = input.lines().collect();
-	let windowed = primitives::head_tail_lines(&input, 12, 12);
+	let windowed = primitives::head_tail_of_lines(&lines, 12, 12);
+	let shown: HashSet<&str> = windowed.lines().collect();
+	let mut emitted = HashSet::new();
 	let mut out = String::new();
-	for line in lines.iter().copied().filter(|line| is_summary_line(line)) {
-		if !windowed.lines().any(|existing| existing == line)
-			&& !out.lines().any(|existing| existing == line)
-		{
+	for &line in &lines {
+		if is_summary_line(line) && !shown.contains(line) && emitted.insert(line) {
 			out.push_str(line);
 			out.push('\n');
 		}
@@ -1193,18 +1201,25 @@ fn compact_summary_output(input: &str, program: &str) -> String {
 }
 
 fn is_summary_line(line: &str) -> bool {
-	let trimmed = line.trim();
-	let lower = trimmed.to_ascii_lowercase();
-	trimmed == "total"
-		|| lower.starts_with("total ")
-		|| lower.ends_with(" total")
-		|| lower.starts_with("filesystem")
-		|| lower.contains(" mounted on")
-		|| lower.contains(" files ")
-}
-
-fn has_content(text: &str) -> bool {
-	text.lines().any(|line| !line.trim().is_empty())
+	let trimmed = line.trim().as_bytes();
+	let contains = |needle: &[u8]| {
+		trimmed
+			.windows(needle.len())
+			.any(|window| window.eq_ignore_ascii_case(needle))
+	};
+	trimmed == b"total"
+		|| trimmed
+			.get(..6)
+			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"total "))
+		|| trimmed
+			.len()
+			.checked_sub(6)
+			.is_some_and(|start| trimmed[start..].eq_ignore_ascii_case(b" total"))
+		|| trimmed
+			.get(..10)
+			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"filesystem"))
+		|| contains(b" mounted on")
+		|| contains(b" files ")
 }
 
 #[cfg(test)]
@@ -1282,15 +1297,15 @@ mod tests {
 		let line = format!("{indent}{body}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// Should show leading … (indentation was skipped), centered code, and …[+N]
-		// tally.
+		// Should show leading … (indentation was skipped), centered code, and
+		// …[+N] tally.
 		assert!(out.starts_with('\u{2026}'), "should start with …: {out}");
 		assert!(out.ends_with(']'), "should end with tally: {out}");
 		assert!(out.contains("result"), "match region 'result' should be visible: {out}");
 		assert!(out.contains("arg5"), "middle args should be visible: {out}");
-		// Should NOT show the raw "let result" from the very front (since indentation
-		// was dropped). But it might appear inside the window. The key assertion:
-		// leading indent chars are dropped.
+		// Should NOT show the raw "let result" from the very front (since
+		// indentation was dropped). But it might appear inside the window. The
+		// key assertion: leading indent chars are dropped.
 		let after_ellipsis = &out['\u{2026}'.len_utf8()..];
 		assert!(
 			!after_ellipsis.starts_with(' '),
@@ -1324,7 +1339,8 @@ mod tests {
 		let line = format!("{prefix}{marker}{suffix}");
 		assert!(line.chars().count() > 140, "test line must exceed max_chars");
 		let out = center_truncate_match(&line, 140);
-		// marker starts at char 40, window is centered, should include the marker.
+		// marker starts at char 40, window is centered, should include the
+		// marker.
 		assert!(out.contains(marker), "match should be visible: {out}");
 	}
 
@@ -1344,7 +1360,8 @@ mod tests {
 		let line = "a".repeat(141);
 		let out = center_truncate_match(&line, 140);
 		assert!(out.contains("\u{2026}[+"), "should have tally: {out}");
-		// With 141 chars, centering produces window_start=0, shows 140 a's, drops 1.
+		// With 141 chars, centering produces window_start=0, shows 140 a's, drops
+		// 1.
 		let content_chars: String = out.chars().filter(|c| *c == 'a').collect();
 		assert_eq!(content_chars.len(), 140);
 	}

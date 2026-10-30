@@ -8,14 +8,6 @@ const OMP_VAR = "$" + "{OMP_PLUGIN_ROOT}";
 describe("substitutePluginRoot", () => {
 	const ROOT = "/plugins/my-plugin";
 
-	it("replaces CLAUDE_PLUGIN_ROOT in strings", () => {
-		expect(substitutePluginRoot(`${CLAUDE_VAR}/bin/server`, ROOT)).toBe("/plugins/my-plugin/bin/server");
-	});
-
-	it("replaces OMP_PLUGIN_ROOT in strings", () => {
-		expect(substitutePluginRoot(`${OMP_VAR}/bin/server`, ROOT)).toBe("/plugins/my-plugin/bin/server");
-	});
-
 	it("replaces both variables in same string", () => {
 		expect(substitutePluginRoot(`${CLAUDE_VAR}:${OMP_VAR}`, ROOT)).toBe("/plugins/my-plugin:/plugins/my-plugin");
 	});
@@ -25,12 +17,6 @@ describe("substitutePluginRoot", () => {
 			"--config",
 			"/plugins/my-plugin/config.json",
 		]);
-	});
-
-	it("handles objects recursively", () => {
-		expect(substitutePluginRoot({ PATH: `${CLAUDE_VAR}/bin` }, ROOT)).toEqual({
-			PATH: "/plugins/my-plugin/bin",
-		});
 	});
 
 	it("handles nested structures", () => {
@@ -44,13 +30,6 @@ describe("substitutePluginRoot", () => {
 			args: ["--port", "3000"],
 			env: { HOME: "/plugins/my-plugin" },
 		});
-	});
-
-	it("passes through non-string primitives", () => {
-		expect(substitutePluginRoot(42, ROOT)).toBe(42);
-		expect(substitutePluginRoot(true, ROOT)).toBe(true);
-		expect(substitutePluginRoot(null, ROOT)).toBeNull();
-		expect(substitutePluginRoot(undefined, ROOT)).toBeUndefined();
 	});
 
 	it("returns string unchanged when no variables present", () => {

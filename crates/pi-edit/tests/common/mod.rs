@@ -110,14 +110,16 @@ impl Workspace {
 			policy: PathPolicy {
 				cwd:                  cwd.clone(),
 				home_dir:             cwd,
-				local_sandbox_root:   None,
-				vault_roots:          None,
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
 				plan_active:          false,
 				block_auto_generated: true,
 			},
 			allow_fuzzy: true,
 			fuzzy_threshold: 0.95,
 			enforce_seen_lines: false,
+			max_columns: 512,
 			raw_input: false,
 		};
 		Self { dir, store: EditStore::new(), config }
@@ -354,9 +356,5 @@ async fn run_case(case: &Value, default_mode: EditMode) -> Result<(), String> {
 			problems.push(format!("expected {writes} writes, got {actual}"));
 		}
 	}
-	if problems.is_empty() {
-		Ok(())
-	} else {
-		Err(problems.join("\n"))
-	}
+	problems.is_empty().ok_or_else(|| problems.join("\n"))
 }

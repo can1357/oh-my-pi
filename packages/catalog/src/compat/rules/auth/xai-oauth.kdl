@@ -1,6 +1,7 @@
 // Device authorization and token refresh adapted from NousResearch/hermes-agent (MIT).
 auth "xai-oauth" {
     name "xAI Grok OAuth (SuperGrok or X Premium+)"
+    oauth-token-env "XAI_OAUTH_TOKEN"
     login "device-code" {
         client-id "b1a00492-073a-47ea-816f-4c329264a828"
         scopes "openid" "profile" "email" "offline_access" "grok-cli:access" "api:access"

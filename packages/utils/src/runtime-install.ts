@@ -172,9 +172,43 @@ function resolverRegistry(): ResolverRegistration[] {
 	holder[REGISTRY] ??= [];
 	return holder[REGISTRY];
 }
-function pathContains(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+/** Canonical form of a path, memoized: resolution is per module request, and roots repeat. */
+const canonicalPaths = new Map<string, string>();
+
+/**
+ * Canonical form of `target` for path comparison: symlinks and Windows
+ * junctions resolved, drive/segment casing folded on Windows. Non-existent
+ * paths fall back to `path.resolve`, which still normalizes separators.
+ *
+ * Comparisons must canonicalize because the two sides come from different
+ * worlds: the stock resolver hands back realpath-resolved filenames, while a
+ * registered runtime root is whatever the caller configured (a cache under a
+ * junctioned `F:\Programs\…`, a home directory symlinked onto another volume,
+ * macOS `/tmp` → `/private/tmp`).
+ */
+function canonicalPath(target: string): string {
+	const cached = canonicalPaths.get(target);
+	if (cached !== undefined) return cached;
+	let canonical: string;
+	try {
+		canonical = fs.realpathSync.native(target);
+	} catch {
+		canonical = path.resolve(target);
+	}
+	if (process.platform === "win32") canonical = canonical.toLowerCase();
+	canonicalPaths.set(target, canonical);
+	return canonical;
+}
+
+/**
+ * Path of `candidate` relative to `root` when `candidate` is inside (or is)
+ * `root`, else `null`. Both sides are canonicalized, so a runtime cache
+ * reached through a link still matches the filenames the resolver reports.
+ */
+function relativeWithin(root: string, candidate: string): string | null {
+	const relative = path.relative(canonicalPath(root), canonicalPath(candidate));
+	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	return relative;
 }
 
 function parentFilename(parent: unknown): string | null {
@@ -243,11 +277,12 @@ export function installRuntimeModuleResolver({ runtimeNodeModules, stubs = {} }:
 		if (bare) {
 			const parentFile = parentFilename(parent);
 			for (const registration of resolverRegistry()) {
-				const parentInRuntime = parentFile !== null && pathContains(registration.runtimeNodeModules, parentFile);
+				const parentInRuntime =
+					parentFile !== null && relativeWithin(registration.runtimeNodeModules, parentFile) !== null;
 				if (parentInRuntime) {
 					const stub = registration.stubs[request];
 					if (stub) return stub;
-					if (!stockResolved || !pathContains(registration.runtimeNodeModules, stockResolved)) {
+					if (!stockResolved || relativeWithin(registration.runtimeNodeModules, stockResolved) === null) {
 						const fallback = resolveRuntimeModule(registration.runtimeNodeModules, request);
 						if (fallback) return fallback;
 					}
@@ -260,8 +295,9 @@ export function installRuntimeModuleResolver({ runtimeNodeModules, stubs = {} }:
 					// it with the top-level instance would cross major versions.
 					const { packageName } = splitBareSpecifier(request);
 					const pkgDir = path.join(registration.runtimeNodeModules, ...packageName.split("/"));
-					if (!stockResolved.startsWith(pkgDir + path.sep)) continue;
-					if (path.relative(pkgDir, stockResolved).split(path.sep).includes("node_modules")) continue;
+					const relative = relativeWithin(pkgDir, stockResolved);
+					if (relative === null || relative === "") continue;
+					if (relative.split(path.sep).includes("node_modules")) continue;
 					const expected = resolveRuntimeModule(registration.runtimeNodeModules, request);
 					if (expected) return expected;
 				} else {

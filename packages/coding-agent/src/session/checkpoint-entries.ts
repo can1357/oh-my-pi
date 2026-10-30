@@ -1,9 +1,10 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { stringProperty } from "@oh-my-pi/pi-utils";
-import { stripXdUrlPrefix } from "../internal-urls/xd-protocol";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { CompletedRewindState } from "../tools/checkpoint";
 import { writeDeviceDispatch } from "../tools/resolve";
+import { REWIND_REPORT_MESSAGE_TYPE } from "./messages";
 import type { SessionEntry } from "./session-entries";
 
 /** Extracts text from custom message content. */
@@ -49,7 +50,7 @@ export function semanticToolResult(toolName: string | undefined, result: unknown
 
 /** Restores completed rewind state from a persisted session entry. */
 export function completedRewindFromEntry(entry: SessionEntry): CompletedRewindState | undefined {
-	if (entry.type !== "custom_message" || entry.customType !== "rewind-report") return undefined;
+	if (entry.type !== "custom_message" || entry.customType !== REWIND_REPORT_MESSAGE_TYPE) return undefined;
 	const details = entry.details;
 	if (!details || typeof details !== "object") return undefined;
 	const startedAt = stringProperty(details, "startedAt");

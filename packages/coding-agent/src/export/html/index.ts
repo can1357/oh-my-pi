@@ -1,53 +1,62 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { buildSessionTraceFromSnapshots } from "@oh-my-pi/omp-stats/trace";
+import type { SessionTrace } from "@oh-my-pi/omp-stats/types";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
-import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
-import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/theme";
+import { APP_NAME, isCompiledBinary, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
-import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
+import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
-import templateCssPath from "./template.css" with { type: "file" };
-import templateHtmlPath from "./template.html" with { type: "file" };
-import templateJsPath from "./template.js" with { type: "file" };
-// Pre-built React tool renderers: built by `gen:tool-views` (`bun run gen:tool-views`),
-// run automatically by root `prepare` on install and by `prepack` at publish.
-import toolViewsJsPath from "./tool-views.generated.js" with { type: "file" };
-import { webExportThemeVars } from "./web-palette";
+import templateHtml from "./template.html.txt" with { type: "text" };
+import viewerAsset from "./viewer.generated.json" with { type: "json" };
+import { exportThemeStyles, webExportThemeVars } from "./web-palette";
 
 export { type ExportThemeNames, parseExportArgs } from "./args";
 
 let cachedTemplate: string | undefined;
-/** Resolve a Bun file-loader value without parsing Windows drive letters as URL schemes. */
-export function resolveBundledHtmlAssetPath(assetPath: string, moduleDir: string = import.meta.dir): string {
-	if (path.isAbsolute(assetPath) || path.win32.isAbsolute(assetPath)) return assetPath;
-	return path.resolve(moduleDir, assetPath);
-}
 
-/** Compose the standalone export template: minified CSS, tool renderers, and viewer JS inlined. */
+/** Create an export document with a checkout viewer or an integrity-pinned release viewer. */
 export function getTemplate(): string {
 	if (cachedTemplate) return cachedTemplate;
-	const templateCss = fs.readFileSync(resolveBundledHtmlAssetPath(templateCssPath), "utf8");
-	const templateHtml = fs.readFileSync(resolveBundledHtmlAssetPath(templateHtmlPath as unknown as string), "utf8");
-	const templateJs = fs.readFileSync(resolveBundledHtmlAssetPath(templateJsPath), "utf8");
-	const toolViewsJs = fs.readFileSync(resolveBundledHtmlAssetPath(toolViewsJsPath), "utf8");
-	const minifiedCss = templateCss
-		.replace(/\/\*[\s\S]*?\*\//g, "")
-		.replace(/\s+/g, " ")
-		.replace(/\s*([{}:;,])\s*/g, "$1")
-		.trim();
-	// Function replacements so `$'`, `$&`, `$$`, etc. inside the embedded
-	// CSS/JS are not interpreted as substitution patterns.
+	const sourceCheckout =
+		!isCompiledBinary() &&
+		!process.env.PI_BUNDLED &&
+		!import.meta.dir.split(/[\\/]/).includes("node_modules") &&
+		fs.existsSync(path.join(import.meta.dir, "shell.html"));
+	let viewerScript: string;
+	if (sourceCheckout) {
+		const viewerPath = path.resolve(import.meta.dir, "../../../export-assets", viewerAsset.file);
+		let viewer: string;
+		try {
+			viewer = fs.readFileSync(viewerPath, "utf8");
+		} catch (err) {
+			if (isEnoent(err)) {
+				throw new Error(`Development export viewer not found: ${viewerPath}. Run bun gen:export-viewer.`);
+			}
+			throw err;
+		}
+		// Inline classic scripts run before deferred external scripts. Wait for
+		// both shared libraries, and prevent embedded text from closing the tag.
+		const escaped = viewer.replace(/<\/script/gi, match => `<\\/${match.slice(2)}`);
+		viewerScript = `<script>window.addEventListener("DOMContentLoaded",function(){\n${escaped}\n});</script>`;
+	} else {
+		const viewerUrl = `https://build.stencil.so/web/omp/${encodeURIComponent(VERSION)}/${viewerAsset.file}`;
+		viewerScript = `<script defer src="${viewerUrl}" integrity="${viewerAsset.integrity}" crossorigin="anonymous" onerror="document.getElementById('viewer-status').textContent='Could not load the session viewer. Connect to the internet and reload this file.'"></script>`;
+	}
 	cachedTemplate = templateHtml
-		.replace("<template-css/>", () => `<style>${minifiedCss}</style>`)
-		.replace("<template-tool-views/>", () => `<script>${toolViewsJs}</script>`)
-		.replace("<template-js/>", () => `<script>${templateJs}</script>`);
+		.replace("{{MARKED_URL}}", () => "https://stencil.so/assets/omp/marked.333561b9.js")
+		.replace("{{MARKED_INTEGRITY}}", () => "sha256-MzVhuUicTTOmBQF03OgI9HBhlGcICMhDRSPIdD9aYmM=")
+		.replace("{{HIGHLIGHT_URL}}", () => "https://stencil.so/assets/omp/highlight.837a6fa5.js")
+		.replace("{{HIGHLIGHT_INTEGRITY}}", () => "sha256-g3pvpbDHNrUrveKythkPMF2j/J7UFoHbUyFQcFe1yEY=")
+		.replace("<viewer-script/>", () => viewerScript);
 	return cachedTemplate;
 }
 
 export interface ExportOptions {
 	outputPath?: string;
-	/** `"web"` bundles the omp web themes; `"theme"` bundles TUI themes. */
+	/** `"web"` uses the hosted web themes; `"theme"` embeds TUI theme overrides. */
 	palette?: "web" | "theme";
 	/** Legacy single TUI theme name. Prefer `themeNames` for dual-theme exports. */
 	themeName?: string;
@@ -154,22 +163,7 @@ export async function generateThemeStyles(
 					generateThemeVars("theme", themeNames?.dark ?? legacyThemeName ?? "dark"),
 					generateThemeVars("theme", themeNames?.light ?? legacyThemeName ?? "light"),
 				]);
-	return [
-		`:root, :root[data-theme="dark"] { color-scheme: dark; ${dark} }`,
-		`:root[data-theme="light"] { color-scheme: light; ${light} }`,
-		`@media (prefers-color-scheme: light) { :root:not([data-theme]) { color-scheme: light; ${light} } }`,
-	].join("\n");
-}
-
-/** Embedded subagent session transcript, keyed by slash-joined agent path in `SessionData.subSessions`. */
-export interface SubSession {
-	/** Bare agent id (session file stem), e.g. "ToolAsk". */
-	agentId: string;
-	/** Key of the parent sub-session, or null when spawned by the main session. */
-	parent: string | null;
-	header: SessionHeader | null;
-	entries: SessionEntry[];
-	leafId: string | null;
+	return exportThemeStyles(dark, light);
 }
 
 export interface SessionData {
@@ -179,12 +173,16 @@ export interface SessionData {
 	systemPrompt?: string;
 	tools?: { name: string; description: string }[];
 	subSessions?: Record<string, SubSession>;
+	/** Offline trace for the embedded transcripts; absent in older share snapshots. */
+	trace?: SessionTrace;
 }
 
 function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | null {
 	if (!header) return null;
 	const exported = { ...header };
 	delete exported.previousSessionFiles;
+	delete exported.providerPromptCacheKey;
+	delete exported.taskPromptCacheKey;
 	return exported;
 }
 
@@ -199,52 +197,11 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
 	};
 }
 
-/**
- * Collect subagent session transcripts stored next to a session file.
- *
- * A session at `<dir>/<name>.jsonl` keeps its subagent sessions at `<dir>/<name>/<AgentId>.jsonl`;
- * each subagent's own children nest the same way under `<dir>/<name>/<AgentId>/`. Keys in the
- * returned record are slash-joined ids relative to the main session ("ToolAsk", "ToolAsk/Helper").
- * Corrupt or empty files are skipped silently.
- */
-export async function collectSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
-	const result: Record<string, SubSession> = {};
-	if (!sessionFile.endsWith(".jsonl")) return result;
-	await collectSubSessionsFromDir(sessionFile.slice(0, -6), null, result);
-	return result;
-}
-
-async function collectSubSessionsFromDir(
-	dir: string,
-	parentKey: string | null,
-	out: Record<string, SubSession>,
-): Promise<void> {
-	let names: string[];
-	try {
-		names = await fs.promises.readdir(dir);
-	} catch (err) {
-		if (isEnoent(err)) return;
-		throw err;
-	}
-	for (const name of names) {
-		if (!name.endsWith(".jsonl") || name.includes(".bak")) continue;
-		const agentId = name.slice(0, -6);
-		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
-		const fileEntries = await loadEntriesFromFile(path.join(dir, name));
-		// Empty/corrupt files (no valid session header) load as [] — skip silently.
-		if (fileEntries.length > 0) {
-			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
-			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
-			out[key] = {
-				agentId,
-				parent: parentKey,
-				header: sessionHeaderForExport(header),
-				entries,
-				leafId: entries.length > 0 ? entries[entries.length - 1].id : null,
-			};
-		}
-		await collectSubSessionsFromDir(path.join(dir, agentId), key, out);
-	}
+/** All trace transcripts next to `sessionFile`, with export-only header fields stripped. */
+async function collectExportSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
+	const subSessions = await collectSubSessions(sessionFile, { includeAdvisors: true, includeCompressed: true });
+	for (const sub of Object.values(subSessions)) sub.header = sessionHeaderForExport(sub.header);
+	return subSessions;
 }
 
 /** Generate HTML from bundled template with runtime substitutions. */
@@ -254,13 +211,13 @@ async function generateHtml(
 	themeNames?: ExportThemeNames,
 	themeName?: string,
 ): Promise<string> {
-	const themeStyles = await generateThemeStyles(palette, themeNames, themeName);
+	const themeStyles = palette === "theme" ? await generateThemeStyles(palette, themeNames, themeName) : "";
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toBase64();
 
 	// Use function replacements so `$'`, `$&`, `$$`, `$n`, etc. in the
 	// substituted CSS/base64 are not interpreted as substitution patterns.
 	return getTemplate()
-		.replace("<theme-vars/>", () => `<style>${themeStyles}</style>`)
+		.replace("<theme-vars/>", () => (themeStyles ? `<style>${themeStyles}</style>` : ""))
 		.replace("{{SESSION_DATA}}", () => sessionDataBase64);
 }
 
@@ -277,9 +234,10 @@ export async function exportSessionToHtml(
 
 	const sessionData = buildSessionData(sm, state);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectSubSessions(sessionFile);
+		const subSessions = await collectExportSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
+	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
 	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
@@ -295,7 +253,10 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	let sm: SessionManager;
 	try {
-		sm = await SessionManager.open(inputPath, undefined, undefined, { suppressBreadcrumb: true });
+		sm = await SessionManager.open(inputPath, undefined, undefined, {
+			suppressBreadcrumb: true,
+			throwIfMissing: true,
+		});
 	} catch (err) {
 		if (isEnoent(err)) throw new Error(`File not found: ${inputPath}`);
 		throw err;
@@ -307,9 +268,10 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		leafId: sm.getLeafId(),
 	};
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectSubSessions(inputPath);
+		const subSessions = await collectExportSubSessions(inputPath);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
+	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
 	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);

@@ -4,7 +4,7 @@
  * Prevents session changes when there are uncommitted git changes.
  * Useful to ensure work is committed before switching context.
  */
-import type { HookAPI, HookContext } from "@oh-my-pi/pi-coding-agent";
+import type { HookAPI, HookContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 async function checkDirtyRepo(pi: HookAPI, ctx: HookContext, action: string): Promise<{ cancel: boolean } | undefined> {
 	// Check for uncommitted changes

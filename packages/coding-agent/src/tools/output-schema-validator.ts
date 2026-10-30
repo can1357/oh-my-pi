@@ -15,12 +15,17 @@ import {
 	validateJsonSchemaValue,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { jtdToJsonSchema, normalizeSchema } from "./jtd-to-json-schema";
 
 /** A validator bound to a specific output schema. */
 export interface OutputValidator {
 	/** Run JSON Schema validation; returns the raw `success`/`issues` shape so callers may inspect every failure. */
 	validate(value: unknown): JsonSchemaValidationResult;
+	/** Treat strict-provider nulls for optional non-nullable properties as omitted before validation and delivery. */
+	normalize(value: unknown): unknown;
+	/** Apply the same normalization to one incremental section (array sections carry one item). */
+	normalizeSection(label: string, value: unknown): unknown;
 	/** Top-level required property names. Empty if the schema has no `required` array at root. */
 	readonly requiredFields: readonly string[];
 	/**
@@ -54,6 +59,13 @@ export interface BuildOutputValidatorResult {
 }
 
 /**
+ * Builds keyed by the declaration's content (JSON strings verbatim, objects by
+ * their serialization), so a reused schema object that was edited in place
+ * gets a fresh validator.
+ */
+const schemaResults = new LRUCache<string, BuildOutputValidatorResult>({ max: 32 });
+
+/**
  * Build the canonical validator for a JTD-or-JSON-Schema output declaration.
  *
  * Returns:
@@ -62,8 +74,31 @@ export interface BuildOutputValidatorResult {
  *   No validator, but distinguishable from "no schema provided".
  * - `{}` for an absent schema (`undefined`).
  * - `{ error, normalized? }` when the schema cannot be honored (invalid syntax, `false`, malformed JTD).
+ *
+ * Results are memoized per schema content and shared across calls: the
+ * validator holds no per-call state, and callers MUST NOT mutate the returned result.
  */
 export function buildOutputValidator(schema: unknown): BuildOutputValidatorResult {
+	let key: string | undefined;
+	if (typeof schema === "string") key = `s${schema}`;
+	else if (schema !== null && typeof schema === "object") {
+		try {
+			key = `o${JSON.stringify(schema)}`;
+		} catch {
+			// Unserializable (cyclic) declarations are rejected by the build itself.
+		}
+	}
+	if (key === undefined) return buildOutputValidatorUncached(schema);
+	let cached = schemaResults.get(key);
+	if (!cached) {
+		// Build from a private copy: the cached result must not alias an object the caller may edit later.
+		cached = buildOutputValidatorUncached(typeof schema === "string" ? schema : JSON.parse(key.slice(1)));
+		schemaResults.set(key, cached);
+	}
+	return cached;
+}
+
+function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResult {
 	const { normalized, error: normalizeError } = normalizeSchema(schema);
 	if (normalizeError) return { error: normalizeError, normalized };
 	if (normalized === undefined) return {};
@@ -92,13 +127,20 @@ export function buildOutputValidator(schema: unknown): BuildOutputValidatorResul
 			: jsonSchemaRecord;
 	const required = extractRequiredFields(labelSchema);
 	const sectionLabels = buildSectionLabelMetadata(labelSchema);
+	const sectionSchemas = buildSectionSchemas(labelSchema);
+	const sectionValidators = new Map<string, (value: unknown) => JsonSchemaValidationResult>();
+	for (const [label, sectionSchema] of sectionSchemas) {
+		sectionValidators.set(label, value => validateJsonSchemaValue(sectionSchema, value));
+	}
 	return {
 		normalized,
 		jsonSchema: jsonSchemaRecord,
 		validator: {
 			requiredFields: required,
 			validate: value => validateJsonSchemaValue(jsonSchemaRecord, value),
-			validateSection: buildSectionValidators(labelSchema),
+			normalize: value => normalizeStrictOutput(value, labelSchema),
+			normalizeSection: (label, value) => normalizeStrictOutput(value, sectionSchemas.get(label)),
+			validateSection: sectionValidators,
 			rejectUnknownSections: sectionLabels.rejectUnknownSections,
 			knownSectionLabels: sectionLabels.labels,
 			isKnownSection: sectionLabels.isKnown,
@@ -106,31 +148,77 @@ export function buildOutputValidator(schema: unknown): BuildOutputValidatorResul
 	};
 }
 
-/**
- * Build per-top-level-property validators for incremental yields.
- *
- * Each entry validates the `data` payload of one `type: ["<label>"]` section against the
- * matching property's sub-schema — array-typed properties (e.g. `findings`, derived from JTD
- * `elements`) use the items schema since each yield contributes one element, while scalar
- * properties use the property schema directly. Closed top-level schemas reject labels that are
- * not declared as properties.
- */
-function buildSectionValidators(
-	jsonSchema: Record<string, unknown>,
-): ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> {
-	const validators = new Map<string, (value: unknown) => JsonSchemaValidationResult>();
+/** Derive the schema for each incremental section, selecting array items when the section submits one element. */
+function buildSectionSchemas(jsonSchema: Record<string, unknown>): ReadonlyMap<string, unknown> {
+	const schemas = new Map<string, unknown>();
 	const properties = jsonSchema.properties;
-	if (!isRecord(properties)) return validators;
+	if (!isRecord(properties)) return schemas;
 	for (const label in properties) {
 		const raw = properties[label];
 		const propRecord = isRecord(raw) ? raw : undefined;
-		const sectionSchema =
+		schemas.set(
+			label,
 			propRecord?.type === "array" && propRecord.items !== undefined && propRecord.items !== null
 				? propRecord.items
-				: raw;
-		validators.set(label, value => validateJsonSchemaValue(sectionSchema, value));
+				: raw,
+		);
 	}
-	return validators;
+	return schemas;
+}
+
+// Remove provider-injected nulls only when the declared property schema rejects null.
+function normalizeStrictOutput(value: unknown, schema: unknown): unknown {
+	if (!isRecord(schema)) return value;
+	if (Array.isArray(schema.anyOf) && schema.anyOf.length === 2) {
+		const [first, second] = schema.anyOf;
+		if (isRecord(first) && first.type === "null") return normalizeStrictOutput(value, second);
+		if (isRecord(second) && second.type === "null") return normalizeStrictOutput(value, first);
+	}
+	if (Array.isArray(schema.allOf)) {
+		for (const branch of schema.allOf) value = normalizeStrictOutput(value, branch);
+	}
+	// For unions, accept a candidate only when it satisfies the entire original schema.
+	for (const keyword of ["oneOf", "anyOf"]) {
+		const branches = schema[keyword];
+		if (!Array.isArray(branches)) continue;
+		if (validateJsonSchemaValue(schema, value).success) return value;
+		for (const branch of branches) {
+			const candidate = normalizeStrictOutput(value, branch);
+			if (candidate !== value && validateJsonSchemaValue(schema, candidate).success) return candidate;
+		}
+	}
+	const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : undefined;
+	if (Array.isArray(value) && (prefixItems !== undefined || schema.items !== undefined)) {
+		let normalized: unknown[] | undefined;
+		for (let index = 0; index < value.length; index++) {
+			const itemSchema = prefixItems && index < prefixItems.length ? prefixItems[index] : schema.items;
+			const item = normalizeStrictOutput(value[index], itemSchema);
+			if (item === value[index]) continue;
+			normalized ??= value.slice();
+			normalized[index] = item;
+		}
+		return normalized ?? value;
+	}
+	if (!isRecord(value) || !isRecord(schema.properties)) return value;
+	let normalized: Record<string, unknown> | undefined;
+	for (const key in schema.properties) {
+		if (!Object.hasOwn(value, key)) continue;
+		const propertySchema = schema.properties[key];
+		if (
+			value[key] === null &&
+			!(Array.isArray(schema.required) && schema.required.includes(key)) &&
+			!validateJsonSchemaValue(propertySchema, null).success
+		) {
+			normalized ??= { ...value };
+			delete normalized[key];
+			continue;
+		}
+		const property = normalizeStrictOutput(value[key], propertySchema);
+		if (property === value[key]) continue;
+		normalized ??= { ...value };
+		normalized[key] = property;
+	}
+	return normalized ?? value;
 }
 
 interface SectionLabelMetadata {

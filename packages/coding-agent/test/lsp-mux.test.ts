@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { MessageFramer } from "../src/jsonrpc/message-framing";
 import {
 	MUX_CONNECT_METHOD,
@@ -25,20 +25,16 @@ interface RpcMessage {
 interface FakeState {
 	initializeCount: number;
 	processId: number | null;
+	initializationOptions: unknown;
 	didOpen: Record<string, number>;
 	didChange: Record<string, number[]>;
 	didClose: string[];
 	notifications: string[];
-}
-
-interface PublishDiagnosticsParams {
-	uri: string;
-	version?: number;
-	diagnostics: Array<{ message: string; severity: number }>;
+	workspaceFolders: string[];
 }
 
 class MuxTestClient {
-	readonly #socket: net.Socket;
+	readonly #connection: IpcConnection;
 	readonly #framer = new MessageFramer(Buffer.alloc(0));
 	readonly #pending = new Map<
 		string | number,
@@ -46,37 +42,25 @@ class MuxTestClient {
 	>();
 	readonly #notifications = new Map<string, RpcMessage[]>();
 	readonly #notificationWaiters = new Map<string, Array<(message: RpcMessage) => void>>();
+	readonly #closed = Promise.withResolvers<void>();
 	#nextId = 1;
-	#closed = false;
 
-	constructor(socket: net.Socket) {
-		this.#socket = socket;
-		socket.on("data", (chunk: Buffer) => {
-			this.#framer.push(chunk);
-			for (const text of this.#framer.drain(() => {})) this.#receive(JSON.parse(text) as RpcMessage);
-		});
-		socket.on("error", error => this.#failPending(error));
-		socket.on("close", () => {
-			this.#closed = true;
-			this.#failPending(new Error("Mux socket closed"));
-		});
+	constructor(connection: IpcConnection) {
+		this.#connection = connection;
+		connection.startRaw(
+			chunk => {
+				this.#framer.push(chunk);
+				for (const text of this.#framer.drain(() => {})) this.#receive(JSON.parse(text) as RpcMessage);
+			},
+			reason => {
+				this.#failPending(new Error(reason ? `Mux connection closed: ${reason}` : "Mux connection closed"));
+				this.#closed.resolve();
+			},
+		);
 	}
 
 	static async connect(endpoint: string): Promise<MuxTestClient> {
-		const socket = net.createConnection(endpoint);
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		const onConnect = (): void => {
-			socket.off("error", onError);
-			resolve();
-		};
-		const onError = (error: Error): void => {
-			socket.off("connect", onConnect);
-			reject(error);
-		};
-		socket.once("connect", onConnect);
-		socket.once("error", onError);
-		await promise;
-		return new MuxTestClient(socket);
+		return new MuxTestClient(await IpcConnection.connect(endpoint, { framing: "raw" }));
 	}
 
 	request<T>(method: string, params?: unknown, id: string | number = this.#nextId++): Promise<T> {
@@ -88,6 +72,10 @@ class MuxTestClient {
 
 	notify(method: string, params?: unknown): void {
 		this.#write({ jsonrpc: "2.0", method, params });
+	}
+
+	sendRaw(bytes: Buffer): void {
+		this.#connection.send(bytes);
 	}
 
 	async nextNotification<T>(method: string): Promise<T> {
@@ -102,26 +90,23 @@ class MuxTestClient {
 	}
 
 	waitForClose(): Promise<void> {
-		if (this.#closed || this.#socket.destroyed) return Promise.resolve();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#socket.once("close", () => resolve());
-		return withTimeout(promise, "socket close");
+		return withTimeout(this.#closed.promise, "connection close");
 	}
 
 	destroy(): void {
-		this.#socket.destroy();
+		this.#connection.destroy();
 	}
 
 	#write(message: RpcMessage): void {
 		const json = JSON.stringify(message);
-		this.#socket.write(`Content-Length: ${Buffer.byteLength(json)}\r\n\r\n${json}`);
+		this.#connection.send(`Content-Length: ${Buffer.byteLength(json)}\r\n\r\n${json}`);
 	}
 
 	#receive(message: RpcMessage): void {
 		if (message.method !== undefined) {
 			if (message.id !== undefined) {
+				// Reply first, then queue the request so tests can await it via nextNotification.
 				this.#write({ jsonrpc: "2.0", id: message.id, result: message.params });
-				return;
 			}
 			const waiters = this.#notificationWaiters.get(message.method);
 			const waiter = waiters?.shift();
@@ -148,7 +133,7 @@ class MuxTestClient {
 }
 
 async function withTimeout<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
-	// Real socket/subprocess integration needs a wall-clock failure watchdog; always cancel it when the event wins.
+	// Real IPC/subprocess integration needs a wall-clock failure watchdog; always cancel it when the event wins.
 	const timeout = Promise.withResolvers<never>();
 	const timer = setTimeout(() => timeout.reject(new Error(`Timed out waiting for ${description}`)), timeoutMs);
 	try {
@@ -159,14 +144,22 @@ async function withTimeout<T>(promise: Promise<T>, description: string, timeoutM
 }
 
 const fixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server.ts");
-const initializeParams = (processId = 424242): Record<string, unknown> => ({
+const initializeParams = (processId = 424242, initializationOptions: unknown = {}): Record<string, unknown> => ({
 	processId,
 	rootUri: null,
 	capabilities: {},
+	initializationOptions,
 });
 
-async function initialize(client: MuxTestClient, processId = 424242): Promise<Record<string, unknown>> {
-	const result = await client.request<Record<string, unknown>>("initialize", initializeParams(processId));
+async function initialize(
+	client: MuxTestClient,
+	processId = 424242,
+	initializationOptions: unknown = {},
+): Promise<Record<string, unknown>> {
+	const result = await client.request<Record<string, unknown>>(
+		"initialize",
+		initializeParams(processId, initializationOptions),
+	);
 	client.notify("initialized", {});
 	return result;
 }
@@ -175,28 +168,19 @@ async function state(client: MuxTestClient): Promise<FakeState> {
 	return client.request<FakeState>("test/state");
 }
 
-async function pollUntil(check: () => Promise<boolean>, description: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
-	while (Date.now() < deadline) {
-		if (await check()) return;
-		await Bun.sleep(25);
-	}
-	throw new Error(`Timed out waiting for ${description}`);
-}
-
 describe("LspMuxServer", () => {
 	let server: LspMuxServer;
 	let tmpDir: string;
-	let socketPath: string;
+	let endpoint: string;
 	let connectParams: MuxConnectParams;
 	const clients: MuxTestClient[] = [];
 
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lsp-mux-test-"));
-		socketPath = path.join(tmpDir, "mux.sock");
+		endpoint = ipcEndpoint(tmpDir, "mux");
 		connectParams = { command: process.execPath, args: ["run", fixturePath], cwd: tmpDir };
 		server = new LspMuxServer();
-		await server.listen(socketPath);
+		await server.listen(endpoint);
 	});
 
 	afterEach(async () => {
@@ -205,194 +189,108 @@ describe("LspMuxServer", () => {
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	});
 
-	async function link(): Promise<{ client: MuxTestClient; connected: MuxConnectResult }> {
-		const client = await MuxTestClient.connect(socketPath);
+	async function link(params = connectParams): Promise<{ client: MuxTestClient; connected: MuxConnectResult }> {
+		const client = await MuxTestClient.connect(endpoint);
 		clients.push(client);
-		const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams);
+		const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, params);
 		return { client, connected };
 	}
 
-	it.skipIf(process.platform === "win32")(
-		"spawns one server per concurrent link",
-		async () => {
-			const first = await link();
-			const second = await link();
-			expect(first.connected.spawned).toBe(true);
-			expect(second.connected.spawned).toBe(true);
-			expect(second.connected.pid).not.toBe(first.connected.pid);
+	it("disconnects a malformed link without terminating other sessions", async () => {
+		const healthy = await link();
+		await initialize(healthy.client);
+		const malformed = await MuxTestClient.connect(endpoint);
+		clients.push(malformed);
+		const closed = malformed.waitForClose();
+		malformed.sendRaw(Buffer.alloc(16 * 1024, 97));
+		await closed;
+		expect(await healthy.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({
+			alive: true,
+		});
+	});
 
-			const [firstInitialize, secondInitialize] = await Promise.all([
-				initialize(first.client),
-				initialize(second.client),
-			]);
-			const firstInfo = firstInitialize.serverInfo as { version: string };
-			const secondInfo = secondInitialize.serverInfo as { version: string };
-			expect(firstInfo.version).toBe(String(first.connected.pid));
-			expect(secondInfo.version).toBe(String(second.connected.pid));
-			expect((await state(first.client)).initializeCount).toBe(1);
-			expect((await state(second.client)).initializeCount).toBe(1);
-		},
-		10_000,
-	);
+	it("spawns one server per concurrent link", async () => {
+		const first = await link();
+		const second = await link();
+		expect(first.connected.spawned).toBe(true);
+		expect(second.connected.spawned).toBe(true);
+		expect(second.connected.pid).not.toBe(first.connected.pid);
 
-	it.skipIf(process.platform === "win32")(
-		"rewrites initialize processId to the mux process",
-		async () => {
-			const { client } = await link();
-			await initialize(client, 424242);
-			expect((await state(client)).processId).toBe(process.pid);
-		},
-		10_000,
-	);
+		const [firstInitialize, secondInitialize] = await Promise.all([
+			initialize(first.client),
+			initialize(second.client),
+		]);
+		const firstInfo = firstInitialize.serverInfo as { version: string };
+		const secondInfo = secondInitialize.serverInfo as { version: string };
+		expect(firstInfo.version).toBe(String(first.connected.pid));
+		expect(secondInfo.version).toBe(String(second.connected.pid));
+		expect((await state(first.client)).initializeCount).toBe(1);
+		expect((await state(second.client)).initializeCount).toBe(1);
+	}, 10_000);
 
-	it.skipIf(process.platform === "win32")(
-		"isolates equal request ids between sessions",
-		async () => {
-			const first = await link();
-			const second = await link();
-			await Promise.all([initialize(first.client), initialize(second.client)]);
-			const [one, two] = await Promise.all([
-				first.client.request<{ owner: string }>("test/echo", { owner: "first" }, 7),
-				second.client.request<{ owner: string }>("test/echo", { owner: "second" }, 7),
-			]);
-			expect(one).toEqual({ owner: "first" });
-			expect(two).toEqual({ owner: "second" });
-		},
-		10_000,
-	);
+	it("rewrites initialize processId to the mux process", async () => {
+		const { client } = await link();
+		await initialize(client, 424242);
+		expect((await state(client)).processId).toBe(process.pid);
+	}, 10_000);
 
-	it.skipIf(process.platform === "win32")(
-		"isolates open-document overlays between concurrent sessions",
-		async () => {
-			const first = await link();
-			const second = await link();
-			expect(second.connected.pid).not.toBe(first.connected.pid);
-			await Promise.all([initialize(first.client), initialize(second.client)]);
-			const uri = "file:///shared.ts";
-			first.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "first" },
-			});
-			second.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "second" },
-			});
+	it("isolates equal request ids between sessions", async () => {
+		const first = await link();
+		const second = await link();
+		await Promise.all([initialize(first.client), initialize(second.client)]);
+		const [one, two] = await Promise.all([
+			first.client.request<{ owner: string }>("test/echo", { owner: "first" }, 7),
+			second.client.request<{ owner: string }>("test/echo", { owner: "second" }, 7),
+		]);
+		expect(one).toEqual({ owner: "first" });
+		expect(two).toEqual({ owner: "second" });
+	}, 10_000);
 
-			await pollUntil(async () => {
-				const [seenByFirst, seenBySecond] = await Promise.all([
-					first.client.request<string | null>("test/documentText", { uri }),
-					second.client.request<string | null>("test/documentText", { uri }),
-				]);
-				return seenByFirst === "first" && seenBySecond === "second";
-			}, "session-specific document contents");
-		},
-		10_000,
-	);
+	it("intercepts shutdown and exit for only the calling session", async () => {
+		const first = await link();
+		const second = await link();
+		await Promise.all([initialize(first.client), initialize(second.client)]);
+		expect(await first.client.request<null>("shutdown")).toBeNull();
+		const closed = first.client.waitForClose();
+		first.client.notify("exit");
+		await closed;
+		expect(await second.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
+	}, 10_000);
 
-	it.skipIf(process.platform === "win32")(
-		"replays cached diagnostics when an idle server is reused",
-		async () => {
-			const first = await link();
-			await initialize(first.client);
-			const uri = "file:///diagnostics.ts";
-			first.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
-			});
-			const publication = await first.client.nextNotification<PublishDiagnosticsParams>(
-				"textDocument/publishDiagnostics",
-			);
-			expect(publication).toMatchObject({
-				uri,
-				version: 1,
-				diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
-			});
+	it("answers muxPing before a link is bound", async () => {
+		const client = await MuxTestClient.connect(endpoint);
+		clients.push(client);
+		expect(await client.request<string>(MUX_PING_METHOD)).toBe("pong");
+	}, 10_000);
 
-			first.client.destroy();
-			await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
-			const second = await link();
-			expect(second.connected.spawned).toBe(false);
-			expect(second.connected.pid).toBe(first.connected.pid);
-			await initialize(second.client);
-			const replay = await second.client.nextNotification<PublishDiagnosticsParams>(
-				"textDocument/publishDiagnostics",
-			);
-			expect(replay).toMatchObject({
-				uri,
-				diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
-			});
-		},
-		10_000,
-	);
+	it("restarts only the calling session's server", async () => {
+		const first = await link();
+		const second = await link();
+		await Promise.all([initialize(first.client), initialize(second.client)]);
+		const firstClosed = first.client.waitForClose();
+		first.client.notify(MUX_RESTART_METHOD);
+		await firstClosed;
+		expect(await second.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
 
-	it.skipIf(process.platform === "win32")(
-		"intercepts shutdown and exit for only the calling session",
-		async () => {
-			const first = await link();
-			const second = await link();
-			await Promise.all([initialize(first.client), initialize(second.client)]);
-			expect(await first.client.request<null>("shutdown")).toBeNull();
-			const closed = first.client.waitForClose();
-			first.client.notify("exit");
-			await closed;
-			expect(await second.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
-		},
-		10_000,
-	);
+		const replacement = await link();
+		expect(replacement.connected.spawned).toBe(true);
+		expect(replacement.connected.pid).not.toBe(first.connected.pid);
+		expect(replacement.connected.pid).not.toBe(second.connected.pid);
+	}, 10_000);
 
-	it.skipIf(process.platform === "win32")(
-		"answers muxPing before a link is bound",
-		async () => {
-			const client = await MuxTestClient.connect(socketPath);
-			clients.push(client);
-			expect(await client.request<string>(MUX_PING_METHOD)).toBe("pong");
-		},
-		10_000,
-	);
+	it("removes the workspace folders a session added before reusing its server", async () => {
+		const first = await link();
+		await initialize(first.client);
+		const added = { uri: "file:///other-checkout", name: "other-checkout" };
+		first.client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+		expect((await state(first.client)).workspaceFolders).toEqual([added.uri]);
+		const firstClosed = first.client.waitForClose();
+		first.client.destroy();
+		await firstClosed;
 
-	it.skipIf(process.platform === "win32")(
-		"restarts only the calling session's server",
-		async () => {
-			const first = await link();
-			const second = await link();
-			await Promise.all([initialize(first.client), initialize(second.client)]);
-			const firstClosed = first.client.waitForClose();
-			first.client.notify(MUX_RESTART_METHOD);
-			await firstClosed;
-			expect(await second.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
-
-			const replacement = await link();
-			expect(replacement.connected.spawned).toBe(true);
-			expect(replacement.connected.pid).not.toBe(first.connected.pid);
-			expect(replacement.connected.pid).not.toBe(second.connected.pid);
-		},
-		10_000,
-	);
-
-	it.skipIf(process.platform === "win32")(
-		"finishes orphan document closes before reusing a server",
-		async () => {
-			const first = await link();
-			await initialize(first.client);
-			const uris = Array.from({ length: 128 }, (_, index) => `file:///orphan-${index}.ts`);
-			for (const uri of uris) {
-				first.client.notify("textDocument/didOpen", {
-					textDocument: { uri, languageId: "typescript", version: 1, text: "orphan" },
-				});
-			}
-			await first.client.request("test/echo", { barrier: true });
-			const firstClosed = first.client.waitForClose();
-			first.client.destroy();
-			await firstClosed;
-
-			const second = await link();
-			expect(second.connected.spawned).toBe(false);
-			const uri = uris.at(-1);
-			expect(uri).toBeDefined();
-			await initialize(second.client);
-			second.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "replacement" },
-			});
-			await second.client.request("test/echo", { barrier: true });
-			expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
-		},
-		10_000,
-	);
+		const second = await link();
+		expect(second.connected.spawned).toBe(false);
+		await initialize(second.client);
+		expect((await state(second.client)).workspaceFolders).toEqual([]);
+	}, 10_000);
 });

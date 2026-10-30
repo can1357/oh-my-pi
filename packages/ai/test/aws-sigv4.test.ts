@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatAmzDate, getSigningKey, signRequest, toHex } from "@oh-my-pi/pi-ai/providers/aws-sigv4";
+import { canonicalQuery, formatAmzDate, getSigningKey, signRequest, toHex } from "@oh-my-pi/pi-ai/providers/aws-sigv4";
 
 // Canonical AWS SigV4 test vectors. Sourced from the
 // `aws-sig-v4-test-suite` published with the SigV4 spec.
@@ -27,6 +27,32 @@ describe("aws-sigv4 helpers", () => {
 		//   https://docs.aws.amazon.com/IAM/latest/UserGuide/signature-v4-examples.html
 		const key = await getSigningKey(CREDS.secretAccessKey, "20150830", REGION, "iam");
 		expect(toHex(key)).toBe("c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9");
+	});
+
+	describe("canonicalQuery", () => {
+		test("sorts by the ENCODED form per spec, not the decoded form", () => {
+			// `%7B` decodes to `{` (0x7B) — decoded, `x` (0x78) sorts before `{`.
+			// Encoded, `%` (0x25) sorts before `x`, so `%7B` must come first.
+			// https://docs.aws.amazon.com/IAM/latest/UserGuide/create-canonical-request.html:
+			// "Sort the encoded parameter names by character code."
+			expect(canonicalQuery("x=1&%7B=2")).toBe("%7B=2&x=1");
+		});
+
+		test("sorts uppercase before lowercase by character code", () => {
+			expect(canonicalQuery("bar=2&Foo=1")).toBe("Foo=1&bar=2");
+		});
+
+		test("sorts duplicate keys by value", () => {
+			expect(canonicalQuery("a=2&a=1")).toBe("a=1&a=2");
+		});
+
+		test("leaves an already-sorted, unreserved-only query unchanged", () => {
+			expect(canonicalQuery("a=1&b=2")).toBe("a=1&b=2");
+		});
+
+		test("returns an empty string for no query", () => {
+			expect(canonicalQuery(undefined)).toBe("");
+		});
 	});
 });
 

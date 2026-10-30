@@ -8,9 +8,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 /**
  * Fixture mirrors the live `https://yolo-auto.com/v1/models` surface: an
- * OpenAI-style `data` array of public model ids. The docs only advertise
- * `deepseek-flash-v4`; the extra id proves discovery surfaces whatever the wire
- * returns, not just bundled ids.
+ * OpenAI-style `data` array of public model ids.
  */
 function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | null)[]; fetch: FetchImpl } {
 	const calls: string[] = [];
@@ -20,10 +18,7 @@ function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | nul
 		authorizations.push(new Headers(init?.headers).get("authorization"));
 		return new Response(
 			JSON.stringify({
-				data: [
-					{ id: "deepseek-flash-v4", object: "model", created: 0, owned_by: "yolo-auto" },
-					{ id: "future-model", object: "model", created: 0, owned_by: "yolo-auto" },
-				],
+				data: [{ id: "qwen3.8-27b", object: "model", created: 0, owned_by: "yolo-auto" }],
 			}),
 			{ status: 200, headers: { "content-type": "application/json" } },
 		);
@@ -39,45 +34,24 @@ describe("Yolo-Auto provider discovery", () => {
 		expect(calls).toEqual(["https://yolo-auto.com/v1/models"]);
 		expect(authorizations).toEqual(["Bearer yolo-test-key"]);
 
-		const flash = models?.find(model => model.id === "deepseek-flash-v4");
-		expect(flash).toMatchObject({
+		const qwen = models?.find(model => model.id === "qwen3.8-27b");
+		expect(qwen).toMatchObject({
 			provider: "yolo-auto",
 			api: "openai-completions",
 			baseUrl: "https://yolo-auto.com/v1",
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 131072,
-			maxTokens: null,
 		});
 		// The documented wire surface flows from the bundled reference into
-		// discovered models: generic chat-template thinking, effort steering, and
+		// discovered models: Qwen chat-template thinking, effort steering, and
 		// no developer role / store param.
-		expect(flash?.compat).toMatchObject({
+		expect(qwen?.compat).toMatchObject({
 			supportsDeveloperRole: false,
 			supportsStore: false,
 			supportsReasoningEffort: true,
-			thinkingFormat: "chat-template",
+			thinkingFormat: "qwen-chat-template",
 		});
-		// The documented effort mapping is retained through credentialed discovery — selecting an effort must reach the request.
-		expect(flash?.thinking).toMatchObject({
-			mode: "effort",
-			efforts: ["minimal", "low", "medium", "high", "xhigh", "max"],
-			effortMap: {
-				minimal: "low",
-				low: "low",
-				medium: "high",
-				high: "high",
-				xhigh: "max",
-				max: "max",
-			},
-		});
-	});
-
-	test("surfaces wire ids that have no bundled reference", async () => {
-		const { fetch } = yoloAutoModelsFetch();
-		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
-		expect(models?.some(model => model.id === "future-model")).toBe(true);
 	});
 
 	test("inherits reasoning and context for models other providers already bundle", async () => {
@@ -85,7 +59,7 @@ describe("Yolo-Auto provider discovery", () => {
 			new Response(
 				JSON.stringify({
 					data: [
-						{ id: "deepseek-flash-v4", object: "model" },
+						{ id: "qwen3.8-27b", object: "model" },
 						{ id: "deepseek-v4-pro", object: "model" },
 					],
 				}),
@@ -112,7 +86,7 @@ describe("Yolo-Auto provider discovery", () => {
 			new Response(
 				JSON.stringify({
 					data: [
-						{ id: "deepseek-flash-v4", object: "model" },
+						{ id: "qwen3.8-27b", object: "model" },
 						{ id: "gpt-4o", object: "model" },
 					],
 				}),
@@ -138,15 +112,8 @@ describe("Yolo-Auto provider discovery", () => {
 		expect(yoloAutoModelManagerOptions().fetchDynamicModels).toBeUndefined();
 	});
 
-	test("marks live discovery authoritative so retired bundled ids cannot linger", () => {
-		// The runtime merge path reads this flag from the manager options, not
-		// the catalog descriptor — without it a successful /v1/models response
-		// merges over the bundled seed instead of replacing it.
-		expect(yoloAutoModelManagerOptions({ apiKey: "yolo-test-key" }).dynamicModelsAuthoritative).toBe(true);
-	});
-
 	test("prunes the bundled id when a live catalog omits it", async () => {
-		// Regression: a provider-side retirement of deepseek-flash-v4 must not leave
+		// Regression: a provider-side retirement of a bundled id must not leave
 		// the bundled seed selectable. With the authoritative option the
 		// production manager replaces the static rows with the wire catalog.
 		const fetch: FetchImpl = async () =>
@@ -167,22 +134,22 @@ describe("Yolo-Auto provider discovery", () => {
 	test("prefers curated metadata over a stale previous bundle", async () => {
 		// A credentialed `gen:models` run bakes live discovery into
 		// models.json; that previous bundle row must not shadow later
-		// corrections to YOLO_AUTO_STATIC_MODELS. Simulate a stale bundle row
-		// (262K context, no template dialect) and require the curated surface.
+		// corrections to the yolo-auto seed. Simulate a stale bundle row
+		// (1M context, no template dialect) and require the curated surface.
 		const originalGetBundledModels = modelsModule.getBundledModels;
 		vi.spyOn(modelsModule, "getBundledModels").mockImplementation((provider => {
 			if (provider === "yolo-auto") {
 				return [
 					buildModel({
-						id: "deepseek-flash-v4",
-						name: "DeepSeek Flash V4 (stale bundle)",
+						id: "qwen3.8-27b",
+						name: "Qwen3.8-27B (stale bundle)",
 						api: "openai-completions",
 						provider: "yolo-auto",
 						baseUrl: "https://yolo-auto.com/v1",
 						reasoning: true,
 						input: ["text", "image"],
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						contextWindow: 262_144,
+						contextWindow: 1_000_000,
 						maxTokens: null,
 					}),
 				];
@@ -191,16 +158,84 @@ describe("Yolo-Auto provider discovery", () => {
 		}) as typeof modelsModule.getBundledModels);
 		try {
 			const fetch: FetchImpl = async () =>
-				new Response(JSON.stringify({ data: [{ id: "deepseek-flash-v4", object: "model" }] }), { status: 200 });
+				new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b", object: "model" }] }), { status: 200 });
 			const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
-			const flash = models?.find(model => model.id === "deepseek-flash-v4");
+			const qwen = models?.find(model => model.id === "qwen3.8-27b");
 
-			expect(flash).toMatchObject({
-				contextWindow: 131072,
-				compat: { thinkingFormat: "chat-template" },
+			expect(qwen).toMatchObject({
+				contextWindow: 262144,
+				compat: { thinkingFormat: "qwen-chat-template" },
 			});
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+
+	test("discovers qwen3.8-27b and yolo at the documented 256K deployment cap", async () => {
+		// The flat-rate /v1/models response carries bare ids with no limit
+		// fields. Without provider-local seeds the bare qwen3.8-27b slug
+		// resolves through the global reference index, which prefers the
+		// largest bundled window (1M) and misreports the deployment cap.
+		const fetch: FetchImpl = async () =>
+			new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b" }, { id: "yolo" }] }), { status: 200 });
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+
+		for (const id of ["qwen3.8-27b", "yolo"]) {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			const model = buildModel(spec);
+			expect(model).toMatchObject({
+				provider: "yolo-auto",
+				contextWindow: 262144,
+				maxTokens: 131072,
+				identity: { class: "qwen", revision: "3.8.0" },
+				compat: {
+					supportsReasoningEffort: true,
+					thinkingFormat: "qwen-chat-template",
+					supportsStore: false,
+					supportsDeveloperRole: false,
+				},
+			});
+			// The opaque `yolo` alias must carry the same tokenizer as the
+			// explicit Qwen3.8-27B row or context accounting falls back to estimates.
+			expect(model.tokenizer).toBe("qwen3");
+		}
+	});
+
+	test("takes each model's effort ladder from the live `thinking` field", async () => {
+		// Live /v1/models advertises minimal..xhigh for the Qwen3.8 rows; the
+		// seed ladder previously stopped at high, hiding xhigh from the picker.
+		const ladder = ["minimal", "low", "medium", "high", "xhigh"];
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					object: "list",
+					data: [
+						{ id: "yolo", context_length: 262144, thinking: ladder },
+						{ id: "qwen3.8-27b", context_length: 262144, thinking: [...ladder, "turbo"] },
+						{ id: "yolo-small", context_length: 262144 },
+					],
+				}),
+				{ status: 200 },
+			);
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+		const built = (id: string) => {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			return buildModel(spec);
+		};
+
+		const expected = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+		for (const id of ["yolo", "qwen3.8-27b"]) {
+			const model = built(id);
+			expect(model.reasoning).toBe(true);
+			// Unknown wire values ("turbo") are dropped, not surfaced as levels.
+			expect(model.thinking?.efforts).toEqual(expected);
+		}
+		// A row without `thinking` keeps its reference surface: the plain
+		// `yolo-small` route stays non-reasoning.
+		const small = built("yolo-small");
+		expect(small.reasoning).toBe(false);
+		expect(small.thinking).toBeUndefined();
 	});
 });

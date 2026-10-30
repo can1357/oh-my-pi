@@ -86,6 +86,59 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		expect(output).not.toContain("Use :");
 	});
 
+	it("marks capped child directories inline instead of appending a `limit=` notice (regression)", async () => {
+		// Child dirs cap at 12 entries. The cap used to surface as
+		// "[1 results limit reached. Use limit=2 for more]" — read has no
+		// `limit` parameter, so the hint was unactionable. The inline marker
+		// plus reading the sub-path is the whole contract.
+		const child = path.join(testDir, "child");
+		fs.mkdirSync(child);
+		for (let i = 1; i <= 40; i++) fs.writeFileSync(path.join(child, `c-${i}.txt`), "");
+
+		const result = await tool.execute("call-capped", { path: testDir });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("… 28 more");
+		expect(output).not.toContain("limit reached");
+		expect(result.details?.meta?.limits).toBeUndefined();
+
+		const expanded = getTextOutput(await tool.execute("call-child", { path: child }));
+		expect(expanded).toContain("c-40.txt");
+		expect(expanded).not.toContain("more");
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports an unreadable root instead of claiming its files are absent",
+		async () => {
+			fs.chmodSync(testDir, 0o000);
+			try {
+				await expect(tool.execute("call-denied-root", { path: testDir })).rejects.toThrow(
+					/Cannot read directory:.*(permission denied|os error 13)/i,
+				);
+			} finally {
+				fs.chmodSync(testDir, 0o755);
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"marks an unreadable child and keeps listing its readable siblings",
+		async () => {
+			const child = path.join(testDir, "blocked");
+			fs.mkdirSync(child);
+			fs.writeFileSync(path.join(child, "nested.txt"), "present");
+			fs.chmodSync(child, 0o000);
+			try {
+				const output = getTextOutput(await tool.execute("call-denied-child", { path: testDir }));
+				expect(output).toMatch(/- blocked\/ \[unreadable: [^\]]*(permission denied|os error 13)[^\]]*\]/i);
+				expect(output).toContain("file-001.txt");
+				expect(output).toContain("file-060.txt");
+			} finally {
+				fs.chmodSync(child, 0o755);
+			}
+		},
+	);
+
 	it("emits a clear `beyond end` notice instead of returning an empty body", async () => {
 		const result = await tool.execute("call-beyond", { path: `${testDir}:9999` });
 		const output = getTextOutput(result);

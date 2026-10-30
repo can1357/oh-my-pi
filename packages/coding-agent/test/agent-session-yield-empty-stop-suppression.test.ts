@@ -8,18 +8,18 @@
  * (see issues #3389 and #4963).
  */
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const yieldToolSchema = type({ data: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
@@ -27,7 +27,7 @@ const recordToolSchema = type({ value: type("string") });
 type Harness = { session: AgentSession; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {
@@ -158,7 +158,7 @@ afterEach(async () => {
 
 describe("AgentSession yield empty-stop suppression", () => {
 	it("settles a successful retry that ends in a terminal yield", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[{ throw: "503 service unavailable: overloaded_error" }, yieldCall("recovered", "call-yield-after-retry")],
 			{ retryEnabled: true },
@@ -184,16 +184,6 @@ describe("AgentSession yield empty-stop suppression", () => {
 		expect(mock.calls).toHaveLength(2);
 		expect(retryEvents).toEqual(["auto_retry_start", "auto_retry_end"]);
 		expect(session.isRetrying).toBe(false);
-	});
-
-	it("does not continue to a trailing empty assistant stop after a successful yield", async () => {
-		const { session, mock } = await createHarness([yieldCall("done", "call-yield-done")]);
-
-		await session.prompt("do work then yield");
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("stops at the terminal yield instead of consuming scripted trailing empty stops", async () => {

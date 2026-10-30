@@ -465,6 +465,71 @@
 					}
 				}
 			]
+		},
+		{
+			"name": "keeps a shallower Go case label inside its switch when the shift would break the parse",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+					"input": "PUT >6:\n+\tcase 2:\n+\t\treturn 2",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 1\n\tcase 2:\n\t\treturn 2\n\t}\n\treturn 0\n}\n",
+						"firstChangedLine": 6,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps an else branch in place instead of duplicating the if closer",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+					"input": "PUT >5:\n+\t} else {\n+\t\treturn 2",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\treturn 1\n\t} else {\n\t\treturn 2\n\t}\n\treturn 0\n}\n",
+						"firstChangedLine": 5,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "still slides a shallower statement past the closer when the shifted result parses",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\treturn 0\n}\n",
+					"input": "PUT >5:\n+\tx = true",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\tx = true\n\treturn 0\n}\n",
+						"firstChangedLine": 6,
+						"warnings": [
+							"PUT >5: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 6. For the deeper position inside the block, re-issue with the body indented to match."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "still slides a shallower statement when an unrelated edit in the batch breaks the parse",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\treturn 0\n}\n",
+					"input": "PUT >5:\n+\tx = true\nPUT >7:\n+\ty := (",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\tx = true\n\treturn 0\n\ty := (\n}\n",
+						"firstChangedLine": 6,
+						"warnings": [
+							"PUT >5: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 6. For the deeper position inside the block, re-issue with the body indented to match.",
+							"This edit introduced a syntax error near line 6: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
 		}
 	]
 }

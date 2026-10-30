@@ -3,8 +3,9 @@ import * as vm from "node:vm";
 import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 
-const [templateHtml, templateJs] = await Promise.all([
-	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
+const [templateHtml, shellHtml, templateJs] = await Promise.all([
+	Bun.file(new URL("../src/export/html/template.html.txt", import.meta.url)).text(),
+	Bun.file(new URL("../src/export/html/shell.html", import.meta.url)).text(),
 	Bun.file(new URL("../src/export/html/template.js", import.meta.url)).text(),
 ]);
 
@@ -33,7 +34,7 @@ interface MinimalSession {
 }
 
 function renderSession(session: MinimalSession) {
-	const { document, window } = parseHTML(templateHtml);
+	const { document, window } = parseHTML(templateHtml.replace("</body>", `${shellHtml}</body>`));
 	const sessionData = document.getElementById("session-data");
 	if (!sessionData) throw new Error("Export template is missing session data");
 	sessionData.textContent = Buffer.from(JSON.stringify(session)).toBase64();
@@ -62,7 +63,7 @@ function renderSession(session: MinimalSession) {
 	const context = vm.createContext({
 		window,
 		document,
-		marked: new Marked(),
+		ompMarkdown: { Marked },
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),
@@ -161,6 +162,21 @@ describe("HTML export Markdown", () => {
 		expect(rendered.querySelector("ul > li > em")?.textContent).toBe("italic");
 		expect(rendered.querySelector("ul > li > code")?.textContent).toBe("code");
 		expect(rendered.querySelector("ol > li > strong")?.textContent).toBe("nested");
+	});
+
+	test("renders bold inline code before indented code blocks in ordered lists", () => {
+		const rendered = renderMarkdown(`1. **\`Crew Ship\`** — description
+   \`\`\`json
+   { "crew": "..." }
+   \`\`\`
+
+2. **\`Hover Ship\`** — description
+   \`\`\`json
+   { "crew": "..." }
+   \`\`\``);
+
+		const names = [...rendered.querySelectorAll("ol > li > p > strong > code")].map(element => element.textContent);
+		expect(names).toEqual(["Crew Ship", "Hover Ship"]);
 	});
 
 	test("renders a deep valid conversation tree without overflowing the call stack", () => {

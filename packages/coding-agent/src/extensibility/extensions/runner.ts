@@ -2,41 +2,70 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CredentialDisabledEvent,
+	ImageContent,
+	Model,
+	ProviderResponseMetadata,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
+import {
+	clearContextHistoryIndex,
+	getContextHistoryIndex,
+	markPerCallContextMessage,
+	setContextHistoryIndex,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
+import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import { type Theme, theme } from "../../modes/theme/theme";
-import type { AsyncJobSnapshot } from "../../session/agent-session";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import { trackUserWaits, type UserWaitTracker } from "./user-wait";
+import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import type {
 	AfterProviderResponseEvent,
+	AssistantMessageRewriteEvent,
+	AssistantMessageRewriteResult,
+	AssistantTextRenderer,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
 	CompactOptions,
-	ComposerShapeDefinition,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionAgentIdentity,
+	ExtensionAnnotationsAPI,
+	ExtensionAnnotationsFactory,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -51,6 +80,10 @@ import type {
 	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	CacheWarmingAction,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
+	LinkActivateEvent,
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
@@ -75,6 +108,8 @@ import type {
 	UserPythonEventResult,
 } from "./types";
 
+import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
@@ -82,6 +117,21 @@ interface BeforeAgentStartCombinedResult {
 }
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+export interface ToolCallPreflight {
+	before?: (
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	) => Promise<{ block?: boolean; reason?: string } | undefined> | { block?: boolean; reason?: string } | undefined;
+	after?: (
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
+	cancel?: (toolCallId: string) => void;
+}
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -123,6 +173,13 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
+/** Events after which the session file and id may differ from what child shells last saw. */
+const SESSION_IDENTITY_EVENTS: Record<string, true> = {
+	session_start: true,
+	session_switch: true,
+	session_branch: true,
+};
+
 interface HandlerTimeoutBudget {
 	pause(): void;
 	resume(): void;
@@ -144,6 +201,7 @@ function createHandlerUIContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
+	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
 		try {
@@ -162,6 +220,10 @@ function createHandlerUIContext(
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
+			: undefined,
+		approve: approve
+			? (prompt, dialogOptions) =>
+					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal)))
 			: undefined,
 		custom: async (factory, options) => {
 			let customSettled = false;
@@ -188,7 +250,7 @@ function createHandlerUIContext(
 		},
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
-	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "custom" | "editor">;
+	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
 	const delegatedMethods = new Map<PropertyKey, unknown>();
 
 	return new Proxy(ui, {
@@ -336,6 +398,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolResultEvent
 	| UserBashEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -404,6 +467,10 @@ const noOpUIContext: ExtensionUIContext = {
 	input: async (_title, _placeholder, _dialogOptions) => undefined,
 	notify: () => {},
 	onTerminalInput: () => () => {},
+	rerenderMessage: () => {},
+	// A subagent's runner has no UI of its own, yet its links are picked from the interactive screen
+	// while its transcript is focused: answer as the interactive UI does.
+	getLinkClicksAvailable: extensionLinkClicksAvailable,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
@@ -417,6 +484,7 @@ const noOpUIContext: ExtensionUIContext = {
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
 	setEditorComponent: () => {},
+	getEditorComponent: () => undefined,
 	get theme() {
 		return theme;
 	},
@@ -433,10 +501,27 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/** Identity reported by a session that is not a subagent and received no explicit identity. */
+export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
+	kind: "main",
+	id: MAIN_AGENT_ID,
+	name: MAIN_AGENT_RULE_NAME,
+	depth: 0,
+});
+
+/** `ctx.annotations` for hosts that inject no implementation: every call rejects. */
+export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
+	submit: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
+	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
+});
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
+	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
+	#sessionApprovals = new Set<string>();
+	#trackUserWait?: UserWaitTracker;
 	#errorListeners: Set<ExtensionErrorListener> = new Set();
 	#getModel: () => Model | undefined = () => undefined;
 	#isIdleFn: () => boolean = () => true;
@@ -446,6 +531,9 @@ export class ExtensionRunner {
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
+	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+	#startLiveFn?: ExtensionContextActions["startLive"];
+	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
@@ -453,11 +541,29 @@ export class ExtensionRunner {
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
+	#resolvePlanReviewFn: NonNullable<ExtensionContextActions["resolvePlanReview"]> = () => false;
+	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
+	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
+	#sessionModes?: ExtensionContextActions["sessionModes"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
+	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
+	/** Link schemes already reported as claimed by more than one extension. */
+	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
+	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
+	#loadOrder: Extension[] | undefined;
+	#suspendedExtensions = new Set<Extension>();
+	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
+	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
+	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
+	#sessionStartEvent: RunnerEmitEvent | undefined;
+	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
+	#suspensionListeners = new Set<() => void>();
+	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
+	#suspensionParent: ExtensionRunner | undefined;
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -520,6 +626,7 @@ export class ExtensionRunner {
 	 * accumulate for the session's lifetime.
 	 */
 	#emittedToolCalls = new Set<string>();
+	#loopToolCalls = new Set<string>();
 
 	/** Records that the loop already emitted `tool_call` for this dispatch. */
 	markToolCallEmitted(toolCallId: string, toolName: string): void {
@@ -535,6 +642,25 @@ export class ExtensionRunner {
 		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
 	}
 
+	/** Marks every dispatch prepared by the agent loop, independent of extension handlers. */
+	markLoopToolCall(toolCallId: string, toolName: string): void {
+		if (this.#loopToolCalls.size >= 512) {
+			const oldest = this.#loopToolCalls.values().next().value;
+			if (oldest !== undefined) this.#loopToolCalls.delete(oldest);
+		}
+		this.#loopToolCalls.add(`${toolCallId}:${toolName}`);
+	}
+
+	/** Clears a loop marker when pre-dispatch blocked execution before the wrapper ran. */
+	clearLoopToolCall(toolCallId: string, toolName: string): void {
+		this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
+	/** Consumes the marker for a loop dispatch; false means non-loop execution. */
+	consumeLoopToolCall(toolCallId: string, toolName: string): boolean {
+		return this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
 	/**
 	 * Resolves a tool NAME to its native built-in implementation (the pre-extension-override,
 	 * unwrapped tool) plus a factory for the `AgentToolContext` that native tool expects, or
@@ -543,6 +669,7 @@ export class ExtensionRunner {
 	 * delegated native call sees the ordinary session tool context (ui, cwd, snapshot state, etc.).
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
+	#toolCallPreflight?: ToolCallPreflight;
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(
@@ -551,9 +678,39 @@ export class ExtensionRunner {
 		this.#nativeToolResolver = resolve;
 	}
 
+	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
+		this.#toolCallPreflight = preflight;
+	}
+
+	async runToolCallPreflightBefore(
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	): Promise<{ block?: boolean; reason?: string } | undefined> {
+		return this.#toolCallPreflight?.before?.(toolCallId, tool, args, context);
+	}
+
+	async runToolCallPreflightAfter(
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult | undefined> {
+		return this.#toolCallPreflight?.after?.(toolCallId, result, context);
+	}
+
+	cancelToolCallPreflight(toolCallId: string): void {
+		this.#toolCallPreflight?.cancel?.(toolCallId);
+	}
+
 	/** Whether a native built-in of `name` is available to delegate to. */
 	hasNativeTool(name: string): boolean {
 		return this.#nativeToolResolver?.(name) !== undefined;
+	}
+
+	/** Guidance a same-name replacement inherits from the native `name` tool it can delegate to. */
+	getNativeDelegationGuidance(name: string): string {
+		return this.#nativeToolResolver?.(name)?.tool.delegationGuidance ?? "";
 	}
 
 	/**
@@ -607,9 +764,14 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
+		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
+		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
+		createAnnotations?: ExtensionAnnotationsFactory,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
+		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 	}
 
@@ -641,6 +803,15 @@ export class ExtensionRunner {
 	 */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
+	}
+
+	/**
+	 * Session settings this runner was constructed with. Used when a direct
+	 * `tool.execute()` omits execute-time context so approval still sees the
+	 * user's configured mode (schema default `yolo`) instead of fail-closed.
+	 */
+	get sessionSettings(): Settings | undefined {
+		return this.settings;
 	}
 
 	initialize(
@@ -682,9 +853,16 @@ export class ExtensionRunner {
 		this.#abortFn = contextActions.abort;
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
+		if (contextActions.resolvePlanReview) this.#resolvePlanReviewFn = contextActions.resolvePlanReview;
+		if (contextActions.getPendingPlanReview) this.#getPendingPlanReviewFn = contextActions.getPendingPlanReview;
+		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
+		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
+		this.#sessionModes = contextActions.sessionModes;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
+		this.#runEphemeralTurnFn = contextActions.runEphemeralTurn;
+		this.#startLiveFn = contextActions.startLive;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -698,7 +876,10 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
-		this.#uiContext = uiContext ?? noOpUIContext;
+		this.#uiContext =
+			uiContext && this.#trackUserWait
+				? trackUserWaits(uiContext, this.#trackUserWait)
+				: (uiContext ?? noOpUIContext);
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -706,70 +887,8 @@ export class ExtensionRunner {
 		// accumulate duplicate global registrations — drop the prior generation before
 		// installing this one's trampolines.
 		this.disposeFileFallbacks();
-		for (const ext of this.extensions) {
-			// Nothing registered by this extension means no trampoline, so a host with
-			// no fallback-registering extension leaves the seam genuinely empty and
-			// `hasFileWriteFallback()`/`hasFileDeleteFallback()` false — the invariant
-			// the whole feature rests on. Each seam is checked separately, so an
-			// extension that only brokers writes never appears in the delete registry.
-			if (ext.fileWriteFallbackHandlers.length === 0 && ext.fileDeleteFallbackHandlers.length === 0) continue;
-			// One trampoline per extension per seam, not per handler: the list is walked
-			// at mutation time so a handler this extension adds later still takes effect,
-			// and `createContext()` takes no extension argument, so within one invocation
-			// a single context is all any of this extension's handlers would have
-			// received anyway.
-			//
-			// The context is built PER INVOCATION rather than captured here, matching
-			// every other dispatch site. `createContext()` materializes `cwd` and
-			// `hasUI` as values, so a trampoline holding one context for the life of the
-			// session would keep handing handlers the workspace this runner initialized
-			// in — wrong the moment `SessionManager.moveTo()` relocates the session
-			// (`/move`), and a handler that scopes or prompts against `ctx.cwd` would
-			// then allow the old workspace and deny the new one. A denied mutation is a
-			// rare path, so the extra object costs nothing that matters.
-			//
-			// Isolation is per HANDLER, not per extension. The registry only sees one
-			// trampoline per extension, so a throw escaping this loop would advance the
-			// registry to the NEXT extension and skip every later handler this one
-			// registered — breaking both the documented "a throwing handler is skipped"
-			// contract and registration order for a backup-handler setup.
-			if (ext.fileWriteFallbackHandlers.length > 0) {
-				this.#fileFallbackDisposers.push(
-					addFileWriteFallback(async req => {
-						const ctx = this.createContext();
-						for (const handler of ext.fileWriteFallbackHandlers) {
-							try {
-								if (await handler(req, ctx)) return true;
-							} catch (error) {
-								logger.warn("Extension file write fallback handler threw; trying next handler", {
-									extension: ext.path,
-									error: error instanceof Error ? error.message : String(error),
-								});
-							}
-						}
-						return false;
-					}),
-				);
-			}
-			if (ext.fileDeleteFallbackHandlers.length > 0) {
-				this.#fileFallbackDisposers.push(
-					addFileDeleteFallback(async req => {
-						const ctx = this.createContext();
-						for (const handler of ext.fileDeleteFallbackHandlers) {
-							try {
-								if (await handler(req, ctx)) return true;
-							} catch (error) {
-								logger.warn("Extension file delete fallback handler threw; trying next handler", {
-									extension: ext.path,
-									error: error instanceof Error ? error.message : String(error),
-								});
-							}
-						}
-						return false;
-					}),
-				);
-			}
-		}
+		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
+		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
 
 		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
 		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
@@ -861,6 +980,31 @@ export class ExtensionRunner {
 		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
 	}
+
+	/**
+	 * Asks extensions to override a prompt-cache warming decision. The last
+	 * handler returning an action wins; handler failures are reported through
+	 * the extension error listeners and leave the warmer's decision standing.
+	 */
+	async emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
+		let action = event.action;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext();
+			for (const handler of handlers) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					handlerTimeoutForEvent(event.type),
+				)) as CacheWarmingDecisionEventResult | undefined;
+				if (result?.action !== undefined) action = result.action;
+			}
+		}
+		return action;
+	}
 	/** Registers the interactive transcript gate that must settle before a tool approval is presented. */
 	setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>): () => void {
 		this.#toolApprovalPreviewWaiter = waiter;
@@ -869,9 +1013,26 @@ export class ExtensionRunner {
 		};
 	}
 
+	/**
+	 * Runs each dialog of the UI context the next {@link initialize} receives (tool approvals, extension prompts) as a
+	 * wait for the user.
+	 */
+	setUserWaitTracker(track: UserWaitTracker): void {
+		this.#trackUserWait = track;
+	}
+
 	/** Waits until the interactive transcript can show the tool call being approved. */
 	async waitForToolApprovalPreview(toolCallId: string): Promise<void> {
 		await this.#toolApprovalPreviewWaiter?.(toolCallId);
+	}
+
+	/** Whether the user approved `key` for the current session; a new or switched session starts with none. */
+	hasSessionApproval(key: string): boolean {
+		return this.#sessionApprovals.has(`${this.sessionId}\0${key}`);
+	}
+
+	grantSessionApproval(key: string): void {
+		this.#sessionApprovals.add(`${this.sessionId}\0${key}`);
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -882,8 +1043,174 @@ export class ExtensionRunner {
 		return this.#uiContext !== noOpUIContext;
 	}
 
+	/**
+	 * Install this extension's file-mutation fallback trampolines.
+	 *
+	 * Nothing registered by this extension means no trampoline, so a host with
+	 * no fallback-registering extension leaves the seam genuinely empty and
+	 * `hasFileWriteFallback()`/`hasFileDeleteFallback()` false — the invariant
+	 * the whole feature rests on. Each seam is checked separately, so an
+	 * extension that only brokers writes never appears in the delete registry.
+	 *
+	 * One trampoline per extension per seam, not per handler: the list is walked
+	 * at mutation time so a handler this extension adds later still takes effect,
+	 * and `createContext()` takes no extension argument, so within one invocation
+	 * a single context is all any of this extension's handlers would have
+	 * received anyway.
+	 *
+	 * The context is built PER INVOCATION rather than captured here, matching
+	 * every other dispatch site. `createContext()` materializes `cwd` and
+	 * `hasUI` as values, so a trampoline holding one context for the life of the
+	 * session would keep handing handlers the workspace this runner initialized
+	 * in — wrong the moment `SessionManager.moveTo()` relocates the session
+	 * (`/move`), and a handler that scopes or prompts against `ctx.cwd` would
+	 * then allow the old workspace and deny the new one. A denied mutation is a
+	 * rare path, so the extra object costs nothing that matters.
+	 *
+	 * Isolation is per HANDLER, not per extension. The registry only sees one
+	 * trampoline per extension, so a throw escaping this loop would advance the
+	 * registry to the NEXT extension and skip every later handler this one
+	 * registered — breaking both the documented "a throwing handler is skipped"
+	 * contract and registration order for a backup-handler setup.
+	 */
+	#installFileFallbacks(ext: Extension): void {
+		if (ext.fileWriteFallbackHandlers.length > 0) {
+			this.#fileFallbackDisposers.push(
+				addFileWriteFallback(async req => {
+					if (this.#suspendedExtensions.has(ext)) return false;
+					const ctx = this.createContext();
+					for (const handler of ext.fileWriteFallbackHandlers) {
+						try {
+							if (await handler(req, ctx)) return true;
+						} catch (error) {
+							logger.warn("Extension file write fallback handler threw; trying next handler", {
+								extension: ext.path,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					return false;
+				}),
+			);
+		}
+		if (ext.fileDeleteFallbackHandlers.length > 0) {
+			this.#fileFallbackDisposers.push(
+				addFileDeleteFallback(async req => {
+					if (this.#suspendedExtensions.has(ext)) return false;
+					const ctx = this.createContext();
+					for (const handler of ext.fileDeleteFallbackHandlers) {
+						try {
+							if (await handler(req, ctx)) return true;
+						} catch (error) {
+							logger.warn("Extension file delete fallback handler threw; trying next handler", {
+								extension: ext.path,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					return false;
+				}),
+			);
+		}
+	}
+
+	/**
+	 * Append extensions bound after this runner was built (startup-deferred
+	 * extensions binding into the live session runtime). They join last, so they
+	 * win name collisions as any later-loaded extension does. Tools their
+	 * factories registered reach every {@link onToolRegistered} subscriber, file
+	 * fallbacks install when the runner is already initialized, and a
+	 * `session_start` that already went out is replayed to them alone. Resolves
+	 * once those tool activations and handlers settle.
+	 */
+	async addExtensions(added: readonly Extension[]): Promise<void> {
+		if (added.length === 0) return;
+		this.extensions.push(...added);
+		this.#loadOrder?.push(...added);
+		if (this.#initialized) {
+			for (const extension of added) this.#installFileFallbacks(extension);
+		}
+		for (const extension of added) {
+			const scope: ToolRegistrationScope = {
+				pending: new Set(),
+				closed: false,
+				signal: AbortSignal.timeout(extensionHandlerTimeoutMs),
+			};
+			this.#toolRegistrationScope.run(scope, () => {
+				for (const attach of this.#toolRegistrationSubscribers) {
+					const listener = attach(extension);
+					for (const toolName of extension.tools.keys()) listener(toolName);
+				}
+			});
+			scope.closed = true;
+			try {
+				await this.#flushToolRegistrations(scope.pending);
+			} catch (error) {
+				this.emitError({
+					extensionPath: extension.path,
+					event: "tool_registration",
+					error: error instanceof Error ? error.message : String(error),
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
+		}
+		if (this.#sessionStartEvent) await this.#emitTo(added, this.#sessionStartEvent);
+	}
+
 	getExtensionPaths(): string[] {
 		return this.extensions.map(e => e.path);
+	}
+
+	/** Every extension this runner loaded, in load order, including suspended ones. */
+	getLoadedExtensions(): readonly Extension[] {
+		return this.#loadOrder ?? this.extensions;
+	}
+
+	/** Whether the extension loaded from `extensionPath` is present and not suspended. */
+	isExtensionActive(extensionPath: string): boolean {
+		return this.extensions.some(ext => ext.path === extensionPath);
+	}
+
+	/**
+	 * Suspend or resume loaded extensions in place (e.g. after a live `disabledExtensions`
+	 * edit). A suspended extension keeps its module state but stops contributing event
+	 * handlers, commands, tools, message renderers, link schemes, shortcuts, flags, and file
+	 * fallbacks until resumed. Returns the extensions whose state changed, after notifying
+	 * {@link onSuspensionChange} listeners when there are any.
+	 */
+	setSuspendedExtensions(shouldSuspend: (extension: Extension) => boolean): {
+		suspended: Extension[];
+		resumed: Extension[];
+	} {
+		this.#loadOrder ??= [...this.extensions];
+		const suspended: Extension[] = [];
+		const resumed: Extension[] = [];
+		for (const extension of this.#loadOrder) {
+			const suspend = shouldSuspend(extension);
+			if (suspend === this.#suspendedExtensions.has(extension)) continue;
+			if (suspend) {
+				this.#suspendedExtensions.add(extension);
+				suspended.push(extension);
+			} else {
+				this.#suspendedExtensions.delete(extension);
+				resumed.push(extension);
+			}
+		}
+		if (suspended.length > 0 || resumed.length > 0) {
+			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
+			this.extensions.splice(0, this.extensions.length, ...active);
+			for (const listener of this.#suspensionListeners) listener();
+		}
+		return { suspended, resumed };
+	}
+
+	/**
+	 * Call `listener` whenever {@link setSuspendedExtensions} suspends or resumes an extension, so
+	 * a UI can redraw what their renderers and link schemes drew. Returns the unsubscribe.
+	 */
+	onSuspensionChange(listener: () => void): () => void {
+		this.#suspensionListeners.add(listener);
+		return () => this.#suspensionListeners.delete(listener);
 	}
 
 	/** Get all registered tools from all extensions. */
@@ -913,7 +1240,7 @@ export class ExtensionRunner {
 	 */
 	onToolRegistered(listener: (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>): () => void {
 		const subscriptions: Array<{ extension: Extension; listener: ToolRegistrationListener }> = [];
-		for (const extension of this.extensions) {
+		const attach = (extension: Extension): ToolRegistrationListener => {
 			const trackRegistration = (pending: Promise<void>): void => {
 				const registrationBarrier = pending.then(
 					() => undefined,
@@ -957,8 +1284,12 @@ export class ExtensionRunner {
 			extension.toolRegistrationListeners ??= new Set();
 			extension.toolRegistrationListeners.add(wrapped);
 			subscriptions.push({ extension, listener: wrapped });
-		}
+			return wrapped;
+		};
+		for (const extension of this.extensions) attach(extension);
+		this.#toolRegistrationSubscribers.add(attach);
 		return () => {
+			this.#toolRegistrationSubscribers.delete(attach);
 			for (const subscription of subscriptions) {
 				subscription.extension.toolRegistrationListeners?.delete(subscription.listener);
 			}
@@ -1099,6 +1430,96 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
+	/**
+	 * Draw with what `parent` (the main session's runner) leaves active: a subagent's runner loads
+	 * its own copies of the extensions, and a live `disabledExtensions` edit suspends only the main
+	 * copies. While this runner's transcript is on screen, its renderers, link schemes and link
+	 * clicks skip every extension `parent` has suspended. `undefined` draws with all of its own.
+	 */
+	followSuspension(parent: ExtensionRunner | undefined): void {
+		this.#suspensionParent = parent === this ? undefined : parent;
+	}
+
+	/** Whether the extension loaded from `resolvedPath` is loaded here and suspended. */
+	isExtensionSuspended(resolvedPath: string): boolean {
+		for (const extension of this.#suspendedExtensions) if (extension.resolvedPath === resolvedPath) return true;
+		return false;
+	}
+
+	/** Active extensions that draw: those {@link followSuspension}'s parent has not suspended. */
+	#drawingExtensions(): Extension[] {
+		const parent = this.#suspensionParent;
+		return parent ? this.extensions.filter(ext => !parent.isExtensionSuspended(ext.resolvedPath)) : this.extensions;
+	}
+
+	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
+	getAssistantTextRenderers(): AssistantTextRenderer[] {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
+		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+	}
+
+	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
+	getLinkSchemes(): string[] {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
+		const owners = new Map<string, Extension>();
+		for (const ext of this.#drawingExtensions()) {
+			for (const scheme of ext.linkSchemes) {
+				const owner = owners.get(scheme);
+				if (!owner) owners.set(scheme, ext);
+				else if (owner !== ext && !this.#warnedLinkSchemes.has(scheme)) {
+					this.#warnedLinkSchemes.add(scheme);
+					logger.warn("Link scheme claimed by several extensions; the first loaded gets its clicks", {
+						scheme,
+						owner: owner.path,
+						ignored: ext.path,
+					});
+				}
+			}
+		}
+		return [...owners.keys()];
+	}
+
+	/**
+	 * Deliver a click on `url` as `link_activate` to the extension that claimed its scheme (the first
+	 * one in load order, when several did). Returns whether an extension owns the link.
+	 *
+	 * `ui` is the UI that drew the link, for a runner that has none of its own: a subagent's runner
+	 * runs headless, but its transcript can be on screen while that subagent is focused, and the
+	 * handler's `ctx.ui.rerenderMessage` must reach that screen.
+	 *
+	 * Like a command or shortcut, a click is the user's own action, and its handler may open a
+	 * dialog: it runs without the event-handler timeout. A failure is reported, not thrown.
+	 */
+	async emitLinkActivate(url: string, ui?: ExtensionUIContext): Promise<boolean> {
+		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return false;
+		const colon = url.indexOf(":");
+		if (colon <= 0) return false;
+		const scheme = url.slice(0, colon).toLowerCase();
+		const owner = this.#drawingExtensions().find(ext => ext.linkSchemes.includes(scheme));
+		if (!owner) return false;
+		const handlers = owner.handlers.get("link_activate");
+		if (!handlers || handlers.length === 0) return true;
+		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
+		const base = this.createContext();
+		const ctx: ExtensionContext =
+			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+		for (const handler of handlers) {
+			try {
+				await this.runScoped(() => handler(event, ctx));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
+				this.emitError({
+					extensionPath: owner.path,
+					event: event.type,
+					error: message,
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
+		}
+		return true;
+	}
+
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {
 		this.#commandDiagnostics = [];
 
@@ -1155,6 +1576,9 @@ export class ExtensionRunner {
 	 * metadata, `signal`/`onUpdate` default to the wrapper's own channels so aborting the outer tool
 	 * call stops the native one and native progress still streams, and `depth` bounds recursion per
 	 * call chain. Explicit options passed to `invokeTool` override the inherited `signal`/`onUpdate`.
+	 *
+	 * `agent` replaces this runner's identity as `ctx.agent` for work done on behalf of another
+	 * agent that shares the runner (the advisor's toolset, see `ExtensionToolWrapper`).
 	 */
 	createContext(
 		model?: Model,
@@ -1165,8 +1589,14 @@ export class ExtensionRunner {
 			signal?: AbortSignal;
 			onUpdate?: AgentToolUpdateCallback;
 		},
+		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const runEphemeralTurn = this.#runEphemeralTurnFn;
+		const createAnnotations = this.#createAnnotations;
+		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
+			this.runtime.sendUserMessage(text, options);
+		const getSessionModes = () => this.#sessionModes;
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1178,6 +1608,7 @@ export class ExtensionRunner {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
 			isProjectTrusted: () => true,
+			agent,
 			get model() {
 				return getModel();
 			},
@@ -1186,12 +1617,53 @@ export class ExtensionRunner {
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
+			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
+			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
+			openPlanReview: () => this.#openPlanReviewFn(),
+			// Live: a context saved before or across a host rebind sees the current controls.
+			get sessionModes() {
+				return getSessionModes();
+			},
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			runEphemeralTurn: runEphemeralTurn
+				? async options => {
+						if (this.#ephemeralTurnBlocker.getStore()) {
+							throw new Error("runEphemeralTurn cannot be called recursively from an ephemeral turn hook");
+						}
+						// Resolve at call time so a running handler's cancellation is inherited.
+						// A saved context must not retain a completed handler's stale signal.
+						const registrationScope = this.#toolRegistrationScope.getStore();
+						const signals = [
+							options.signal,
+							delegation?.signal,
+							registrationScope && !registrationScope.closed ? registrationScope.signal : undefined,
+						].filter((signal): signal is AbortSignal => signal !== undefined);
+						// Only hooks reached inside the side-turn pipeline are blocked. The caller's own
+						// delivery callback runs outside the guard so work it starts (lazy subscriptions,
+						// timers) does not inherit a permanent block on later consultations.
+						const onTextDelta = options.onTextDelta;
+						const request = {
+							...options,
+							onTextDelta: onTextDelta
+								? (delta: string) => this.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
+								: undefined,
+							signal: signals.length ? AbortSignal.any(signals) : undefined,
+						};
+						return await this.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
+					}
+				: undefined,
+			startLive: this.#startLiveFn,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
+			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
+			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.
+			get annotations(): ExtensionAnnotationsAPI {
+				return createAnnotations ? createAnnotations(() => this, sendUserMessage) : UNAVAILABLE_ANNOTATIONS;
+			},
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
+			addAdditionalContext: delegation?.context?.addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>
@@ -1289,11 +1761,13 @@ export class ExtensionRunner {
 						registrationScope.signal = handlerSignal;
 						let result: R | undefined;
 						try {
+							const handlerContext = createHandlerContext(
+								ctx,
+								handlerSignal,
+								event.type === "tool_call" ? budget : undefined,
+							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(
-									event,
-									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
-								),
+								handler(event, handlerContext),
 							);
 						} catch (error) {
 							handlerFailure = { error };
@@ -1347,6 +1821,17 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		const result = await this.#emitTo(this.extensions, event);
+		// Recorded once the broadcast ends: an extension added mid-broadcast is
+		// reached by the live iteration, one added later gets the replay.
+		if (event.type === "session_start") this.#sessionStartEvent = event;
+		return result;
+	}
+
+	async #emitTo<TEvent extends RunnerEmitEvent>(
+		extensions: readonly Extension[],
+		event: TEvent,
+	): Promise<RunnerEmitResult<TEvent>> {
 		// Defer the per-event context allocation (and the Promise.race/Bun.sleep
 		// timeout machinery) to the first matching handler. Streaming sessions emit
 		// message_update / tool_execution_* per delta with usually no extension
@@ -1357,7 +1842,7 @@ export class ExtensionRunner {
 		if (this.#isSessionShutdownEvent(event)) {
 			const timeoutMs = handlerTimeoutForEvent(event.type);
 			const promises: Promise<unknown>[] = [];
-			for (const ext of this.extensions) {
+			for (const ext of extensions) {
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 				ctx ??= this.createContext();
@@ -1369,7 +1854,7 @@ export class ExtensionRunner {
 			return result as RunnerEmitResult<TEvent>;
 		}
 
-		for (const ext of this.extensions) {
+		for (const ext of extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 			ctx ??= this.createContext();
@@ -1395,24 +1880,140 @@ export class ExtensionRunner {
 				}
 
 				if (event.type === "session_stop" && handlerResult) {
-					result = handlerResult as SessionStopEventResult;
-					const hasContinuationContext =
-						(typeof result.additionalContext === "string" && result.additionalContext.length > 0) ||
-						(typeof result.reason === "string" && result.reason.length > 0);
-					if ((result.continue === true || result.decision === "block") && hasContinuationContext) {
-						return result as RunnerEmitResult<TEvent>;
+					const stopResult = handlerResult as SessionStopEventResult;
+					if (stopResult.decision === "block") {
+						return stopResult as RunnerEmitResult<TEvent>;
+					}
+					const continuationContext = stopResult.additionalContext || stopResult.reason;
+					if (stopResult.continue === true && continuationContext) {
+						if (result) {
+							const prior = result as SessionStopEventResult;
+							result = {
+								continue: true,
+								additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
+							};
+						} else {
+							result = stopResult;
+						}
 					}
 				}
 			}
 		}
 
+		// Handlers for these events export session-scoped environment (a session
+		// id, per-session tool config). The shell spawn environment is a cached
+		// copy that may predate them or belong to the previous session, so capture
+		// process.env for it as soon as they have run. Only the main agent's events
+		// do this: in-process subagents share process.env, and a subagent's session
+		// start must not hand its values to the parent's commands. A process that
+		// hosts several top-level sessions (ACP) still has one spawn environment,
+		// which follows the latest of their events.
+		if (ctx !== undefined && this.agent.kind === "main" && SESSION_IDENTITY_EVENTS[event.type] === true) {
+			refreshShellConfigCache();
+		}
+
 		return result as RunnerEmitResult<TEvent>;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+	/**
+	 * Run extension rewrites on a detached finalized assistant message. Text may
+	 * change only in its original block position; all other metadata and blocks
+	 * remain unchanged. Text replay signatures are tied to their original text.
+	 *
+	 * Handlers see a structured clone, but the result is rebuilt from the
+	 * original blocks: unchanged blocks keep their identity and symbol-keyed
+	 * provider markers (e.g. `kCursorExecResolved`, which `structuredClone`
+	 * drops and without which agent-loop re-runs Cursor-settled tool calls).
+	 */
+	async emitAssistantMessage(
+		message: AssistantMessage,
+		signal?: AbortSignal,
+	): Promise<AssistantMessage["content"] | undefined> {
+		if (!this.hasHandlers("assistant_message")) return undefined;
 		const ctx = this.createContext();
+		const original = message.content;
+		// Accepted text per block position; every other field comes from `original`.
+		const texts = original.map(block => (block.type === "text" ? block.text : undefined));
+		const isRewritten = (index: number) => {
+			const block = original[index];
+			return block?.type === "text" && texts[index] !== block.text;
+		};
+		const currentContent = (): AssistantMessage["content"] =>
+			original.map((block, index) => {
+				if (block.type !== "text" || !isRewritten(index)) return block;
+				const { textSignature: _stale, ...rest } = block;
+				return { ...rest, text: texts[index] as string };
+			});
+		const textMetadata = (block: TextContent) => {
+			const { text: _text, textSignature: _textSignature, ...metadata } = block;
+			return metadata;
+		};
+
+		extensions: for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("assistant_message");
+			if (!handlers?.length) continue;
+			for (const handler of handlers) {
+				if (signal?.aborted) break extensions;
+				// Detach the whole message, not just `content`: in-place edits to `usage`
+				// or other fields must not leak into the finalized message.
+				const presented = structuredClone({ ...message, content: currentContent() });
+				const event: AssistantMessageRewriteEvent = { type: "assistant_message", message: presented };
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+				)) as AssistantMessageRewriteResult | undefined;
+				if (signal?.aborted) break extensions;
+				if (result?.content === undefined) continue;
+				const replacement = result.content;
+				// Compare against a fresh clone: the handler may have mutated `presented`.
+				const expected = structuredClone(currentContent());
+				if (
+					!Array.isArray(replacement) ||
+					replacement.length !== expected.length ||
+					replacement.some((block, index) => {
+						const previous = expected[index];
+						if (!block || typeof block !== "object" || block.type !== previous?.type) return true;
+						if (block.type !== "text") return !Bun.deepEquals(block, previous);
+						return (
+							typeof block.text !== "string" ||
+							previous?.type !== "text" ||
+							!Bun.deepEquals(textMetadata(block), textMetadata(previous))
+						);
+					})
+				) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "assistant_message",
+						error: "content replacement may only change text in existing blocks; block positions, non-text blocks, and other metadata must remain unchanged",
+					});
+					continue;
+				}
+				for (const [index, block] of replacement.entries()) {
+					if (block.type === "text") texts[index] = block.text;
+				}
+			}
+		}
+		return original.some((_block, index) => isRewritten(index)) ? currentContent() : undefined;
+	}
+
+	/**
+	 * Emit `tool_result` to every subscribed extension. Returns the full
+	 * `content`/`details`/`isError` triple only when a handler modified the
+	 * result; joined `additionalContext` rides along whenever any handler set it.
+	 */
+	async emitToolResult(
+		event: ToolResultEvent,
+		agent?: ExtensionAgentIdentity,
+	): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(undefined, undefined, agent);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
+		const contexts: string[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
@@ -1440,15 +2041,20 @@ export class ExtensionRunner {
 					currentEvent.isError = handlerResult.isError;
 					modified = true;
 				}
+				if (isNonBlankContext(handlerResult.additionalContext)) {
+					contexts.push(handlerResult.additionalContext);
+				}
 			}
 		}
 
-		if (!modified) return undefined;
+		const additionalContext = joinAdditionalContext(contexts);
+		if (!modified) return additionalContext === undefined ? undefined : { additionalContext };
 
 		return {
 			content: currentEvent.content,
 			details: currentEvent.details,
 			isError: currentEvent.isError,
+			...(additionalContext !== undefined ? { additionalContext } : {}),
 		};
 	}
 
@@ -1466,20 +2072,28 @@ export class ExtensionRunner {
 	 * symmetric with the existing error path below and safer for a
 	 * pre-execution gate — an unresponsive extension MUST NOT be treated as
 	 * silent consent to run the tool.
+	 *
+	 * `agent` overrides `ctx.agent` when the tool runs for another agent sharing this runner.
 	 */
-	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(
+		event: ToolCallEvent,
+		signal?: AbortSignal,
+		agent?: ExtensionAgentIdentity,
+	): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(undefined, undefined, agent);
 		const timeoutMs = normalizeHandlerTimeout(
-			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
+			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
+				extensionHandlerTimeoutMs,
 		);
 		let result: ToolCallEventResult | undefined;
+		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
+				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
@@ -1493,21 +2107,22 @@ export class ExtensionRunner {
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
-				);
+				)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult;
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: _context, input: _input, ...controlResult } = handlerResult;
+				accumulateToolCallResult(aggregated, handlerResult);
+				result = controlResult;
 			}
 		}
 
 		if (signal?.aborted) {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
-		return result;
+		return buildAggregatedToolCallResult(result, aggregated);
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
@@ -1594,6 +2209,7 @@ export class ExtensionRunner {
 		images: ImageContent[] | undefined,
 		source: "interactive" | "rpc" | "extension",
 	): Promise<InputEventResult> {
+		if (!this.hasHandlers("input")) return {};
 		const ctx = this.createContext();
 		let currentText = text;
 		let currentImages = images;
@@ -1615,18 +2231,11 @@ export class ExtensionRunner {
 		return transformed;
 	}
 
-	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
+		// Check if any extensions actually have context handlers before building
+		// the context object or cloning; this runs on every provider request.
+		if (!this.hasHandlers("context")) return messages;
 		const ctx = this.createContext();
-
-		// Check if any extensions actually have context handlers before cloning
-		let hasContextHandlers = false;
-		for (const ext of this.extensions) {
-			if (ext.handlers.get("context")?.length) {
-				hasContextHandlers = true;
-				break;
-			}
-		}
-		if (!hasContextHandlers) return messages;
 
 		let currentMessages: AgentMessage[];
 		try {
@@ -1636,6 +2245,10 @@ export class ExtensionRunner {
 			// or ProviderPayload). Fall back to a shallow array clone — extensions should
 			// return new message arrays rather than mutating in place.
 			currentMessages = [...messages];
+		}
+		for (let index = 0; index < currentMessages.length; index++) {
+			const message = currentMessages[index];
+			if (message) setContextHistoryIndex(message, index);
 		}
 
 		for (const ext of this.extensions) {
@@ -1650,19 +2263,50 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {
-					currentMessages = (handlerResult as ContextEventResult).messages!;
+					const nextMessages = (handlerResult as ContextEventResult).messages!;
+					for (let index = 0; index < nextMessages.length; index++) {
+						const message = nextMessages[index];
+						if (!message || getContextHistoryIndex(message) !== undefined) continue;
+						const previousMessage = currentMessages[index];
+						if (!previousMessage) continue;
+						const historyIndex = getContextHistoryIndex(previousMessage);
+						if (historyIndex === undefined) continue;
+						setContextHistoryIndex(message, historyIndex);
+						if (!Bun.deepEquals(message, previousMessage)) clearContextHistoryIndex(message);
+					}
+					currentMessages = nextMessages;
 				}
 			}
 		}
 
+		for (const message of currentMessages) {
+			const historyIndex = getContextHistoryIndex(message);
+			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
+			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
+			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
+			clearContextHistoryIndex(message);
+			if (historyMessage) clearContextHistoryIndex(historyMessage);
+			if (!unchanged) markPerCallContextMessage(message);
+		}
+		for (const message of messages) clearContextHistoryIndex(message);
+		// An aborted handler is skipped and its input kept unchanged. Never hand that
+		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
+		signal?.throwIfAborted();
 		return currentMessages;
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */
-	async emitBeforeProviderRequest(payload: unknown, model?: Model): Promise<BeforeProviderRequestEventResult> {
+	async emitBeforeProviderRequest(
+		payload: unknown,
+		model?: Model,
+		signal?: AbortSignal,
+	): Promise<BeforeProviderRequestEventResult> {
+		if (!this.hasHandlers("before_provider_request")) return payload;
 		const ctx = this.createContext(model);
 		let currentPayload = payload;
 
@@ -1681,6 +2325,8 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
 				);
 				if (handlerResult !== undefined) {
 					currentPayload = handlerResult;
@@ -1692,7 +2338,12 @@ export class ExtensionRunner {
 	}
 
 	/** Runs response hooks with the model that produced that provider response. */
-	async emitAfterProviderResponse(response: ProviderResponseMetadata, model?: Model): Promise<void> {
+	async emitAfterProviderResponse(
+		response: ProviderResponseMetadata,
+		model?: Model,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (!this.hasHandlers("after_provider_response")) return;
 		const ctx = this.createContext(model);
 
 		for (const ext of this.extensions) {
@@ -1707,7 +2358,7 @@ export class ExtensionRunner {
 					requestId: response.requestId,
 					metadata: response.metadata,
 				};
-				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs);
+				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs, undefined, signal);
 			}
 		}
 	}
@@ -1716,7 +2367,9 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		reason: BeforeAgentStartEvent["reason"] = "prompt",
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
+		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let currentSystemPrompt = systemPrompt;
@@ -1729,6 +2382,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				const event: BeforeAgentStartEvent = {
 					type: "before_agent_start",
+					reason,
 					prompt,
 					images,
 					systemPrompt: currentSystemPrompt,
@@ -1763,5 +2417,41 @@ export class ExtensionRunner {
 		}
 
 		return undefined;
+	}
+
+	/**
+	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
+	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
+	 */
+	async emitBeforeSubagentSpawn(
+		event: BeforeSubagentSpawnEvent,
+		signal?: AbortSignal,
+	): Promise<BeforeSubagentSpawnEventResult | undefined> {
+		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
+		const ctx = this.createContext();
+		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_subagent_spawn");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				const handlerResult = await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+				);
+				if (!handlerResult) continue;
+				const result = handlerResult as BeforeSubagentSpawnEventResult;
+				if (result.block) return result;
+				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+			}
+		}
+
+		return chosen;
 	}
 }

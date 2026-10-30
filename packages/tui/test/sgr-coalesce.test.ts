@@ -89,6 +89,33 @@ describe("coalesceAdjacentSgr", () => {
 		expect(coalesceAdjacentSgr(input)).toBe(input);
 	});
 
+	it.each(["38", "48", "58"])("preserves incomplete %s color boundaries, including nested introducers", introducer => {
+		for (const params of [
+			introducer,
+			`${introducer};2`,
+			`${introducer};2;255`,
+			`${introducer};2;255;0`,
+			`${introducer};5`,
+			`${introducer};48;5`,
+		]) {
+			const input = `\x1b[${params}m\x1b[31mX`;
+			expect(coalesceAdjacentSgr(input)).toBe(input);
+		}
+	});
+
+	it("does not interpret color values or colon subparameters as new introducers", () => {
+		for (const params of ["38;2;48;58;38", "48;5;38", "58:2::38:48:58", "38;2;;;"]) {
+			expect(coalesceAdjacentSgr(`\x1b[${params}m\x1b[31mX`)).toBe(`\x1b[${params};31mX`);
+		}
+	});
+
+	it("counts colon subparameters toward the merge cap without splitting a color", () => {
+		const input = "\x1b[38:2::1:2:3m\x1b[1;3;4;5;6;7;8;9;10;11m\x1b[31mX";
+		const out = coalesceAdjacentSgr(input);
+		expect(out).toBe("\x1b[38:2::1:2:3;1;3;4;5;6;7;8;9;10;11m\x1b[31mX");
+		expect(maxParamTokens(out)).toBeLessThanOrEqual(16);
+	});
+
 	it("still merges a complete extended color followed by another code", () => {
 		// `38;2;255;0;0` consumes exactly r,g,b; a trailing `31` then starts fresh,
 		// so concatenation stays behavior-preserving and the merge win is kept.

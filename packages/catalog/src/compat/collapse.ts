@@ -36,7 +36,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { AntigravityModelWireProfile, Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
@@ -491,6 +491,17 @@ export function reviewedCollapseTable(provider: string): VariantCollapseTable | 
 }
 
 /**
+ * Logical id of the reviewed `provider` family claiming `memberId` as a member
+ * or extra alias, or `undefined` when no reviewed family owns it. Cursor's rich
+ * discovery names lanes with it so they keep the id the legacy-slug collapse
+ * (and the bundled catalog) assigns.
+ */
+export function reviewedVariantFamilyId(provider: string, memberId: string): string | undefined {
+	const table = reviewedCollapseTable(provider);
+	return table ? getAliasIndex(table).resolve(memberId.trim()) : undefined;
+}
+
+/**
  * The global automatic rule: derive an `X` + `X-thinking` family for every
  * pair where both ids are live in `specs` (trailing or infix token). Gates:
  * - both members share the same `api`,
@@ -735,6 +746,136 @@ function reconcileDefaultMember<TSpec extends VariantSpecLike>(
 }
 
 /**
+ * Whether a Cursor wire id names an extended tier that upstream serves only in
+ * max mode. The compiled taxonomy identifies `xhigh`/`extra-high`/`max`
+ * efforts and their optional service lanes. This is an inference, not an
+ * upstream marker: it is the only per-tier signal available for bundled rows
+ * and for routes live discovery never advertised.
+ */
+export function isCursorMaxModeWireId(wireModelId: string): boolean {
+	const effort = collapseVariantId("cursor", wireModelId).effort;
+	return effort === Effort.XHigh || effort === Effort.Max;
+}
+
+/**
+ * Whether `wireModelId` is one tier of a reviewed `provider` family that serves
+ * different efforts from distinct sibling SKUs (`-low`/`-medium`/`-high`), so
+ * the SKU, not the effort, fixes the thinking strength. Decided from the
+ * declared family routes, not a collapsed row's routing: an account roster
+ * listing one tier collapses to a row routing every effort to it, yet that SKU
+ * still advertises its own fixed thinking. Families routing every effort to
+ * one `-thinking` SKU keep the effort's own budget or level.
+ */
+export function isReviewedTierVariantWireId(provider: string, wireModelId: string): boolean {
+	const table = reviewedCollapseTable(provider);
+	if (table === undefined) return false;
+	const id = wireModelId.trim();
+	const family =
+		table.families.find(candidate => candidate.members.includes(id)) ??
+		(table.templates === undefined ? undefined : templateFamilyFor(table.templates, id));
+	if (family === undefined) return false;
+	const tiers = new Set<string>();
+	for (const key of VARIANT_ROUTING_KEYS) {
+		const target = family.routing[key];
+		if (key !== "off" && target !== undefined) tiers.add(target);
+	}
+	return tiers.size > 1 && tiers.has(id);
+}
+
+/**
+ * Recover Cursor's max-mode marker for a bundled collapsed row. The bundled
+ * snapshot may contain only the logical row, but its effort routing still
+ * records the wire ids, so {@link isCursorMaxModeWireId} preserves the
+ * transport invariant even when live discovery contributes no raw members.
+ */
+function reconcileCursorMaxModeFromRouting<TSpec extends VariantSpecLike>(spec: TSpec): TSpec {
+	if (spec.provider !== "cursor" || spec.cursorMaxMode === true) return spec;
+	const routing = spec.thinking?.effortRouting;
+	if (routing === undefined) return spec;
+	const hasMaxModeRoute = Object.values(routing).some(
+		(target): target is string => typeof target === "string" && isCursorMaxModeWireId(target),
+	);
+	return hasMaxModeRoute ? { ...spec, cursorMaxMode: true } : spec;
+}
+
+/**
+ * Index the discovered `max_mode` marker of every live Cursor member by its own
+ * wire id. The collapsed row's `cursorMaxMode` is an OR across members, so it
+ * says nothing per tier; the transport needs the marker addressable by the wire
+ * id it actually sends, because upstream marks tiers the slug cannot identify
+ * (the whole Opus `-fast` lane is max-mode, `-low-fast` included). Returns
+ * `undefined` when no member carries a marker, so unmarked rosters add no field.
+ */
+function cursorMaxModeRoutesOf<TSpec extends VariantSpecLike>(
+	provider: string,
+	memberSpecs: readonly TSpec[],
+): Record<string, boolean> | undefined {
+	if (provider !== "cursor") return undefined;
+	let routes: Record<string, boolean> | undefined;
+	for (const member of memberSpecs) {
+		if (member.cursorMaxMode === undefined) continue;
+		routes ??= {};
+		routes[member.id] = member.cursorMaxMode;
+	}
+	return routes;
+}
+
+/**
+ * Lift Cursor's max-mode markers from live member rows onto an already-collapsed
+ * snapshot. Bundled catalog and cache rows froze the flag from `memberSpecs[0]`
+ * — the `-none`/`-low` tier — so the committed `gpt-5.6-*` / `cursor-grok-*`
+ * rows carry `cursorMaxMode: false`. The existing-collapsed pass-through keeps
+ * the snapshot verbatim, so a live `GetUsableModels` roster that marks the
+ * `-xhigh`/`-max` tiers would be discarded and max-tier requests would keep
+ * sending `max_mode: false` on a max-mode-only wire id. The row-level flag
+ * mirrors the fresh-collapse aggregation: only the positive case is lifted, so
+ * a roster that marks nothing leaves the snapshot alone. The per-wire-id
+ * markers are merged on top of the snapshot's own so live rows win per route.
+ * Returns `spec` by reference when unchanged.
+ */
+function reconcileCursorMaxMode<TSpec extends VariantSpecLike>(spec: TSpec, memberSpecs: readonly TSpec[]): TSpec {
+	const routes = cursorMaxModeRoutesOf(spec.provider, memberSpecs);
+	const lifts = spec.cursorMaxMode !== true && memberSpecs.some(member => member.cursorMaxMode === true);
+	if (routes === undefined && !lifts) return spec;
+	return {
+		...spec,
+		...(lifts ? { cursorMaxMode: true } : {}),
+		...(routes === undefined ? {} : { cursorMaxModeRoutes: { ...spec.cursorMaxModeRoutes, ...routes } }),
+	};
+}
+
+/**
+ * Union the members' discovered Antigravity wire profiles, keyed by each
+ * member's own wire id, so the collapsed row keeps the request constants of
+ * every SKU it routes to (`...firstMember` alone keeps only the first tier's).
+ * Returns `undefined` when no member carries a profile.
+ */
+function antigravityWireProfilesOf<TSpec extends VariantSpecLike>(
+	memberSpecs: readonly TSpec[],
+): Record<string, AntigravityModelWireProfile> | undefined {
+	let profiles: Record<string, AntigravityModelWireProfile> | undefined;
+	for (const member of memberSpecs) {
+		if (member.antigravityWireProfiles === undefined) continue;
+		profiles = { ...profiles, ...member.antigravityWireProfiles };
+	}
+	return profiles;
+}
+
+/**
+ * Merge live members' wire profiles over an already-collapsed snapshot, which
+ * froze them (or none) when it was written. Returns `spec` by reference when no
+ * member carries a profile.
+ */
+function reconcileAntigravityWireProfiles<TSpec extends VariantSpecLike>(
+	spec: TSpec,
+	memberSpecs: readonly TSpec[],
+): TSpec {
+	const profiles = antigravityWireProfilesOf(memberSpecs);
+	if (profiles === undefined) return spec;
+	return { ...spec, antigravityWireProfiles: { ...spec.antigravityWireProfiles, ...profiles } };
+}
+
+/**
  * Collapse every family in `table` found in `specs`. Non-member specs pass
  * through verbatim (by reference), order preserved; the collapsed spec
  * replaces the first occurrence of its family.
@@ -776,7 +917,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			// Recycled extraAliases rows are healed in a later pass.
 			const refreshed =
 				existing !== undefined && existingCollapsed
-					? reconcileDefaultMember(refreshCollapsedThinking(reconciled ?? existing, family, retired), family)
+					? reconcileCursorMaxModeFromRouting(
+							reconcileDefaultMember(refreshCollapsedThinking(reconciled ?? existing, family, retired), family),
+						)
 					: reconciled;
 			if (refreshed !== undefined && refreshed !== existing) {
 				familyIdBySpecId.set(family.id, family.id);
@@ -788,20 +931,29 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		for (const id of rawPresent) familyIdBySpecId.set(id, family.id);
 		if (existing) familyIdBySpecId.set(family.id, family.id);
 
-		if (existingCollapsed && reconciled !== undefined) {
-			// Mixed input: the collapsed entry wins; stale raw members are deduped
-			// away. Retired targets are re-pointed first, then the default wire id
-			// prefers the family's declared member when live and otherwise falls
-			// back to the first member the account actually advertised.
-			replacement.set(family.id, reconcileDefaultMember(reconciled, family, new Set(rawPresent)));
-			continue;
-		}
-
 		const memberSpecs: TSpec[] = [];
 		for (const id of rawPresent) {
 			const member = byId.get(id);
 			if (member !== undefined) memberSpecs.push(member);
 		}
+
+		if (existingCollapsed && reconciled !== undefined) {
+			// Mixed input: the collapsed entry wins; stale raw members are deduped
+			// away. Retired targets are re-pointed first, then the default wire id
+			// prefers the family's declared member when live and otherwise falls
+			// back to the first member the account actually advertised. The live
+			// members still own `cursorMaxMode`: the snapshot froze it from the
+			// lowest tier.
+			replacement.set(
+				family.id,
+				reconcileAntigravityWireProfiles(
+					reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
+					memberSpecs,
+				),
+			);
+			continue;
+		}
+
 		const firstMember = memberSpecs[0];
 		if (firstMember === undefined) continue;
 		const presentSet = new Set(rawPresent);
@@ -836,6 +988,15 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
 
+		// `cursorMaxMode` gates the `max_mode` request flag. The collapsed row
+		// otherwise inherits `memberSpecs[0]`, so a family whose max-mode member
+		// is not the first one would advertise `false` and send `max_mode: false`
+		// on a max-mode wire id. Only the positive case is aggregated — an
+		// unmarked family keeps whatever the first member carried. The OR loses
+		// which tier needed it, so the members' own markers are kept per wire id.
+		const cursorMaxMode = memberSpecs.some(spec => spec.cursorMaxMode === true) ? true : undefined;
+		const cursorMaxModeRoutes = cursorMaxModeRoutesOf(firstMember.provider, memberSpecs);
+		const antigravityWireProfiles = antigravityWireProfilesOf(memberSpecs);
 		const collapsed: TSpec = {
 			...firstMember,
 			id: family.id,
@@ -844,7 +1005,13 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			input,
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
+			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
+			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
+			...(antigravityWireProfiles === undefined ? {} : { antigravityWireProfiles }),
 		};
+		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
+			collapsed.isProviderDefault = true;
+		}
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
 		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.
@@ -941,8 +1108,17 @@ function retargetCollapsedModelReferences<TSpec extends VariantSpecLike>(specs: 
 			liveIdsByProvider,
 		);
 		const compactionModel = resolveCollapsedModelReference(spec.compactionModel, spec.provider, liveIdsByProvider);
-		if (contextPromotionTarget === spec.contextPromotionTarget && compactionModel === spec.compactionModel) continue;
-		specs[index] = { ...spec, contextPromotionTarget, compactionModel };
+		const webSearchModel = resolveCollapsedModelReference(spec.webSearchModel, spec.provider, liveIdsByProvider);
+		const imageModel = resolveCollapsedModelReference(spec.imageModel, spec.provider, liveIdsByProvider);
+		if (
+			contextPromotionTarget === spec.contextPromotionTarget &&
+			compactionModel === spec.compactionModel &&
+			webSearchModel === spec.webSearchModel &&
+			imageModel === spec.imageModel
+		) {
+			continue;
+		}
+		specs[index] = { ...spec, contextPromotionTarget, compactionModel, webSearchModel, imageModel };
 	}
 }
 

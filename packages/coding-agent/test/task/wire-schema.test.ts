@@ -3,7 +3,8 @@ import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { getTaskSchema, oneLineLabel } from "@oh-my-pi/pi-coding-agent/task/types";
+import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
+import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 // Contract: the task tool's wire shape is flat `{ name?, agent?, task, isolated? }`
@@ -49,7 +50,7 @@ function parsedItems(parsed: unknown): Array<Record<string, unknown>> {
 
 describe("task wire schema", () => {
 	it("accepts the flat { name, agent, task } shape", () => {
-		const parsed = taskSchema({ name: "AuthLoader", agent: "scout", task: "map the auth flow" });
+		const parsed = taskSchema({ name: "AuthLoader", agent: "scout", task: "map the auth flow", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.name).toBe("AuthLoader");
@@ -59,7 +60,7 @@ describe("task wire schema", () => {
 	});
 
 	it("defaults a missing agent to 'task'", () => {
-		const parsed = taskSchema({ task: "x" });
+		const parsed = taskSchema({ task: "x", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.agent).toBe("task");
@@ -67,7 +68,13 @@ describe("task wire schema", () => {
 	});
 
 	it("deletes stale caller keys (role, description) instead of rejecting", () => {
-		const parsed = taskSchema({ agent: "task", task: "x", role: "Rust specialist", description: "stale ui label" });
+		const parsed = taskSchema({
+			agent: "task",
+			task: "x",
+			solutionSpace: "c",
+			role: "Rust specialist",
+			description: "stale ui label",
+		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect("role" in parsed).toBe(false);
@@ -78,24 +85,59 @@ describe("task wire schema", () => {
 
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x" }] }));
+		const items = parsedItems(
+			batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x", solutionSpace: "c" }] }),
+		);
 		expect(items[0]?.agent).toBe("task");
 		expect(items[0]?.name).toBe("DbMigrator");
 	});
 
 	it("defaults batch item agents to the schema's defaultAgent", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, defaultAgent: "scout" });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x" }, { agent: "reviewer", task: "y" }] }));
+		const items = parsedItems(
+			batch({
+				context: "ctx",
+				tasks: [
+					{ task: "x", solutionSpace: "c" },
+					{ agent: "reviewer", task: "y", solutionSpace: "c" },
+				],
+			}),
+		);
 		expect(items[0]?.agent).toBe("scout");
 		expect(items[1]?.agent).toBe("reviewer");
 	});
 
 	it("deletes stale keys from batch items", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", role: "DB migration specialist" }] }));
+		const items = parsedItems(
+			batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", role: "DB migration specialist" }] }),
+		);
 		const item = items[0] ?? {};
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
+	});
+
+	it("rejects a batch-level specialist instead of silently spawning the default agent", () => {
+		for (const options of [
+			{ isolationEnabled: false, batchEnabled: true },
+			{ isolationEnabled: true, batchEnabled: true, defaultAgent: "scout", effortEnabled: true },
+		]) {
+			const schema = getTaskSchema(options);
+			const parsed = schema({
+				context: "Inspect changes",
+				agent: "custom-auditor",
+				tasks: [{ task: "Inspect the patch", solutionSpace: "one inspection" }],
+			});
+			expect(parsed instanceof type.errors).toBe(true);
+			if (parsed instanceof type.errors) expect(parsed.summary).toContain("tasks[].agent");
+			const corrected = parsedItems(
+				schema({
+					context: "Inspect changes",
+					tasks: [{ agent: "custom-auditor", task: "Inspect the patch", solutionSpace: "one inspection" }],
+				}),
+			);
+			expect(corrected[0]?.agent).toBe("custom-auditor");
+		}
 	});
 });
 
@@ -164,5 +206,30 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines.join("\n")).not.toContain("undefined");
 
 		expect(() => tool.formatApprovalDetails({ tasks: [undefined, { agent: "reviewer" }] })).not.toThrow();
+	});
+
+	it("shows every file authorized in a batch that starts with inline work", async () => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({
+			context: "review all assignments",
+			tasks: [
+				{ task: "summarize the code" },
+				{ taskFile: "/restricted/security-review.md" },
+				{ taskFile: "/tmp/implementation.md" },
+			],
+		});
+		expect(lines.join("\n")).toContain("/restricted/security-review.md");
+		expect(lines.join("\n")).toContain("/tmp/implementation.md");
+	});
+
+	it("escapes filename controls without injecting approval lines for flat or batch calls", async () => {
+		const tool = await makeTool();
+		const taskFile = "/tmp/assignment\nAgent: forged\t\u001b[31m.md";
+		for (const args of [{ taskFile }, { tasks: [{ taskFile }] }]) {
+			const lines = tool.formatApprovalDetails(args);
+			const fileLine = lines.find(line => line.includes("/tmp/assignment"));
+			expect(fileLine).toContain("\\nAgent: forged\\t");
+			expect(fileLine).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+		}
 	});
 });

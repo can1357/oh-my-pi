@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 
 afterEach(() => {
 	mock.restore();
@@ -13,27 +20,56 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-		},
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
 }
 
 describe("BashTool execution results", () => {
+	it.each([
+		{ wallTimeMs: 0, noticeCount: 1 },
+		{ wallTimeMs: 1000, noticeCount: 2 },
+	])("preserves timing-like stdout in shell views at $wallTimeMs ms", async ({ wallTimeMs, noticeCount }) => {
+		let now = 0;
+		spyOn(performance, "now").mockImplementation(() => now);
+		const realRun = Shell.prototype.run;
+		spyOn(Shell.prototype, "run").mockImplementation(async function (this: Shell, options, onChunk) {
+			const result = await realRun.call(this, options, onChunk);
+			now = wallTimeMs;
+			return result;
+		});
+		const tool = new BashTool(makeSession());
+		const args = { command: `printf 'Wall time: %.2f seconds\\n' ${wallTimeMs / 1000}` };
+		const result = await tool.execute("call-timing-output", args);
+		const timingOutput = `Wall time: ${(wallTimeMs / 1000).toFixed(2)} seconds`;
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(result.details?.wallTimeMs).toBe(wallTimeMs);
+		expect(text.match(/Wall time: \d+\.\d{2} seconds/gu)).toHaveLength(noticeCount);
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected dark theme");
+
+		for (const expanded of [false, true]) {
+			const options = { expanded, isPartial: false };
+			const component = bashToolRenderer.renderResult(result, options, theme, args);
+			const rendered = Bun.stripANSI(component.render(120).join("\n"));
+			expect(rendered.match(/Wall time: \d+\.\d{2} seconds/gu)).toEqual([timingOutput]);
+			const view = bashToolRenderer.describeResult(result, options, args);
+			const output = (view.body ?? [])
+				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
+				.find(node => "k" in node && node.k === "ansi");
+			expect(output).toMatchObject({ p: { role: "omp.tool.bash.output", text: timingOutput } });
+		}
+	});
+
 	it("resolves with an error result carrying execution details instead of throwing", async () => {
 		const tool = new BashTool(makeSession());
 		const result = await tool.execute("call-fail", { command: "exit 3" });
@@ -97,6 +133,54 @@ describe("BashTool execution results", () => {
 		expect(text).not.toContain("Command exited with code");
 	});
 
+	it("exposes the session identity to the command over a stale value in its shell", async () => {
+		const tool = new BashTool({
+			...makeSession(),
+			getSessionId: () => "session-fg-shell",
+			sessionManager: { getSessionId: () => "session-fg" },
+		} as unknown as ToolSession);
+		// The session's persistent shell carries a value an earlier command (or a parent omp) left behind.
+		await tool.execute("call-stale", { command: "export PI_SESSION_FILE=/stale/parent.jsonl" });
+		const result = await tool.execute("call-env", {
+			command: `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`,
+		});
+		const [id, file] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
+		expect(id).toBe("session-fg");
+		// Empty, not the stale path: the session is not persisted.
+		expect(file).toBe("");
+	});
+
+	it("gives a call the identity of the session it started in, even if the session changes before it runs", async () => {
+		let sessionId = "session-a";
+		const gate = Promise.withResolvers<void>();
+		let allocating = Promise.withResolvers<void>();
+		const tool = new BashTool({
+			...makeSession(),
+			getSessionId: () => sessionId,
+			getSessionFile: () => path.resolve(`/sessions/${sessionId}.jsonl`),
+			allocateOutputArtifact: async () => {
+				allocating.resolve();
+				await gate.promise;
+				return {};
+			},
+		} as unknown as ToolSession);
+		const probe = `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`;
+		const fields = (result: { content: readonly { type: string; text?: string }[] }) =>
+			(result.content.find(c => c.type === "text")?.text ?? "").split("|").slice(0, 2);
+
+		const pending = tool.execute("call-a", { command: probe });
+		await allocating.promise;
+		sessionId = "session-b"; // e.g. `/fork` while the call waits on its artifact
+		gate.resolve();
+		expect(fields(await pending)).toEqual(["session-a", path.resolve("/sessions/session-a.jsonl")]);
+
+		allocating = Promise.withResolvers<void>();
+		expect(fields(await tool.execute("call-b", { command: probe }))).toEqual([
+			"session-b",
+			path.resolve("/sessions/session-b.jsonl"),
+		]);
+	});
+
 	it("keeps the raw diagnostics when a minimized failure cannot be persisted as an artifact", async () => {
 		// The native minimizer streams the raw bytes live, then reports a lossy
 		// summary. This session has no artifact allocator (the `ToolSession`
@@ -144,6 +228,117 @@ describe("BashTool execution results", () => {
 
 			expect(result.isError).toBeUndefined();
 			expect(stdout).toBe(scenario.expected);
+		}
+	});
+});
+
+describe("BashTool skill:// working directory", () => {
+	async function skillFixture(): Promise<{ dir: string; skillDir: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-cwd-")));
+		const skillDir = path.join(dir, "skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		return {
+			dir,
+			skillDir,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		};
+	}
+
+	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
+		const { dir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd; cat SKILL.md", cwd: "skill://docs" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain("skill://docs");
+			expect(text).toContain("body");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs a leading cd into a bare skill URI", async () => {
+		const { dir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && cat SKILL.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain("body");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("BashTool skill:// containment failures", () => {
+	async function containedFixture(): Promise<{ dir: string; outsideFile: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		const skillDir = path.join(pluginRoot, "skills", "docs");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		const outsideFile = path.join(dir, "secret.md");
+		await fs.writeFile(outsideFile, "outside contents\n");
+		return {
+			dir,
+			outsideFile,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: outsideFile,
+				baseDir: skillDir,
+				source: "agent-plugins:user",
+				containRoot: pluginRoot,
+			},
+		};
+	}
+
+	it("refuses a read through a symlink past the plugin boundary", async () => {
+		const { dir, outsideFile, skill } = await containedFixture();
+		await fs.symlink(outsideFile, path.join(skill.baseDir, "leak.md"));
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-leak", { command: "cat skill://docs/leak.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBe(true);
+			expect(text).not.toContain("outside contents");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a working directory past the plugin boundary instead of running in it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		await fs.mkdir(pluginRoot, { recursive: true });
+		const skill: Skill = {
+			name: "docs",
+			description: "d",
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "agent-plugins:user",
+			containRoot: pluginRoot,
+		};
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak-cwd", { command: "pwd", cwd: "skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

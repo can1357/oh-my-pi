@@ -15,31 +15,46 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
-import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
+import { lookup } from "../../src/config/registry";
+import { Settings } from "../../src/config/settings";
 import {
+	CHANGELOG_COMMAND_USAGE,
 	type ChangelogEntry,
+	DEFAULT_LAST_CHANGELOG_COUNT,
 	formatStartupChangelogSummary,
 	getNewEntries,
 	parseChangelog,
+	parseChangelogView,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	readLastChangelogVersion,
 	renderChangelogEntries,
 	resolveStartupChangelogForDisplay,
+	selectChangelogEntries,
 	STARTUP_CHANGELOG_FULL_HINT,
 	STARTUP_CHANGELOG_MAX_BYTES,
 	selectStartupChangelog,
 	writeLastChangelogVersion,
 } from "../../src/utils/changelog";
 
+import { cfgStartupChangelogMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
+
 const CURRENT_VERSION = "2.0.0";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const packageDir = path.join(repoRoot, "packages", "coding-agent");
-const hasPtyHarness =
-	process.platform === "linux" &&
-	(await Bun.file("/usr/bin/script").exists()) &&
-	(await Bun.file("/usr/bin/timeout").exists());
+const hasPtyHarness = process.platform === "linux" && (await Bun.file("/usr/bin/script").exists());
 const PTY_STARTUP_OUTPUT_CEILING = 512 * 1024;
+/**
+ * Upper bound for a cold `bun src/cli.ts` to persist the first-run marker. Only
+ * a hang reaches it: the test proceeds as soon as the marker lands, so a slow or
+ * loaded runner costs time, not a failure.
+ */
+const PTY_MARKER_DEADLINE_MS = 60_000;
+/** How long the CLI keeps running after the marker, so a startup changelog render would reach the PTY. */
+const PTY_POST_MARKER_OBSERVE_MS = 5_000;
+/** Marker deadline plus observation window, with slack for spawn and `script` teardown. */
+const PTY_TEST_TIMEOUT_MS = PTY_MARKER_DEADLINE_MS + PTY_POST_MARKER_OBSERVE_MS + 30_000;
 
 function release(major: number, minor: number, patch: number, body: string): ChangelogEntry {
 	const heading = `## [${major}.${minor}.${patch}] - 2026-07-11`;
@@ -48,12 +63,8 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 }
 
 describe("startup changelog mode settings", () => {
-	test("defaults to a summary", () => {
-		expect(Settings.isolated().get("startup.changelogMode")).toBe("summary");
-	});
-
 	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
-		expect(Object.hasOwn(SETTINGS_SCHEMA, "collapseChangelog")).toBe(false);
+		expect(lookup("collapseChangelog")).toBeUndefined();
 
 		await withTempAgentDir(async agentDir => {
 			const configPath = path.join(agentDir, "config.yml");
@@ -63,7 +74,7 @@ describe("startup changelog mode settings", () => {
 			] as const) {
 				await Bun.write(configPath, `collapseChangelog: ${legacyValue}\n`);
 				const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
-				expect(settings.get("startup.changelogMode")).toBe(expectedMode);
+				expect(cfgStartupChangelogMode.get(settings)).toBe(expectedMode);
 			}
 		});
 	});
@@ -75,8 +86,34 @@ describe("startup changelog mode settings", () => {
 				"collapseChangelog: false\nstartup:\n  changelogMode: hidden\n",
 			);
 			const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
-			expect(settings.get("startup.changelogMode")).toBe("hidden");
+			expect(cfgStartupChangelogMode.get(settings)).toBe("hidden");
 		});
+	});
+});
+describe("parseChangelogView", () => {
+	const entries = [release(1, 0, 3, "c"), release(1, 0, 2, "b"), release(1, 0, 1, "a")];
+
+	test("maps bare, full, and last counts", () => {
+		expect(parseChangelogView("")).toEqual({ kind: "recent", count: RECENT_CHANGELOG_ENTRY_LIMIT });
+		expect(parseChangelogView("full")).toEqual({ kind: "full" });
+		expect(parseChangelogView("last")).toEqual({ kind: "last", count: DEFAULT_LAST_CHANGELOG_COUNT });
+		expect(parseChangelogView("LAST 2")).toEqual({ kind: "last", count: 2 });
+	});
+
+	test("rejects unknown args and a zero count with one usage string", () => {
+		expect(parseChangelogView("yesterday")).toEqual({ error: CHANGELOG_COMMAND_USAGE });
+		expect(parseChangelogView("last 0")).toEqual({
+			error: `${CHANGELOG_COMMAND_USAGE} (N must be a positive integer)`,
+		});
+	});
+
+	test("slices last N and leaves an oversized count to the caller title", () => {
+		const last = parseChangelogView("last 2");
+		if ("error" in last) throw new Error(last.error);
+		expect(selectChangelogEntries(entries, last).map(entry => entry.patch)).toEqual([3, 2]);
+		const oversized = parseChangelogView("last 999999");
+		if ("error" in oversized) throw new Error(oversized.error);
+		expect(selectChangelogEntries(entries, oversized)).toHaveLength(entries.length);
 	});
 });
 
@@ -303,26 +340,84 @@ describe("last changelog marker", () => {
 			expect(await readLastChangelogVersion(agentDir)).toBe("3.0.0");
 		});
 	});
+
+	test("summary mode keeps the last unseen release of a changelog that ends in a newline", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("1.0.0", agentDir);
+			const changelogPath = path.join(agentDir, "CHANGELOG.md");
+			const history = [release(2, 0, 0, "### Added\n\n- Newest."), release(1, 5, 0, "### Fixed\n\n- Last section.")];
+			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "summary",
+				currentVersion: CURRENT_VERSION,
+				changelogPath,
+				agentDir,
+			});
+
+			expect(selection?.totalUnseenEntries).toBe(2);
+			expect(selection?.markdown).toContain("## [1.5.0]");
+			expect(selection?.markdown).toContain("- Last section.");
+		});
+	});
 });
 
-describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () => {
-	test("does not dump packaged changelog history on first install with uncollapsed notes", async () => {
-		await withTempAgentDir(async agentDir => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
-			try {
-				await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
-				await Bun.write(path.join(agentDir, "config.yml"), "setupVersion: 1\ncollapseChangelog: false\n");
+/**
+ * Resolve the changelog marker a spawned CLI persists in `agentDir`, re-reading
+ * on each directory change event. Resolves `undefined` once `exited` settles or
+ * `deadline` aborts without a marker (a crashed or hung startup).
+ */
+async function waitForChangelogMarker(
+	agentDir: string,
+	exited: Promise<unknown>,
+	deadline: AbortSignal,
+): Promise<string | undefined> {
+	const stop = new AbortController();
+	void exited.then(() => stop.abort());
+	const signal = AbortSignal.any([stop.signal, deadline]);
+	const events = fs.watch(agentDir, { signal });
+	try {
+		let marker = await readLastChangelogVersion(agentDir);
+		if (marker !== undefined) return marker;
+		for await (const _ of events) {
+			marker = await readLastChangelogVersion(agentDir);
+			if (marker !== undefined) return marker;
+		}
+	} catch (error) {
+		if (!signal.aborted) throw error;
+	} finally {
+		stop.abort();
+	}
+	return await readLastChangelogVersion(agentDir);
+}
 
-				const proc = Bun.spawn(
-					["timeout", "6s", "script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"],
-					{
+describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () => {
+	test(
+		"does not dump packaged changelog history on first install with uncollapsed notes",
+		async () => {
+			await withTempAgentDir(async agentDir => {
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
+				try {
+					await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
+					await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
+					await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
+					// Setup already completed, so the interactive transcript (where the startup
+					// changelog renders) comes up instead of the animated setup wizard.
+					await Bun.write(
+						path.join(agentDir, "config.yml"),
+						`setupVersion: ${CURRENT_SETUP_VERSION}\ncollapseChangelog: false\n`,
+					);
+
+					const proc = Bun.spawn(["script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"], {
 						cwd: repoRoot,
 						stdout: "pipe",
 						stderr: "pipe",
 						env: {
 							...process.env,
+							// ci-test-ts children inherit PI_TEST_RUNTIME=1, which makes the CLI
+							// headless: it paints nothing and exits once startup drains. Clear it so
+							// CI runs the same painting interactive startup as a local `bun test`.
+							PI_TEST_RUNTIME: undefined,
 							HOME: root,
 							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 							XDG_STATE_HOME: path.join(root, "xdg-state"),
@@ -333,25 +428,47 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							NO_COLOR: "1",
 							TERM: "xterm-256color",
 						},
-					},
-				);
+					});
+					let exited = false;
+					void proc.exited.then(() => {
+						exited = true;
+					});
+					const outputs = Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text()]);
 
-				const [stdout, stderr, exitCode] = await Promise.all([
-					new Response(proc.stdout).arrayBuffer(),
-					new Response(proc.stderr).text(),
-					proc.exited,
-				]);
-				const output = Buffer.from(stdout).toString("utf8");
+					let marker: string | undefined;
+					let exitedBeforeStop: boolean;
+					try {
+						// Cold-start time tracks runner load, so wait for the marker the first-run
+						// path persists rather than racing it against a fixed window.
+						marker = await waitForChangelogMarker(
+							agentDir,
+							proc.exited,
+							AbortSignal.timeout(PTY_MARKER_DEADLINE_MS),
+						);
+						if (marker !== undefined) {
+							// Genuine delay: asserting the startup changelog is absent has no event to
+							// await, so give the first frames time to reach the PTY.
+							await Promise.race([proc.exited, Bun.sleep(PTY_POST_MARKER_OBSERVE_MS)]);
+						}
+						exitedBeforeStop = exited;
+					} finally {
+						proc.kill();
+					}
+					const [stdout, stderr] = await outputs;
+					await proc.exited;
+					const output = Buffer.from(stdout).toString("utf8");
 
-				expect(exitCode).toBe(124);
-				expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
-				expect(output).not.toContain("## [");
-				expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
-				expect(stderr).not.toContain("Cannot find module");
-				expect(await readLastChangelogVersion(agentDir)).toBe(VERSION);
-			} finally {
-				await removeWithRetries(root);
-			}
-		});
-	}, 15_000);
+					expect(exitedBeforeStop).toBe(false);
+					expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
+					expect(output).not.toContain("## [");
+					expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
+					expect(stderr).not.toContain("Cannot find module");
+					expect(marker).toBe(VERSION);
+				} finally {
+					await removeWithRetries(root);
+				}
+			});
+		},
+		PTY_TEST_TIMEOUT_MS,
+	);
 });

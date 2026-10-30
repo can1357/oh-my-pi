@@ -1,6 +1,8 @@
 /**
- * CPU and heap profiling wrappers for debug reports.
+ * CPU profiling and aggregate memory statistics for debug reports.
  */
+
+import { type HeapStats, heapStats } from "bun:jsc";
 
 export interface CpuProfile {
 	data: string;
@@ -147,22 +149,37 @@ export async function startCpuProfile(): Promise<ProfilerSession> {
 	};
 }
 
-export interface HeapSnapshot {
-	data: string;
+/** Numeric-only process and heap statistics for memory reports, without heap contents. */
+export interface MemoryStats {
+	process: NodeJS.MemoryUsage;
+	heap: Pick<
+		HeapStats,
+		| "heapSize"
+		| "heapCapacity"
+		| "extraMemorySize"
+		| "objectCount"
+		| "protectedObjectCount"
+		| "globalObjectCount"
+		| "protectedGlobalObjectCount"
+	>;
 }
 
-/**
- * Generate a heap snapshot.
- * Uses Bun's built-in generateHeapSnapshot.
- */
-export function generateHeapSnapshotData(): HeapSnapshot {
-	// Force GC before snapshot
+/** Collect post-GC memory counters for reports without capturing credentials or other live strings. */
+export function collectMemoryStats(): MemoryStats {
 	Bun.gc(true);
+	const heap = heapStats();
 
-	// Use V8 format for Chrome DevTools compatibility
-	const snapshot = Bun.generateHeapSnapshot("v8");
-
+	// Never serialize a heap snapshot or runtime-derived type names: both can contain secrets.
 	return {
-		data: snapshot,
+		process: process.memoryUsage(),
+		heap: {
+			heapSize: heap.heapSize,
+			heapCapacity: heap.heapCapacity,
+			extraMemorySize: heap.extraMemorySize,
+			objectCount: heap.objectCount,
+			protectedObjectCount: heap.protectedObjectCount,
+			globalObjectCount: heap.globalObjectCount,
+			protectedGlobalObjectCount: heap.protectedGlobalObjectCount,
+		},
 	};
 }

@@ -7,7 +7,6 @@ import {
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
-	resolveOwnerScopedSessionKey,
 	type SessionOwners,
 	waitForPromiseWithCancellation,
 } from "./executor-base";
@@ -87,11 +86,17 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TKernel extends RegistryKernel, TOptions extends KernelSessionRegistryOptions, R> {
+interface KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends KernelSessionRegistryOptions,
+	R,
+	TSession extends KernelSession<TKernel>,
+> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
+	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -132,7 +137,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
-): KernelSessionRegistry<TKernel, TOptions, R> {
+): KernelSessionRegistry<TKernel, TOptions, R, TSession> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -181,7 +186,9 @@ export function createKernelSessionRegistry<
 		}
 		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
-		const startup = (async () => {
+		// Kernels are shared by every owner of the key, so the readers and timers a
+		// kernel starts carry no caller's log context.
+		const startup = logger.withoutContext(async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
 			const session = descriptor.createSession({
 				sessionKey,
@@ -195,7 +202,7 @@ export function createKernelSessionRegistry<
 				sessions.set(sessionKey, session);
 			}
 			return session;
-		})();
+		});
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
@@ -211,8 +218,9 @@ export function createKernelSessionRegistry<
 	}
 
 	async function replaceSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
-		if (descriptor.replaceSessionKernel) {
-			return await descriptor.replaceSessionKernel(session, cwd, options, context);
+		const replace = descriptor.replaceSessionKernel;
+		if (replace) {
+			return await logger.withoutContext(() => replace(session, cwd, options, context));
 		}
 		if (descriptor.logBeforeReplacement) {
 			logger.warn(`${descriptor.languageLabel} subprocess died or is unresponsive; spawning fresh process`, {
@@ -228,7 +236,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		requireRemainingKernelTimeoutMs(options.deadlineMs, descriptor.cancelledErrorClass);
-		const next = await descriptor.startKernel(cwd, options);
+		const next = await logger.withoutContext(() => descriptor.startKernel(cwd, options));
 		if (sessions.get(session.sessionKey) !== session) {
 			await next.shutdown().catch(() => undefined);
 			throw new descriptor.cancelledErrorClass(false);
@@ -342,7 +350,7 @@ export function createKernelSessionRegistry<
 			if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: id,
 				cwd: session.cwd,
 				reason,
@@ -395,7 +403,7 @@ export function createKernelSessionRegistry<
 			}
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: session.sessionKey,
 				cwd: session.cwd,
 				reason,
@@ -406,26 +414,19 @@ export function createKernelSessionRegistry<
 
 	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = resolveOwnerScopedSessionKey({
-			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
-			ownerId: options.kernelOwnerId,
-			reset: false,
-			hasSession: key => sessions.has(key) || startingSessions.has(key),
-			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
-		});
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		const kernel = sessions.get(sessionKey)?.kernel;
 		return kernel?.isAlive() ? kernel : undefined;
 	}
 
+	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
+	}
+
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = resolveOwnerScopedSessionKey({
-			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
-			ownerId: options.kernelOwnerId,
-			reset: options.reset === true,
-			hasSession: key => sessions.has(key) || startingSessions.has(key),
-			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
-		});
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
@@ -473,5 +474,5 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
 }

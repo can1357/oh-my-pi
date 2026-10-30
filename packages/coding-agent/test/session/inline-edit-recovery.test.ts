@@ -24,24 +24,19 @@ function assistant(content: AssistantMessage["content"], stopReason: AssistantMe
 	};
 }
 
-const payload = [
-	'<SM:EDIT path="src/a.ts">',
-	"<SM:FIND>",
-	"const x = 1;",
-	"</SM:FIND>",
-	"<SM:PUT>",
-	"const x = 2;",
-	"</SM:PUT>",
-	"</SM:EDIT>",
-].join("\n");
+const payload = ["*** Edit File: src/a.ts", "*** Find", "const x = 1;", "*** Replace", "const x = 2;"].join("\n");
 
 describe("recoverInlineSloppyEdit", () => {
 	test("lifts a stray payload out of prose into a synthetic edit tool call", () => {
-		const message = assistant([{ type: "text", text: `Fixing the constant.\n\n${payload}\n\nDone.` }], "stop");
+		// Header bodies run to EOF, so trailing prose needs the explicit `*** End Patch` boundary.
+		const message = assistant(
+			[{ type: "text", text: `Fixing the constant.\n\n${payload}\n*** End Patch\n\nDone.` }],
+			"stop",
+		);
 
 		expect(recoverInlineSloppyEdit(message)).toBe(1);
 		const text = message.content.find(block => block.type === "text");
-		expect(text?.type === "text" && text.text).toBe("Fixing the constant.\n\n\nDone.");
+		expect(text?.type === "text" && text.text).toBe("Fixing the constant.\n\n*** End Patch\n\nDone.");
 		const call = message.content.find(block => block.type === "toolCall");
 		expect(call?.type === "toolCall" && call.name).toBe("edit");
 		expect(call?.type === "toolCall" && call.arguments).toEqual({ input: payload });

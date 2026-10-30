@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { YAML } from "bun";
-import { theme } from "../modes/theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { loadBundledAgents } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
 
@@ -58,12 +58,13 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 		description: agent.description,
 	};
 
-	if (agent.tools && agent.tools.length > 0) frontmatter.tools = agent.tools;
+	if (agent.tools !== undefined) frontmatter.tools = agent.tools;
 	if (agent.spawns !== undefined) frontmatter.spawns = agent.spawns;
 	if (agent.model && agent.model.length > 0) frontmatter.model = agent.model;
 	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
 	if (agent.output !== undefined) frontmatter.output = agent.output;
 	if (agent.blocking) frontmatter.blocking = true;
+	if (agent.structured) frontmatter.structured = true;
 
 	return frontmatter;
 }

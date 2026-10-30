@@ -36,6 +36,18 @@ const TAGS: readonly Tag[] = [
 const OPENS = TAGS.map(tag => tag.open);
 const IMPLIED_OPEN_TAGS = TAGS.filter(tag => tag.impliedOpen);
 const IMPLIED_OPEN_DELIMITERS = [...OPENS, ...IMPLIED_OPEN_TAGS.map(tag => tag.close)];
+/** A hold needs the buffer tail to be a proper prefix of some delimiter, so it must be shorter than this. */
+const MAX_DELIMITER_LENGTH = Math.max(...IMPLIED_OPEN_DELIMITERS.map(delimiter => delimiter.length));
+const BACKTICK = 0x60;
+const BOUNDARY_LEAD_CODES = [...IMPLIED_OPEN_DELIMITERS.map(delimiter => delimiter.charCodeAt(0)), BACKTICK];
+/**
+ * `1` at the char code of every character a {@link scanVisible} boundary can
+ * start on: the first character of any delimiter (a tag open, an implied close,
+ * or a partial of either) and the backtick. Every other character — including
+ * any code past the table — is skipped without comparing.
+ */
+const BOUNDARY_LEAD = new Uint8Array(Math.max(...BOUNDARY_LEAD_CODES) + 1);
+for (const code of BOUNDARY_LEAD_CODES) BOUNDARY_LEAD[code] = 1;
 
 export interface ThinkingInbandScannerOptions {
 	/**
@@ -240,20 +252,26 @@ type VisibleHit =
  */
 function scanVisible(buffer: string, final: boolean, impliedOpen: boolean): VisibleHit {
 	const delimiters = impliedOpen ? IMPLIED_OPEN_DELIMITERS : OPENS;
+	// Only the tail can be a proper prefix of a delimiter.
+	const holdFrom = final ? buffer.length : buffer.length - MAX_DELIMITER_LENGTH + 1;
 	for (let i = 0; i < buffer.length; i++) {
-		const tag = TAGS.find(candidate => buffer.startsWith(candidate.open, i));
-		if (tag) return { kind: "tag", index: i, tag };
-		if (impliedOpen) {
-			const closed = IMPLIED_OPEN_TAGS.find(candidate => buffer.startsWith(candidate.close, i));
-			if (closed) return { kind: "impliedClose", index: i, tag: closed };
+		const code = buffer.charCodeAt(i);
+		if (code >= BOUNDARY_LEAD.length || BOUNDARY_LEAD[code] === 0) continue;
+		for (const tag of TAGS) {
+			if (buffer.startsWith(tag.open, i)) return { kind: "tag", index: i, tag };
 		}
-		if (!final) {
+		if (impliedOpen) {
+			for (const tag of IMPLIED_OPEN_TAGS) {
+				if (buffer.startsWith(tag.close, i)) return { kind: "impliedClose", index: i, tag };
+			}
+		}
+		if (i >= holdFrom) {
 			const rest = buffer.slice(i);
 			if (delimiters.some(delimiter => delimiter.length > rest.length && delimiter.startsWith(rest))) {
 				return { kind: "hold", index: i };
 			}
 		}
-		if (buffer[i] === "`") {
+		if (code === BACKTICK) {
 			const ticks = backtickRun(buffer, i);
 			if (!final && i + ticks === buffer.length) return { kind: "hold", index: i };
 			return { kind: "code", index: i, ticks };

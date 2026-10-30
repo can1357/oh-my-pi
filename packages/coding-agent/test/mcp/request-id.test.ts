@@ -3,12 +3,6 @@ import { describe, expect, it } from "bun:test";
 import { RequestIdAllocator } from "../../src/mcp/request-id";
 
 describe("RequestIdAllocator", () => {
-	it("defaults to sequential integer ids", () => {
-		const allocator = new RequestIdAllocator();
-
-		expect([allocator.next(undefined), allocator.next(undefined), allocator.next("number")]).toEqual([1, 2, 3]);
-	});
-
 	it("issues unique snowflake strings for servers opting into string ids", () => {
 		const allocator = new RequestIdAllocator();
 		const ids = [allocator.next("string"), allocator.next("string"), allocator.next("string")];

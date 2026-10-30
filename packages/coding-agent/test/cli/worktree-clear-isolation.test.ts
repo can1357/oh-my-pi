@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
-import { ISOLATION_OWNER_FILE, writeIsolationOwner } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import {
+	ISOLATION_OWNER_FILE,
+	RETAINED_BACKEND_FILE,
+	writeIsolationOwner,
+	writeRetainedBackend,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -83,6 +89,64 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(await exists(orphan)).toBe(false);
 		expect(await exists(corrupt)).toBe(false);
 		expect(await exists(pending)).toBe(true);
-		expect(await exists(recycled)).toBe(false);
+		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
+		// cannot spot the recycled pid and the sandbox is conservatively kept.
+		expect(await exists(recycled)).toBe(process.platform === "win32");
+	});
+
+	it("unmounts retained mounting-backend workspaces before removal", async () => {
+		const retained = await makeSandbox("tret0007");
+		await Bun.write(
+			path.join(retained, ISOLATION_OWNER_FILE),
+			JSON.stringify({ pid: await deadPid(), id: "ret0007" }),
+		);
+		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStopSpy).toHaveBeenCalledWith(natives.IsoBackendKind.Overlayfs, path.join(retained, "m"));
+		await expect(fs.stat(retained)).rejects.toThrow();
+	});
+
+	it("removes sandboxes without a retained-mount sidecar without unmounting", async () => {
+		const plain = await makeSandbox("tplain08");
+		await Bun.write(path.join(plain, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "plain08" }));
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStopSpy).not.toHaveBeenCalled();
+		await expect(fs.stat(plain)).rejects.toThrow();
+	});
+
+	it("keeps the workspace when its retained mount cannot stop", async () => {
+		const retained = await makeSandbox("tbusy0009");
+		await Bun.write(
+			path.join(retained, ISOLATION_OWNER_FILE),
+			JSON.stringify({ pid: await deadPid(), id: "busy0009" }),
+		);
+		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
+		vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount EBUSY"));
+
+		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+		expect(failed).toBe(1);
+
+		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
+	});
+
+	it("keeps workspaces whose retained-mount metadata is unreadable", async () => {
+		const retained = await makeSandbox("tbad0010");
+		await Bun.write(
+			path.join(retained, ISOLATION_OWNER_FILE),
+			JSON.stringify({ pid: await deadPid(), id: "bad0010" }),
+		);
+		await Bun.write(path.join(retained, RETAINED_BACKEND_FILE), "{ not json");
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStopSpy).not.toHaveBeenCalled();
+		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
 	});
 });

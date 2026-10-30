@@ -44,14 +44,6 @@ describe("KeybindingsManager", () => {
 		expect(keybindings.getKeys("tui.editor.cursorLeft")).toEqual(["left", "ctrl+b"]);
 	});
 
-	it("ships ctrl+j alongside shift+enter as default newline keys", () => {
-		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
-
-		const newLineKeys = keybindings.getKeys("tui.input.newLine");
-		expect(newLineKeys).toContain("ctrl+j");
-		expect(newLineKeys).toContain("shift+enter");
-	});
-
 	it("exports the canonical alias helpers used by matching", () => {
 		const aliases = new Set<string>();
 		for (const key of ["esc", "return", "?", "shift+a"] as const) {

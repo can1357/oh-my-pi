@@ -4,8 +4,8 @@ import { fatal } from "@oh-my-pi/pi-utils/postmortem";
 const tui = new TUI(new ProcessTerminal(), false);
 const input = new Input();
 input.prompt = "╰─ ";
-// The harness sends Enter once it has observed the composer boundary on the
-// PTY, so the fatal path always races against a fully painted frame.
+// The harness sends Enter only after terminal replay shows the composer boundary,
+// so the fatal path starts from a fully painted frame.
 input.onSubmit = () => {
 	void fatal(new Error("fatal PTY fixture"));
 };

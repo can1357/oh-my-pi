@@ -233,7 +233,7 @@ function createPuushUploader(config: DestinationRuntimeConfig, endpoint: URL): B
 		destination,
 		async upload(request) {
 			try {
-				const body = multipartFile(request, "f", { k: apiKey, z: "oh-my-pi" });
+				const body = multipartFile(request, "f", { k: apiKey, z: "omp" });
 				const response = await fetchFor(config)(endpoint, { method: "POST", body });
 				await expectOk(response, destination);
 				const values = (await response.text()).trim().split(",");

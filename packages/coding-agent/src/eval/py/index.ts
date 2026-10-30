@@ -1,20 +1,17 @@
 import type { ToolSession } from "../../tools";
 import {
+	type BackendAvailability,
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
 	resolveEvalUrlRoots,
 } from "../backend";
-import {
-	readSetting,
-	namespaceSessionId as sharedNamespace,
-	readInterpreterSetting as sharedReadInterpreterSetting,
-	toExecutorBackendResult,
-} from "../backend-helpers";
+import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
 import type { BackendProbeOptions } from "../probe";
 import { defaultEvalSessionId } from "../session-id";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
+import { cfgPythonInterpreter, cfgPythonKernelMode } from "../settings";
 
 const PYTHON_SESSION_PREFIX = "python:";
 
@@ -23,7 +20,7 @@ export function namespaceSessionId(sessionId: string): string {
 }
 
 function readInterpreterSetting(session: ToolSession): string | undefined {
-	return sharedReadInterpreterSetting(session, "python.interpreter");
+	return cfgPythonInterpreter.get(session)?.trim() || undefined;
 }
 
 /** Resolve the retained Python kernel identity owned by a tool session. */
@@ -46,16 +43,16 @@ export default {
 	label: "Python",
 	highlightLang: "python",
 
-	async isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean> {
-		const availability = await checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
-		return availability.ok;
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability> {
+		return checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
 	},
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
-		const kernelMode = readSetting<PythonExecutorOptions["kernelMode"]>(opts.session, "python.kernelMode");
+		const kernelMode = cfgPythonKernelMode.get(opts.session);
 		const identity = resolvePythonKernelIdentity(opts.session);
 		const executorOptions: PythonExecutorOptions = {
 			cwd: identity.cwd,
+			filename: opts.filename,
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
 			sessionId: identity.sessionId,

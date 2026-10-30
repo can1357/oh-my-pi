@@ -170,16 +170,19 @@ export function tier3Days(env: Env = process.env): number {
 	return envInt("MNEMOPI_TIER3_DAYS", 180, env);
 }
 
+/** Recall-time score multiplier for an episodic row still at degradation tier 1. */
 export function tier1Weight(env: Env = process.env): number {
 	return envFloat("MNEMOPI_TIER1_WEIGHT", 1.0, env);
 }
 
+/** Recall-time score multiplier for an episodic row degraded to tier 2. */
 export function tier2Weight(env: Env = process.env): number {
-	return envFloat("MNEMOPI_TIER2_WEIGHT", 0.5, env);
+	return envFloat("MNEMOPI_TIER2_WEIGHT", 0.85, env);
 }
 
+/** Recall-time score multiplier for an episodic row degraded to tier 3 or beyond. */
 export function tier3Weight(env: Env = process.env): number {
-	return envFloat("MNEMOPI_TIER3_WEIGHT", 0.25, env);
+	return envFloat("MNEMOPI_TIER3_WEIGHT", 0.7, env);
 }
 
 export function degradeBatchSize(env: Env = process.env): number {
@@ -279,11 +282,12 @@ let enhancedRecallDefault = false;
 let proactiveLinkingDefault = false;
 
 /**
- * Sets process-wide defaults for the env-gated recall features. Host configuration
- * (e.g. the coding-agent `mnemopi.polyphonicRecall` / `mnemopi.enhancedRecall` /
- * `mnemopi.proactiveLinking` settings) lands here; the `MNEMOPI_POLYPHONIC_RECALL` /
- * `MNEMOPI_ENHANCED_RECALL` / `MNEMOPI_PROACTIVE_LINKING` environment variables still
- * win whenever they are set.
+ * Sets process-wide defaults for the env-gated recall features. Hosts that open
+ * several memories with different policies should pass the per-instance
+ * `polyphonicRecall` / `enhancedRecall` / `proactiveLinking` options instead
+ * (`Mnemopi` / `BeamMemory` constructors), which take precedence over these
+ * defaults. The `MNEMOPI_POLYPHONIC_RECALL` / `MNEMOPI_ENHANCED_RECALL` /
+ * `MNEMOPI_PROACTIVE_LINKING` environment variables still win whenever they are set.
  */
 export function configureRecallFeatures(flags: RecallFeatureFlags): void {
 	if (flags.polyphonicRecall !== undefined) polyphonicRecallDefault = flags.polyphonicRecall;
@@ -291,18 +295,26 @@ export function configureRecallFeatures(flags: RecallFeatureFlags): void {
 	if (flags.proactiveLinking !== undefined) proactiveLinkingDefault = flags.proactiveLinking;
 }
 
-export function polyphonicRecallEnabled(env: Env = process.env): boolean {
+/**
+ * Resolves the polyphonic recall gate: the env var wins when set, then the
+ * per-instance `configured` value, then the process-wide default.
+ */
+export function polyphonicRecallEnabled(env: Env = process.env, configured?: boolean): boolean {
 	const value = envOptionalString("MNEMOPI_POLYPHONIC_RECALL", env);
-	return value === undefined ? polyphonicRecallDefault : value === "1";
+	return value === undefined ? (configured ?? polyphonicRecallDefault) : value === "1";
 }
 
 export function temporalHalflifeHours(env: Env = process.env): number {
 	return envFloat("MNEMOPI_TEMPORAL_HALFLIFE_HOURS", 24, env);
 }
 
-export function enhancedRecallEnabled(env: Env = process.env): boolean {
+/**
+ * Resolves the enhanced recall (query result cache) gate: the env var wins when
+ * set, then the per-instance `configured` value, then the process-wide default.
+ */
+export function enhancedRecallEnabled(env: Env = process.env, configured?: boolean): boolean {
 	const value = envOptionalString("MNEMOPI_ENHANCED_RECALL", env);
-	return value === undefined ? enhancedRecallDefault : value === "1";
+	return value === undefined ? (configured ?? enhancedRecallDefault) : value === "1";
 }
 
 export function proactiveLinkingEnabled(env: Env = process.env): boolean {

@@ -44,7 +44,8 @@ export async function registerDaemonProjectPresence(
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
 	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
-	await fs.chmod(presencePath, 0o600);
+	// POSIX modes are meaningless on Windows; chmod there only costs another syscall.
+	if (process.platform !== "win32") await fs.chmod(presencePath, 0o600);
 	let closed = false;
 	const close = async (): Promise<void> => {
 		if (closed) return;

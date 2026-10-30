@@ -2,6 +2,95 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.
+- Added `TspEditorProps.typeahead` support so programs that cannot yet read input can preserve typed text, display it at the caret, and submit it when input becomes available.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+### Removed
+
+- Removed `TspPalette` definition and `t` verb from the protocol specification
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added `min`, `max` and dashed reference `marks` to bars/spark `chart` nodes, a `tone` per series column, and the common `hovercard` prop: a node tree Tern floats over the node while the pointer rests on it
+
+## [18.10.2] - 2026-10-12
+
+### Added
+
+- Added `TspPickerMark.icon`: an icon a picker mark draws instead of its initials when the terminal has it (`provider:<id>` names a model provider's logo)
+
+## [18.8.8] - 2026-10-10
+
+### Added
+
+- Added `TspToolProps.command` (the command line Copy command copies), `TspToolProps.preview: "children"` (the collapsed body stays whole while its children clamp) and `TspCodeProps.preview`
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Updated `TspEditorProps.placeholder` and `TspInputProps.placeholder` to accept `TspText`, enabling styled placeholder text.
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added support for submitting explicit prompts to live editable composers without simulating keyboard input.
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added support for agent completion estimates in the wire protocol.
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added terminal scrolling support through the TSP scroll operation, allowing keyboard scrolling of the terminal scroller when supported.
+- Added a terminal focus event for requesting keyboard focus on editors and inputs, or returning focus to the preferences sheet.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added the `TspMeterMark` component for marking a position on a meter track with a custom icon and a total value that defines the full span of the track.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added the Tern Surface Protocol wire contract (`@oh-my-pi/pi-wire`): message framing constants, the component vocabulary, document ops, frames, the handshake and terminal events that let omp render natively in terminals that speak it
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added public API contract and authentication schemas for the Skillshare registry.
+
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added the `omp stream` wire contract (`@oh-my-pi/pi-wire/stream`) for pane screen updates, viewer snapshots and chat, channel metadata, and `live.omp.sh` stream routes.
+- Added authentication support for stencil.so streams, including user identity in welcome messages, channel ownership metadata, and explicit unauthorized and forbidden close codes.
+
+### Changed
+
+- Restricted channel names to the Stencil-compatible alphanumeric-and-underscore format and derived host channels from authentication tokens rather than URL path segments.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

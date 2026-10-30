@@ -137,14 +137,14 @@ mod platform {
 		let Ok(c_str) = CString::new(s) else {
 			return ptr::null();
 		};
-		// SAFETY: `c_str` is a valid null-terminated C string for the duration of the
-		// call.
+		// SAFETY: `c_str` is a valid null-terminated C string for the duration of
+		// the call.
 		unsafe { CFStringCreateWithCString(ptr::null(), c_str.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
 	}
 
 	fn cf_string_to_string(s: CFStringRef) -> String {
-		// SAFETY: `s` is a live `CFStringRef` returned by CoreFoundation and remains
-		// valid for the duration of this conversion helper.
+		// SAFETY: `s` is a live `CFStringRef` returned by CoreFoundation and
+		// remains valid for the duration of this conversion helper.
 		unsafe {
 			let ptr = CFStringGetCStringPtr(s, K_CF_STRING_ENCODING_UTF8);
 			if !ptr.is_null() {
@@ -165,9 +165,9 @@ mod platform {
 
 	/// Read `AppleInterfaceStyle` via CoreFoundation preferences.
 	pub fn detect_appearance() -> MacOSAppearance {
-		// SAFETY: CoreFoundation pointers are null-checked, type-checked where needed,
-		// and every object created or copied here is released exactly once before
-		// return.
+		// SAFETY: CoreFoundation pointers are null-checked, type-checked where
+		// needed, and every object created or copied here is released exactly
+		// once before return.
 		unsafe {
 			let key = create_cf_string("AppleInterfaceStyle");
 			if key.is_null() {
@@ -204,8 +204,9 @@ mod platform {
 	// SAFETY: `CFRunLoopStop` is documented thread-safe, and this wrapper only
 	// exposes the pointer for stopping the run loop from another thread.
 	unsafe impl Send for SendableRunLoop {}
-	// SAFETY: Shared access is limited to passing the pointer to `CFRunLoopStop`,
-	// which does not require exclusive ownership of the run loop object.
+	// SAFETY: Shared access is limited to passing the pointer to
+	// `CFRunLoopStop`, which does not require exclusive ownership of the run
+	// loop object.
 	unsafe impl Sync for SendableRunLoop {}
 
 	/// Shared context for the notification callback and the poll timer.
@@ -244,8 +245,8 @@ mod platform {
 		_object: *const c_void,
 		_user_info: *const c_void,
 	) {
-		// SAFETY: `observer` is the leaked `Box<CallbackCtx>` installed during observer
-		// registration and is only reclaimed after the run loop stops.
+		// SAFETY: `observer` is the leaked `Box<CallbackCtx>` installed during
+		// observer registration and is only reclaimed after the run loop stops.
 		let ctx = unsafe { &*observer.cast::<CallbackCtx>() };
 		ctx.report_if_changed();
 	}
@@ -264,8 +265,9 @@ mod platform {
 	/// during `ObserverInner::start`, and that allocation must outlive the
 	/// timer.
 	unsafe extern "C" fn on_timer(_timer: CFRunLoopTimerRef, info: *mut c_void) {
-		// SAFETY: `info` comes from the timer context created in `ObserverInner::start`
-		// and points at the same leaked `CallbackCtx` as the notification observer.
+		// SAFETY: `info` comes from the timer context created in
+		// `ObserverInner::start` and points at the same leaked `CallbackCtx` as
+		// the notification observer.
 		let ctx = unsafe { &*(info as *const CallbackCtx) };
 		ctx.report_if_changed();
 	}
@@ -288,10 +290,12 @@ mod platform {
 			let (tx, rx) = flume::bounded::<()>(1);
 
 			let handle = thread::spawn(move || {
-				// SAFETY: All CoreFoundation objects created or copied here are either released
-				// in the cleanup path or intentionally leaked until the run loop exits. The
-				// callback context pointer remains valid for both the notification center and
-				// timer until `CFRunLoopRun` returns and cleanup reclaims it exactly once.
+				// SAFETY: All CoreFoundation objects created or copied here are
+				// either released in the cleanup path or intentionally leaked
+				// until the run loop exits. The callback context pointer
+				// remains valid for both the notification center and
+				// timer until `CFRunLoopRun` returns and cleanup reclaims it
+				// exactly once.
 				unsafe {
 					let rl = CFRunLoopGetCurrent();
 					*rl_clone.lock() = Some(SendableRunLoop(rl));
@@ -320,10 +324,11 @@ mod platform {
 					// -- Polling timer (keep-alive + fallback) ---------------
 					//
 					// Two purposes:
-					// 1. Keeps `CFRunLoopRun` alive — without any source/timer attached,
-					//    `CFRunLoopRun` returns immediately.
-					// 2. Polls `CFPreferencesCopyAppValue` every 2 s so we catch theme changes even
-					//    if the Mach-port notification does not fire on this thread.
+					// 1. Keeps `CFRunLoopRun` alive — without any source/timer
+					//    attached, `CFRunLoopRun` returns immediately.
+					// 2. Polls `CFPreferencesCopyAppValue` every 2 s so we catch
+					//    theme changes even if the Mach-port notification does not
+					//    fire on this thread.
 					let timer_ctx = TimerContext {
 						version:          0,
 						info:             ctx_ptr.cast::<c_void>(),
@@ -357,8 +362,8 @@ mod platform {
 			});
 
 			// Wait until the background thread stores its run loop pointer before
-			// returning, so `stop()` can always reach a live run loop when the observer
-			// exists.
+			// returning, so `stop()` can always reach a live run loop when the
+			// observer exists.
 			rx.recv()
 				.expect("observer startup channel stays alive until run loop is stored");
 
@@ -368,8 +373,9 @@ mod platform {
 		pub fn stop(&mut self) {
 			let rl = self.run_loop.lock().take();
 			if let Some(rl) = rl {
-				// SAFETY: `rl.0` came from `CFRunLoopGetCurrent` on the observer thread and is
-				// only used here to stop that run loop, which Apple documents as thread-safe.
+				// SAFETY: `rl.0` came from `CFRunLoopGetCurrent` on the observer
+				// thread and is only used here to stop that run loop, which
+				// Apple documents as thread-safe.
 				unsafe {
 					CFRunLoopStop(rl.0);
 				}

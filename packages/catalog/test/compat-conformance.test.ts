@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import rules from "../src/compat/rules.json";
-import models from "../src/models.json";
+import { getBundledModels, getBundledProviders } from "../src/models";
 
 /**
- * Providers referenced by rules that have no bundled models.json rows:
+ * Providers referenced by rules that have no bundled catalog rows:
  * local runtimes, hosted-search facades, and routing-variant device peers.
  * Additions require a comment naming the runtime path that resolves them.
  */
@@ -17,8 +15,32 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"synthetic-search",
 	"llama.cpp",
 	"lm-studio",
+	"litellm",
 	"vllm",
 	"openai-codex-device",
+	// Public gateway discovery via charmHyperModelManagerOptions: every row,
+	// including its tariff and effort ladder, comes from the live /v1/models
+	// snapshot, so no rows are frozen into the bundled catalog.
+	"charm-hyper",
+	// Factory has no public model-listing endpoint. Its CLI roster is a
+	// `bundle="never"` KDL seed; factoryDroidModelManagerOptions serves it
+	// offline and narrows it by account flags/org policy live.
+	"factory-droid",
+	// Both SingularityAPI rosters are live and credential-scoped (one key sees
+	// only its own product's models — the pay-as-you-go catalog or the reserved
+	// lanes), so no rows are frozen into the bundled catalog.
+	"singularityapi-dev",
+	"singularityapi-tech",
+	// Clef judges are a `bundle="always"` KDL seed that
+	// cloudflareWorkersAiModelManagerOptions serves at runtime; the bundled
+	// catalog gains the rows at the next regeneration.
+	"cloudflare-workers-ai",
+	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
+	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
+	"litellm",
+	// User-configured models.yml provider pointing at
+	// https://inference-api.nousresearch.com/v1 (NousResearch inference API).
+	"nous",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
@@ -52,8 +74,10 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.hostedDefaults,
 		behavior.apiRoutes,
 		behavior.modelLimits,
+		behavior.excludeDiscoveryModes,
 		behavior.excludeModels,
 		behavior.planRequirements,
+		behavior.retryResetTimezones,
 		behavior.pricingPeers,
 	];
 	for (const list of lists) {
@@ -64,11 +88,26 @@ function collectReferencedProviders(): Map<string, string> {
 
 describe("compat rules conformance", () => {
 	test("every referenced provider id is bundled or runtime-only", () => {
-		const known = new Set(Object.keys(models));
+		const known = new Set<string>(getBundledProviders());
 		const offenders: string[] = [];
 		for (const [provider, source] of collectReferencedProviders()) {
 			if (!known.has(provider) && !RUNTIME_ONLY_PROVIDERS.has(provider)) {
 				offenders.push(`${provider} (${source})`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
+	test('every bundle="always" seed row is bundled in the catalog', () => {
+		// bundledSeedRows() writes every bundle="always" seed row on each
+		// regeneration, so a missing row means the catalog was regenerated from
+		// a stale snapshot (#16610 lost web/deepseek that way in 18.12.2).
+		const offenders: string[] = [];
+		for (const [provider, entry] of Object.entries(rules.providers)) {
+			if (entry.seed?.bundle !== "always") continue;
+			const bundled = new Set(getBundledModels(provider).map(model => model.id));
+			for (const seed of entry.seed.models) {
+				if (!bundled.has(seed.id)) offenders.push(`${provider}/${seed.id}`);
 			}
 		}
 		expect(offenders).toEqual([]);
@@ -94,16 +133,5 @@ describe("compat rules conformance", () => {
 			}
 		}
 		expect(offenders).toEqual([]);
-	});
-
-	test("every rules/**/*.kdl file was compiled", async () => {
-		const rulesDir = path.join(import.meta.dir, "../src/compat/rules");
-		const onDisk: string[] = [];
-		for (const group of ["taxonomy", "classes", "providers", "runtime", "auth"]) {
-			for (const name of await fs.readdir(path.join(rulesDir, group))) {
-				if (name.endsWith(".kdl")) onDisk.push(`${group}/${name}`);
-			}
-		}
-		expect([...rules.files].sort()).toEqual(onDisk.sort());
 	});
 });

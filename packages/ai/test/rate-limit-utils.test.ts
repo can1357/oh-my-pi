@@ -8,8 +8,18 @@ import {
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
+	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
+import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
+import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+// MiniMax CN (minimax-code-cn) Token Plan exhaustion (2067): phrased 用量上限,
+// not 使用上限 like Zhipu.
+const MINIMAX_CN_TOKEN_PLAN_429 =
+	'{"type":"error","error":{"type":"rate_limit_error","message":"当前已达到 Token Plan 用量上限。为避免调用中断，请升级 Token Plan 套餐，或购买积分补充用量并开启积分自动消耗。 (2067)"}}';
 
 function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
 	const details: Array<Record<string, string>> = [
@@ -25,6 +35,52 @@ function googleRpc429(reason: string, retryDelay?: string, message = "Resource e
 			retryDelay,
 		});
 	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+function googleRpcQuotaFailure429(
+	violations: Array<{ quotaId?: string; quotaMetric?: string; quotaValue?: string | number; description?: string }>,
+	retryDelay?: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+			violations,
+		},
+	];
+	if (retryDelay) {
+		details.push({
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		});
+	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+
+function googleRpcRetryInfo429(
+	retryDelay: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		},
+	];
 	return `Cloud Code Assist API error (429): ${JSON.stringify({
 		error: {
 			code: 429,
@@ -89,10 +145,6 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Connect error resource_exhausted: Quota exceeded for this account")).toBe(
 			"QUOTA_EXHAUSTED",
 		);
-	});
-
-	it("classifies Too many requests as RATE_LIMIT_EXCEEDED", () => {
-		expect(parseRateLimitReason("Cloud Code Assist API error (429): Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
 	});
 
 	it("classifies per minute errors as RATE_LIMIT_EXCEEDED", () => {
@@ -201,6 +253,31 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, freeQuota)).toBe(true);
 	});
 
+	it("keeps rolling-window TPM/RPM throttles in the transient lane", () => {
+		// A per-minute token throttle reported with quota wording ("tpm
+		// exhausted", type=quota_exceeded_error, no Retry-After) used to fall
+		// through to QUOTA_EXHAUSTED: the session layer then invented a 30-min
+		// wait, blew past retry.maxDelayMs and terminated the turn (#13253).
+		const tpmExhausted =
+			"429 tpm exhausted\ntpm exhausted (type=quota_exceeded_error param=8)\ntpm exhausted (type=quota_exceeded_error param=8) (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(tpmExhausted)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(calculateRateLimitBackoffMs(parseRateLimitReason(tpmExhausted))).toBeLessThanOrEqual(60_000);
+		expect(matchesUsageLimitText(tpmExhausted)).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(tpmExhausted, 429, { code: "quota_exceeded_error" }))).toBe(false);
+		expect(isUsageLimitOutcome(429, tpmExhausted)).toBe(false);
+
+		// Other phrasings of the same rolling window.
+		expect(parseRateLimitReason("429 inference exceeds tpm/rpm limit")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 RPM limit reached for this endpoint")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 (code=RateLimitExceeded.EndpointTPMExceeded)")).toBe("RATE_LIMIT_EXCEEDED");
+
+		// An account-scoped cap that merely quotes a TPM number keeps its quota
+		// verdict — the downgrade must not rescue a credential-rotating error.
+		const planQuota = "429 Your plan quota is exhausted; the plan TPM is 1000 (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(planQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, planQuota)).toBe(true);
+	});
+
 	it("classifies Codex usage limit error as QUOTA_EXHAUSTED", () => {
 		expect(
 			parseRateLimitReason("Codex error event: The usage limit has been reached (code=usage_limit_reached)"),
@@ -289,6 +366,237 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
 		expect(isUsageLimitOutcome(429, body)).toBe(false);
 	});
+
+	it("classifies structured MODEL_CAPACITY_EXHAUSTED as transient even on quota-worded message", () => {
+		const body = googleRpc429("MODEL_CAPACITY_EXHAUSTED", "10s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-minute requests as transient RATE_LIMIT_EXCEEDED", () => {
+		const body = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+			"Quota exceeded for quota metric 'Generate Content API requests'",
+		);
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-day requests as QUOTA_EXHAUSTED even when paired with per-minute violations or generic RATE_LIMIT_EXCEEDED", () => {
+		const minuteBeforeDaily = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+				{
+					quotaId: "GenerateContentRequestsPerDayPerProject",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+		);
+		expect(parseRateLimitReason(minuteBeforeDaily)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, minuteBeforeDaily)).toBe(true);
+
+		const coReportedWithGenericRateLimit = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [
+							{
+								quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+								quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+							},
+						],
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.RetryInfo",
+						retryDelay: "20s",
+					},
+				],
+			},
+		});
+		expect(parseRateLimitReason(coReportedWithGenericRateLimit)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, coReportedWithGenericRateLimit)).toBe(true);
+	});
+
+	it("classifies structured QuotaFailure with quotaValue 0 as QUOTA_EXHAUSTED even on per-minute metrics", () => {
+		const zeroQuota = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+					quotaValue: "0",
+				},
+			],
+			"15s",
+		);
+		expect(parseRateLimitReason(zeroQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, zeroQuota)).toBe(true);
+	});
+
+	it("classifies standalone RetryInfo on generic resource exhaustion according to delay threshold", () => {
+		const shortBody = googleRpcRetryInfo429("25s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(shortBody)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, shortBody)).toBe(false);
+
+		const longBody = googleRpcRetryInfo429("3600s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(longBody)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, longBody)).toBe(true);
+	});
+
+	it("preserves structured Google 429 details through streamGoogle error extraction and classification", async () => {
+		const googleModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.example/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+		const runWith429 = async (rawBody: unknown) => {
+			const fetchImpl: FetchImpl = Object.assign(
+				async () =>
+					new Response(JSON.stringify(rawBody), {
+						status: 429,
+						headers: { "content-type": "application/json" },
+					}),
+				{ preconnect: globalThis.fetch.preconnect },
+			);
+			return streamGoogle(googleModel, context, { apiKey: "test-key", fetch: fetchImpl }).result();
+		};
+
+		const transientCapacity = await runWith429({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "MODEL_CAPACITY_EXHAUSTED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.RetryInfo",
+						retryDelay: "10s",
+					},
+				],
+			},
+		});
+		expect(transientCapacity.stopReason).toBe("error");
+		expect(transientCapacity.errorStatus).toBe(429);
+		expect(is(transientCapacity.errorId ?? 0, Flag.UsageLimit)).toBe(false);
+		expect(isUsageLimitOutcome(transientCapacity.errorStatus, transientCapacity.errorMessage)).toBe(false);
+
+		const zeroEntitlement = await runWith429({
+			error: {
+				code: 429,
+				message: "Quota exceeded for quota metric 'Generate Content API requests'",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [
+							{
+								quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+								quotaMetric: "Generate Content API requests",
+								quotaValue: "0",
+							},
+						],
+					},
+				],
+			},
+		});
+		expect(zeroEntitlement.stopReason).toBe("error");
+		expect(zeroEntitlement.errorStatus).toBe(429);
+		expect(is(zeroEntitlement.errorId ?? 0, Flag.UsageLimit)).toBe(true);
+		expect(isUsageLimitOutcome(zeroEntitlement.errorStatus, zeroEntitlement.errorMessage)).toBe(true);
+	});
+	it("preserves in-band SSE error chunk details on streamGoogle and streamGoogleGeminiCli", async () => {
+		const sseErrorPayload =
+			'data: {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED","domain":"googleapis.com"}]}}\n\n';
+
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+		const sseFetch: FetchImpl = Object.assign(
+			async () =>
+				new Response(sseErrorPayload, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+
+		// 1. Test streamGoogle
+		const googleModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.example/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		const googleStream = streamGoogle(googleModel, context, { apiKey: "test-key", fetch: sseFetch });
+		const googleResult = await googleStream.result();
+		expect(googleResult.stopReason).toBe("error");
+		expect(parseRateLimitReason(googleResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(googleResult.errorStatus, googleResult.errorMessage)).toBe(false);
+
+		// 2. Test streamGoogleGeminiCli
+		const cliModel: Model<"google-gemini-cli"> = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const cliStream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: sseFetch,
+		});
+		const cliResult = await cliStream.result();
+		expect(cliResult.stopReason).toBe("error");
+		expect(cliResult.errorMessage).toBeDefined();
+		expect(parseRateLimitReason(cliResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(cliResult.errorStatus, cliResult.errorMessage)).toBe(false);
+	});
 });
 
 describe("isUsageLimit", () => {
@@ -304,6 +612,18 @@ describe("isUsageLimit", () => {
 		expect(
 			isUsageLimit("401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/demo"),
 		).toBe(true);
+	});
+	it("detects OpenCode Go window limits as credential-rotatable usage limits", () => {
+		// Upstream `GoUsageLimitError` wire shape: HTTP 429
+		// `{"type":"error","error":{"type":"GoUsageLimitError","message":"… Resets in …"},"metadata":{…}}`
+		// plus a `retry-after` header, flattened by `captureOpenAIHttpError` into
+		// "429 <message>". One window fixture pins the rotation branch; the
+		// distinct reset-duration formats are covered in `fetch-retry.test.ts`.
+		const message =
+			"429 5-hour usage limit reached. Resets in 2hr 15min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go";
+		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, message)).toBe(true);
+		expect(isUsageLimit(message)).toBe(true);
 	});
 
 	it("detects Antigravity capacity-exhausted message as a usage-limit error", () => {
@@ -344,6 +664,17 @@ describe("isUsageLimit", () => {
 		).toBe(true);
 	});
 
+	// Google phrases the same ceiling as a cap ("Your project has exceeded its
+	// monthly spending cap."), which `/spend.?limit/` missed, so a transport that
+	// flattens the body to prose left the 429 transient and retryable (#13090).
+	it("detects a monthly spending-cap 429 as a credential-rotatable usage limit", () => {
+		expect(isUsageLimit("Google API error (429): Your project has exceeded its monthly spending cap.")).toBe(true);
+	});
+
+	it("keeps 'spending capacity' throttle wording out of the billing-cap branch", () => {
+		expect(parseRateLimitReason("429 model spending capacity reached, slow down")).toBe("MODEL_CAPACITY_EXHAUSTED");
+	});
+
 	it("detects bare 'quota reached' phrasing", () => {
 		expect(isUsageLimit("quota reached")).toBe(true);
 		expect(isUsageLimit("quota_reached")).toBe(true);
@@ -368,6 +699,7 @@ describe("isUsageLimit", () => {
 		expect(isUsageLimit("额度已用完，请充值")).toBe(true);
 		expect(isUsageLimit("配额已用尽")).toBe(true);
 		expect(isUsageLimit("账户余额不足")).toBe(true);
+		expect(isUsageLimit(new Error(MINIMAX_CN_TOKEN_PLAN_429))).toBe(true);
 	});
 
 	it("does not treat Simplified Chinese throttling as a usage limit", () => {
@@ -385,6 +717,16 @@ describe("isUsageLimit", () => {
 		expect(isUsageLimit(message)).toBe(true);
 		expect(isUsageLimit(Object.assign(new Error(message), { status: 403 }))).toBe(true);
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("detects Claude subscription extra-usage exhaustion as a credential-rotatable usage limit", () => {
+		// Anthropic OAuth (claude.ai) accounts answer HTTP 400 invalid_request_error with
+		// this wording once the plan window and the extra-usage balance are both spent.
+		// Without the match a multi-account pool stays sticky on the exhausted account.
+		const message =
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"You\'re out of extra usage. Add more at claude.ai/settings/usage and keep going."}}';
+		expect(isUsageLimit(message)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 400 }))).toBe(true);
 	});
 
 	it("detects OpenAI quota payload codes as credential-rotatable usage limits", () => {
@@ -412,6 +754,17 @@ describe("isUsageLimit", () => {
 		).toBe(false);
 		expect(isUsageLimit(new ProviderHttpError("Payment Required", 402))).toBe(true);
 		expect(isUsageLimit(new ProviderHttpError("A subscription is required for this endpoint", 402))).toBe(false);
+		expect(
+			isUsageLimit(
+				new ProviderHttpError("Upstream request failed: Insufficient account funds", 402, {
+					code: "server_error",
+				}),
+			),
+		).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError('{"error":{"code":"insufficient_account_funds"}}', 402))).toBe(true);
+		expect(
+			isUsageLimit(new ProviderHttpError("Upstream request failed", 402, { code: "insufficient-account-funds" })),
+		).toBe(true);
 	});
 	it("detects 402 Payment Required and Payment is required as credential-rotatable usage limit", () => {
 		expect(isUsageLimit(Object.assign(new Error("Payment Required"), { status: 402 }))).toBe(true);
@@ -446,6 +799,18 @@ describe("isUsageLimitOutcome", () => {
 			true,
 		);
 		expect(isUsageLimitOutcome(undefined, "free limit reached on model x/y. try again in 5 minutes")).toBe(true);
+	});
+
+	it("rotates on Cursor prepaid-balance exhaustion but not on the changeable pricing gate", () => {
+		const prepaid =
+			"Cursor USAGE_PRICING_REQUIRED: Your prepaid balance is used up: Add funds or enable auto top-up in your billing settings to keep going.";
+		expect(parseRateLimitReason(prepaid)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, prepaid)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(prepaid, 429))).toBe(true);
+		expect(isUsageLimitOutcome(429, "Cursor USAGE_PRICING_REQUIRED: Usage-based pricing required")).toBe(true);
+		expect(matchesUsageLimitText("Cursor USAGE_PRICING_REQUIRED_CHANGEABLE: Switch to a different model")).toBe(
+			false,
+		);
 	});
 
 	it("keeps informative transient 429s in the upstream-backoff lane", () => {
@@ -494,7 +859,7 @@ describe("isUsageLimitOutcome", () => {
 		).toBe(true);
 	});
 
-	it("rotates on Simplified Chinese quota exhaustion (Zhipu 429)", () => {
+	it("rotates on Simplified Chinese quota exhaustion (Zhipu, MiniMax CN 429)", () => {
 		const zhipu =
 			"429 已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。\n已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。 (type=1308)";
 		expect(isUsageLimitOutcome(429, zhipu)).toBe(true);
@@ -504,6 +869,7 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, "额度已用完，请充值")).toBe(true);
 		expect(isUsageLimitOutcome(429, "配额已用尽")).toBe(true);
 		expect(isUsageLimitOutcome(429, "账户余额不足")).toBe(true);
+		expect(isUsageLimitOutcome(429, MINIMAX_CN_TOKEN_PLAN_429)).toBe(true);
 	});
 
 	it("keeps Simplified Chinese throttling in the upstream-backoff lane", () => {
@@ -512,6 +878,8 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, "并发请求达到上限")).toBe(false);
 		expect(isUsageLimitOutcome(429, "每分钟使用次数已达上限")).toBe(false);
 		expect(isUsageLimitOutcome(429, "API 使用频率已达上限")).toBe(false);
+		expect(isUsageLimitOutcome(429, "用量速率已达上限，请稍后重试")).toBe(false);
+		expect(isUsageLimitOutcome(429, "用量并发已达上限")).toBe(false);
 	});
 
 	it("treats Simplified Chinese error bodies the classifier can read as informative", () => {
@@ -627,6 +995,19 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
 	});
 
+	it("classifies Kimi access_terminated_error as QUOTA_EXHAUSTED and rotates on 403", () => {
+		const fullError =
+			'{"error":{"message":"You\'ve reached your monthly usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/membership/subscription?tab=quota","type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(fullError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, fullError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(fullError, 403))).toBe(true);
+
+		const bareError = '{"error":{"type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(bareError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, bareError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(bareError, 403))).toBe(true);
+	});
+
 	// Vertex returns "Online prediction concurrent requests quota exceeded" for a
 	// concurrent-request cap. The generic USAGE_LIMIT_PATTERN matches
 	// `quota.?exceeded`, but this is a concurrency cap (5s backoff, no rotation),
@@ -678,6 +1059,27 @@ describe("isUsageLimitOutcome", () => {
 		// 429 concurrency cap: shed-and-backoff, do not rotate.
 		expect(isUsageLimitOutcome(429, message)).toBe(false);
 		expect(isUsageLimit(Object.assign(new Error(message), { status: 429 }))).toBe(false);
+	});
+
+	it("rotates Anthropic credits-required walls", () => {
+		const body =
+			'429 {"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","model":"claude-fable-5"}}}';
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	// The entitlement wall rotates, but "usage credits" also appears in
+	// unrelated diagnostics. Those must stay in their own lane: rotating on a
+	// 500 from a billing service blocks a credential that never hit a cap.
+	it("leaves non-entitlement usage-credits wording alone", () => {
+		const diagnostic = "500 Failed to fetch usage credits from billing service";
+		expect(parseRateLimitReason(diagnostic)).not.toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(500, diagnostic)).toBe(false);
+		expect(matchesUsageLimitText(diagnostic)).toBe(false);
+
+		const perMinute = "429 Usage credits are limited per minute for this workspace";
+		expect(parseRateLimitReason(perMinute)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
 	});
 });
 

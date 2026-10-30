@@ -24,6 +24,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
+import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
 
 /** Stream function - can return sync or Promise for async config lookup */
@@ -31,8 +32,26 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Staged queue preparation; commit synchronously only while the batch is still owned. */
+export interface QueuedMessagePreparation {
+	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
+	commit(): readonly AgentMessage[] | undefined;
+}
+
+/** Which agent queue a batch came from: steering amends the running task, follow-ups start the next one. */
+export type QueuedMessageQueue = "steering" | "followUp";
+
+/** Prepare an exclusively claimed batch. Undefined delivers unchanged; the signal also aborts when the claim is cancelled. */
+export type PrepareQueuedMessages = (
+	messages: readonly AgentMessage[],
+	signal: AbortSignal,
+	queue: QueuedMessageQueue,
+) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
+
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
+/** Symbol-keyed handoff for one finalized, tool-owned stream speculation session. */
+export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
 
@@ -49,11 +68,20 @@ export type CommittableAsideMessage = AgentMessage & {
  */
 export type AsideMessage = CommittableAsideMessage | (() => CommittableAsideMessage | null);
 
+/** Where the loop polls asides: after a tool batch (`"work"`) or after a turn without tool calls (`"stop"`). */
+export type AsideBoundary = "work" | "stop";
+
 export interface AgentTurnEndContext {
 	/** Assistant/user message that just completed this turn boundary. */
 	message: AgentMessage;
 	/** Tool results produced by this turn, already paired with `message` in the live context. */
 	toolResults: ToolResultMessage[];
+	/**
+	 * Passive model-visible messages appended after the tool results at this
+	 * boundary. The agent loop always sends an array (possibly empty);
+	 * absent is equivalent to empty for hosts that construct the context.
+	 */
+	additionalMessages?: AgentMessage[];
 	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
 	willContinue: boolean;
 }
@@ -147,10 +175,15 @@ export interface SteeringQueueState {
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
 
+	/** Reports whether this loop has reached a safe process-pause boundary. */
+	onPauseChange?: (paused: boolean) => void;
+
 	/**
 	 * When to interrupt tool execution for steering messages.
-	 * - "immediate" = check after each tool call (default)
-	 * - "wait" = defer steering until the current turn completes
+	 * - "immediate" = cut interruptible waits short and raise the cooperative
+	 *   `steeringSignal` for other running tools (default)
+	 * - "wait" = let non-interruptible tools finish undisturbed; interruptible
+	 *   waits are still cut short, since they have no work to complete
 	 */
 	interruptMode?: "immediate" | "wait";
 
@@ -224,6 +257,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 
+	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
+	sentToolDefinitions?: SentToolDefinitions;
+
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.
 	 *
@@ -245,8 +281,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
-	 * Polled while a tool batch runs (unless interruptMode is "wait") to decide
-	 * whether to abort in-flight and skip not-yet-started *interruptible* waits;
+	 * Polled while a tool batch runs (in "wait" mode, only when the batch holds an
+	 * interruptible tool) to decide whether to abort in-flight and skip
+	 * not-yet-started *interruptible* waits, unless they handle queued interrupts;
 	 * every other already-emitted call still executes and the message injects
 	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
@@ -272,13 +309,52 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
 
 	/**
+	 * Called when live steering dequeues messages via {@link getSteeringMessages}
+	 * for the response being streamed. The loop records them in the transcript
+	 * after that response (or its tool batch); an abort before then leaves them
+	 * unrecorded for the host to requeue.
+	 */
+	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
+
+	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only
-	 * runs for interruptible tools, and is ignored when interruptMode is "wait".
+	 * runs for interruptible tools, and cuts them short even when interruptMode
+	 * is "wait".
 	 * The host owns message injection at the next boundary.
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a background completion (finished job, exited supervised
+	 * process) is queued for aside injection at the next boundary.
+	 *
+	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
+	 * *interruptible* waits short, in either interruptMode. Without
+	 * it a completion notice sits behind an hour-long `wait` that the agent
+	 * would have abandoned had it seen the notice. Unlike a peer IRC it never
+	 * raises {@link ToolCallContext.steeringSignal}: a queued completion must
+	 * not push ordinary foreground work (auto-background bash/eval) into the
+	 * background.
+	 */
+	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a passive aside (an extension or user message queued with
+	 * `deliverAs: "aside"`) is waiting for injection at the next boundary.
+	 *
+	 * Same rules as {@link hasBackgroundCompletions}: non-consuming, ends only
+	 * *interruptible* waits, never raises {@link ToolCallContext.steeringSignal}.
+	 * The host still injects the aside once at the boundary; ordinary running
+	 * tools finish first.
+	 */
+	hasQueuedAsides?: () => boolean | Promise<boolean>;
+	/**
+	 * Receives a tool's `onUpdate` frames that arrive after this run's event
+	 * stream ended: a call that returned while its background job keeps
+	 * reporting (`details.async`), whose run yielded before the job settled.
+	 * Without it those frames are dropped.
+	 */
+	onDetachedToolUpdate?: (event: Extract<AgentEvent, { type: "tool_execution_update" }>) => void;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -292,13 +368,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
 	 * Polled after each tool batch (before the next LLM call) AND at the yield
-	 * check. Unlike steering, these NEVER abort in-flight tools — they are passive
+	 * check. Unlike steering, these never abort foreground tools (only an
+	 * interruptible `wait` ends early, via the peek hooks) — they are passive
 	 * notifications (e.g. background-job completions, late LSP diagnostics) that
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal
 	 * message events and keep the loop running so the model can react.
+	 *
+	 * `boundary` is `"work"` after a tool batch and `"stop"` when the model ended
+	 * its turn without tool calls; a provider may hold back messages that should
+	 * not extend a finished turn.
 	 */
-	getAsideMessages?: () => Promise<AsideMessage[]>;
+	getAsideMessages?: (boundary: AsideBoundary) => Promise<AsideMessage[]>;
 	/**
 	 * Hook fired right before the loop would exit.
 	 *
@@ -309,7 +390,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/**
 	 * Provides tool execution context, resolved per tool call.
-	 * Use for late-bound UI or session state access.
+	 * Use for late-bound UI or session state access. The loop passes the tool
+	 * call's {@link ToolCallContext}; hosts that support passive tool context
+	 * surface its `addAdditionalContext` sink as
+	 * {@link AgentToolContext.addAdditionalContext}. The returned object is
+	 * handed to the tool as-is.
 	 */
 	getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 
@@ -339,12 +424,32 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	/**
+	 * Opt-in speculative execution for finalized, discard-safe tool calls.
+	 *
+	 * Candidates remain invisible until ordinary dispatch commits their result.
+	 */
+	speculativeToolExecution?: SpeculativeToolExecutionConfig;
+	/**
 	 * Resolve a tool call whose name matched no advertised tool (including
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
 	 * through side transports (e.g. `xd://` device mounts) instead of failing
 	 * with "Tool not found". Returning `undefined` keeps the failure.
+	 *
+	 * `advertised` is the very snapshot exact-name dispatch just searched — the
+	 * set offered to THIS request. A host must resolve against it rather than
+	 * its own live tool state: an MCP `tools/list_changed` mid-stream reassigns
+	 * the agent's tools, so live state can hold a roster the model never saw,
+	 * and a name-recovering host would dispatch a tool this request never
+	 * advertised while exact dispatch still answered from the snapshot.
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
+	/**
+	 * Names reachable through {@link resolveFallbackTool} but absent from the
+	 * advertised set (e.g. `xd://` device mounts). Consulted only to name a
+	 * plausible target when a call misses, so a mis-transcribed device call is
+	 * recoverable; never a dispatch source.
+	 */
+	suggestFallbackToolNames?: () => Iterable<string>;
 
 	/**
 	 * Enable intent tracing for tool calls.
@@ -367,6 +472,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * model's text output back into canonical `toolCall` blocks.
 	 */
 	dialect?: Dialect;
+	/**
+	 * Per-call owned-dialect resolver, read once per LLM call with the model
+	 * being requested. Authoritative when set: its return value (including
+	 * `undefined` = native tool calling) replaces the static {@link dialect}.
+	 */
+	getDialect?: (model: Model) => Dialect | undefined;
 	/**
 	 * When owned (in-band) tool calling is active and the model starts
 	 * fabricating a tool result inside its own turn, control how the loop reacts:
@@ -517,6 +628,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformAssistantMessage?: (message: AssistantMessage, signal?: AbortSignal) => Promise<void> | void;
 
 	/**
+	 * Declares that {@link transformAssistantMessage} never rewrites or removes a
+	 * tool call the model streamed (it may edit text or append new calls). Stream
+	 * speculation sessions and direct speculative candidates plan from streamed
+	 * calls, so they stay disabled under a transform unless this is set.
+	 */
+	transformAssistantMessagePreservesToolCalls?: boolean;
+
+	/**
 	 * Called after a tool finishes executing, before `tool_execution_end` and the
 	 * tool-result message are emitted.
 	 *
@@ -560,10 +679,220 @@ export interface ToolCallContext {
 	 * always safe (the message injects at the next batch boundary).
 	 */
 	steeringSignal?: AbortSignal;
+	/**
+	 * Loop-owned sink for passive context reported while this call executes.
+	 * Values join the call's context at the batch boundary and are injected
+	 * after the batch's tool results, in assistant tool-call order, before the
+	 * next provider request. Blank values are ignored.
+	 */
+	addAdditionalContext?: (context: string) => void;
 }
 
 /** A single tool-call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+
+export interface SpeculativeResourceAccess {
+	scheme: "file";
+	path: string;
+	access: "read";
+}
+
+/** Declares an operation whose early execution can be discarded without rollback. */
+export type ToolSpeculationEffect =
+	| { kind: "pure" }
+	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] };
+
+export type ToolSpeculationAssessment =
+	| { eligible: false; reason: string }
+	| { eligible: true; effect: ToolSpeculationEffect };
+
+/** Immutable finalized call data provided to a tool-owned policy. */
+export interface ToolSpeculationAssessmentContext {
+	toolCall: AgentToolCall;
+	args: Readonly<Record<string, unknown>>;
+}
+
+export interface ToolSpeculationExecutionContext extends ToolSpeculationAssessmentContext {
+	effect: ToolSpeculationEffect;
+}
+
+export interface ToolSpeculationCommitContext extends ToolSpeculationExecutionContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface ToolSpeculationDiscardContext extends ToolSpeculationExecutionContext {
+	reason: string;
+}
+
+export interface SpeculativePhysicalOutcome {
+	kind: "result";
+	result: AgentToolResult<unknown>;
+	isError: boolean;
+	/** Opaque evidence binding the result to the local bytes actually consumed. */
+	evidence?: unknown;
+}
+
+export interface SpeculativeToolReference {
+	name: string;
+	approval?: ToolApproval;
+	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
+}
+
+export interface SpeculativeOperationContext extends ToolSpeculationExecutionContext {
+	tool: SpeculativeToolReference;
+	candidateId: string;
+	source: "direct" | "eval_shadow";
+	dependencies: readonly string[];
+}
+
+export interface SpeculativeCommitContext extends SpeculativeOperationContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface SpeculativeDiscardContext extends SpeculativeOperationContext {
+	reason: string;
+}
+
+export type SpeculativeAuthorization =
+	| { allowed: false; reason: string }
+	| { allowed: true; deferBeforeToolCall?: boolean };
+
+export type SpeculativeCommitDecision =
+	| { kind: "committed"; result: AgentToolResult<unknown> }
+	| { kind: "fallback"; reason: string }
+	| { kind: "failed"; error: unknown };
+
+export interface SpeculativeExecutionHost {
+	authorize(context: SpeculativeOperationContext): SpeculativeAuthorization | Promise<SpeculativeAuthorization>;
+	/**
+	 * Capture content evidence after admission gates pass but before the
+	 * candidate executes. The coordinator invokes this immediately before
+	 * starting speculative execution — which for hook-deferred candidates is
+	 * after `beforeToolCall` runs — so content inspection never precedes a
+	 * hook that may block the call. Return false (or throw) to veto the
+	 * candidate without executing it. Hosts without this hook keep the legacy
+	 * behavior of capturing during `authorize`.
+	 */
+	captureEvidence?(context: SpeculativeOperationContext): boolean | Promise<boolean>;
+	validate?(context: SpeculativeCommitContext): boolean | Promise<boolean>;
+	commit?(
+		context: SpeculativeCommitContext,
+		commitDefault: () => Promise<AgentToolResult<unknown>>,
+	): Promise<SpeculativeCommitDecision>;
+	discard?(context: SpeculativeDiscardContext): void | Promise<void>;
+	/**
+	 * Authorize a stream session to start effectful work (e.g. subagents) from
+	 * partially streamed arguments. The session owns that work and must abort it
+	 * when the finalized call is invalid, blocked, or changed. Hosts without this
+	 * hook deny every launch.
+	 */
+	authorizeLaunch?(context: SpeculativeLaunchContext): SpeculativeAuthorization | Promise<SpeculativeAuthorization>;
+	close?(reason: string): void | Promise<void>;
+}
+
+/** Effectful work a tool-owned stream session asks to start before its outer call dispatches. */
+export interface SpeculativeLaunchContext {
+	tool: SpeculativeToolReference;
+	toolCall: AgentToolCall;
+	/** Arguments the launch was planned from: the streamed prefix of the outer call. */
+	args: Readonly<Record<string, unknown>>;
+}
+
+export interface ToolSpeculationStreamContext {
+	readonly coordinator: SpeculativeOperationSink;
+	readonly parentToolCallId: string;
+}
+
+/** One dependency-aware child operation projected by a streamed outer tool. */
+export interface SpeculativeChildDefinition {
+	candidateId: string;
+	parentToolCallId: string;
+	dependencies: readonly string[];
+	toolCall: AgentToolCall;
+	tool: AgentTool;
+	source: "eval_shadow";
+	virtualDurationMs?: number;
+}
+
+/** Opaque ownership handle returned after agent-core validates and authorizes a child. */
+export interface SpeculativeChildHandle {
+	readonly candidateId: string;
+	readonly fingerprint: string;
+	readonly effect: ToolSpeculationEffect;
+	readonly outcome: Promise<SpeculativePhysicalOutcome>;
+	commit(actualArgs: Readonly<Record<string, unknown>>): Promise<AgentToolResult<unknown> | undefined>;
+	discard(reason: string): Promise<void>;
+}
+
+export interface ToolSpeculationStreamSession {
+	/** True when the tool owns claim routing and does not need an AgentToolContext attachment. */
+	readonly contextIndependent?: boolean;
+	update(toolCall: AgentToolCall, partialJson?: string): void | Promise<void>;
+	finalize(context: ToolSpeculationAssessmentContext): void | Promise<void>;
+	commit(): void | Promise<void>;
+	discard(reason: string): void | Promise<void>;
+	/**
+	 * Whether the session's streamed plan still authorizes these final
+	 * arguments. The coordinator discards the session when the finalized call
+	 * kept its ID but a hook or argument transform replaced its arguments:
+	 * deferred work planned from the original code must never release.
+	 * Sessions without this predicate are always retained.
+	 */
+	matchesFinalArgs?(args: Readonly<Record<string, unknown>>): boolean;
+}
+
+export interface SpeculativeOperationSink {
+	readonly maxInFlight: number;
+	admit(definition: SpeculativeChildDefinition): Promise<SpeculativeChildHandle | undefined>;
+	/** Host-gated permission for effectful stream work; see {@link SpeculativeExecutionHost.authorizeLaunch}. */
+	authorizeLaunch?(context: SpeculativeLaunchContext): Promise<SpeculativeAuthorization>;
+	discardChildren?(parentToolCallId: string, reason: string): void | Promise<void>;
+	close(reason: string): void | Promise<void>;
+}
+
+export interface ToolSpeculationPolicy {
+	finalized?: {
+		assess(context: ToolSpeculationAssessmentContext): ToolSpeculationAssessment | Promise<ToolSpeculationAssessment>;
+		execute(context: ToolSpeculationExecutionContext, signal: AbortSignal): Promise<SpeculativePhysicalOutcome>;
+		commit?(
+			context: ToolSpeculationCommitContext,
+			outcome: SpeculativePhysicalOutcome,
+		): Promise<AgentToolResult<unknown>>;
+		discard?(context: ToolSpeculationDiscardContext): void | Promise<void>;
+	};
+	stream?: {
+		open(
+			context: ToolSpeculationStreamContext,
+		): ToolSpeculationStreamSession | Promise<ToolSpeculationStreamSession | undefined>;
+	};
+}
+
+/** Diagnostic information for one speculative operation. */
+export interface SpeculativeToolTelemetry {
+	source: "direct" | "eval_shadow";
+	candidateId: string;
+	parentToolCallId?: string;
+	toolName: string;
+	effectKind?: ToolSpeculationEffect["kind"];
+	candidateStartedAt?: number;
+	candidateFinishedAt?: number;
+	dispatchReachedAt?: number;
+	dependencyCount: number;
+	queueMs?: number;
+	executionDurationMs?: number;
+	overlapMs?: number;
+	outcome: "committed" | "discarded" | "ineligible" | "fingerprint_mismatch" | "aborted" | "commit_conflict";
+	reason?: string;
+	resourceCount: number;
+}
+
+/** Opt-in configuration for discard-safe speculative tool execution. */
+export interface SpeculativeToolExecutionConfig {
+	enabled: boolean;
+	maxInFlight?: number;
+	host?: SpeculativeExecutionHost;
+	onTelemetry?: (event: SpeculativeToolTelemetry) => void;
+}
 
 /**
  * Result returned from `beforeToolCall`.
@@ -576,11 +905,20 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
  * written back to the tool-call block on the assistant message, and seen by
  * history, scheduling, execution events, and `tool.execute` alike. It is
  * ignored when `block` is true.
+ *
+ * Set `additionalContext` to attach passive model-visible context to this call.
+ * Non-empty values from a tool batch are injected in assistant tool-call order,
+ * a value identical to an earlier one in the batch only once,
+ * after every result settles and before the next provider request. It is
+ * dropped when the call is blocked or skipped, or when its final result is an
+ * error (including an approval denial raised by the tool's own gate). Within a
+ * call it follows any context the tool reported during execution.
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
 	args?: Record<string, unknown>;
+	additionalContext?: string;
 }
 
 /**
@@ -600,6 +938,13 @@ export interface AfterToolCallResult {
 	isError?: boolean;
 	/** If provided, replaces the contextually-useless flag carried with the tool result. */
 	useless?: boolean;
+	/**
+	 * Trusted post-tool instructions for the next provider request. Delivered
+	 * outside the tool result, after all calls in the batch settle. Unlike
+	 * `BeforeToolCallResult.additionalContext`, this is retained for error
+	 * results because the callback receives the finalized outcome.
+	 */
+	additionalContext?: string;
 }
 
 /** Context passed to `beforeToolCall`. */
@@ -609,7 +954,7 @@ export interface BeforeToolCallContext {
 	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
 	/** The resolved tool the call dispatches to. */
-	tool: AgentTool<any>;
+	tool: AgentTool;
 	/**
 	 * Validated tool arguments. The same reference is forwarded to `tool.execute`
 	 * (after any `transformToolCallArguments` pass), so in-place mutations stick;
@@ -748,7 +1093,18 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/**
+	 * Attach trusted, agent-authored instructions to the next provider request.
+	 * The host emits them after tool results with developer/system priority where
+	 * the selected transport supports it. Do not use this channel for raw tool
+	 * output, retrieved documents, web content, or other untrusted data; return
+	 * those through the ordinary tool result instead. Hosts populate it from
+	 * {@link ToolCallContext.addAdditionalContext} (or their own collector for
+	 * calls dispatched outside the loop); absent when the host has no sink.
+	 */
+	addAdditionalContext?(context: string): void;
+	/** Present only while the matching outer tool owns its finalized stream session. */
+	[SPECULATIVE_STREAM_SESSION]?: ToolSpeculationStreamSession;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -791,8 +1147,9 @@ export interface AgentTool<
 	 * Called at `toolcall_start`, before any argument delta. Return `undefined` to opt out.
 	 */
 	openArgStream?: (init: AgentToolArgStreamInit) => AgentToolArgStream | undefined;
-	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
+	/** If true, the tool can read `skill://<name>` instruction content; prompt builders gate skill guidance on it. */
+	readsSkillUris?: boolean;
 	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */
 	deferrable?: boolean;
 	/** How an enabled tool is presented. See {@link ToolLoadMode}. Omitted is treated as `"essential"` for built-ins; custom-tool adapters normalize omission to `"discoverable"`. */
@@ -800,13 +1157,30 @@ export interface AgentTool<
 	/** Short one-line summary used for tool discovery indexes. */
 	summary?: string;
 	/**
+	 * Instructions a same-name extension replacement inherits in its description, because results it
+	 * obtains by delegating to this native tool through `ctx.invokeTool` follow this tool's contract.
+	 */
+	readonly delegationGuidance?: string;
+	/**
+	 * On-demand documentation topics (`topic → markdown`), readable as
+	 * `xd://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
+	 * description and advertise only a one-line pointer per topic.
+	 */
+	docTopics?(): Readonly<Record<string, string>>;
+	/**
 	 * Concurrency mode for tool scheduling when multiple calls are in one turn.
 	 * - "shared": can run alongside other shared tools (default)
 	 * - "exclusive": runs alone; other tools wait until it finishes
 	 * - function: resolved per call from the (raw, pre-validation) arguments
 	 */
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
-	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
+
+	/**
+	 * Declares the bounded, validated effect of a finalized call that may execute
+	 * before ordinary dispatch commits its result.
+	 */
+	speculation?: ToolSpeculationPolicy;
+	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM, and unknown root keys a closed schema would drop stay on the args. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
@@ -817,9 +1191,16 @@ export interface AgentTool<
 	 * cleanly (e.g. `job` poll), so the abort surfaces the tool's current
 	 * snapshot rather than corrupting a side effect. Every other call runs to
 	 * completion even when steering is queued; the message lands at the next
-	 * batch boundary. Honored only when `interruptMode` is "immediate".
+	 * batch boundary. Honored in both `interruptMode`s.
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
+	/**
+	 * An interruptible tool can execute with an already-aborted
+	 * `TOOL_INTERRUPT_ABORT_REASON` signal to drain caller-owned wake events.
+	 * It must not block when that signal is aborted. External/user cancellation
+	 * still prevents execution. Omitted tools keep the usual pre-start skip.
+	 */
+	handlesToolInterrupt?: boolean;
 	/**
 	 * Controls how the INTENT_FIELD (`i`) is handled for this tool.
 	 * - `"require"` (default): `i` is injected and required in the parameter schema.
@@ -865,6 +1246,19 @@ export interface AgentTool<
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 
+	/**
+	 * Remembered-approval keys for `tools.approvalMode: always-ask-cached`: the files (or URL
+	 * targets) this call touches. When every key is already granted the call skips its prompt;
+	 * approving the call can record them. Omit it (or return `undefined`) and the call prompts by tier.
+	 */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
+
+	/**
+	 * Paths a call reads beyond its working directory, matched against restricted folders when it
+	 * reports no `approvalCacheTargets`. Unlike cache targets they never key a remembered grant.
+	 */
+	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
+
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 
@@ -892,7 +1286,14 @@ export interface AgentContext {
  */
 export type AgentEvent =
 	// Agent lifecycle
-	| { type: "agent_start" }
+	| {
+			type: "agent_start";
+			/**
+			 * Calls of the unpaired assistant tail a continued run executes before its
+			 * first model request. They run without a new assistant `message_end`.
+			 */
+			resumedToolCallIds?: string[];
+	  }
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];

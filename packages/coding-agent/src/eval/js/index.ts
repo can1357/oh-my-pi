@@ -1,5 +1,6 @@
 import type { ToolSession } from "../../tools";
 import {
+	type BackendAvailability,
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
@@ -31,8 +32,8 @@ export default {
 	label: "JavaScript",
 	highlightLang: "javascript",
 
-	async isAvailable(_session: ToolSession): Promise<boolean> {
-		return true;
+	async checkAvailability(_session: ToolSession): Promise<BackendAvailability> {
+		return { ok: true };
 	},
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
@@ -44,6 +45,9 @@ export default {
 			sessionId: identity.sessionKey,
 			kernelOwnerId: identity.ownerId,
 			sessionFile: opts.sessionFile,
+			filename: opts.filename,
+			packages: opts.packages,
+			environment: opts.environment,
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,

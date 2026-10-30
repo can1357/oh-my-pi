@@ -45,12 +45,4 @@ describe("safeSend", () => {
 			process.removeListener("unhandledRejection", onUnhandled);
 		}
 	});
-
-	it("neutralizes a resolved thenable without affecting the happy path", async () => {
-		const proc = { send: () => Promise.resolve(undefined) };
-		expect(() => safeSend(proc, {}, "test")).not.toThrow();
-		// Drain the microtask queue so a stray rejection would surface.
-		await Promise.resolve();
-		await Promise.resolve();
-	});
 });

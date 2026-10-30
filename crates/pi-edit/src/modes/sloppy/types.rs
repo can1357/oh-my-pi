@@ -6,7 +6,7 @@
 //! was computed against (the TypeScript source used UTF-16 indices; both are
 //! internal and never surface to the model).
 
-/// One `<SM:EDIT path="…">` target of a sloppy payload: a file plus its
+/// One `*** Edit File: path` target of a sloppy payload: a file plus its
 /// compiled op stream (`«`/`»` lines).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SloppySection {
@@ -26,7 +26,7 @@ pub struct InlineSloppyRegion {
 	pub payload: String,
 }
 
-/// Internal op-stream alphabet; the taught surface is the XML tag format.
+/// Internal op-stream alphabet; the taught surface is the line-header format.
 pub mod markers {
 	pub const OPEN: &str = "«";
 	pub const PUT: &str = "»";
@@ -42,14 +42,45 @@ pub mod markers {
 pub const MAX_CANDIDATES: usize = 200;
 /// Upper bound on candidate combinations explored for `all` ops.
 pub const MAX_COMBINATIONS: usize = 20_000;
-/// Appended to every apply failure so the model re-sends the whole payload.
+/// Leads apply failures so copy-ready payloads can extend to EOF.
 pub const ATOMICITY_NOTICE: &str =
 	"No operations were applied — ops apply atomically; re-send the full corrected payload.";
 
+/// Replacement or insertion applied by the sloppy engine to a matched source
+/// span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRewrite {
-	Explicit { text: String },
-	Inline { replacements: Vec<String> },
+	Explicit {
+		text: String,
+	},
+	/// Literal, LF-terminated lines inserted before the first or after the last
+	/// matched source line; the match itself is kept.
+	Insert {
+		text: String,
+		at:   Placement,
+	},
+	Inline {
+		replacements: Vec<String>,
+	},
+}
+
+/// Side of the matched lines an [`OperationRewrite::Insert`] lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+	/// `*** Insert Before`: ahead of the first matched line.
+	Before,
+	/// `*** Insert After`: behind the last matched line.
+	After,
+}
+
+impl Placement {
+	/// Taught header naming this placement.
+	pub const fn header(self) -> &'static str {
+		match self {
+			Self::Before => "*** Insert Before",
+			Self::After => "*** Insert After",
+		}
+	}
 }
 
 /// One compiled `«` … `»` … operation.
@@ -97,9 +128,21 @@ pub struct SelectionPair {
 	pub gap_only:        bool,
 }
 
+/// Open-ended `…` edges of a `*** Find` body.
+///
+/// An edge gap spans no text inside the match: it is dropped from the token
+/// stream (taking the newline that joined it to its neighbour with it), and a
+/// `…` on the same edge of `*** Replace` re-emits it as nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeGaps {
+	pub leading:  bool,
+	pub trailing: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedPattern {
 	pub tokens:                   Vec<PatternToken>,
+	pub edge_gaps:                EdgeGaps,
 	pub selection_start:          usize,
 	pub selection_end:            usize,
 	pub insertion:                bool,
@@ -137,6 +180,9 @@ pub struct Candidate {
 	pub captures:        Vec<String>,
 	pub selection_spans: Vec<(usize, usize)>,
 	pub tuple:           Vec<usize>,
+	/// Located through the literal fallback: the pattern's `…` matched file
+	/// text verbatim, so `*** Replace` ellipses are literal too.
+	pub literal_gaps:    bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

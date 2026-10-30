@@ -1,0 +1,34 @@
+---
+source: brush-parser/src/parser/tests/assignments.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "arr[i+1]=value",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                prefix: Some(CommandPrefix([
+                  AssignmentWord(Assignment(
+                    name: ArrayElementName("arr", "i+1"),
+                    value: Scalar(Word(
+                      value: "value",
+                      loc: "[location]",
+                    )),
+                    loc: "[location]",
+                  ), Word(
+                    value: "arr[i+1]=value",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

@@ -8,19 +8,11 @@
  * anything timestamp-shaped is a seek position.
  */
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { $which, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
-
-/** Container extensions treated as video. Mirrors the video subset of the local-protocol binary list. */
-const VIDEO_EXTENSION_LOOKUP: Record<string, true> = {
-	".mp4": true,
-	".mov": true,
-	".mkv": true,
-	".webm": true,
-	".m4v": true,
-	".avi": true,
-	".wmv": true,
-};
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
+import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { $which } from "@oh-my-pi/pi-utils/which";
 
 const VIDEO_MIME_BY_EXT: Record<string, string> = {
 	".mp4": "video/mp4",
@@ -31,11 +23,6 @@ const VIDEO_MIME_BY_EXT: Record<string, string> = {
 	".avi": "video/x-msvideo",
 	".wmv": "video/x-ms-wmv",
 };
-
-/** True when the path names a video container we handle through ffmpeg. */
-export function isVideoPath(filePath: string): boolean {
-	return VIDEO_EXTENSION_LOOKUP[path.extname(filePath).toLowerCase()] === true;
-}
 
 /** Container MIME for a video path, or undefined for non-video. */
 export function videoMimeForPath(filePath: string): string | undefined {
@@ -120,62 +107,52 @@ export interface VideoMetadata {
 /** Raised when ffmpeg/ffprobe is missing or a video operation fails. Message is user-facing. */
 export class VideoError extends Error {}
 
-/**
- * Original local source path stored on a generated contact-sheet image. Symbol
- * metadata stays out of serialized/model-bound image data while traveling with
- * the draft object until AgentSession creates its hidden companion message.
- */
-const kVideoPreviewSource = Symbol("video.previewSource");
-
-/** A contact-sheet image tagged with the original local video path. */
-export type VideoPreviewImage = ImageContent & {
-	readonly [kVideoPreviewSource]: string;
-};
-
-/** Create a model-ready contact-sheet image tagged with its original video path. */
-export function createVideoPreviewImage(preview: ImageContent, sourcePath: string): VideoPreviewImage {
-	return {
-		type: "image",
-		data: preview.data,
-		mimeType: preview.mimeType,
-		[kVideoPreviewSource]: sourcePath,
-	};
+interface FfmpegRelease {
+	readonly major: number;
+	readonly minor: number;
 }
 
-/** Return the original video path associated with a generated contact-sheet image. */
-export function videoPreviewSource(preview: ImageContent): string | undefined {
-	if (!(kVideoPreviewSource in preview)) return undefined;
-	const sourcePath = preview[kVideoPreviewSource];
-	return typeof sourcePath === "string" ? sourcePath : undefined;
+let ffmpegReleaseProbe: { binary: string; release: Promise<FfmpegRelease | undefined> } | undefined;
+
+/** Major and minor release from `ffmpeg -version`, probed once per binary; undefined for unnumbered (git) builds. */
+function ffmpegRelease(): Promise<FfmpegRelease | undefined> {
+	const binary = requireMediaBinary("ffmpeg");
+	if (ffmpegReleaseProbe?.binary !== binary) {
+		ffmpegReleaseProbe = { binary, release: probeFfmpegRelease(binary) };
+	}
+	return ffmpegReleaseProbe.release;
 }
 
-let cachedFpsModeFlag: string[] | null = null;
+async function probeFfmpegRelease(binary: string): Promise<FfmpegRelease | undefined> {
+	try {
+		const child = Bun.spawn([binary, "-version"], { stdout: "pipe", stderr: "pipe" });
+		const [stdout] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
+		const match = /^ffmpeg version n?(\d+)\.(\d+)/.exec(stdout);
+		return match ? { major: Number(match[1]), minor: Number(match[2]) } : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * Frame-passthrough flag across the ffmpeg 5.1 rename (`-vsync 0` became
- * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Probed
- * once from `ffmpeg -version`; unknown output keeps the modern spelling.
+ * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Unknown
+ * releases keep the modern spelling.
  */
 async function framePassthroughFlag(): Promise<string[]> {
-	if (cachedFpsModeFlag) return cachedFpsModeFlag;
 	try {
-		const ffmpeg = requireMediaBinary("ffmpeg");
-		const child = Bun.spawn([ffmpeg, "-version"], { stdout: "pipe", stderr: "pipe" });
-		const [stdout, ,] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
-		const major = Number.parseInt(stdout.split("\n")[0]?.split("version")[1]?.trim().split(".")[0] ?? "", 10);
-		cachedFpsModeFlag = Number.isFinite(major) && major < 5 ? ["-vsync", "0"] : ["-fps_mode", "passthrough"];
-	} catch {
-		cachedFpsModeFlag = ["-fps_mode", "passthrough"];
-	}
-	return cachedFpsModeFlag;
+		const release = await ffmpegRelease();
+		if (release && release.major < 5) return ["-vsync", "0"];
+	} catch {}
+	return ["-fps_mode", "passthrough"];
 }
 
-/** Resolve a system binary or throw a user-facing install hint. */
-function requireMediaBinary(name: "ffmpeg" | "ffprobe"): string {
+/** Resolve a system media binary or throw a user-facing install hint. */
+export function requireMediaBinary(name: "ffmpeg" | "ffprobe"): string {
 	const found = $which(name);
 	if (!found) {
 		throw new VideoError(
-			`Reading video requires ${name}, which was not found on PATH. Install it (e.g. \`brew install ffmpeg\`) and retry.`,
+			`Video operations require ${name}, which was not found on PATH. Install it (e.g. \`brew install ffmpeg\`) and retry.`,
 		);
 	}
 	return found;
@@ -329,7 +306,8 @@ export function formatVideoDetails(
 	return lines.join("\n");
 }
 
-function formatByteSize(bytes: number): string {
+/** Binary-unit size (`512 B`, `1.5 KiB`, `3.2 MiB`) for resource details. */
+export function formatByteSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	const kib = bytes / 1024;
 	if (kib < 1024) return `${kib.toFixed(1)} KiB`;
@@ -344,7 +322,8 @@ export interface VideoPng {
 	readonly mimeType: "image/png";
 }
 
-async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
+/** Run ffmpeg with bounded, abort-aware process cleanup and a user-facing failure. */
+export async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
 	const ffmpeg = requireMediaBinary("ffmpeg");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
 	const child = Bun.spawn([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...args], {
@@ -380,7 +359,7 @@ export async function extractVideoFramePng(
 	selector: VideoSelector,
 	signal?: AbortSignal,
 ): Promise<VideoPng> {
-	const tmp = await TempDir.create("omp-video-frame-");
+	const tmp = await TempDir.create("@omp-video-frame-");
 	try {
 		const out = tmp.join("frame.png");
 		if (selector.kind === "time") {
@@ -413,6 +392,47 @@ export async function extractVideoFramePng(
 	}
 }
 
+/** ffmpeg `-q:v` JPEG qualities for HEIF stills: near-lossless, then a pass under half that size. */
+const STILL_IMAGE_JPEG_QUALITIES = [3, 12] as const;
+
+/**
+ * Decode a HEIC, HEIF or AVIF still, which the image pipeline cannot read, to a full-resolution
+ * JPEG of at most `maxBytes`, so the resize note keeps the photo's true size. A dense
+ * high-megapixel photo over the cap at near-lossless quality gets one lower-quality pass. Camera
+ * photos are tiled, and before 8.1 the ffmpeg CLI decodes only one tile of them.
+ */
+export async function decodeStillImageJpeg(
+	absolutePath: string,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<Uint8Array> {
+	const release = await ffmpegRelease();
+	if (release && (release.major < 8 || (release.major === 8 && release.minor < 1))) {
+		throw new VideoError(
+			`ffmpeg ${release.major}.${release.minor} cannot decode tiled HEIF images such as camera photos; ffmpeg 8.1 or newer can.`,
+		);
+	}
+	const tmp = await TempDir.create("@omp-still-image-");
+	try {
+		const out = tmp.join("image.jpg");
+		let decodedBytes = 0;
+		for (const quality of STILL_IMAGE_JPEG_QUALITIES) {
+			await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", String(quality), out], signal);
+			const bytes = await Bun.file(out)
+				.bytes()
+				.catch(() => null);
+			if (!bytes || bytes.length === 0) throw new VideoError("ffmpeg wrote no image.");
+			if (bytes.length <= maxBytes) return bytes;
+			decodedBytes = bytes.length;
+		}
+		throw new VideoError(
+			`It decodes to ${formatByteSize(decodedBytes)} of JPEG, over the ${formatByteSize(maxBytes)} image limit.`,
+		);
+	} finally {
+		await tmp.remove().catch(() => {});
+	}
+}
+
 /** Contact-sheet layout: thumbnails, grid columns/rows. */
 export interface ContactSheet {
 	readonly png: VideoPng;
@@ -438,7 +458,7 @@ export async function buildVideoContactSheetPng(
 	const thumbs = CONTACT_SHEET_THUMBS;
 	const cols = CONTACT_SHEET_COLS;
 	const rows = Math.ceil(thumbs / cols);
-	const tmp = await TempDir.create("omp-video-sheet-");
+	const tmp = await TempDir.create("@omp-video-sheet-");
 	try {
 		const duration = meta.durationSec;
 		const times: number[] =
@@ -496,6 +516,210 @@ export async function buildVideoContactSheetPng(
 			thumbs: available.length,
 			cols,
 			rows,
+		};
+	} finally {
+		await tmp.remove().catch(() => {});
+	}
+}
+
+/** Options for selecting changed frames and composing a labeled recording contact sheet. */
+export interface ChangedFrameContactSheetOptions {
+	/** Destination PNG path. */
+	readonly outputPath: string;
+	/** Constant frame rate of the encoded source. */
+	readonly fps: number;
+	/** Minimum changed-pixel ratio needed to retain an intermediate frame. */
+	readonly threshold: number;
+	/** Maximum number of tiles, including the first and last frames. */
+	readonly maxTiles?: number;
+}
+
+/** A labeled contact sheet built from visually changed frames. */
+export interface ChangedFrameContactSheet {
+	/** Absolute destination path. */
+	readonly path: string;
+	/** PNG bytes ready for a vision image block. */
+	readonly png: VideoPng;
+	/** Number of rendered thumbnails. */
+	readonly thumbs: number;
+	/** Tile-grid columns. */
+	readonly cols: number;
+	/** Tile-grid rows. */
+	readonly rows: number;
+	/** Output PNG width. */
+	readonly width: number;
+	/** Output PNG height. */
+	readonly height: number;
+}
+
+interface ScoredFrame {
+	index: number;
+	score: number;
+}
+
+const CHANGE_SAMPLE_WIDTH = 64;
+const CHANGE_SAMPLE_HEIGHT = 64;
+const CHANGE_PIXEL_DELTA = 16;
+const RECORDING_CONTACT_THUMB_WIDTH = 320;
+
+function formatContactSheetTimestamp(seconds: number): string {
+	const tenths = Math.max(0, Math.round(seconds * 10));
+	const minutes = Math.floor(tenths / 600);
+	const secondsWithinMinute = Math.floor((tenths % 600) / 10);
+	return `${String(minutes).padStart(2, "0")}:${String(secondsWithinMinute).padStart(2, "0")}.${tenths % 10}`;
+}
+
+async function selectChangedFrames(
+	rawPath: string,
+	threshold: number,
+	maxTiles: number,
+	signal?: AbortSignal,
+): Promise<number[]> {
+	const frameBytes = CHANGE_SAMPLE_WIDTH * CHANGE_SAMPLE_HEIGHT;
+	const reader = Bun.file(rawPath).stream().getReader();
+	let pending = Buffer.alloc(0);
+	let previous: Buffer | undefined;
+	let frameIndex = 0;
+	let lastIndex = -1;
+	const changed: ScoredFrame[] = [];
+	try {
+		for (;;) {
+			if (signal?.aborted) throw new VideoError("Video operation aborted.");
+			const { done, value } = await reader.read();
+			if (done) break;
+			pending =
+				pending.length === 0
+					? Buffer.from(value)
+					: Buffer.concat([pending, Buffer.from(value)], pending.length + value.length);
+			while (pending.length >= frameBytes) {
+				const frame = pending.subarray(0, frameBytes);
+				pending = pending.subarray(frameBytes);
+				if (previous) {
+					let changedPixels = 0;
+					for (let i = 0; i < frameBytes; i++) {
+						if (Math.abs(frame[i]! - previous[i]!) > CHANGE_PIXEL_DELTA) changedPixels++;
+					}
+					const score = changedPixels / frameBytes;
+					if (score >= threshold) {
+						changed.push({ index: frameIndex, score });
+						changed.sort((a, b) => b.score - a.score || a.index - b.index);
+						if (changed.length > Math.max(0, maxTiles - 2)) changed.pop();
+					}
+				}
+				previous = Buffer.from(frame);
+				lastIndex = frameIndex;
+				frameIndex++;
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	if (lastIndex < 0) throw new VideoError("Could not decode frames for the recording contact sheet.");
+	const selected = new Set<number>([0, lastIndex]);
+	for (const frame of changed) selected.add(frame.index);
+	return [...selected].sort((a, b) => a - b);
+}
+
+/**
+ * Select visually changed frames from a constant-frame-rate video and write a
+ * timestamp-labeled PNG contact sheet. Analysis is disk-backed and streamed.
+ */
+export async function buildChangedFrameContactSheetPng(
+	absolutePath: string,
+	options: ChangedFrameContactSheetOptions,
+	signal?: AbortSignal,
+): Promise<ChangedFrameContactSheet> {
+	const maxTiles = Math.max(2, Math.min(12, Math.floor(options.maxTiles ?? 12)));
+	const tmp = await TempDir.create("@omp-video-change-sheet-");
+	try {
+		const raw = tmp.join("frames.gray");
+		await runFfmpeg(
+			[
+				"-i",
+				absolutePath,
+				"-vf",
+				`scale=${CHANGE_SAMPLE_WIDTH}:${CHANGE_SAMPLE_HEIGHT},format=gray`,
+				"-f",
+				"rawvideo",
+				raw,
+			],
+			signal,
+		);
+		const indexes = await selectChangedFrames(raw, options.threshold, maxTiles, signal);
+		const rawThumbPaths = indexes.map((_, i) => tmp.join(`thumb-raw-${i}.png`));
+		const labelPaths = indexes.map((_, i) => tmp.join(`label-${i}.png`));
+		const thumbPaths = indexes.map((_, i) => tmp.join(`thumb-${i}.png`));
+		await Promise.all(
+			indexes.map(async (index, i) => {
+				const seconds = index / options.fps;
+				const label = formatContactSheetTimestamp(seconds);
+				try {
+					await runFfmpeg(
+						[
+							"-ss",
+							String(Math.max(0, seconds - 0.001)),
+							"-i",
+							absolutePath,
+							"-frames:v",
+							"1",
+							"-vf",
+							`scale=${RECORDING_CONTACT_THUMB_WIDTH}:-2`,
+							rawThumbPaths[i]!,
+						],
+						signal,
+					);
+					const labelSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${RECORDING_CONTACT_THUMB_WIDTH}" height="30"><rect width="100%" height="100%" fill="#000" fill-opacity=".7"/><text x="8" y="22" fill="#fff" font-size="18" font-family="monospace">${label}</text></svg>`;
+					const labelPng = await rasterizeSvg(Buffer.from(labelSvg), RECORDING_CONTACT_THUMB_WIDTH, 30);
+					await Bun.write(labelPaths[i]!, labelPng);
+					await runFfmpeg(
+						[
+							"-i",
+							rawThumbPaths[i]!,
+							"-i",
+							labelPaths[i]!,
+							"-filter_complex",
+							"[0:v][1:v]overlay=0:H-h",
+							"-frames:v",
+							"1",
+							thumbPaths[i]!,
+						],
+						signal,
+					);
+				} catch (error) {
+					if (signal?.aborted) throw error;
+				}
+			}),
+		);
+		const available = thumbPaths.filter(thumb => Bun.file(thumb).size > 0);
+		if (available.length === 0) throw new VideoError("Could not extract contact-sheet frames from the recording.");
+		const cols = Math.min(CONTACT_SHEET_COLS, available.length);
+		const rows = Math.ceil(available.length / cols);
+		const inputs = available.flatMap(thumb => ["-i", thumb]);
+		const concat = available.map((_, i) => `[${i}:v]`).join("");
+		await runFfmpeg(
+			[
+				...inputs,
+				"-filter_complex",
+				`${concat}concat=n=${available.length}:v=1:a=0,tile=${cols}x${rows}:padding=0:margin=0:color=black`,
+				"-frames:v",
+				"1",
+				options.outputPath,
+			],
+			signal,
+		);
+		const bytes = await Bun.file(options.outputPath)
+			.bytes()
+			.catch(() => null);
+		if (!bytes || bytes.length === 0) throw new VideoError("Could not build the recording contact sheet.");
+		const metadata = await new Bun.Image(bytes).metadata();
+		return {
+			path: options.outputPath,
+			png: { data: Buffer.from(bytes).toBase64(), mimeType: "image/png" },
+			thumbs: available.length,
+			cols,
+			rows,
+			width: metadata.width,
+			height: metadata.height,
 		};
 	} finally {
 		await tmp.remove().catch(() => {});

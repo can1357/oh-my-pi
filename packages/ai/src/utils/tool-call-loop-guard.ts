@@ -15,6 +15,8 @@ export interface ToolCallLoopGuardOptions {
 export interface ToolCallLoopTurn {
 	readonly message: AssistantMessage;
 	readonly toolResults: readonly ToolResultMessage[];
+	/** The turn also delivered context outside its tool results (extension `additionalContext`). */
+	readonly injectedContext?: boolean;
 }
 
 /** Details needed to steer the model away from a repeated tool call. */
@@ -76,7 +78,7 @@ export class ToolCallLoopGuard {
 		this.#exemptTools = new Set(options.exemptTools);
 	}
 
-	/** Records one completed turn and returns the threshold hit, if any. */
+	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
 		if (toolCalls.length === 0) {
@@ -85,8 +87,18 @@ export class ToolCallLoopGuard {
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
-			this.#lastHash = undefined;
-			this.#count = 0;
+			// An exempt poll its tool flagged useless (a wait that elapsed or found
+			// nothing to wait for) is skipped, so alternating it with a repeated call
+			// cannot hide the loop. Any other exempt turn, failures included, may have
+			// changed state (finished jobs, a message, injected context), so it ends
+			// the repetition.
+			const idle =
+				!turn.injectedContext &&
+				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
+			if (!idle) {
+				this.#lastHash = undefined;
+				this.#count = 0;
+			}
 			return null;
 		}
 
@@ -101,7 +113,7 @@ export class ToolCallLoopGuard {
 			this.#count = 1;
 		}
 
-		if (this.#count !== this.#threshold) return null;
+		if (this.#count < this.#threshold) return null;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",

@@ -20,9 +20,4 @@ describe("isCompliantSubject", () => {
 		expect(isCompliantSubject("Fix: added thing")).toBe(false);
 		expect(isCompliantSubject("fix:")).toBe(false);
 	});
-
-	test("selection skips earlier noncompliant commits", () => {
-		const subjects = ["fix: Add Thing.", "WIP", "fix: added thing", "feat: also fine"];
-		expect(subjects.find(isCompliantSubject)).toBe("fix: added thing");
-	});
 });

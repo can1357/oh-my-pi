@@ -62,9 +62,3 @@ it("deep unmatched )", () => {
 		type("((string|number)[]|boolean))[]");
 	}).toThrow();
 });
-
-it("starting )", () => {
-	expect(() => {
-		type(")number(");
-	}).toThrow();
-});

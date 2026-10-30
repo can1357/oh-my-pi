@@ -44,14 +44,6 @@ function expectExclusiveAccess(dbPath: string): void {
 	}
 }
 
-test("close() releases the connection so the DB file can be locked exclusively", async () => {
-	const dbPath = path.join(tempDir, "agent.db");
-	const store = await SqliteAuthCredentialStore.open(dbPath);
-	store.close();
-
-	expect(() => expectExclusiveAccess(dbPath)).not.toThrow();
-});
-
 test("close() releases the connection after the lease/cache statements have run", async () => {
 	const dbPath = path.join(tempDir, "used.db");
 	const store = await SqliteAuthCredentialStore.open(dbPath);

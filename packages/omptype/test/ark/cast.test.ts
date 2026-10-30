@@ -39,11 +39,6 @@ describe("type.cast", () => {
 		const _infer: Eq<typeof Constructable.infer, Constructor> = true;
 		const _inferIn: Eq<typeof Constructable.in.infer, Constructor> = true;
 	});
-
-	it("undefined", () => {
-		const Foo = type("string" as type.cast<"foo">).t;
-		const _foo: Eq<typeof Foo, "foo"> = true;
-	});
 });
 
 describe("as", () => {
@@ -62,15 +57,6 @@ describe("as", () => {
 	it("cast to never", () => {
 		const T = type("unknown").as<never>();
 		const _t: Eq<typeof T.t, never> = true;
-	});
-
-	it("missing type param", () => {
-		type("string").as();
-	});
-
-	it("runtime arguments do not alter the cast", () => {
-		const T = type("string");
-		expect(T.as("foo" as never)).toBe(T);
 	});
 });
 

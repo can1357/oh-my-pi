@@ -1,4 +1,3 @@
-import type http2 from "node:http2";
 import {
 	AgentClientMessageSchema,
 	AskQuestionInteractionResponseSchema,
@@ -22,23 +21,20 @@ import {
 	WebSearchRequestResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, logger } from "@oh-my-pi/pi-utils";
+import { frameConnectMessage } from "../connect-frame";
 
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 
 type ProtoUnknownField = { no: number; wireType: number; data: Uint8Array };
 type ProtoUnknownBag = { $unknown?: ProtoUnknownField[] };
 
+interface CursorInteractionWriter {
+	write(frame: Uint8Array): void;
+}
+
 type InteractionQueryCase = NonNullable<InteractionQuery["query"]["case"]>;
 type InteractionResult = Exclude<InteractionResponse["result"], { case: undefined; value?: undefined }>;
-
-function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
-	const frame = Buffer.alloc(5 + data.length);
-	frame[0] = flags;
-	frame.writeUInt32BE(data.length, 1);
-	frame.set(data, 5);
-	return frame;
-}
 
 function isProtoUnknownField(value: unknown): value is ProtoUnknownField {
 	if (!value || typeof value !== "object") return false;
@@ -46,7 +42,8 @@ function isProtoUnknownField(value: unknown): value is ProtoUnknownField {
 	return typeof value.no === "number" && typeof value.wireType === "number" && value.data instanceof Uint8Array;
 }
 
-function protoUnknownFields(message: object): ProtoUnknownField[] {
+/** Well-formed protobuf-es `$unknown` entries on `message`; anything else on the bag is ignored. */
+export function protoUnknownFields(message: object): ProtoUnknownField[] {
 	if (!("$unknown" in message) || !Array.isArray(message.$unknown)) return [];
 	return message.$unknown.filter(isProtoUnknownField);
 }
@@ -65,12 +62,12 @@ function attachUnknownApprovedField(response: InteractionResponse, fieldNo: numb
 
 function log(type: string, subtype?: string, data?: unknown): void {
 	if (!$env.DEBUG_CURSOR) return;
-	const verbose = $env.DEBUG_CURSOR === "2" || $env.DEBUG_CURSOR === "verbose";
-	const dataStr = verbose && data ? ` ${JSON.stringify(data)?.slice(0, 500)}` : "";
-	console.error(`[CURSOR] ${type}${subtype ? `: ${subtype}` : ""}${dataStr}`);
+	logger.debug(`cursor interaction: ${type}${subtype ? `: ${subtype}` : ""}`, {
+		...($env.DEBUG_CURSOR === "2" || $env.DEBUG_CURSOR === "verbose" ? { data } : undefined),
+	});
 }
 
-function sendInteractionResponse(h2Request: http2.ClientHttp2Stream, queryId: number, result: InteractionResult): void {
+function sendInteractionResponse(h2Request: CursorInteractionWriter, queryId: number, result: InteractionResult): void {
 	const response = create(InteractionResponseSchema, { id: queryId, result });
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "interactionResponse", value: response },
@@ -80,7 +77,7 @@ function sendInteractionResponse(h2Request: http2.ClientHttp2Stream, queryId: nu
 }
 
 function sendUnknownApprovedInteractionResponse(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorInteractionWriter,
 	queryId: number,
 	fieldNo: number,
 ): void {
@@ -107,7 +104,7 @@ function sendUnknownApprovedInteractionResponse(
  * Unsupported interactive queries are rejected so the server is not stranded.
  * VM setup is left unanswered rather than reporting a fake success.
  */
-export function handleInteractionQuery(query: InteractionQuery, h2Request: http2.ClientHttp2Stream): void {
+export function handleInteractionQuery(query: InteractionQuery, h2Request: CursorInteractionWriter): void {
 	const queryCase = query.query.case;
 	log("interactionQuery", queryCase, query.query.value);
 	if (!queryCase) {

@@ -9,8 +9,8 @@ use pi_edit::modes::hashline::{
 	mismatch::{MismatchDetails, format_mismatch_message},
 	parser::{AbsoluteRangeOp, ParseFailure, parse_patch, parse_patch_streaming},
 	prefixes::{
-		hashline_parse_text, is_read_metadata_line, strip_hashline_prefixes, strip_new_line_prefixes,
-		strip_one_leading_hashline_prefix,
+		hashline_parse_text, is_read_metadata_line, is_read_truncation_notice,
+		strip_hashline_prefixes, strip_new_line_prefixes, strip_one_leading_hashline_prefix,
 	},
 	tokenizer::{BlockTarget, Token, Tokenizer, op_labels, parse_lid, split_hashline_lines},
 	types::{BlockMode, Cursor, Edit, FileOp, PasteTarget},
@@ -29,6 +29,19 @@ fn formats_hashline_v4_rows_and_headers() {
 	assert_eq!(format_numbered_lines("a\nb\n", 4), "4:a\n5:b\n6:");
 	assert_eq!(split_addressable_file_lines("a\nb\n"), vec!["a", "b"]);
 	assert_eq!(split_addressable_file_lines(""), vec![""]);
+}
+
+#[test]
+fn numbered_empty_text_keeps_its_display_row() {
+	assert_eq!(format_numbered_lines("", 0), "0:");
+}
+
+#[test]
+fn numbered_rows_preserve_payload_and_saturate_at_u32_max() {
+	assert_eq!(
+		format_numbered_lines("a\r\n\n\u{3bb}\0\n", u32::MAX - 1),
+		"4294967294:a\r\n4294967295:\n4294967295:\u{3bb}\0\n4294967295:"
+	);
 }
 
 #[test]
@@ -555,6 +568,27 @@ fn input_recovers_apply_patch_header_noise_and_spaces() {
 }
 
 #[test]
+fn input_accepts_hash_in_tagged_paths_only() {
+	// yadm alt files (`conf.yaml##hostname.home`) are real; the trailing tag
+	// separates path from tag, on both the strict and the recovery path.
+	for (header, path) in [
+		("[conf.yaml##hostname.home#1a2b]", "conf.yaml##hostname.home"),
+		("[*** Update File: conf.yaml##os.Linux#1A2B]", "conf.yaml##os.Linux"),
+	] {
+		let patch = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options()).unwrap();
+		assert_eq!(patch.sections[0].path, path, "{header}");
+		assert_eq!(patch.sections[0].file_hash.as_deref(), Some("1A2B"), "{header}");
+	}
+	// Untagged, a `#` is a malformed tag, not a file name.
+	for header in ["[conf.yaml##hostname.home]", "[conf.yaml##hostname]"] {
+		let error = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("Input header must be [PATH#TAG] with"), "{header}: {error}");
+	}
+}
+
+#[test]
 fn input_recovers_headers_nested_in_apply_patch_envelope_markers() {
 	// Observed in an edit-benchmark trace: the model wrapped the section
 	// header in apply_patch framing. The bracketed sentinel must be consumed
@@ -599,7 +633,7 @@ fn input_rejects_multi_group_headers_instead_of_inventing_a_path() {
 
 #[test]
 fn input_rejects_malformed_tags_and_missing_headers() {
-	for header in ["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#1A2B copied]"] {
+	for header in ["[a.ts#1A2B copied]", "[a.ts#1A2B:812]", "[a.ts#1A2B copied from read]"] {
 		assert!(
 			Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
 				.unwrap_err()
@@ -607,6 +641,14 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 				.contains("Input header must be"),
 			"{header}"
 		);
+	}
+	// A placeholder word where the tag belongs is no tag at all.
+	for header in
+		["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#AUTO]", "[a.ts#????]", "[a.ts#]"]
+	{
+		let patch = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options()).unwrap();
+		assert_eq!(patch.sections[0].path, "a.ts", "{header}");
+		assert_eq!(patch.sections[0].file_hash, None, "{header}");
 	}
 	let error = Patch::parse("CUT 38.=40", &options())
 		.unwrap_err()
@@ -669,10 +711,49 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 }
 
 #[test]
+fn read_truncation_notice_covers_emitted_shapes() {
+	for notice in [
+		"[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
+		"[Showing last 50.0KB across lines 4-8 of 8; line 4 is partial]",
+		"[40 more lines in notebook. Use :21 to continue]",
+		"[More lines in file (1.2MB total; not scanned to EOF). Use :21 to continue]",
+		"[...30ln elided; re-read needed ranges, e.g. a.ts:5-16,40-80]",
+		"[Line 1 is 60.0KB, exceeds 50.0KB limit. Hashline output requires full lines; cannot emit \
+		 an editable numbered preview for a truncated line.]",
+	] {
+		assert!(is_read_truncation_notice(notice), "notice was not recognized: {notice}");
+	}
+	assert!(!is_read_truncation_notice("[Showing files 1-20 of 60. Use skip=20 for the next page]"));
+}
+
+#[test]
 fn prefix_helpers_leave_mixed_content_unchanged() {
 	let lines = vec!["1:one".into(), "plain".into()];
 	assert_eq!(strip_hashline_prefixes(&lines), lines);
 	assert_eq!(strip_new_line_prefixes(&lines), lines);
+}
+
+fn rows(text: &str) -> Vec<String> {
+	text.split('\n').map(str::to_owned).collect()
+}
+
+#[test]
+fn write_prefix_strip_keeps_numbers_that_do_not_count_up_by_one() {
+	for text in [
+		"100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n",
+		"00:00 welcome back\n00:02 to the series\n00:03 today we\n",
+		"20:56:07 read a\n20:56:07 read b\n",
+	] {
+		assert_eq!(strip_hashline_prefixes(&rows(text)), rows(text), "{text:?}");
+	}
+}
+
+#[test]
+fn write_prefix_strip_still_removes_read_and_search_numbering() {
+	let read = "[a.ts#1A2B]\n1:one\n2:two\n\n…\n\n9:nine\n10:ten\n";
+	assert_eq!(strip_hashline_prefixes(&rows(read)), ["one", "two", "", "", "nine", "ten", ""]);
+	let search = "[a.ts#1A2B]\n 4:ctx\n*5:hit\n...\n*9:hit\n[b.ts#3C4D]\n*2:hit\n";
+	assert_eq!(strip_hashline_prefixes(&rows(search)), ["ctx", "hit", "hit", "hit", ""]);
 }
 
 #[test]
@@ -684,6 +765,7 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 		file_lines:         vec!["one".into(), "two".into(), "three".into()],
 		anchor_lines:       vec![2],
 		hash_recognized:    true,
+		tag_origin_paths:   Vec::new(),
 	};
 	let message = format_mismatch_message(&stale);
 	assert!(message.contains("Edit rejected for a.ts: file changed between read and edit."));
@@ -691,6 +773,24 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	let unknown = MismatchDetails { hash_recognized: false, ..stale };
 	let message = format_mismatch_message(&unknown);
 	assert!(message.contains("hash #1A2B is not from this session"));
+	assert!(message.contains("never invent the tag"));
+	// When the unrecognized tag was actually issued earlier in this session
+	// for a different path, the rejection names that path so a relative
+	// worktree lane doesn't follow a wrong-tree suggestion.
+	let known_elsewhere = MismatchDetails {
+		path:               Some("a.ts".into()),
+		expected_file_hash: "1A2B".into(),
+		actual_file_hash:   "3C4D".into(),
+		file_lines:         vec!["one".into(), "two".into(), "three".into()],
+		anchor_lines:       vec![2],
+		hash_recognized:    false,
+		tag_origin_paths:   vec!["/build/x/wt/crates/a/mcp.rs".into()],
+	};
+	let message = format_mismatch_message(&known_elsewhere);
+	assert!(message.contains("hash #1A2B is not from this session"));
+	assert!(
+		message.contains("Hash #1A2B was issued in this session for /build/x/wt/crates/a/mcp.rs.")
+	);
 	assert!(message.contains("never invent the tag"));
 }
 

@@ -654,6 +654,66 @@ class SessionRecords:
     file_mtime: int = 0
 
 
+def _apply_header_event(meta: dict, ev: dict, seq: int) -> None:
+    """Fold a session-header line into `meta`.
+
+    Current sessions open with a rewritable `title` slot (seq 0) followed by
+    the `session` entry (seq 1); older files start with the `session` entry.
+    The slot title is the live one, so it wins over the header's initial title.
+    """
+    kind = ev.get("type")
+    if kind == "title" and seq == 0:
+        meta["title"] = ev.get("title")
+    elif kind == "session" and seq <= 1:
+        meta["session_uuid"] = ev.get("id")
+        meta["version"] = ev.get("version")
+        meta["title"] = meta["title"] or ev.get("title")
+        meta["cwd"] = ev.get("cwd")
+        meta["started_at"] = parse_iso_ms(ev.get("timestamp")) or None
+
+
+def backfill_session_headers(conn: sqlite3.Connection) -> None:
+    """Fill header metadata for rows synced before title-slot sessions were parsed.
+
+    Only reads the first two lines of each headerless file, so it stays cheap
+    for files that genuinely have no header.
+    """
+    rows = conn.execute(
+        "SELECT session_file FROM ss_sessions WHERE session_uuid IS NULL"
+    ).fetchall()
+    updates = []
+    for (session_file,) in rows:
+        meta = {"session_uuid": None, "version": None, "title": None, "cwd": None, "started_at": None}
+        try:
+            with open(session_file, "rb") as f:
+                for seq, raw in enumerate(f):
+                    if seq > 1:
+                        break
+                    try:
+                        _apply_header_event(meta, json.loads(raw), seq)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+        if meta["session_uuid"] is not None:
+            updates.append(
+                (
+                    meta["session_uuid"],
+                    meta["version"],
+                    meta["title"],
+                    meta["cwd"],
+                    meta["started_at"],
+                    session_file,
+                )
+            )
+    conn.executemany(
+        "UPDATE ss_sessions SET session_uuid=?, version=?, title=COALESCE(?, title), "
+        "cwd=?, started_at=COALESCE(started_at, ?) WHERE session_file=?",
+        updates,
+    )
+    print(f"-> backfilled headers:   {len(updates)}/{len(rows)}", file=sys.stderr)
+
+
 def parse_file(
     path: Path,
     starting_offset: int,
@@ -707,12 +767,8 @@ def parse_file(
                 ts = parse_iso_ms(ev.get("timestamp"))
                 entry_id = ev.get("id")
 
-                if kind == "session" and seq == 0:
-                    rec.session_meta["session_uuid"] = ev.get("id")
-                    rec.session_meta["version"] = ev.get("version")
-                    rec.session_meta["title"] = ev.get("title")
-                    rec.session_meta["cwd"] = ev.get("cwd")
-                    rec.session_meta["started_at"] = ts or None
+                if kind in ("title", "session") and seq <= 1:
+                    _apply_header_event(rec.session_meta, ev, seq)
                 elif kind == "message":
                     msg = ev.get("message") or {}
                     role = msg.get("role")
@@ -1159,6 +1215,7 @@ def main() -> int:
     )
 
     conn = open_db()
+    backfill_session_headers(conn)
     state = existing_state(conn)
     print(f"-> known sessions in db: {len(state)}", file=sys.stderr)
 

@@ -26,7 +26,7 @@ import { $which } from "@oh-my-pi/pi-utils";
 import type { TerminalId, TerminalNotification } from "./terminal-capabilities";
 
 /** Application name surfaced as the notification source. */
-const APP_NAME = "Oh My Pi";
+const APP_NAME = "omp";
 
 /** Resolved notifier binary used to fan a notification out to D-Bus. */
 export type DesktopNotifierKind = "notify-send" | "gdbus";
@@ -50,7 +50,8 @@ export function hasLinuxDesktopSession(
 	if (platform !== "linux") return false;
 	if (env.DBUS_SESSION_BUS_ADDRESS) return true;
 	const runtimeDir = env.XDG_RUNTIME_DIR;
-	return Boolean(runtimeDir && fileExists(path.join(runtimeDir, "bus")));
+	// Only reached for Linux, so join with POSIX separators regardless of the host.
+	return Boolean(runtimeDir && fileExists(path.posix.join(runtimeDir, "bus")));
 }
 
 /**

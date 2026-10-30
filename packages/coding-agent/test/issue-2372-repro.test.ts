@@ -4,7 +4,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -210,5 +210,23 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		mode.rebuildChatFromMessages();
 		expect(addMessageSpy).toHaveBeenCalledTimes(callsAfterCancel);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+	});
+
+	it("recovers a cancelled submission without losing text and images added after Enter", () => {
+		const submittedImage = { type: "image" as const, data: "YQ==", mimeType: "image/png" };
+		const laterImage = { type: "image" as const, data: "Yg==", mimeType: "image/png" };
+		mode.editor.setText("");
+		mode.startPendingSubmission(
+			{ text: "first [Image #1]", images: [submittedImage], imageLinks: ["file:///first.png"] },
+			{ clearEditor: false },
+		);
+		mode.editor.pendingImages = [laterImage];
+		mode.editor.pendingImageLinks = ["file:///later.png"];
+		mode.editor.setCollapsedText("later [Image #1]");
+
+		expect(mode.cancelPendingSubmission()).toBe(true);
+		expect(mode.editor.getExpandedText()).toBe("first [Image #1]\nlater [Image #2]");
+		expect(mode.editor.pendingImages).toEqual([submittedImage, laterImage]);
+		expect(mode.editor.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
 	});
 });

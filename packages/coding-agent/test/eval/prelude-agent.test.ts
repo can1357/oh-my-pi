@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import * as vm from "node:vm";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import { artifactReadBridge } from "../helpers/artifact-read-bridge";
 
 /**
  * The eval `agent()` helper always returns an `AgentHandle` — spawning is
@@ -72,7 +76,11 @@ describe("eval js agent() handle", () => {
 
 	it("throws when the bridge omits the handle id", async () => {
 		const sandbox = loadPrelude(async () => ({ text: "lonely" }));
-		await expect((sandbox.agent as AgentHelper)("x")).rejects.toThrow("agent() did not return a handle");
+		// The factory returns a thenable handle wrapper, so normalize to a Promise
+		// before asserting rejection (Bun's `.rejects` requires a real Promise).
+		await expect(Promise.resolve((sandbox.agent as AgentHelper)("x"))).rejects.toThrow(
+			"agent() did not return a handle",
+		);
 	});
 
 	it("parses wait() text as JSON only when a schema was given", async () => {
@@ -93,6 +101,94 @@ describe("eval js agent() handle", () => {
 	});
 });
 
+describe("eval js immediate-handle contract", () => {
+	// Regression for #10986: the JS factories return immediately, so the
+	// documented pattern `const h = completion(...); await h.wait()` must work
+	// without first `await`-ing the factory itself.
+	it("exposes handle methods on the un-awaited factory result", async () => {
+		const sandbox = loadPrelude(async name => {
+			if (name === "__completion__") return { id: "c-1" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: "OK" }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const completion = sandbox.completion as (prompt: string, opts?: unknown) => { wait(): Promise<unknown> };
+
+		const handle = completion("Return OK", { model: "smol" });
+		expect(typeof handle.wait).toBe("function");
+		expect(await handle.wait()).toBe("OK");
+	});
+
+	it("treats an un-awaited factory result as a single handle in wait()", async () => {
+		const sandbox = loadPrelude(async name => {
+			if (name === "__agent__") return { id: "a-2", agent: "task" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: "done" }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const waitAll = sandbox.wait as (handles: unknown) => Promise<unknown[]>;
+
+		expect(await waitAll((sandbox.agent as AgentHelper)("go"))).toEqual(["done"]);
+	});
+});
+
+describe("eval js wait() timeout (issue #12549)", () => {
+	type WaitCall = Record<string, unknown>;
+	type Waitable = { wait(...args: unknown[]): Promise<unknown> };
+	type WaitHelper = (handles: unknown, opts?: unknown, ...rest: unknown[]) => Promise<unknown[]>;
+
+	function loadWaitPrelude(): { sandbox: Record<string, unknown>; waitCalls: WaitCall[] } {
+		const waitCalls: WaitCall[] = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			if (name === "__agent__") return { id: "a-1", agent: "task" };
+			if (name === "__wait__") {
+				waitCalls.push(args as WaitCall);
+				return { items: [{ status: "completed", text: "done" }] };
+			}
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		return { sandbox, waitCalls };
+	}
+
+	it("treats a positional wait() timeout as seconds", async () => {
+		const { sandbox, waitCalls } = loadWaitPrelude();
+		const handle = await (sandbox.agent as AgentHelper)("go");
+
+		expect(await (sandbox.wait as WaitHelper)([handle], 30)).toEqual(["done"]);
+		expect(waitCalls).toEqual([{ items: [{ kind: "agent", id: "a-1" }], timeoutMs: 30_000 }]);
+	});
+
+	it("treats a positional handle.wait() timeout as seconds on resolved and pending handles", async () => {
+		const { sandbox, waitCalls } = loadWaitPrelude();
+		const agent = sandbox.agent as (prompt: string) => Waitable;
+
+		expect(await ((await agent("resolved")) as Waitable).wait(45)).toBe("done");
+		expect(await agent("pending").wait(5)).toBe("done");
+		expect(waitCalls.map(call => call.timeoutMs)).toEqual([45_000, 5_000]);
+	});
+
+	it("keeps the options-object form", async () => {
+		const { sandbox, waitCalls } = loadWaitPrelude();
+		const agent = sandbox.agent as AgentHelper;
+
+		// Each handle caches its result after the first wait, so use one per call.
+		await (sandbox.wait as WaitHelper)([await agent("first")], { timeout: 10 });
+		await ((await agent("second")) as Waitable).wait({ timeout: 2 });
+		expect(waitCalls.map(call => call.timeoutMs)).toEqual([10_000, 2_000]);
+	});
+
+	it("rejects mixing an options object with positional args", async () => {
+		const { sandbox, waitCalls } = loadWaitPrelude();
+		const agent = sandbox.agent as (prompt: string) => Waitable;
+		const resolved = (await agent("resolved")) as Waitable;
+		// The sandbox has its own TypeError constructor, so match on the message.
+		const mixed = /do not mix both forms/;
+
+		await expect((sandbox.wait as WaitHelper)([resolved], { timeout: 10 }, true)).rejects.toThrow(mixed);
+		await expect(resolved.wait({ timeout: 1 }, 2)).rejects.toThrow(mixed);
+		await expect(agent("pending").wait({ timeout: 1 }, 2)).rejects.toThrow(mixed);
+		expect(waitCalls).toEqual([]);
+	});
+});
+
 describe("eval js read() URI delegation", () => {
 	it("appends line selectors to delegated URI paths", async () => {
 		const calls: Array<{ name: string; args: unknown }> = [];
@@ -100,6 +196,7 @@ describe("eval js read() URI delegation", () => {
 			calls.push({ name, args });
 			return { text: "resource contents" };
 		});
+		sandbox.__omp_helpers__ = { hasRoot: () => false };
 
 		const result = await vm.runInContext(`read("mcp://server/resource", { offset: 10, limit: 5 })`, sandbox);
 
@@ -109,6 +206,93 @@ describe("eval js read() URI delegation", () => {
 				name: "read",
 				args: { path: "mcp://server/resource:10-14" },
 			},
+		]);
+	});
+
+	function loadArtifactPrelude(
+		artifacts: string | undefined,
+		readTool: (args: { path: string }) => Promise<unknown> = async () => ({ text: "from the read tool" }),
+	) {
+		const roots: Record<string, string> = artifacts === undefined ? {} : { artifact: artifacts };
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return readTool(args as { path: string });
+		});
+		sandbox.__omp_helpers__ = createHelpers({
+			cwd: () => process.cwd(),
+			env: new Map(),
+			localRoots: () => roots,
+			emitStatus: () => {},
+		});
+		return { calls, sandbox };
+	}
+
+	// Over the 50 KB a bare `:raw` read inlines, with a line wider than any column cap and a trailing newline.
+	const largeArtifact = ["head", "w".repeat(60_000), ...Array.from({ length: 3000 }, (_, i) => `row ${i}`), ""].join(
+		"\n",
+	);
+
+	it("returns an empty string for artifact:// reads with a non-positive limit", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-artifact-limit-");
+		await Bun.write(path.join(tmp.path(), "12.eval.log"), "first\nsecond\nthird\n");
+		const { calls, sandbox } = loadArtifactPrelude(tmp.path());
+
+		expect(await vm.runInContext(`read("artifact://12", { limit: 0 })`, sandbox)).toBe("");
+		expect(await vm.runInContext(`read("artifact://12", { limit: -1 })`, sandbox)).toBe("");
+		expect(await vm.runInContext(`read("artifact://7", { limit: 0 })`, sandbox)).toBe("");
+		expect(calls).toEqual([]);
+	});
+
+	it("reads an artifact another session holds in full, however large, through the read tool", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-artifact-fallback-");
+		const owner = path.join(tmp.path(), "owner");
+		await Bun.write(path.join(owner, "7.bash.log"), largeArtifact);
+		const { calls, sandbox } = loadArtifactPrelude(
+			path.join(tmp.path(), "own"),
+			artifactReadBridge(tmp.path(), owner),
+		);
+
+		expect(await vm.runInContext(`read("artifact://7")`, sandbox)).toBe(largeArtifact);
+		expect(await vm.runInContext(`read("artifact://7", { offset: 2, limit: 2 })`, sandbox)).toBe(
+			`${"w".repeat(60_000)}\nrow 0`,
+		);
+		expect(await vm.runInContext(`read("artifact://7", { offset: 3 })`, sandbox)).toBe(
+			`${Array.from({ length: 3000 }, (_, i) => `row ${i}`).join("\n")}\n`,
+		);
+		expect(calls).toEqual([
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
+		]);
+	});
+
+	it("reads an artifact in full through the read tool when no artifacts dir was injected", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-artifact-no-root-");
+		await Bun.write(path.join(tmp.path(), "12.eval.log"), largeArtifact);
+		const { calls, sandbox } = loadArtifactPrelude(undefined, artifactReadBridge(tmp.path(), tmp.path()));
+
+		expect(await vm.runInContext(`read("artifact://12")`, sandbox)).toBe(largeArtifact);
+		expect(await vm.runInContext(`read("artifact://12:raw:1-1")`, sandbox)).toBe("head");
+		expect(calls).toEqual([
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+		]);
+	});
+
+	it("returns a replacement read tool's text when it names no artifact file", async () => {
+		// An extension's same-name `read` replacement returns its own content without the built-in's `details`.
+		const { calls, sandbox } = loadArtifactPrelude(undefined, async args => ({ text: `replaced ${args.path}` }));
+
+		expect(await vm.runInContext(`read("artifact://12")`, sandbox)).toBe("replaced artifact://12:raw");
+		expect(await vm.runInContext(`read("artifact://12", { offset: 2, limit: 2 })`, sandbox)).toBe(
+			"replaced artifact://12:raw:2-3",
+		);
+		expect(calls).toEqual([
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://12:raw" } },
+			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
+			{ name: "read", args: { path: "artifact://12:raw:2-3" } },
 		]);
 	});
 });

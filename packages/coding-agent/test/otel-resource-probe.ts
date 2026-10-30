@@ -37,7 +37,7 @@ process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `http://localhost:${server.port
 process.env.OTEL_SERVICE_NAME = "svc-probe";
 process.env.OTEL_RESOURCE_ATTRIBUTES = "deployment.environment=staging,tenant.id=acme,service.name=should-lose";
 
-await initTelemetryExport();
+await initTelemetryExport(true);
 if (!isTelemetryExportEnabled()) {
 	console.error("PROBE: provider did not register");
 	await server.stop(true);

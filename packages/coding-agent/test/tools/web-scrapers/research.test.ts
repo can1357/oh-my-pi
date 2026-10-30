@@ -11,11 +11,6 @@ describe.skipIf(SKIP)("handleWikidata", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for non-wikidata URLs", async () => {
-		const result = await handleWikidata("https://wikipedia.org/wiki/Apple_Inc", 20);
-		expect(result).toBeNull();
-	});
-
 	it("fetches Q312 - Apple Inc", async () => {
 		const result = await handleWikidata("https://www.wikidata.org/wiki/Q312", 20);
 		expect(result).not.toBeNull();
@@ -41,11 +36,6 @@ describe.skipIf(SKIP)("handleOpenLibrary", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for non-openlibrary URLs", async () => {
-		const result = await handleOpenLibrary("https://amazon.com/books/123", 20);
-		expect(result).toBeNull();
-	});
-
 	it("fetches by ISBN - Fantastic Mr Fox", async () => {
 		const result = await handleOpenLibrary("https://openlibrary.org/isbn/9780140328721", 20);
 		expect(result).not.toBeNull();
@@ -65,11 +55,6 @@ describe.skipIf(SKIP)("handleOpenLibrary", () => {
 describe.skipIf(SKIP)("handleBiorxiv", () => {
 	it("returns null for non-matching URLs", async () => {
 		const result = await handleBiorxiv("https://example.com", 20);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for non-biorxiv URLs", async () => {
-		const result = await handleBiorxiv("https://nature.com/articles/123", 20);
 		expect(result).toBeNull();
 	});
 

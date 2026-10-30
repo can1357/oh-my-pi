@@ -30,6 +30,43 @@ export function resolveLocalHostAddon(host: {
 	};
 }
 
+const ELF_MAGIC = 0x7f454c46;
+const PT_INTERP = 3;
+
+/**
+ * Whether the running Bun links musl, read from its ELF interpreter
+ * (`/lib/ld-musl-*.so.1`). This is the libc every addon it dlopens must match;
+ * OS markers like /etc/alpine-release or an installed musl loader describe the
+ * machine, not this process.
+ */
+export function detectHostMusl(): boolean {
+	if (process.platform !== "linux") return false;
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(process.execPath, "r");
+		const header = Buffer.alloc(64);
+		fs.readSync(fd, header, 0, header.length, 0);
+		// ELFCLASS64 + little-endian: every Bun linux build (x64, arm64).
+		if (header.readUInt32BE(0) !== ELF_MAGIC || header[4] !== 2 || header[5] !== 1) return false;
+		const tableOffset = Number(header.readBigUInt64LE(0x20));
+		const entrySize = header.readUInt16LE(0x36);
+		const entryCount = header.readUInt16LE(0x38);
+		const table = Buffer.alloc(entrySize * entryCount);
+		fs.readSync(fd, table, 0, table.length, tableOffset);
+		for (let entry = 0; entry < table.length; entry += entrySize) {
+			if (table.readUInt32LE(entry) !== PT_INTERP) continue;
+			const interp = Buffer.alloc(Number(table.readBigUInt64LE(entry + 32)));
+			fs.readSync(fd, interp, 0, interp.length, Number(table.readBigUInt64LE(entry + 8)));
+			return interp.toString("latin1").includes("/ld-musl-");
+		}
+		return false;
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+}
+
 /** Detect whether this x86-64 host can run the modern AVX2 addon. */
 export function detectHostAvx2Support(): boolean {
 	if (process.arch !== "x64") return false;

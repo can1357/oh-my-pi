@@ -1,25 +1,23 @@
 import { describe, expect, it } from "bun:test";
-import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
-import { CATALOG_PROVIDERS, DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
-// Pins the invariant: bundled `models.json` carries every entry the runtime
-// curated catalog (XAI_OAUTH_CURATED_MODELS, surfaced via
-// buildXaiOAuthStaticSeed) emits. Without this, editing the curated list
-// without regenerating `models.json` silently regresses the boot-time
-// default-model resolver — the registry sees the runtime seed only after
-// `refresh()`, but interactive boot resolves the persisted default
-// synchronously from `#loadModels()`, which reads only `models.json`.
+// Pins the invariant: the bundled catalog carries every entry the runtime
+// xai-oauth KDL seed (surfaced via buildXaiOAuthStaticSeed) emits. Without
+// this, editing the seed without regenerating the catalog silently regresses
+// the boot-time default-model resolver — the registry sees the runtime seed
+// only after `refresh()`, but interactive boot resolves the persisted default
+// synchronously from `#loadModels()`, which reads only the bundled catalog.
 //
 // Failure here means: run `bun run gen:models` and commit the diff.
 describe("xai-oauth bundled catalog (regression)", () => {
-	const bundled =
-		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-responses">>>)["xai-oauth"] ?? {};
+	const bundled = Object.fromEntries(getBundledModels("xai-oauth").map(model => [model.id, model]));
 	const seed = buildXaiOAuthStaticSeed();
 
 	it("defaults SuperGrok selection to grok-4.6", () => {
-		const entry = CATALOG_PROVIDERS.find(provider => provider.id === "xai-oauth");
+		const entry = providerEntry("xai-oauth");
 		expect(entry?.defaultModel).toBe("grok-4.6");
 		expect(DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]).toBe("grok-4.6");
 		expect(bundled["grok-4.6"], "xai-oauth/grok-4.6 must be bundled for the default").toBeDefined();
@@ -31,23 +29,36 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		expect(bundledIds).toEqual(seededIds);
 	});
 
-	for (const seededModel of seed) {
+	for (const seededModel of seed.filter(model => model.api === "openai-responses")) {
 		it(`matches contract for ${seededModel.id}`, () => {
 			const bundledEntry = bundled[seededModel.id];
-			expect(bundledEntry, `xai-oauth/${seededModel.id} missing from models.json`).toBeDefined();
+			expect(bundledEntry, `xai-oauth/${seededModel.id} missing from bundled catalog`).toBeDefined();
 			expect(bundledEntry.id).toBe(seededModel.id);
 			expect(bundledEntry.name).toBe(seededModel.name);
 			expect(bundledEntry.provider).toBe("xai-oauth");
-			expect(bundledEntry.api).toBe("openai-responses");
+			expect(bundledEntry.api).toBe(seededModel.api);
 			expect(bundledEntry.contextWindow).toBe(seededModel.contextWindow);
 			expect(bundledEntry.reasoning).toBe(seededModel.reasoning);
 			// Input modality must survive both the curated seed and the bundle.
 			// Without this the static fallback used on offline boot strips
 			// vision capability silently (Codex PR #1127 review).
 			expect(bundledEntry.input).toEqual(seededModel.input);
-			expect(bundledEntry.compat?.supportsReasoningEffort).toBe(seededModel.compat?.supportsReasoningEffort);
+			if (seededModel.compat && "supportsReasoningEffort" in seededModel.compat) {
+				expect(bundledEntry.compat).toMatchObject({
+					supportsReasoningEffort: seededModel.compat.supportsReasoningEffort,
+				});
+			}
 		});
 	}
+
+	it("preserves dedicated runner transports and kinds without chat compatibility projection", () => {
+		expect(seed.find(model => model.id === "grok-tts")).toMatchObject({ api: "xai-tts" });
+		expect(seed.find(model => model.id === "grok-tts")?.compat).toBeUndefined();
+		expect(bundled["grok-tts"]).toMatchObject({ api: "xai-tts", kind: "tts" });
+		expect(seed.find(model => model.id === "grok-imagine-image")).toMatchObject({ api: "openai-images" });
+		expect(seed.find(model => model.id === "grok-imagine-image")?.compat).toBeUndefined();
+		expect(bundled["grok-imagine-image"]).toMatchObject({ api: "openai-images", kind: "image" });
+	});
 
 	// SuperGrok's `grok-4.20-multi-agent-0309` mirrors the paid catalog's
 	// `grok-4.20-multi-agent-beta-latest` under a different ID; the price
@@ -76,8 +87,9 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	// OPENAI_MAX_OUTPUT_TOKENS). Pin maxTokens === contextWindow on both the
 	// static-seed and bundled paths so a null placeholder can
 	// never silently leak back into the bundle.
-	it("sets maxTokens equal to contextWindow for every xai-oauth model", () => {
+	it("sets maxTokens equal to contextWindow for every xai-oauth Responses model", () => {
 		for (const model of seed) {
+			if (model.api !== "openai-responses") continue;
 			expect(model.maxTokens, `seed ${model.id} maxTokens`).toBe(model.contextWindow);
 			expect(bundled[model.id]?.maxTokens, `bundled ${model.id} maxTokens`).toBe(model.contextWindow);
 		}

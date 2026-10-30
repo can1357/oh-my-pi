@@ -322,33 +322,20 @@ registerProvider(contextFileCapability.id, {
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const items: SystemPrompt[] = [];
 
-	// User-level: ~/.gemini/system.md
-	const userSystemMd = getUserPath(ctx, "gemini", "system.md");
-	if (userSystemMd) {
-		const content = await readFile(userSystemMd);
+	const load = async (filePath: string | null, level: "user" | "project", kind: "text" | "template") => {
+		if (!filePath) return;
+		const content = await readFile(filePath);
 		if (content) {
-			items.push({
-				path: userSystemMd,
-				content,
-				level: "user",
-				_source: createSourceMeta(PROVIDER_ID, userSystemMd, "user"),
-			});
+			items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
 		}
-	}
+	};
 
-	// Project-level: .gemini/system.md
-	const projectSystemMd = getProjectPath(ctx, "gemini", "system.md");
-	if (projectSystemMd) {
-		const content = await readFile(projectSystemMd);
-		if (content) {
-			items.push({
-				path: projectSystemMd,
-				content,
-				level: "project",
-				_source: createSourceMeta(PROVIDER_ID, projectSystemMd, "project"),
-			});
-		}
-	}
+	// Project entries first: dedupe is first-wins, so a project file claims its
+	// key before a same-scope user file can survive.
+	await load(getProjectPath(ctx, "gemini", "SYSTEM_TEMPLATE.md"), "project", "template");
+	await load(getProjectPath(ctx, "gemini", "system.md"), "project", "text");
+	await load(getUserPath(ctx, "gemini", "SYSTEM_TEMPLATE.md"), "user", "template");
+	await load(getUserPath(ctx, "gemini", "system.md"), "user", "text");
 
 	return { items, warnings: [] };
 }

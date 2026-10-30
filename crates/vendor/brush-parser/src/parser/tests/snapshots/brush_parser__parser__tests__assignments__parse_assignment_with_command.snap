@@ -1,0 +1,48 @@
+---
+source: brush-parser/src/parser/tests/assignments.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "VAR=value command arg1 arg2",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                prefix: Some(CommandPrefix([
+                  AssignmentWord(Assignment(
+                    name: VariableName("VAR"),
+                    value: Scalar(Word(
+                      value: "value",
+                      loc: "[location]",
+                    )),
+                    loc: "[location]",
+                  ), Word(
+                    value: "VAR=value",
+                    loc: "[location]",
+                  )),
+                ])),
+                word_or_name: Some(Word(
+                  value: "command",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  Word(Word(
+                    value: "arg1",
+                    loc: "[location]",
+                  )),
+                  Word(Word(
+                    value: "arg2",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

@@ -3,13 +3,6 @@ import { type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "./type-assert";
 
 describe("tuple expressions", () => {
-	it("nested", () => {
-		const T = type(["string|bigint", "|", ["number", "|", "boolean"]]);
-		const _1: Eq<typeof T.infer, string | number | bigint | boolean> = true;
-	});
-
-	it.todo("autocompletion");
-
 	it("missing right operand", () => {
 		expect(() => type(["string", "|"])).toThrow();
 		expect(() => type(["string", "&"])).toThrow();

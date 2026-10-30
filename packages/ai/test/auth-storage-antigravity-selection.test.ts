@@ -144,7 +144,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	test("blocks exhausted Antigravity Gemini counter without blocking healthy Claude counter", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-gemini-exhausted", "proj-gemini-exhausted", "exhausted@example.com"),
@@ -178,14 +178,14 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			}),
 		);
 
-		const geminiKey = await authStorage.getApiKey("google-antigravity", "session-antigravity-gemini", {
+		const geminiKey = await authStorage.keys.get("google-antigravity", "session-antigravity-gemini", {
 			modelId: "gemini-3-flash",
 		});
 		expect(geminiKey).toBe("api-acct-gemini-healthy");
 
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 80; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-claude-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-claude-${i}`, {
 				modelId: "claude-sonnet-4-5",
 			});
 			if (!apiKey) continue;
@@ -198,7 +198,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	test("ranks by bottleneck counter instead of healthier secondary counter", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-gemini-hot", "proj-gemini-hot", "hot@example.com"),
@@ -234,7 +234,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 80; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-bottleneck-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-bottleneck-${i}`, {
 				modelId: "gemini-3-flash",
 			});
 			if (!apiKey) continue;
@@ -248,7 +248,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			throw new Error("test setup failed");
 		}
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-recovered", "proj-recovered", "recovered@example.com"),
@@ -291,12 +291,12 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			}),
 		);
 
-		await authStorage.fetchUsageReports();
+		await authStorage.usage.reports();
 
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:anthropic")).toBe(weekAhead);
 
-		const geminiKey = await authStorage.getApiKey("google-antigravity", "session-antigravity-recovered", {
+		const geminiKey = await authStorage.keys.get("google-antigravity", "session-antigravity-recovered", {
 			modelId: "gemini-3-flash",
 		});
 		expect(geminiKey).toBe("api-acct-recovered");
@@ -305,7 +305,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	test("prefers less-pressured antigravity account when neither is exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-loaded", "proj-loaded", "loaded@example.com"),
@@ -337,7 +337,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		// account by a clear margin even though both are unblocked.
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 60; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-fresh-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-fresh-${i}`, {
 				modelId: "gemini-3-flash",
 			});
 			if (!apiKey) continue;

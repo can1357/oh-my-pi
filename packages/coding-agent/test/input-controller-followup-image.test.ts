@@ -94,6 +94,7 @@ function createContext(opts: {
 		handlePlanModeCommand,
 		handleVibeModeCommand,
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
+		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 
 	return { ctx, editor, handleGoalModeCommand, handlePlanModeCommand, handleVibeModeCommand, prompt, showError };
@@ -232,5 +233,40 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		});
 		expect(ctx.editor.pendingImages).toEqual([]);
 		expect(ctx.editor.pendingImageLinks).toEqual([]);
+	});
+
+	it("restores a failed Ctrl+Enter mode command submission alongside a newer draft, reporting the error exactly once", async () => {
+		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+		const { ctx, editor, handleGoalModeCommand, showError } = createContext({
+			isStreaming: false,
+			pendingImages: [image],
+			pendingImageLinks: ["local://draft.png"],
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		handleGoalModeCommand.mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			throw new Error("goal setup failed");
+		});
+
+		const controller = new InputController(ctx);
+		editor.setText("/goal set Ship the release [Image #1]");
+		const submitting = controller.handleFollowUp();
+		await entered.promise;
+		// Typed after the draft detached for dispatch but before the mode
+		// command settles; a failed submission must merge with this, not
+		// replace or discard it.
+		editor.setText("later draft");
+		release.resolve();
+		await submitting;
+
+		expect(handleGoalModeCommand).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledWith("goal setup failed");
+		expect(editor.getText()).toBe("/goal set Ship the release [Image #1]\n\nlater draft");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);
 	});
 });

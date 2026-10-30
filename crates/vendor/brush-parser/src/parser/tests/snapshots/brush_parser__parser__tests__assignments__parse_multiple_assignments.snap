@@ -1,0 +1,56 @@
+---
+source: brush-parser/src/parser/tests/assignments.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "x=1 y=2 z=3",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                prefix: Some(CommandPrefix([
+                  AssignmentWord(Assignment(
+                    name: VariableName("x"),
+                    value: Scalar(Word(
+                      value: "1",
+                      loc: "[location]",
+                    )),
+                    loc: "[location]",
+                  ), Word(
+                    value: "x=1",
+                    loc: "[location]",
+                  )),
+                  AssignmentWord(Assignment(
+                    name: VariableName("y"),
+                    value: Scalar(Word(
+                      value: "2",
+                      loc: "[location]",
+                    )),
+                    loc: "[location]",
+                  ), Word(
+                    value: "y=2",
+                    loc: "[location]",
+                  )),
+                  AssignmentWord(Assignment(
+                    name: VariableName("z"),
+                    value: Scalar(Word(
+                      value: "3",
+                      loc: "[location]",
+                    )),
+                    loc: "[location]",
+                  ), Word(
+                    value: "z=3",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

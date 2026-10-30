@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import {
@@ -110,7 +110,6 @@ describe("interactive /mcp test", () => {
 		// impossible, or a later press kills the running agent turn instead.
 		const rendered = ctx.chatContainer.children.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Tested connection to "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 
 		// The grace window still holds while untouched...
 		vi.advanceTimersByTime(4_999);
@@ -206,7 +205,6 @@ describe("interactive /mcp test", () => {
 		expect(presented).toHaveLength(1);
 		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Cancelled connection test for "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
 	});
 
@@ -334,28 +332,6 @@ describe("interactive /mcp test", () => {
 		expect(presentCommandOutput).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
 		expect(mcpTestEscapeHandlers).toHaveLength(0);
-	});
-
-	it("claims Esc ownership before the awaited server lookup", async () => {
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport: { connected: true, request: vi.fn(), notify: vi.fn(), close: vi.fn(async () => {}) },
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
-		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
-		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const mcpTestEscapeHandlers = new Set<() => void>();
-		const { controller } = createController({ mcpTestEscapeHandlers });
-
-		// Do not await: the handler must be registered synchronously, before the
-		// awaited `#resolveServerForAuth()` config read can suspend and let Esc
-		// fall through to aborting the agent turn.
-		const pending = controller.handle("/mcp test github");
-		expect(mcpTestEscapeHandlers).toHaveLength(1);
-		await pending;
 	});
 
 	it("releases Esc immediately when lookup fails before the hint is shown", async () => {

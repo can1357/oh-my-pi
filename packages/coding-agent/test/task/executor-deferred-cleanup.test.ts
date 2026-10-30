@@ -82,6 +82,7 @@ function mockSession(opts: {
 			state.messages.push(msg);
 			emit({ type: "message_end", message: msg } as AgentSessionEvent);
 			opts.onPrompt(emit);
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => false,
@@ -92,61 +93,9 @@ function mockSession(opts: {
 	} as unknown as AgentSession;
 }
 
-function emitYield(emit: (event: AgentSessionEvent) => void, data: unknown): void {
-	emit({
-		type: "tool_execution_end",
-		toolCallId: "yield-1",
-		toolName: "yield",
-		result: {
-			content: [{ type: "text", text: "Result submitted." }],
-			details: { status: "success", data },
-		},
-	} as AgentSessionEvent);
-}
-
 describe("runSubprocess deferred cleanup outcome (issue #9670)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
-	});
-
-	it("preserves a successful yield when disposal is deferred past the cleanup deadline", async () => {
-		const disposeGate = Promise.withResolvers<void>();
-		const session = mockSession({
-			onPrompt: emit => emitYield(emit, { ok: true }),
-			// Disposal never settles within the (zero) grace window.
-			dispose: () => disposeGate.promise,
-		});
-		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-			session,
-			extensionsResult: {} as unknown as LoadExtensionsResult,
-			setToolUIContext: () => {},
-			eventBus: new EventBus(),
-		} as CreateAgentSessionResult);
-
-		let deferredCleanup: Promise<void> | undefined;
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent: baseAgent,
-			task: "do the work",
-			index: 0,
-			id: "issue-9670-success",
-			keepAlive: false,
-			cleanupGraceMs: 0,
-			onCleanupDeferred: completion => {
-				deferredCleanup = completion;
-			},
-		});
-
-		// The deferred teardown must not overwrite the successful yield.
-		expect(result.exitCode).toBe(0);
-		expect(result.aborted).toBe(false);
-		expect(result.abortReason).toBeUndefined();
-		expect(result.error).toBeUndefined();
-		expect(result.output).toContain('"ok": true');
-		// The teardown was still handed off, not dropped.
-		expect(deferredCleanup).toBeDefined();
-		disposeGate.resolve();
-		await deferredCleanup;
 	});
 
 	it("keeps a genuinely aborted run aborted when its cleanup is deferred", async () => {

@@ -55,7 +55,8 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 		importer,
 	);
 
-	expect(rewritten).toContain(path.join("packages", "contracts", "src", "index.ts"));
+	// The rewrite emits a `file://` URL, whose separators are `/` on every platform.
+	expect(rewritten).toContain("/packages/contracts/src/index.ts");
 });
 
 test("installed node_modules copies shadow workspace members at the same level", async () => {

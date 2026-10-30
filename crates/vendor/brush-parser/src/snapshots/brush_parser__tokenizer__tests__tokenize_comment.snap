@@ -1,0 +1,33 @@
+---
+source: brush-parser/src/tokenizer.rs
+expression: "test_tokenizer(r\"a #comment\n\")?"
+---
+TokenizerResult(
+  input: "a #comment\n",
+  result: [
+    Word("a", SourceSpan(
+      start: SourcePosition(
+        index: 0,
+        line: 1,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 1,
+        line: 1,
+        column: 2,
+      ),
+    )),
+    Operator("\n", SourceSpan(
+      start: SourcePosition(
+        index: 2,
+        line: 1,
+        column: 3,
+      ),
+      end: SourcePosition(
+        index: 11,
+        line: 2,
+        column: 1,
+      ),
+    )),
+  ],
+)

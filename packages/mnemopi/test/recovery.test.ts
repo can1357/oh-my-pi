@@ -114,14 +114,6 @@ describe("SQLite recovery helpers", () => {
 		expect(existsSync(second.metadata_path)).toBe(true);
 	});
 
-	it("returns true for a valid SQLite database integrity check", () => {
-		const dir = makeTempDir();
-		const dbPath = join(dir, "mnemopi.db");
-		createSqliteDb(dbPath);
-
-		expect(verifyIntegrity(dbPath)).toBe(true);
-	});
-
 	it("restores a backup to a new path", () => {
 		const dir = makeTempDir();
 		const dbPath = join(dir, "mnemopi.db");

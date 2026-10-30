@@ -13,12 +13,17 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sayHelp as commandHelp } from "../cli/command-help";
-import { Settings, settings } from "../config/settings";
+import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
+import { discoverAuthStorage } from "../sdk";
 import { TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { SpeakableStream } from "../tts/speakable";
 import { StreamingAudioPlayer } from "../tts/streaming-player";
 import { shutdownTtsClient, ttsClient } from "../tts/tts-client";
+import { resolveLocalSpeechModelId } from "../tts/vocalizer";
 import { encodeWav } from "../tts/wav";
+
+import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
 
 export default class Say extends Command {
 	static description = commandHelp.description;
@@ -28,6 +33,7 @@ export default class Say extends Command {
 
 	static flags = {
 		voice: Flags.string({ description: "Voice id", options: TTS_LOCAL_VOICE_VALUES }),
+		speed: Flags.string({ description: "Speaking rate, 0.5–2.5 (1 = normal; default: tts.localSpeed)" }),
 		model: Flags.string({ description: "Local TTS model key" }),
 		file: Flags.string({ char: "f", description: "Read the text to speak from this file" }),
 		out: Flags.string({ char: "o", description: "Write WAV to this path instead of playing" }),
@@ -35,7 +41,7 @@ export default class Say extends Command {
 
 	static examples = [
 		'omp say "hello world"',
-		"omp say --file notes.md --voice bm_fable",
+		"omp say --file notes.md --voice bm_fable --speed 1.25",
 		'omp say "hello world" --out /tmp/hello.wav',
 	];
 
@@ -46,9 +52,14 @@ export default class Say extends Command {
 			process.exit(1);
 		}
 
-		await Settings.init({ cwd: getProjectDir() });
-		const model = flags.model ?? settings.get("tts.localModel");
-		const voice = flags.voice ?? settings.get("tts.localVoice");
+		const settings = await Settings.init({ cwd: getProjectDir() });
+		const model = flags.model ?? (await this.#resolveDefaultModel(settings));
+		const voice = flags.voice ?? cfgTtsLocalVoice.get(settings);
+		const speed = flags.speed === undefined ? cfgTtsLocalSpeed.get(settings) : Number(flags.speed);
+		if (!Number.isFinite(speed) || speed <= 0) {
+			process.stderr.write(chalk.red(`error: invalid --speed: ${flags.speed}\n`));
+			process.exit(1);
+		}
 
 		let exitCode = 0;
 		const unsubscribe = ttsClient.onProgress(event => {
@@ -72,7 +83,7 @@ export default class Say extends Command {
 				return;
 			}
 
-			const stream = ttsClient.synthesizeStream(model, { voice });
+			const stream = ttsClient.synthesizeStream(model, { voice, speed });
 			for (const segment of segments) stream.push(segment);
 			stream.end();
 
@@ -134,6 +145,16 @@ export default class Say extends Command {
 		}
 
 		if (exitCode !== 0) process.exit(exitCode);
+	}
+
+	async #resolveDefaultModel(settings: Settings): Promise<string> {
+		const authStorage = await discoverAuthStorage(undefined, { settings });
+		try {
+			const registry = new ModelRegistry(authStorage, undefined, { settings });
+			return resolveLocalSpeechModelId({ settings, registry });
+		} finally {
+			authStorage.close();
+		}
 	}
 
 	#synthesisFailed(model: string): void {

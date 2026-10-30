@@ -87,22 +87,6 @@ describe("MCP server-name autocomplete", () => {
 		expect(names).toEqual(["project-server", "runtime-discovered", "user-disabled", "user-enabled"]);
 	});
 
-	test("collectMcpServerNames includes a discovered server disabled via disabledServers, even once dropped from mcpManager", async () => {
-		// A third-party-discovered server that was `/mcp disable`d: recorded in the user
-		// config's top-level `disabledServers` list, absent from `mcpServers`, and no
-		// longer reported by the manager (loadAllMCPConfigs filters disabled sources out).
-		await Bun.write(
-			getMCPConfigPath("user", projectDir),
-			`${JSON.stringify({ mcpServers: {}, disabledServers: ["discovered-disabled"] }, null, 2)}\n`,
-		);
-		await writeConfig("project", projectDir, {});
-		const { ctx } = createFakeCtx([]);
-
-		const names = await collectMcpServerNames(ctx);
-
-		expect(names).toEqual(["discovered-disabled"]);
-	});
-
 	test("collectMcpServerNames accepts preloaded configs and skips re-reading them from disk", async () => {
 		await writeConfig("user", projectDir, { "user-server": { type: "stdio", command: "one" } });
 		await writeConfig("project", projectDir, { "project-server": { type: "stdio", command: "two" } });

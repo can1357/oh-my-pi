@@ -1,6 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type {
-	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
@@ -9,7 +8,7 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
-import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+import { buildUsageAmount, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const QUOTAS_URL = "https://api.synthetic.new/v2/quotas";
 
@@ -18,35 +17,6 @@ function parseDollarAmount(value: unknown): number | undefined {
 	const trimmed = value.replace(/^\$/, "").trim();
 	const parsed = Number(trimmed);
 	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function buildUsageAmount(args: {
-	used: number | undefined;
-	limit: number | undefined;
-	remaining: number | undefined;
-	usedFraction: number | undefined;
-	unit: UsageAmount["unit"];
-}): UsageAmount {
-	let usedFraction = args.usedFraction;
-	if (usedFraction === undefined && args.used !== undefined && args.limit !== undefined && args.limit > 0) {
-		usedFraction = Math.min(args.used / args.limit, 1);
-	}
-	const remainingFraction = usedFraction !== undefined ? Math.max(1 - usedFraction, 0) : undefined;
-	return {
-		...(args.used !== undefined ? { used: args.used } : {}),
-		...(args.limit !== undefined ? { limit: args.limit } : {}),
-		...(args.remaining !== undefined ? { remaining: args.remaining } : {}),
-		...(usedFraction !== undefined ? { usedFraction } : {}),
-		...(remainingFraction !== undefined ? { remainingFraction } : {}),
-		unit: args.unit,
-	};
-}
-
-function getUsageStatus(usedFraction: number | undefined): UsageStatus | undefined {
-	if (usedFraction === undefined) return undefined;
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
 }
 
 function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["provider"]): UsageLimit | null {
@@ -67,14 +37,8 @@ function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["pro
 		durationMs: 5 * HOUR_MS,
 		...(nextTickAt !== undefined ? { resetsAt: nextTickAt, resetLabel: "tick" } : {}),
 	};
-	const amount = buildUsageAmount({
-		used,
-		limit: max,
-		remaining,
-		usedFraction: undefined,
-		unit: "requests",
-	});
-	const status: UsageStatus = limited ? "exhausted" : (getUsageStatus(amount.usedFraction) ?? "ok");
+	const amount = buildUsageAmount({ used, limit: max, remaining, unit: "requests" });
+	const status: UsageStatus = limited ? "exhausted" : usageStatus(amount.usedFraction ?? 0);
 	return {
 		id: "synthetic:requests:5h",
 		label: "Synthetic Requests",
@@ -117,7 +81,7 @@ function parseWeeklyTokenLimit(raw: unknown, provider: UsageFetchParams["provide
 		scope: { provider, windowId: "7d", shared: true },
 		window,
 		amount,
-		status: getUsageStatus(amount.usedFraction),
+		status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 	};
 }
 

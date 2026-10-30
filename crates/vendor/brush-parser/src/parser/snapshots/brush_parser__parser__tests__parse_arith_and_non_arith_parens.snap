@@ -1,0 +1,126 @@
+---
+source: brush-parser/src/parser/mod.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "( : && ( (( 0 )) || : ) )",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(Subshell(SubshellCommand(
+                list: CompoundList([
+                  CompoundListItem(AndOrList(
+                    first: Pipeline(
+                      seq: [
+                        Simple(SimpleCommand(
+                          word_or_name: Some(Word(
+                            value: ":",
+                            loc: Some(SourceSpan(
+                              start: SourcePosition(
+                                index: 2,
+                                line: 1,
+                                column: 3,
+                              ),
+                              end: SourcePosition(
+                                index: 3,
+                                line: 1,
+                                column: 4,
+                              ),
+                            )),
+                          )),
+                        )),
+                      ],
+                    ),
+                    additional: [
+                      And(Pipeline(
+                        seq: [
+                          Compound(Subshell(SubshellCommand(
+                            list: CompoundList([
+                              CompoundListItem(AndOrList(
+                                first: Pipeline(
+                                  seq: [
+                                    Compound(Arithmetic(ArithmeticCommand(
+                                      expr: UnexpandedArithmeticExpr(
+                                        value: "0",
+                                      ),
+                                      loc: SourceSpan(
+                                        start: SourcePosition(
+                                          index: 9,
+                                          line: 1,
+                                          column: 10,
+                                        ),
+                                        end: SourcePosition(
+                                          index: 16,
+                                          line: 1,
+                                          column: 17,
+                                        ),
+                                      ),
+                                    )), None),
+                                  ],
+                                ),
+                                additional: [
+                                  Or(Pipeline(
+                                    seq: [
+                                      Simple(SimpleCommand(
+                                        word_or_name: Some(Word(
+                                          value: ":",
+                                          loc: Some(SourceSpan(
+                                            start: SourcePosition(
+                                              index: 20,
+                                              line: 1,
+                                              column: 21,
+                                            ),
+                                            end: SourcePosition(
+                                              index: 21,
+                                              line: 1,
+                                              column: 22,
+                                            ),
+                                          )),
+                                        )),
+                                      )),
+                                    ],
+                                  )),
+                                ],
+                              ), Sequence),
+                            ]),
+                            loc: SourceSpan(
+                              start: SourcePosition(
+                                index: 7,
+                                line: 1,
+                                column: 8,
+                              ),
+                              end: SourcePosition(
+                                index: 23,
+                                line: 1,
+                                column: 24,
+                              ),
+                            ),
+                          )), None),
+                        ],
+                      )),
+                    ],
+                  ), Sequence),
+                ]),
+                loc: SourceSpan(
+                  start: SourcePosition(
+                    index: 0,
+                    line: 1,
+                    column: 1,
+                  ),
+                  end: SourcePosition(
+                    index: 25,
+                    line: 1,
+                    column: 26,
+                  ),
+                ),
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

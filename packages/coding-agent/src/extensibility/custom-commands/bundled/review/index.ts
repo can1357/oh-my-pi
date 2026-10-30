@@ -1,284 +1,59 @@
-/**
- * /review command - Interactive code review launcher
- *
- * Provides a menu to select review mode:
- * 1. Review against a base branch (PR style)
- * 2. Review uncommitted changes
- * 3. Review a specific commit
- * 4. Custom review instructions
- *
- * Runs VCS diffs upfront, parses results, filters noise, and provides
- * rich context for the orchestrating agent to distribute work across
- * multiple reviewer agents based on diff weight and locality.
- */
-
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { findScopedSettings } from "../../../../config/settings";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
+import { parseMrUrl } from "../../../../internal-urls/mr-protocol";
+import { parseInternalUrl } from "../../../../internal-urls/parse";
 import reviewCustomRequestTemplate from "../../../../prompts/review-custom-request.md" with { type: "text" };
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
-import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface FileDiff {
-	path: string;
-	linesAdded: number;
-	linesRemoved: number;
-	hunks: string;
-}
-
-interface DiffStats {
-	files: FileDiff[];
-	totalAdded: number;
-	totalRemoved: number;
-	excluded: { path: string; reason: string; linesAdded: number; linesRemoved: number }[];
-}
-
-interface CurrentReviewDiff {
-	diffInstruction: string;
-	diffText: string;
-	emptyMessage?: string;
-	mode: string;
-}
-
-interface ReviewPrRef {
-	repo: string;
-	number: number;
-	raw: string;
-	kind: "github-url" | "pr-url";
-}
+import * as glab from "../../../../tools/glab-mr";
+import { github } from "../../../../utils/github";
+import { gitlab } from "../../../../utils/gitlab";
+import { buildReviewPrompt } from "./prompt";
+import {
+	createResolvedReviewTarget,
+	getReviewTargetIssue,
+	LOCAL_REVIEW_CHOICES,
+	type LocalReviewKind,
+	type ResolvedReviewTarget,
+	readUncommittedReviewTarget,
+	resolveLocalReviewTarget,
+} from "./target";
 
 interface ParsedReviewArgs {
 	prRef: ReviewPrRef | undefined;
 	extraInstructions: string;
 }
 
-type ReviewMenuChoice =
-	| { kind: "detected-pr"; ref: ReviewPrRef }
-	| { kind: "base-branch" }
-	| { kind: "uncommitted" }
-	| { kind: "commit" }
-	| { kind: "custom" };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Exclusion patterns for noise files
-// ─────────────────────────────────────────────────────────────────────────────
-
-const EXCLUDED_PATTERNS: { pattern: RegExp; reason: string }[] = [
-	// Lock files
-	{ pattern: /\.lock$/, reason: "lock file" },
-	{ pattern: /-lock\.(json|yaml|yml)$/, reason: "lock file" },
-	{ pattern: /package-lock\.json$/, reason: "lock file" },
-	{ pattern: /yarn\.lock$/, reason: "lock file" },
-	{ pattern: /pnpm-lock\.yaml$/, reason: "lock file" },
-	{ pattern: /Cargo\.lock$/, reason: "lock file" },
-	{ pattern: /Gemfile\.lock$/, reason: "lock file" },
-	{ pattern: /poetry\.lock$/, reason: "lock file" },
-	{ pattern: /composer\.lock$/, reason: "lock file" },
-	{ pattern: /flake\.lock$/, reason: "lock file" },
-
-	// Generated/build artifacts
-	{ pattern: /\.min\.(js|css)$/, reason: "minified" },
-	{ pattern: /\.generated\./, reason: "generated" },
-	{ pattern: /\.snap$/, reason: "snapshot" },
-	{ pattern: /\.map$/, reason: "source map" },
-	{ pattern: /^dist\//, reason: "build output" },
-	{ pattern: /^build\//, reason: "build output" },
-	{ pattern: /^out\//, reason: "build output" },
-	{ pattern: /node_modules\//, reason: "vendor" },
-	{ pattern: /vendor\//, reason: "vendor" },
-
-	// Binary/assets (usually shown as binary in diff anyway)
-	{ pattern: /\.(png|jpg|jpeg|gif|ico|webp|avif)$/i, reason: "image" },
-	{ pattern: /\.(woff|woff2|ttf|eot|otf)$/i, reason: "font" },
-	{ pattern: /\.(pdf|zip|tar|gz|rar|7z)$/i, reason: "binary" },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Diff parsing
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Check if a file path should be excluded from review.
- * Returns the exclusion reason if excluded, undefined otherwise.
- */
-function getExclusionReason(path: string): string | undefined {
-	for (const { pattern, reason } of EXCLUDED_PATTERNS) {
-		if (pattern.test(path)) return reason;
-	}
-	return undefined;
+/** A GitHub pull request or GitLab merge request to review. */
+export interface ReviewPrRef {
+	forge: "github" | "gitlab";
+	/** GitHub `[HOST/]OWNER/REPO`, or GitLab `<host>/<namespace…>/<project>`. */
+	repo: string;
+	/** PR number or MR iid. */
+	number: number;
+	raw: string;
+	kind: "github-url" | "pr-url" | "gitlab-url" | "mr-url";
 }
 
-/**
- * Parse unified diff output into per-file stats.
- * Splits on file boundaries, counts +/- lines, and filters excluded files.
- */
-function parseDiff(diffOutput: string): DiffStats {
-	const files: FileDiff[] = [];
-	const excluded: DiffStats["excluded"] = [];
-	let totalAdded = 0;
-	let totalRemoved = 0;
+/** A diff the reviewer can target: a detected PR/MR or one local diff kind. */
+export type ReviewTargetChoice =
+	| { label: string; kind: "pr"; ref: ReviewPrRef }
+	| { label: string; kind: LocalReviewKind };
 
-	// Split by file boundary: "diff --git a/... b/..."
-	const fileChunks = diffOutput.split(/^diff --git /m).filter(Boolean);
-
-	for (const chunk of fileChunks) {
-		// Extract file path from "a/path b/path" line
-		const headerMatch = chunk.match(/^a\/(.+?) b\/(.+)/);
-		if (!headerMatch) continue;
-
-		const path = headerMatch[2];
-
-		// Count added/removed lines (lines starting with + or - but not ++ or --)
-		let linesAdded = 0;
-		let linesRemoved = 0;
-
-		const lines = chunk.split("\n");
-		for (const line of lines) {
-			if (line.startsWith("+") && !line.startsWith("+++")) {
-				linesAdded++;
-			} else if (line.startsWith("-") && !line.startsWith("---")) {
-				linesRemoved++;
-			}
-		}
-
-		const exclusionReason = getExclusionReason(path);
-		if (exclusionReason) {
-			excluded.push({ path, reason: exclusionReason, linesAdded, linesRemoved });
-		} else {
-			files.push({
-				path,
-				linesAdded,
-				linesRemoved,
-				hunks: `diff --git ${chunk}`,
-			});
-			totalAdded += linesAdded;
-			totalRemoved += linesRemoved;
-		}
-	}
-
-	return { files, totalAdded, totalRemoved, excluded };
-}
-
-/**
- * Get file extension for display purposes.
- */
-function getFileExt(path: string): string {
-	const match = path.match(/\.([^.]+)$/);
-	return match ? match[1] : "";
-}
-
-/**
- * Determine recommended number of reviewer agents based on diff weight.
- * Uses total lines changed as the primary metric.
- */
-function getRecommendedAgentCount(stats: DiffStats): number {
-	const totalLines = stats.totalAdded + stats.totalRemoved;
-	const fileCount = stats.files.length;
-
-	// Heuristics:
-	// - Tiny (<100 lines or 1-2 files): 1 agent
-	// - Small (<500 lines): 1-2 agents
-	// - Medium (<2000 lines): 2-4 agents
-	// - Large (<5000 lines): 4-8 agents
-	// - Huge (>5000 lines): 8-16 agents
-
-	if (totalLines < 100 || fileCount <= 2) return 1;
-	if (totalLines < 500) return Math.min(2, fileCount);
-	if (totalLines < 2000) return Math.min(4, Math.ceil(fileCount / 3));
-	if (totalLines < 5000) return Math.min(8, Math.ceil(fileCount / 2));
-	return Math.min(16, fileCount);
-}
-
-/**
- * Extract first N lines of actual diff content (excluding headers) for preview.
- */
-function getDiffPreview(hunks: string, maxLines: number): string {
-	const lines = hunks.split("\n");
-	const contentLines: string[] = [];
-
-	for (const line of lines) {
-		// Skip diff headers, keep actual content
-		if (
-			line.startsWith("diff --git") ||
-			line.startsWith("index ") ||
-			line.startsWith("---") ||
-			line.startsWith("+++") ||
-			line.startsWith("@@")
-		) {
-			continue;
-		}
-		contentLines.push(line);
-		if (contentLines.length >= maxLines) break;
-	}
-
-	return contentLines.join("\n");
-}
-
-// Thresholds for diff inclusion
-const MAX_DIFF_CHARS = 50_000; // Don't include diff above this
-const MAX_FILES_FOR_INLINE_DIFF = 20; // Don't include diff if more files than this
-const DEFAULT_LARGE_DIFF_INSTRUCTION = "MUST run `git diff`/`git show` for assigned files";
-const DEFAULT_CONTEXT_INSTRUCTION = "MAY read full file context as needed via `read`";
-const GIT_UNCOMMITTED_DIFF_INSTRUCTION =
-	"MUST run both `git diff -- <path>` and `git diff --cached -- <path>` for assigned files";
-const JJ_UNCOMMITTED_DIFF_INSTRUCTION = "MUST run `jj --ignore-working-copy diff --git -- <path>` for assigned files";
-
-/**
- * Build the full review prompt with diff stats and distribution guidance.
- */
-function buildReviewPrompt(
-	mode: string,
-	stats: DiffStats,
-	rawDiff: string,
-	options: { additionalInstructions?: string; diffInstruction?: string; contextInstruction?: string } = {},
-): string {
-	const agentCount = getRecommendedAgentCount(stats);
-	const skipDiff = rawDiff.length > MAX_DIFF_CHARS || stats.files.length > MAX_FILES_FOR_INLINE_DIFF;
-	const totalLines = stats.totalAdded + stats.totalRemoved;
-	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / stats.files.length)) : 0;
-
-	const filesWithExt = stats.files.map(f => ({
-		...f,
-		ext: getFileExt(f.path),
-		hunksPreview: skipDiff ? getDiffPreview(f.hunks, linesPerFile) : "",
-	}));
-
-	return prompt.render(reviewRequestTemplate, {
-		mode,
-		files: filesWithExt,
-		excluded: stats.excluded,
-		totalAdded: stats.totalAdded,
-		totalRemoved: stats.totalRemoved,
-		totalLines,
-		agentCount,
-		multiAgent: agentCount > 1,
-		skipDiff,
-		rawDiff: rawDiff.trim(),
-		linesPerFile,
-		additionalInstructions: options.additionalInstructions,
-		diffInstruction: options.diffInstruction ?? DEFAULT_LARGE_DIFF_INSTRUCTION,
-		contextInstruction: options.contextInstruction ?? DEFAULT_CONTEXT_INSTRUCTION,
-	});
-}
-
-function buildCustomReviewPrompt(instructions: string): string {
-	return prompt.render(reviewCustomRequestTemplate, { instructions });
-}
-
-function buildHeadlessReviewPrompt(focus?: string): string {
-	return prompt.render(reviewHeadlessRequestTemplate, { focus });
-}
+export type ReviewChoice = ReviewTargetChoice | { label: string; kind: "custom" };
 
 const REVIEW_CONTEXT_PR_LIMIT = 3;
+const PICK_PR_CHOICE_LABEL = "4. Review a specific PR/MR";
+/** `gh pr list` / `glab mr list` page size. 100 is the per-page maximum of both forges. */
+const PR_PICKER_LIMIT = 100;
 const REPO_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
-const PR_SCHEME_PATTERN = /^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?$/;
-const PR_REF_TEXT_PATTERN = /https:\/\/github\.com\/[^\s<>"']+|pr:\/\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[^\s<>"']+/g;
+const PR_SCHEME_PATTERN =
+	/^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?(?:\?at=\d+)?$/;
+const PR_REF_TEXT_PATTERN =
+	/https:\/\/github\.com\/[^\s<>"']+|pr:\/\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[^\s<>"']+|https:\/\/[^\s<>"'/]+\/[^\s<>"']*\/-\/merge_requests\/[^\s<>"']+|mr:\/\/[^\s<>"']+/g;
 
 function stripTrailingPrRefPunctuation(text: string): string {
 	return text.replace(/[.,)\]>]+$/g, "");
@@ -301,62 +76,83 @@ function parseGithubPrUrl(text: string): ReviewPrRef | undefined {
 	} catch {
 		return undefined;
 	}
-
 	if (url.protocol !== "https:" || url.hostname !== "github.com") return undefined;
-
 	const parts = url.pathname.split("/").filter(Boolean);
 	if (parts.length < 4 || parts[2] !== "pull") return undefined;
-
 	const [owner, repo, , numberPart] = parts;
 	if (!isValidRepoSegment(owner) || !isValidRepoSegment(repo)) return undefined;
-
 	const number = parsePositivePrNumber(numberPart);
 	if (number === undefined) return undefined;
-
-	return { repo: `${owner}/${repo}`, number, raw: text, kind: "github-url" };
+	return { forge: "github", repo: `${owner}/${repo}`, number, raw: text, kind: "github-url" };
 }
 
 function parsePrSchemeRef(text: string): ReviewPrRef | undefined {
 	const match = PR_SCHEME_PATTERN.exec(text);
 	if (!match) return undefined;
-
 	const [, owner, repo, numberPart] = match;
 	const number = parsePositivePrNumber(numberPart);
 	if (number === undefined) return undefined;
-
-	return { repo: `${owner}/${repo}`, number, raw: text, kind: "pr-url" };
+	return { forge: "github", repo: `${owner}/${repo}`, number, raw: text, kind: "pr-url" };
 }
 
-function parseReviewPrRef(text: string): ReviewPrRef | undefined {
+/** `https://<host>/<group…>/<project>/-/merge_requests/<iid>[/…]` */
+function parseGitlabMrUrl(text: string): ReviewPrRef | undefined {
+	let url: URL;
+	try {
+		url = new URL(text);
+	} catch {
+		return undefined;
+	}
+	if (url.protocol !== "https:") return undefined;
+	const parts = url.pathname.split("/").filter(Boolean);
+	const dash = parts.indexOf("-");
+	if (dash < 0 || parts[dash + 1] !== "merge_requests") return undefined;
+	const repo = glab.parseGitlabProjectWebUrl(`${url.origin}/${parts.slice(0, dash).join("/")}`);
+	const number = parsePositivePrNumber(parts[dash + 2]);
+	if (!repo || number === undefined) return undefined;
+	return { forge: "gitlab", repo, number, raw: text, kind: "gitlab-url" };
+}
+
+/** Fully qualified `mr://<host>/<group…>/<project>/<iid>/diff[/…]`; the short `mr://<iid>/…` form names no project. */
+function parseMrSchemeRef(text: string): ReviewPrRef | undefined {
+	if (!text.startsWith("mr://")) return undefined;
+	try {
+		const parsed = parseMrUrl(parseInternalUrl(text));
+		if (!parsed.project) return undefined;
+		return { forge: "gitlab", repo: parsed.project, number: parsed.iid, raw: text, kind: "mr-url" };
+	} catch {
+		return undefined;
+	}
+}
+
+export function parseReviewPrRef(text: string): ReviewPrRef | undefined {
 	const candidate = stripTrailingPrRefPunctuation(text);
-	return parseGithubPrUrl(candidate) ?? parsePrSchemeRef(candidate);
+	return (
+		parseGithubPrUrl(candidate) ??
+		parsePrSchemeRef(candidate) ??
+		parseGitlabMrUrl(candidate) ??
+		parseMrSchemeRef(candidate)
+	);
 }
 
-function buildPrLargeDiffInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST read assigned PR file diffs from \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\`; NEVER use local \`git diff\`/\`git show\` for PR diff content`;
+/** `PR owner/repo#N` for GitHub, `MR host/group/project!N` for GitLab. */
+export function formatReviewRefLabel(ref: ReviewPrRef): string {
+	return ref.forge === "gitlab" ? `MR ${ref.repo}!${ref.number}` : `PR ${ref.repo}#${ref.number}`;
 }
 
-function buildPrContextInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST NOT read local workspace files for PR file context; use the fetched PR diff and \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\` only`;
-}
-
-function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
+export function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
 	let prRef: ReviewPrRef | undefined;
 	let prRefIndex = -1;
-	for (const [idx, arg] of args.entries()) {
+	for (const [index, arg] of args.entries()) {
 		const parsed = parseReviewPrRef(arg);
-		if (parsed) {
-			prRef = parsed;
-			prRefIndex = idx;
-			break;
-		}
+		if (!parsed) continue;
+		prRef = parsed;
+		prRefIndex = index;
+		break;
 	}
-
 	return {
 		prRef,
-		extraInstructions: args.filter((_, idx) => idx !== prRefIndex).join(" "),
+		extraInstructions: args.filter((_, index) => index !== prRefIndex).join(" "),
 	};
 }
 
@@ -366,317 +162,420 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 	);
 }
 
-function buildReviewPromptFromDiff(
-	ctx: HookCommandContext,
-	mode: string,
-	diffText: string,
-	extraInstructions: string | undefined,
-	emptyMessage: string,
-	options: { diffInstruction?: string; filteredMessage?: string; contextInstruction?: string } = {},
-): string | undefined {
-	if (!diffText.trim()) {
-		if (ctx.hasUI) ctx.ui.notify(emptyMessage, "warning");
-		return undefined;
+/** Fetch one PR/MR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
+export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
+	const label = formatReviewRefLabel(ref);
+	// Session settings are the active scope (set around `/review`). Without them,
+	// `resolveCacheTtl(undefined)` uses the default enabled cache and a kill switch
+	// still stores a generation.
+	const settings = findScopedSettings(cwd);
+	if (ref.forge === "gitlab") {
+		try {
+			const lookup = await glab.getOrFetchMrDiff({
+				cwd,
+				project: ref.repo,
+				iid: ref.number,
+				...(settings ? { settings } : {}),
+			});
+			return createResolvedReviewTarget(
+				"pr",
+				label,
+				lookup.payload.unified,
+				`${label} has no diff content available`,
+				{
+					prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
+				},
+			);
+		} catch (error) {
+			throw new Error(
+				`Failed to fetch MR diff for ${ref.repo}!${ref.number}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
-
-	const stats = parseDiff(diffText);
-	if (stats.files.length === 0) {
-		if (ctx.hasUI)
-			ctx.ui.notify(options.filteredMessage ?? "No reviewable files (all changes filtered out)", "warning");
-		return undefined;
+	try {
+		const lookup = await gh.getOrFetchPrDiff({
+			cwd,
+			repo: ref.repo,
+			number: ref.number,
+			...(settings ? { settings } : {}),
+		});
+		const generationAt =
+			lookup.status === "disabled"
+				? null
+				: gh.retainPrDiffGeneration({
+						repo: ref.repo,
+						number: ref.number,
+						rendered: lookup.rendered,
+						files: lookup.payload.files,
+						fetchedAt: lookup.fetchedAt,
+					});
+		return createResolvedReviewTarget("pr", label, lookup.payload.unified, `${label} has no diff content available`, {
+			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
+			prDiffQuery: generationAt !== null ? `?at=${generationAt}` : "",
+		});
+	} catch (error) {
+		throw new Error(
+			`Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
-
-	return buildReviewPrompt(mode, stats, diffText, {
-		additionalInstructions: extraInstructions,
-		diffInstruction: options.diffInstruction,
-		contextInstruction: options.contextInstruction,
-	});
 }
 
-async function buildPrReviewPrompt(
-	api: CustomCommandAPI,
+/** Interactive wrapper: notifies instead of throwing when a UI is available. */
+export async function resolvePrReviewTarget(
+	cwd: string,
 	ctx: HookCommandContext,
 	ref: ReviewPrRef,
-	extraInstructions: string,
-): Promise<string | undefined> {
-	let diffText: string;
+): Promise<ResolvedReviewTarget | undefined> {
 	try {
-		const lookup = await gh.getOrFetchPrDiff({ cwd: api.cwd, repo: ref.repo, number: ref.number });
-		diffText = lookup.payload.unified;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		const failure = `Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${message}`;
-		if (ctx.hasUI) {
-			ctx.ui.notify(failure, "error");
-			return undefined;
-		}
-		return failure;
+		return await fetchPrReviewTarget(cwd, ref);
+	} catch (error) {
+		if (!ctx.hasUI) throw error;
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		return undefined;
 	}
-
-	const promptText = buildReviewPromptFromDiff(
-		ctx,
-		`PR ${ref.repo}#${ref.number}`,
-		diffText,
-		extraInstructions || undefined,
-		`PR ${ref.repo}#${ref.number} has no diff content available`,
-		{ diffInstruction: buildPrLargeDiffInstruction(ref), contextInstruction: buildPrContextInstruction(ref) },
-	);
-	if (promptText !== undefined || ctx.hasUI) return promptText;
-	return `Unable to review PR ${ref.repo}#${ref.number}: no diff content available.`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
 }
 
 function getTextContentParts(content: unknown): string[] {
 	if (typeof content === "string") return [content];
 	if (!Array.isArray(content)) return [];
-
 	const parts: string[] = [];
 	for (const item of content) {
-		if (isRecord(item) && item.type === "text" && typeof item.text === "string") {
-			parts.push(item.text);
-		}
+		if (isRecord(item) && item.type === "text" && typeof item.text === "string") parts.push(item.text);
 	}
 	return parts;
 }
 
-function findRecentPrRefs(ctx: HookCommandContext, limit: number): ReviewPrRef[] {
+export function findRecentPrRefs(ctx: HookCommandContext, limit: number): ReviewPrRef[] {
 	const refs: ReviewPrRef[] = [];
 	const seen = new Set<string>();
 	const entries = ctx.sessionManager.getBranch();
-
-	for (let idx = entries.length - 1; idx >= 0 && refs.length < limit; idx--) {
-		const entry = entries[idx];
+	for (let index = entries.length - 1; index >= 0 && refs.length < limit; index--) {
+		const entry = entries[index];
 		if (entry?.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
-
 		const parts = getTextContentParts(message.content);
-		for (let partIdx = parts.length - 1; partIdx >= 0; partIdx--) {
-			const part = parts[partIdx];
-			const partRefs = extractReviewPrRefsFromText(part);
-			for (let refIdx = partRefs.length - 1; refIdx >= 0; refIdx--) {
-				const ref = partRefs[refIdx];
-				const key = `${ref.repo.toLowerCase()}#${ref.number}`;
+		for (let partIndex = parts.length - 1; partIndex >= 0 && refs.length < limit; partIndex--) {
+			const partRefs = extractReviewPrRefsFromText(parts[partIndex]!);
+			for (let refIndex = partRefs.length - 1; refIndex >= 0 && refs.length < limit; refIndex--) {
+				const ref = partRefs[refIndex]!;
+				const key = `${ref.forge}:${ref.repo.toLowerCase()}#${ref.number}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
 				refs.push(ref);
-				if (refs.length >= limit) break;
 			}
-			if (refs.length >= limit) break;
 		}
 	}
-
 	return refs;
+}
+
+interface PrListItem {
+	number?: number;
+	title?: string;
+	author?: { login?: string } | null;
+	isDraft?: boolean;
+	url?: string;
+}
+
+/** One row of `glab mr list -F json` (GitLab REST list-MRs shape). */
+interface GitlabMrListItem {
+	iid?: number;
+	title?: string;
+	author?: { username?: string } | null;
+	draft?: boolean;
+	web_url?: string;
+}
+
+type PickablePr = PrListItem & { number: number };
+
+function formatPrPickerLabel(item: PickablePr, prefix: string): string {
+	const collapsed = (item.title ?? "(no title)").replace(/[\r\n\x00-\x1F\x7F]+/g, " ");
+	const singleLine = replaceTabs(collapsed).replace(/\s+/g, " ").trim() || "(no title)";
+	const title = truncateToWidth(singleLine, TRUNCATE_LENGTHS.TITLE);
+	const author = item.author?.login?.trim() || "unknown";
+	const draftSuffix = item.isDraft ? "  [draft]" : "";
+	return `${prefix}${item.number}  ${title}  @${author}${draftSuffix}`;
+}
+
+function prNumberRef(repo: string, number: number): ReviewPrRef {
+	return { forge: "github", repo, number, raw: `pr://${repo}/${number}`, kind: "pr-url" };
+}
+
+function mrNumberRef(project: string, iid: number): ReviewPrRef {
+	return { forge: "gitlab", repo: project, number: iid, raw: `mr://${project}/${iid}`, kind: "mr-url" };
+}
+
+function pickablePrs(items: PrListItem[]): PickablePr[] {
+	return items.filter(
+		(item): item is PickablePr =>
+			typeof item.number === "number" && Number.isSafeInteger(item.number) && item.number > 0,
+	);
+}
+
+/** The forge-specific half of the open PR/MR picker. */
+interface ChangeRequestSource {
+	repo: string;
+	plural: "pull requests" | "merge requests";
+	prefix: "#" | "!";
+	searchPrompt: string;
+	/** One page of open items, optionally narrowed by a server-side search; throws on CLI failure. */
+	fetch(search: string | undefined): Promise<PrListItem[]>;
+	refFor(item: PickablePr): ReviewPrRef;
+	refForNumber(number: number): ReviewPrRef;
+}
+
+/**
+ * GitHub first; GitLab only when `gh` cannot resolve a repository and `glab`
+ * is installed, so a checkout with both remotes keeps today's GitHub picker.
+ */
+async function resolveChangeRequestSource(
+	cwd: string,
+	ctx: HookCommandContext,
+): Promise<ChangeRequestSource | undefined> {
+	let ghMessage: string;
+	try {
+		const repo = await gh.resolveDefaultRepoMemoized(cwd);
+		return {
+			repo,
+			plural: "pull requests",
+			prefix: "#",
+			searchPrompt: "Search open pull requests — title, author, or #123",
+			fetch: search => {
+				const args = ["pr", "list", "--repo", repo, "--state", "open", "--limit", String(PR_PICKER_LIMIT)];
+				args.push("--json", "number,title,author,isDraft,url");
+				if (search !== undefined) args.push("--search", search);
+				return github.json<PrListItem[]>(cwd, args, undefined, { repoProvided: true });
+			},
+			refFor: item => (item.url ? parseGithubPrUrl(item.url) : undefined) ?? prNumberRef(repo, item.number),
+			refForNumber: number => prNumberRef(repo, number),
+		};
+	} catch (error) {
+		ghMessage = error instanceof Error ? error.message : String(error);
+	}
+	if (!gitlab.available()) {
+		ctx.ui.notify(`Failed to resolve repository for PR picker: ${ghMessage}`, "error");
+		return undefined;
+	}
+	try {
+		const project = await glab.resolveDefaultGitlabProjectMemoized(cwd);
+		return {
+			repo: project,
+			plural: "merge requests",
+			prefix: "!",
+			searchPrompt: "Search open merge requests — title, description, or !123",
+			fetch: async search => {
+				const args = ["mr", "list", "-R", glab.formatGitlabProjectArg(project), "-F", "json"];
+				args.push("-P", String(PR_PICKER_LIMIT));
+				if (search !== undefined) args.push("--search", search);
+				const items = await gitlab.json<GitlabMrListItem[]>(cwd, args);
+				return items.map(item => ({
+					number: item.iid,
+					title: item.title,
+					author: { login: item.author?.username },
+					isDraft: item.draft,
+					url: item.web_url,
+				}));
+			},
+			refFor: item => mrNumberRef(project, item.number),
+			refForNumber: iid => mrNumberRef(project, iid),
+		};
+	} catch (error) {
+		const glMessage = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`Failed to resolve repository for PR picker: GitHub: ${ghMessage}; GitLab: ${glMessage}`, "error");
+		return undefined;
+	}
+}
+
+/**
+ * List the repository's open PRs/MRs with a server-side search row and a
+ * `#123`/`!123` fast-path. Local type-to-filter only covers the fetched page;
+ * the search row reaches items beyond it, and a number skips listing entirely
+ * because the forge list search never matches item numbers.
+ */
+async function selectPullRequestRef(cwd: string, ctx: HookCommandContext): Promise<ReviewPrRef | undefined> {
+	const source = await resolveChangeRequestSource(cwd, ctx);
+	if (!source) return undefined;
+	const { repo, plural, prefix } = source;
+	const searchEntry = `Search open ${plural}…`;
+	/** Notifies and resolves `undefined` on failure. */
+	const listOpen = async (search: string | undefined): Promise<PickablePr[] | undefined> => {
+		ctx.ui.setStatus("review", `Loading open ${plural}…`);
+		try {
+			return pickablePrs(await source.fetch(search));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Failed to list open ${plural} in ${repo}: ${message}`, "error");
+			return undefined;
+		} finally {
+			ctx.ui.setStatus("review", undefined);
+		}
+	};
+	const openPrs = await listOpen(undefined);
+	if (openPrs === undefined) return undefined;
+	if (openPrs.length === 0) {
+		ctx.ui.notify(`No open ${plural} in ${repo}`, "warning");
+		return undefined;
+	}
+	let activeQuery: string | undefined;
+	let currentPrs = openPrs;
+	for (;;) {
+		const rows = currentPrs.map(item => ({ label: formatPrPickerLabel(item, prefix), item }));
+		const title =
+			activeQuery === undefined
+				? `Open ${plural} in ${repo}`
+				: `Open ${plural} in ${repo} matching "${activeQuery}"`;
+		const selected = await ctx.ui.select(title, [...rows.map(row => row.label), searchEntry]);
+		if (selected === undefined) return undefined;
+		if (selected !== searchEntry) {
+			const match = rows.find(row => row.label === selected);
+			if (!match) return undefined;
+			return source.refFor(match.item);
+		}
+		// The hint rides in the title: `HookInputComponent` accepts a placeholder
+		// and never renders it, so a second argument would be invisible.
+		const input = await ctx.ui.input(source.searchPrompt);
+		if (input === undefined) continue;
+		const query = input.trim();
+		if (query === "") {
+			activeQuery = undefined;
+			currentPrs = openPrs;
+			continue;
+		}
+		const number = parsePositivePrNumber(query.startsWith(prefix) ? query.slice(1) : query);
+		if (number !== undefined) return source.refForNumber(number);
+		const matches = await listOpen(query);
+		// The failure was already reported; stay in the picker on the list shown before.
+		if (matches === undefined) continue;
+		if (matches.length === 0) {
+			ctx.ui.notify(`No open ${plural} matching "${query}" in ${repo}`, "warning");
+			activeQuery = undefined;
+			currentPrs = openPrs;
+			continue;
+		}
+		activeQuery = query;
+		currentPrs = matches;
+	}
+}
+
+type ReviewMenuChoice = ReviewChoice | { label: string; kind: "pick-pr" };
+
+/**
+ * Review target menu shared by `/review` and `/annotate code-review`. Picking
+ * "Review a specific PR/MR" opens the open-PR/MR picker and resolves to a `pr`
+ * choice, so callers never see the picker step.
+ */
+export async function selectReviewChoice(ctx: HookCommandContext, cwd: string): Promise<ReviewTargetChoice | undefined>;
+export async function selectReviewChoice(
+	ctx: HookCommandContext,
+	cwd: string,
+	options: { includeCustom: boolean },
+): Promise<ReviewChoice | undefined>;
+export async function selectReviewChoice(
+	ctx: HookCommandContext,
+	cwd: string,
+	options: { includeCustom: boolean } = { includeCustom: false },
+): Promise<ReviewChoice | undefined> {
+	const choices: ReviewMenuChoice[] = [
+		...findRecentPrRefs(ctx, REVIEW_CONTEXT_PR_LIMIT).map(ref => ({
+			label: `Review ${formatReviewRefLabel(ref)} from conversation`,
+			kind: "pr" as const,
+			ref,
+		})),
+		...LOCAL_REVIEW_CHOICES.map(choice => ({ label: choice.label, kind: choice.kind })),
+		{ label: PICK_PR_CHOICE_LABEL, kind: "pick-pr" },
+	];
+	if (options.includeCustom) choices.push({ label: "5. Custom review instructions", kind: "custom" });
+	const selected = await ctx.ui.select(
+		"Review Mode",
+		choices.map(choice => choice.label),
+	);
+	const choice = choices.find(candidate => candidate.label === selected);
+	if (choice?.kind !== "pick-pr") return choice;
+	const ref = await selectPullRequestRef(cwd, ctx);
+	return ref ? { label: `Review ${formatReviewRefLabel(ref)}`, kind: "pr", ref } : undefined;
+}
+
+function reviewTargetPrompt(
+	ctx: HookCommandContext,
+	target: ResolvedReviewTarget,
+	instructions?: string,
+): string | undefined {
+	const issue = getReviewTargetIssue(target);
+	if (issue) {
+		if (ctx.hasUI) ctx.ui.notify(issue, "warning");
+		return undefined;
+	}
+	return buildReviewPrompt(target, instructions);
+}
+
+function buildHeadlessReviewPrompt(focus?: string): string {
+	return prompt.render(reviewHeadlessRequestTemplate, { focus });
+}
+
+/**
+ * `api.cwd` freezes at command-load time; after /move or /wt the live session
+ * cwd comes from the session manager (issue #12501).
+ */
+export function liveCommandCwd(api: CustomCommandAPI, ctx: HookCommandContext): string {
+	return ctx.sessionManager?.getCwd?.() || api.cwd;
+}
+
+function buildCustomReviewPrompt(instructions: string): string {
+	return prompt.render(reviewCustomRequestTemplate, { instructions });
 }
 
 export class ReviewCommand implements CustomCommand {
 	name = "review";
 	description = "Launch interactive code review";
 
-	constructor(private api: CustomCommandAPI) {}
+	constructor(private readonly api: CustomCommandAPI) {}
 
 	async execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> {
+		const cwd = liveCommandCwd(this.api, ctx);
 		const parsedArgs = extractReviewPrRefFromArgs(args);
 		if (parsedArgs.prRef) {
-			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
+			try {
+				const target = await resolvePrReviewTarget(cwd, ctx, parsedArgs.prRef);
+				const result = target
+					? reviewTargetPrompt(ctx, target, parsedArgs.extraInstructions || undefined)
+					: undefined;
+				return (
+					result ??
+					(ctx.hasUI
+						? undefined
+						: `Unable to review ${formatReviewRefLabel(parsedArgs.prRef)}: no diff content available.`)
+				);
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
 		}
-
 		const extraInstructions = parsedArgs.extraInstructions || undefined;
-		if (!ctx.hasUI) {
-			return buildHeadlessReviewPrompt(extraInstructions);
-		}
-
-		const choices: Array<{ label: string; value: ReviewMenuChoice }> = [
-			...findRecentPrRefs(ctx, REVIEW_CONTEXT_PR_LIMIT).map(ref => ({
-				label: `Review PR ${ref.repo}#${ref.number} from conversation`,
-				value: { kind: "detected-pr" as const, ref },
-			})),
-			{
-				label: "1. Review against a base branch (PR Style)",
-				value: { kind: "base-branch" },
-			},
-			{
-				label: "2. Review uncommitted changes",
-				value: { kind: "uncommitted" },
-			},
-			{
-				label: "3. Review a specific commit",
-				value: { kind: "commit" },
-			},
-		];
-
-		if (!extraInstructions) {
-			choices.push({
-				label: "4. Custom review instructions",
-				value: { kind: "custom" },
-			});
-		}
-
-		const selected = await ctx.ui.select(
-			"Review Mode",
-			choices.map(choice => choice.label),
-		);
-		if (!selected) return undefined;
-
-		const selectedChoice = choices.find(choice => choice.label === selected)?.value;
+		if (!ctx.hasUI) return buildHeadlessReviewPrompt(extraInstructions);
+		const selectedChoice = await selectReviewChoice(ctx, cwd, { includeCustom: !extraInstructions });
 		if (!selectedChoice) return undefined;
-
-		switch (selectedChoice.kind) {
-			case "detected-pr":
-				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "");
-
-			case "base-branch": {
-				const branches = await getGitBranches(this.api);
-				if (branches.length === 0) {
-					ctx.ui.notify("No git branches found", "error");
-					return undefined;
-				}
-
-				const baseBranch = await ctx.ui.select("Select base branch to compare against", branches);
-				if (!baseBranch) return undefined;
-
-				const currentBranch = await getCurrentBranch(this.api);
-				let diffText: string;
-				try {
-					const repository = vcs.requireGit(this.api.cwd);
-					// PR-style review compares the merge base against the current
-					// branch (`base...head`), so base-only commits are excluded.
-					const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
-					if (!mergeBase) {
-						// No common ancestor: `git diff base...head` aborts here
-						// rather than comparing unrelated trees tip-to-tip.
-						ctx.ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
-						return undefined;
-					}
-					diffText = await repository.diffText({ base: mergeBase, head: currentBranch });
-				} catch (err) {
-					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
-					return undefined;
-				}
-
-				return buildReviewPromptFromDiff(
-					ctx,
-					`Reviewing changes between \`${baseBranch}\` and \`${currentBranch}\` (PR-style)`,
-					diffText,
-					extraInstructions,
-					`No changes between ${baseBranch} and ${currentBranch}`,
-				);
-			}
-
-			case "uncommitted": {
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(err => {
-					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
-					return undefined;
-				});
-				if (!reviewDiff) return undefined;
-
-				return buildReviewPromptFromDiff(
-					ctx,
-					reviewDiff.mode,
-					reviewDiff.diffText,
-					extraInstructions,
-					reviewDiff.emptyMessage ?? "No diff content found",
-					{ diffInstruction: reviewDiff.diffInstruction },
-				);
-			}
-
-			case "commit": {
-				const commits = await getRecentCommits(this.api, 20);
-				if (commits.length === 0) {
-					ctx.ui.notify("No commits found", "error");
-					return undefined;
-				}
-
-				const selectedCommit = await ctx.ui.select("Select commit to review", commits);
-				if (!selectedCommit) return undefined;
-
-				const hash = selectedCommit.split(" ")[0];
-
-				let diffText: string;
-				try {
-					const result = await vcs.requireGit(this.api.cwd).showCommit(hash);
-					diffText = result.data.toString("utf8");
-				} catch (err) {
-					ctx.ui.notify(`Failed to get commit: ${err instanceof Error ? err.message : String(err)}`, "error");
-					return undefined;
-				}
-
-				return buildReviewPromptFromDiff(
-					ctx,
-					`Reviewing commit \`${hash}\``,
-					diffText,
-					extraInstructions,
-					"Commit has no diff content",
-					{ filteredMessage: "No reviewable files in commit (all changes filtered out)" },
-				);
-			}
-
-			case "custom": {
-				const instructions = await ctx.ui.editor(
-					"Enter custom review instructions",
-					"Review the following:\n\n",
-					undefined,
-					{ promptStyle: true },
-				);
-				if (!instructions?.trim()) return undefined;
-
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(() => undefined);
-
-				if (reviewDiff?.diffText.trim()) {
-					const stats = parseDiff(reviewDiff.diffText);
-					return buildReviewPrompt(
-						`Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`,
-						stats,
-						reviewDiff.diffText,
-						{
-							additionalInstructions: instructions,
-							diffInstruction: reviewDiff.diffInstruction,
-						},
-					);
-				}
-
-				return buildCustomReviewPrompt(instructions);
-			}
+		if (selectedChoice.kind === "pr") {
+			const target = await resolvePrReviewTarget(cwd, ctx, selectedChoice.ref);
+			return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 		}
-	}
-}
-
-async function getGitBranches(api: CustomCommandAPI): Promise<string[]> {
-	try {
-		return await vcs.requireGit(api.cwd).listBranches(true);
-	} catch {
-		return [];
-	}
-}
-
-async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
-	try {
-		return (await vcs.git(api.cwd)?.currentBranch()) ?? "HEAD";
-	} catch {
-		return "HEAD";
-	}
-}
-
-async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentReviewDiff> {
-	const repository = vcs.require(api.cwd);
-	const diffText = await repository.uncommittedDiff([]);
-	const isJj = repository.kind() === "jj";
-	return {
-		diffText,
-		diffInstruction: isJj ? JJ_UNCOMMITTED_DIFF_INSTRUCTION : GIT_UNCOMMITTED_DIFF_INSTRUCTION,
-		emptyMessage: isJj || !diffText.trim() ? "No uncommitted changes found" : "No diff content found",
-		mode: isJj ? "Reviewing JJ working-copy changes" : "Reviewing uncommitted changes (staged + unstaged)",
-	};
-}
-
-async function getRecentCommits(api: CustomCommandAPI, count: number): Promise<string[]> {
-	try {
-		return await vcs.require(api.cwd).logOnelines(count);
-	} catch {
-		return [];
+		if (selectedChoice.kind === "custom") {
+			const instructions = await ctx.ui.editor(
+				"Enter custom review instructions",
+				"Review the following:\n\n",
+				undefined,
+				{ promptStyle: true },
+			);
+			if (!instructions?.trim()) return undefined;
+			const target = await readUncommittedReviewTarget(cwd).catch(() => undefined);
+			if (target?.rawDiff.trim()) {
+				return buildReviewPrompt(
+					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…` },
+					instructions,
+				);
+			}
+			return buildCustomReviewPrompt(instructions);
+		}
+		const target = await resolveLocalReviewTarget(selectedChoice.kind, cwd, ctx.ui);
+		return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 	}
 }
 

@@ -1,38 +1,56 @@
-import * as nodeCrypto from "node:crypto";
-import * as fs from "node:fs";
-import { scheduler } from "node:timers/promises";
-import * as tls from "node:tls";
-import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	isAnthropicSigningProxyUrl,
+	isOfficialAnthropicApiUrl,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
-	getInstallId,
-	isEnoent,
+	$flag,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
 	readSseEvents,
 } from "@oh-my-pi/pi-utils";
+import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
-import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { waitForRetry } from "../utils/retry-wait";
+import { getEnvApiKey } from "../env-api-key";
+import { OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import type {
+	AnthropicCompactionFiles,
+	AnthropicCompactionPayload,
+	AnthropicCompactionRequest,
 	AnthropicFallbackContent,
+	AnthropicFallbackCreditHandle,
 	AnthropicMessagePayload,
+	AnthropicOutputEffort,
+	AnthropicRequestControls,
 	AnthropicServerToolContent,
+	AnthropicToolChange,
 	Api,
 	AssistantMessage,
+	AssistantMessageEvent,
 	CacheRetention,
 	Context,
+	DeveloperMessage,
 	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
 	ProviderInputTransformation,
+	ProviderPayload,
 	ProviderSessionState,
 	RawSseEvent,
 	RedactedThinkingContent,
@@ -58,15 +76,25 @@ import {
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
+	copyPerCallContextMessage,
+	type ConversationalUserCarrier,
+	isConversationalUser,
+	isPerCallContextMessage,
+	isSyntheticUser,
+	kConversationalUser,
 	kStreamingBlockIndex,
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	ANTHROPIC_SLOW_USAGE_LIMIT,
+	ANTHROPIC_USAGE_LIMIT_HEADER,
+	parseAnthropicSlowModeHeaders,
+} from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -85,120 +113,175 @@ import {
 	type ToolInputSchema as AnthropicToolInputSchema,
 	type Tool as AnthropicWireTool,
 	type Usage as AnthropicWireUsage,
+	COMPACTION_BETA,
+	LEGACY_COMPACTION_BETA,
+	type CompactionBlockParam,
+	type CompactionEdit,
 	type ContentBlockParam,
 	type FallbackParam,
 	isAnthropicServerToolHistoryBlock,
 	type MessageCreateParams,
 	type MessageCreateParamsStreaming,
 	type MessageParam,
+	type OutputConfig,
 	parseAnthropicInputTransformations,
 	type RawMessageStreamEvent,
 	THINKING_BINDING_CONTROLS_BETA,
 	type TextBlockParam,
+	type ThinkingConfigParam,
 } from "./anthropic-wire";
 import {
-	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
-	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
-	claudeCodeVersion,
+	adoptRequiredClaudeCodeVersion,
 	claudeToolPrefix,
-	claudeCodeUserAgent,
+	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
 import {
 	buildCopilotDynamicHeaders,
+	getCachedCopilotIntegrationId,
+	getCopilotIntegrationCacheKey,
 	hasCopilotVisionInput,
-	resolveGitHubCopilotBaseUrl,
+	resolveCopilotRequestIdentity,
+	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
+import { prepareAnthropicImageContext } from "./anthropic-images";
+import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { transformMessages } from "./transform-messages";
+import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import {
+	injectedClientBaseUrl,
+	resolvesToOfficialAnthropicEndpoint,
+	supportsAnthropicCompaction,
+	supportsAnthropicCompactionOnClient,
+} from "./anthropic-compaction";
+import {
+	applyClaudeToolPrefix,
+	deriveClaudeDeviceId,
+	extractClaudeMetadataSessionId,
+	generateClaudeCloakingUserId,
+	isClaudeCloakingUserId,
+	readAnthropicMetadataAccountId,
+	readAnthropicMetadataString,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
+} from "./anthropic-identity";
+import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
+import { buildClaudeCodeTlsFetchOptions, resolveAnthropicBaseUrl } from "./anthropic-http-options";
+import {
+	buildBetaHeader,
+	mergeAnthropicBetaHeader,
+	midConversationSystemClearAtBeta,
+	midConversationToolChangesBeta,
+	midConversationOutputConfigBeta,
+	contextManagementBeta,
+	structuredOutputsBeta,
+	fallbackCreditBeta,
+	promptCachingScopeBeta,
+	extendedCacheTtlBeta,
+	fineGrainedToolStreamingBeta,
+	interleavedThinkingBeta,
+	fastModeBeta,
+	taskBudgetBeta,
+	effortBeta,
+	serverSideFallbackBeta,
+	buildClaudeCodeBetas,
+	buildAnthropicHeaders,
+	resolveAnthropicCustomHeadersForBaseUrl,
+	mergeHeaders,
+	normalizeExtraBetas,
+} from "./anthropic-headers";
+import {
+	ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY,
+	anthropicProviderSessionStateKey,
+	clearAnthropicFastModeFallback,
+	isAnthropicFastModeFallbackDisabled,
+	normalizeAnthropicBaseUrl,
+} from "./anthropic-state";
 
-export type AnthropicHeaderOptions = {
-	apiKey: string;
-	baseUrl?: string;
-	isOAuth?: boolean;
-	extraBetas?: string[];
-	stream?: boolean;
-	modelHeaders?: Record<string, string>;
-	isCloudflareAiGateway?: boolean;
-	claudeCodeSessionId?: string;
-	claudeCodeBetas?: readonly string[];
-	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
-	allowAnthropicHeaderOverrides?: boolean;
+export {
+	applyClaudeToolPrefix,
+	clearAnthropicFastModeFallback,
+	deriveClaudeDeviceId,
+	generateClaudeCloakingUserId,
+	isAnthropicFastModeFallbackDisabled,
+	isClaudeCloakingUserId,
+	normalizeAnthropicBaseUrl,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
 };
-
-export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
-	const trimmed = baseUrl?.trim();
-	if (!trimmed) {
-		return undefined;
-	}
-	const withoutTrailingSlashes = trimmed.replace(/\/+$/, "");
-	return withoutTrailingSlashes.endsWith("/v1") ? withoutTrailingSlashes.slice(0, -3) : withoutTrailingSlashes;
-}
-
-// Build deduplicated beta header string
-export function buildBetaHeader(baseBetas: readonly string[], extraBetas: readonly string[]): string {
-	const seen = new Set<string>();
-	const result: string[] = [];
-	for (const beta of [...baseBetas, ...extraBetas]) {
-		const trimmed = beta.trim();
-		if (trimmed && !seen.has(trimmed)) {
-			seen.add(trimmed);
-			result.push(trimmed);
-		}
-	}
-	return result.join(",");
-}
+export { resolvesToOfficialAnthropicEndpoint, supportsAnthropicCompaction, supportsAnthropicCompactionOnClient };
 
 /**
- * Merge an extra Anthropic beta into a caller-provided `anthropic-beta` header,
- * preserving the caller's key casing and deduping the tokens. Returns a
- * single-entry header record for a per-request `headers` override — used to
- * attach a required beta to injected SDK clients that bypass the client-level
- * beta construction.
+ * Redemption window of a refusal's `fallback_credit_token`. `stop_details`
+ * reports no expiry; the documented window is five minutes from the refusal
+ * (https://platform.claude.com/docs/en/build-with-claude/fallback-credit).
  */
-function mergeAnthropicBetaHeader(callerHeaders: Record<string, string>, beta: string): Record<string, string> {
-	for (const key in callerHeaders) {
-		if (key.toLowerCase() === "anthropic-beta") {
-			return { [key]: buildBetaHeader(normalizeExtraBetas(callerHeaders[key]), [beta]) };
+const FALLBACK_CREDIT_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * The two betas that only make sense alongside a `cache_control` breakpoint.
+ * A breakpoint-free replay must advertise neither: an endpoint that refused the
+ * field would refuse the replay too, and an endpoint that merely ignores it is
+ * left with a header that contradicts the body.
+ */
+const promptCacheBetas: Record<string, true> = {
+	[extendedCacheTtlBeta]: true,
+	[promptCachingScopeBeta]: true,
+};
+
+/**
+ * Betas withheld under the kill switch: they gate the pre-release body fields
+ * it removes (Claude Code's gateway contract: context management, beta tool
+ * fields, structured-output format, task budgets, tool search), plus the
+ * thinking-binding and compaction controls omp also withholds.
+ */
+const killSwitchBetas: Record<string, true> = {
+	[THINKING_BINDING_CONTROLS_BETA]: true,
+	[contextManagementBeta]: true,
+	[COMPACTION_BETA]: true,
+	[LEGACY_COMPACTION_BETA]: true,
+	[structuredOutputsBeta]: true,
+	[taskBudgetBeta]: true,
+	[midConversationToolChangesBeta]: true,
+};
+
+/**
+ * Remove the `dropped` betas from every `anthropic-beta` entry in a header
+ * record. Header names are case-insensitive and the value is a comma-separated
+ * list, so each matching key keeps its own casing and its remaining tokens;
+ * an entry left with no token is deleted rather than sent empty. The input is
+ * returned untouched when it advertises none of them.
+ *
+ * `model.headers` and `options.headers` are caller-controlled channels that
+ * reach the wire through `buildAnthropicHeaders` (as `modelHeaders`, which an
+ * override-enabled endpoint lets replace our own beta header outright), the
+ * GitHub Copilot default headers, and the per-request beta override built for
+ * injected clients — each of which must go through here once breakpoints drop
+ * or the experimental-beta kill switch is on.
+ */
+function stripHeaderBetas(headers: Record<string, string>, dropped: Record<string, true>): Record<string, string> {
+	let stripped: Record<string, string> | undefined;
+	for (const key in headers) {
+		if (key.toLowerCase() !== "anthropic-beta") continue;
+		const betas = normalizeExtraBetas(headers[key]);
+		const kept = betas.filter(beta => dropped[beta] !== true);
+		if (kept.length === betas.length) continue;
+		stripped ??= { ...headers };
+		if (kept.length === 0) {
+			delete stripped[key];
+		} else {
+			stripped[key] = kept.join(",");
 		}
 	}
-	return { "anthropic-beta": beta };
+	return stripped ?? headers;
 }
-const oauthAuthBeta = "oauth-2025-04-20";
-const midConversationSystemBeta = "mid-conversation-system-2026-04-07";
-const midConversationSystemClearAtBeta = "mid-conversation-system-clear-at-2026-08-21";
-const midConversationToolChangesBeta = "mid-conversation-tool-changes-2026-07-01";
-const midConversationOutputConfigBeta = "mid-conversation-output-config-2026-07-01";
-const contextManagementBeta = "context-management-2025-06-27";
-const structuredOutputsBeta = "structured-outputs-2025-12-15";
-const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
-const fallbackCreditBeta = "fallback-credit-2026-06-01";
-const claudeCodeUtilityBetaDefaults = [
-	oauthAuthBeta,
-	"interleaved-thinking-2025-05-14",
-	thinkingTokenCountBeta,
-	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
-	structuredOutputsBeta,
-] as const;
-const claudeCodeAgentBetaDefaults = [
-	"claude-code-20250219",
-	oauthAuthBeta,
-	"interleaved-thinking-2025-05-14",
-	thinkingTokenCountBeta,
-	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
-	midConversationSystemBeta,
-] as const;
-const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
-const fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
-const interleavedThinkingBeta = "interleaved-thinking-2025-05-14";
-const fastModeBeta = "fast-mode-2026-02-01";
-const taskBudgetBeta = "task-budgets-2026-03-13";
-const effortBeta = "effort-2025-11-24";
-const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
+
+/** Whether a thinking config carries a defined `block_binding` (the binding-controls beta's field). */
+function carriesThinkingBinding(thinking: MessageCreateParamsStreaming["thinking"] | undefined): boolean {
+	return thinking !== undefined && "block_binding" in thinking && thinking.block_binding !== undefined;
+}
 
 function resolveAnthropicControlBetas(
 	model: Model<"anthropic-messages">,
@@ -210,168 +293,6 @@ function resolveAnthropicControlBetas(
 	if (model.compat.supportsMidConversationToolChanges) betas.push(midConversationToolChangesBeta);
 	if (model.compat.supportsPerMessageEffort) betas.push(midConversationOutputConfigBeta);
 	return betas;
-}
-
-function buildClaudeCodeBetas({
-	agentRequest,
-	thinkingRequest,
-	disableStrictTools = false,
-	supportsContextManagement = true,
-}: {
-	agentRequest: boolean;
-	thinkingRequest: boolean;
-	disableStrictTools?: boolean;
-	supportsContextManagement?: boolean;
-}): readonly string[] {
-	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
-	// subscription credentials have no long-context credit balance, so Anthropic
-	// hard-429s ("Usage credits are required for long context requests") on any
-	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
-	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools && supportsContextManagement) return claudeCodeUtilityBetaDefaults;
-	const betas: string[] = [];
-	for (const beta of agentRequest ? claudeCodeAgentBetaDefaults : claudeCodeUtilityBetaDefaults) {
-		if (disableStrictTools && beta === structuredOutputsBeta) continue;
-		if (!supportsContextManagement && beta === contextManagementBeta) continue;
-		betas.push(beta);
-	}
-	if (!agentRequest) return betas;
-	if (thinkingRequest) betas.push(effortBeta);
-	betas.push(fallbackCreditBeta);
-	return betas;
-}
-
-function isClaudeCodeClientUserAgent(userAgent: string | undefined): userAgent is string {
-	if (!userAgent) return false;
-	return userAgent.toLowerCase().startsWith("claude-cli");
-}
-
-const sharedHeaders = {
-	"Accept-Encoding": "gzip, deflate, br, zstd",
-	Connection: "keep-alive",
-	"Content-Type": "application/json",
-	"anthropic-version": "2023-06-01",
-	"anthropic-dangerous-direct-browser-access": "true",
-	"x-app": "cli",
-};
-
-export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<string, string> {
-	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
-	const extraBetas = options.extraBetas ?? [];
-	const stream = options.stream ?? false;
-	// `enforcedHeaderKeys` strips User-Agent / X-Api-Key / Authorization out of
-	// modelHeaders so a case-insensitive spread can't produce duplicate keys; each
-	// branch re-adds the caller's value explicitly. User-Agent and X-Api-Key are
-	// always honored (with branch-specific defaults filling in when absent), while
-	// Authorization is honored for every non-OAuth, non-Cloudflare-gateway branch —
-	// OAuth requests MUST carry `Authorization: Bearer <oauth-token>` (the OAuth
-	// credential itself) and Cloudflare AI Gateway authenticates via
-	// `cf-aig-authorization`, so user-supplied auth there would just leak. Both of
-	// those cases drop + log the caller value (#3391).
-	const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
-	const incomingAuthorization = getHeaderCaseInsensitive(options.modelHeaders, "Authorization");
-	const incomingApiKey = getHeaderCaseInsensitive(options.modelHeaders, "X-Api-Key");
-	// Claude Code's beta profile is part of the OAuth fingerprint; API-key
-	// requests default to extras only, matching the streaming path.
-	const betaHeader = buildBetaHeader(
-		options.claudeCodeBetas ??
-			(oauthToken ? buildClaudeCodeBetas({ agentRequest: true, thinkingRequest: true }) : []),
-		extraBetas,
-	);
-	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
-	const isCloudflare = options.isCloudflareAiGateway ?? false;
-	const honorAuthorization = !oauthToken && !isCloudflare;
-	const allowAnthropicHeaderOverrides =
-		oauthToken &&
-		options.allowAnthropicHeaderOverrides === true &&
-		!isCloudflare &&
-		!isOfficialAnthropicApiUrl(options.baseUrl);
-	const honorApiKey = !isCloudflare;
-	const modelHeaders: Record<string, string> = {};
-	const anthropicHeaderOverrides: Record<string, string> = {};
-	const filteredEnforcedKeys: string[] = [];
-	const headerSource = options.modelHeaders;
-	if (headerSource) {
-		for (const key in headerSource) {
-			const value = headerSource[key];
-			const lowerKey = key.toLowerCase();
-			if (enforcedHeaderKeys.has(lowerKey)) {
-				if (allowAnthropicHeaderOverrides && overridableAnthropicHeaderKeys.has(lowerKey)) {
-					anthropicHeaderOverrides[key] = value;
-					continue;
-				}
-				// user-agent is always re-applied explicitly. authorization / x-api-key
-				// are silently re-applied in honoring branches and dropped + logged
-				// where the branch enforces its own credential.
-				if (lowerKey === "user-agent") continue;
-				if (lowerKey === "authorization" && honorAuthorization) continue;
-				if (lowerKey === "x-api-key" && honorApiKey) continue;
-				filteredEnforcedKeys.push(key);
-				continue;
-			}
-			modelHeaders[key] = value;
-		}
-	}
-	if (filteredEnforcedKeys.length > 0) {
-		// Caller/env-supplied values (options.headers, ANTHROPIC_CUSTOM_HEADERS)
-		// for enforced headers are replaced by our own values; say so instead of
-		// dropping them silently. Keys only — values may carry credentials.
-		logger.debug("anthropic: ignoring caller-supplied enforced headers", {
-			headers: filteredEnforcedKeys,
-		});
-	}
-
-	if (isCloudflare) {
-		return {
-			...modelHeaders,
-			Accept: acceptHeader,
-			...sharedHeaders,
-			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
-			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
-			"cf-aig-authorization": `Bearer ${options.apiKey}`,
-		};
-	}
-
-	if (oauthToken) {
-		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : claudeCodeUserAgent;
-		const headers = {
-			...modelHeaders,
-			Accept: acceptHeader,
-			"Content-Type": "application/json",
-			"User-Agent": userAgent,
-			...(options.claudeCodeSessionId ? { "X-Claude-Code-Session-Id": options.claudeCodeSessionId } : {}),
-			...claudeCodeHeaders,
-			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
-			"anthropic-dangerous-direct-browser-access": "true",
-			"anthropic-version": "2023-06-01",
-			Authorization: `Bearer ${options.apiKey}`,
-			"x-app": "cli",
-			Connection: "keep-alive",
-			"Accept-Encoding": "gzip, deflate, br, zstd",
-			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
-		};
-		return allowAnthropicHeaderOverrides ? mergeHeaders(headers, anthropicHeaderOverrides) : headers;
-	} else if (!isOfficialAnthropicApiUrl(options.baseUrl)) {
-		return {
-			...modelHeaders,
-			Accept: acceptHeader,
-			Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}`,
-			...sharedHeaders,
-			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
-			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
-			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
-		};
-	} else {
-		return {
-			...modelHeaders,
-			Accept: acceptHeader,
-			...sharedHeaders,
-			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
-			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
-			...(incomingAuthorization ? { Authorization: incomingAuthorization } : {}),
-			"X-Api-Key": incomingApiKey ?? options.apiKey,
-		};
-	}
 }
 
 type AnthropicCacheControl = NonNullable<TextBlockParam["cache_control"]>;
@@ -400,38 +321,19 @@ type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_co
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
 
-const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
-
-/**
- * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
- * the wire history so top-level `tools` and `output_config.effort` can stay
- * byte-stable for preserved thinking and the prompt cache. `messageCount` is
- * the number of wire messages preceding the control; `anchor` fingerprints the
- * message right before it so a rewritten history (compaction, branch switch)
- * discards the transition instead of splicing it into the wrong turn.
- */
-type AnthropicControlTransition = {
-	messageCount: number;
-	anchor: string;
-	content: ContentBlockParam[];
-	effort?: AnthropicOutputEffort;
-};
-
-type AnthropicControlState = {
-	/** `tools` declared at baseline plus later `defer_loading` additions, in wire order. */
-	declaredTools: AnthropicWireTool[] | undefined;
-	activeToolNames: Set<string>;
-	stableSystemBlocks: AnthropicSystemBlock[] | undefined;
-	systemFingerprint: string | undefined;
-	controlTransitions: AnthropicControlTransition[];
-	baseEffort: AnthropicOutputEffort | undefined;
-	baseEffortWire: AnthropicOutputEffort | undefined;
-	currentEffort: AnthropicOutputEffort | undefined;
-};
-
 type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
+	/**
+	 * Value of {@link AnthropicOpaqueClientAnchor.fastModeRearmGeneration} this
+	 * state last observed. Only anchored (opaque-client) states are stamped:
+	 * they are the ones {@link clearAnthropicFastModeFallback} cannot reach, so
+	 * a stamp that is not the anchor's current generation is how the next
+	 * request through that client learns a re-arm happened and lowers
+	 * `fastModeDisabled`. Endpoint-keyed states are cleared by the sweep itself
+	 * and never read it.
+	 */
+	fastModeRearmGeneration: number;
 	/**
 	 * Runtime-learned: this endpoint rejected a replayed unsigned thinking
 	 * block, so it must be treated as a signing proxy from now on. All
@@ -440,106 +342,169 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * `compat.replayUnsignedThinking: false`. Cleared on session close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
-	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
+	/**
+	 * Runtime-learned: this endpoint kept rejecting replayed thinking
+	 * signatures even after unsigned demotion — every surviving block is
+	 * signed by a foreign signer (e.g. a failover proxy swapped upstreams
+	 * mid-conversation and minted signatures the restored upstream cannot
+	 * verify). All subsequent requests drop replayed thinking entirely for
+	 * this (baseUrl, modelId). Cleared on session close.
+	 */
+	thinkingReplayDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint rejected `cache_control`, so prompt-cache
+	 * breakpoints are omitted from every later request for this (baseUrl,
+	 * modelId). Cleared on session close.
+	 */
+	cacheControlUnsupported: boolean;
+	/**
+	 * Runtime-learned: this endpoint took a `cache_control` breakpoint but
+	 * refused the `ttl`/`scope` options on it, so every later request for this
+	 * (baseUrl, modelId) sends breakpoints without them — short-lived caching
+	 * keeps working. The narrow half of {@link cacheControlUnsupported}: a 400
+	 * about `cache_control` cannot say which of the two it is, so the retry
+	 * ladder tries this rung first and only escalates if it is refused too.
+	 * Cleared on session close.
+	 */
+	cacheControlOptionsUnsupported: boolean;
+	/**
+	 * Thinking blocks the client strips after a 400 rejected their replay: a
+	 * prefix-binding 400 that forced a retry without `drop_block`, or a latest
+	 * assistant turn whose reasoning the API refused as modified.
+	 */
 	prefixDroppedThinkingBlocks: Set<string>;
-	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
-	controlStates: Map<string, AnthropicControlState>;
+	/**
+	 * Server-reported `prefix_binding_mismatch` drops already warned about. A
+	 * `drop_block` request replays dropped blocks verbatim, so the API reports
+	 * them again on every later request; only newly dropped blocks warn.
+	 */
+	reportedPrefixDroppedThinking: Set<string>;
 };
-
-function createAnthropicControlState(): AnthropicControlState {
-	return {
-		declaredTools: undefined,
-		activeToolNames: new Set(),
-		stableSystemBlocks: undefined,
-		systemFingerprint: undefined,
-		controlTransitions: [],
-		baseEffort: undefined,
-		baseEffortWire: undefined,
-		currentEffort: undefined,
-	};
-}
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	const state: AnthropicProviderSessionState = {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
+		fastModeRearmGeneration: 0,
 		replayUnsignedThinkingDisabled: false,
+		thinkingReplayDisabled: false,
+		cacheControlUnsupported: false,
+		cacheControlOptionsUnsupported: false,
 		prefixDroppedThinkingBlocks: new Set(),
-		controlStates: new Map(),
+		reportedPrefixDroppedThinking: new Set(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.thinkingReplayDisabled = false;
+			state.cacheControlUnsupported = false;
+			state.cacheControlOptionsUnsupported = false;
 			state.prefixDroppedThinkingBlocks.clear();
-			state.controlStates.clear();
+			state.reportedPrefixDroppedThinking.clear();
 		},
 	};
 	return state;
 }
 
 /**
- * Key the sticky strict-tools / fast-mode learning per endpoint+model. A
- * grammar-too-large 400 or a fast-mode rejection is specific to the model (its
- * tool grammar / entitlement) and the endpoint (direct Anthropic vs a gateway /
- * Foundry / Bedrock proxy), so it MUST NOT bleed onto unrelated anthropic-messages
- * requests in the same session. NUL separates the two components so neither can
- * forge the boundary.
+ * Private per-client state maps for opaque injected clients, anchored in the
+ * caller's session. Closing the anchor resets all its clients without keeping
+ * those clients alive or leaking learned settings across sessions.
  */
-function anthropicProviderSessionStateKey(baseUrl: string, modelId: string): string {
-	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${baseUrl}\u0000${modelId}`;
+type AnthropicOpaqueClientAnchor = ProviderSessionState & {
+	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
+	/**
+	 * Bumped once per `/fast on` re-arm. Anchored states carry the value they
+	 * last observed in `fastModeRearmGeneration`; a mismatch is a re-arm they
+	 * have not picked up yet. Never reset by `close()`: the sweep discards the
+	 * states themselves, so a monotone counter needs no second reset path.
+	 */
+	fastModeRearmGeneration: number;
+};
+
+function isAnthropicOpaqueClientAnchor(state: ProviderSessionState | undefined): state is AnthropicOpaqueClientAnchor {
+	if (state === undefined) return false;
+	return (
+		"stores" in state &&
+		state.stores instanceof WeakMap &&
+		"fastModeRearmGeneration" in state &&
+		typeof state.fastModeRearmGeneration === "number"
+	);
 }
 
-function getAnthropicProviderSessionState(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-	baseUrl: string,
-	modelId: string,
-): AnthropicProviderSessionState | undefined {
-	if (!providerSessionState) return undefined;
-	const key = anthropicProviderSessionStateKey(baseUrl, modelId);
-	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
-	if (existing) {
-		existing.prefixDroppedThinkingBlocks ??= new Set();
-		existing.controlStates ??= new Map();
-		return existing;
-	}
-	const created = createAnthropicProviderSessionState();
-	providerSessionState.set(key, created);
+function anthropicOpaqueClientAnchor(
+	providerSessionState: Map<string, ProviderSessionState>,
+): AnthropicOpaqueClientAnchor {
+	const existing = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
+	if (isAnthropicOpaqueClientAnchor(existing)) return existing;
+	const freshAnchor: AnthropicOpaqueClientAnchor = {
+		stores: new WeakMap(),
+		fastModeRearmGeneration: 0,
+		close: () => {
+			freshAnchor.stores = new WeakMap();
+		},
+	};
+	providerSessionState.set(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY, freshAnchor);
+	return freshAnchor;
+}
+
+function opaqueInjectedClientStore(
+	anchor: AnthropicOpaqueClientAnchor,
+	client: AnthropicMessagesClientLike,
+): Map<string, ProviderSessionState> {
+	const store = anchor.stores.get(client);
+	if (store !== undefined) return store;
+	const created = new Map<string, ProviderSessionState>();
+	anchor.stores.set(client, created);
 	return created;
 }
 
 /**
- * Clears the in-session "server rejected fast mode" sticky flag. Call when the
- * caller is explicitly re-arming `serviceTier: "priority"` (e.g. user toggled
- * `/fast on` after a previous turn auto-disabled it) so the next request
- * actually carries `speed: "fast"` again. No-op when the map or state entry
- * hasn't been materialized yet.
+ * Picks up a fast-mode re-arm the anchored state could not be swept by. A stamp
+ * other than the anchor's current generation means a re-arm landed since this
+ * state was last resolved, so the sticky fast-mode fallback is lowered — and
+ * nothing else, so the client keeps the rest of what it learned. The comparison
+ * is for inequality rather than ordering: the stamp claims only "this state has
+ * observed that generation", which needs no assumption about how the counter
+ * moved.
  */
-export function clearAnthropicFastModeFallback(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-): void {
-	if (!providerSessionState) return;
-	// Fast mode is re-armed session-wide (user toggled `/fast on`), so clear the
-	// sticky flag on every per-endpoint/model Anthropic entry — plus the legacy
-	// unscoped key — rather than a single shared object.
-	const prefix = `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:`;
-	for (const [key, value] of providerSessionState) {
-		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
-		(value as AnthropicProviderSessionState).fastModeDisabled = false;
-	}
+function observeAnthropicFastModeRearm(state: AnthropicProviderSessionState, generation: number): void {
+	if (state.fastModeRearmGeneration === generation) return;
+	state.fastModeRearmGeneration = generation;
+	state.fastModeDisabled = false;
 }
-/**
- * Whether the direct Anthropic model's endpoint-scoped fast-mode fallback is
- * currently active. Reading the map directly is intentional: inspection must
- * not materialize a state entry for a model that has never streamed.
- */
-export function isAnthropicFastModeFallbackDisabled(
+function getAnthropicProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
-	model: Model<Api>,
-): boolean {
-	if (!providerSessionState || model.provider !== "anthropic" || model.api !== "anthropic-messages") return false;
-	const baseUrl = resolveAnthropicBaseUrl(model as Model<"anthropic-messages">) ?? "https://api.anthropic.com";
-	const key = anthropicProviderSessionStateKey(baseUrl, model.id);
-	return (providerSessionState.get(key) as AnthropicProviderSessionState | undefined)?.fastModeDisabled ?? false;
+	client: AnthropicMessagesClientLike | undefined,
+	baseUrl: string,
+	modelId: string,
+): AnthropicProviderSessionState | undefined {
+	// No map means the caller opted out of session state entirely — an injected
+	// client does not opt back in on their behalf.
+	if (!providerSessionState) return undefined;
+	const clientBaseUrl = client !== undefined ? injectedClientBaseUrl(client) : undefined;
+	let store = providerSessionState;
+	let anchor: AnthropicOpaqueClientAnchor | undefined;
+	if (client !== undefined && clientBaseUrl === undefined) {
+		anchor = anthropicOpaqueClientAnchor(providerSessionState);
+		store = opaqueInjectedClientStore(anchor, client);
+	}
+	const key = anthropicProviderSessionStateKey(clientBaseUrl ?? baseUrl, modelId);
+	const existing = store.get(key) as AnthropicProviderSessionState | undefined;
+	const state = existing ?? createAnthropicProviderSessionState();
+	if (existing) {
+		existing.prefixDroppedThinkingBlocks ??= new Set();
+		existing.reportedPrefixDroppedThinking ??= new Set();
+		existing.cacheControlUnsupported ??= false;
+		existing.cacheControlOptionsUnsupported ??= false;
+	} else {
+		store.set(key, state);
+	}
+	// Every request for an opaque client resolves its state here and nowhere
+	// else, so this is where the re-arm it cannot be swept by has to land. A
+	// fresh state has nothing to lower and only takes the stamp.
+	if (anchor !== undefined) observeAnthropicFastModeRearm(state, anchor.fastModeRearmGeneration);
+	return state;
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
@@ -560,11 +525,14 @@ function dropAnthropicStrictTools(params: MessageCreateParamsStreaming): void {
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention: CacheRetention | undefined,
+	isOAuthToken = false,
 ): { retention: CacheRetention; cacheControl?: AnthropicCacheControl } {
-	// Five-minute writes are the cheapest cache population strategy. Longer
-	// retention remains an explicit PI_CACHE_RETENTION/request override; idle
-	// sessions keep the short entry warm with bounded read-only refreshes.
-	const retention = resolveCacheRetention(cacheRetention, "short");
+	// Five-minute writes are the cheapest cache population strategy for pay-per-token API keys.
+	// For OAuth (Claude Code subscriber seats), match Claude Code's native policy by defaulting
+	// to 1h retention where supported, avoiding cold cache re-writes after 15m idle intervals.
+	// An explicit cacheRetention ('short', 'long', 'none') or PI_CACHE_RETENTION always takes precedence.
+	const defaultRetention = isOAuthToken && model.compat.supportsLongCacheRetention ? "long" : "short";
+	const retention = resolveCacheRetention(cacheRetention, defaultRetention);
 	if (retention === "none") {
 		return { retention };
 	}
@@ -579,92 +547,18 @@ function getCacheControl(
 // in the leaf module so registry/usage consumers avoid an init cycle.
 export * from "./claude-code-fingerprint";
 
-/** Maps Node's platform identifier to the Stainless wire value. */
-export function mapStainlessOs(platform: string): "MacOS" | "Windows" | "Linux" | "FreeBSD" | `Other::${string}` {
-	switch (platform.toLowerCase()) {
-		case "darwin":
-			return "MacOS";
-		case "windows":
-		case "win32":
-			return "Windows";
-		case "linux":
-			return "Linux";
-		case "freebsd":
-			return "FreeBSD";
-		default:
-			return `Other::${platform.toLowerCase()}`;
-	}
-}
-
-/** Maps Node's architecture identifier to the Stainless wire value. */
-export function mapStainlessArch(arch: string): "x64" | "arm64" | "x86" | `other::${string}` {
-	switch (arch.toLowerCase()) {
-		case "amd64":
-		case "x64":
-			return "x64";
-		case "arm64":
-		case "aarch64":
-			return "arm64";
-		case "386":
-		case "x86":
-		case "ia32":
-			return "x86";
-		default:
-			return `other::${arch.toLowerCase()}`;
-	}
-}
-
-/** Static headers emitted by Claude Code's CLI runtime. */
-export const claudeCodeHeaders = {
-	"X-Stainless-Arch": mapStainlessArch(process.arch),
-	"X-Stainless-Lang": "js",
-	"X-Stainless-OS": mapStainlessOs(process.platform),
-	"X-Stainless-Package-Version": claudeCodeSdkVersion,
-	"X-Stainless-Retry-Count": "0",
-	"X-Stainless-Runtime": "node",
-	"X-Stainless-Runtime-Version": "v26.3.0",
-	"X-Stainless-Timeout": "600",
-};
-
-const enforcedHeaderKeys = new Set(
-	[
-		...Object.keys(claudeCodeHeaders),
-		"Accept",
-		"Accept-Encoding",
-		"Connection",
-		"Content-Type",
-		"anthropic-version",
-		"anthropic-dangerous-direct-browser-access",
-		"anthropic-beta",
-		"User-Agent",
-		"x-app",
-		"Authorization",
-		"X-Api-Key",
-		"X-Claude-Code-Session-Id",
-		"x-client-request-id",
-		"cf-aig-authorization",
-	].map(key => key.toLowerCase()),
-);
-
-const overridableAnthropicHeaderKeys = new Set(
-	[...Object.keys(claudeCodeHeaders), "anthropic-beta", "User-Agent", "x-app"].map(key => key.toLowerCase()),
-);
-
 const CLAUDE_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 
 function createClaudeBillingHeader(firstUserMessageText: string): string {
 	// Fingerprint: SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]
 	// Matches CC's computeFingerprint in utils/fingerprint.ts.
-	// Uses chars from the first user message (not the system prompt).
+	// Uses chars from the first conversational wire user turn (not the system prompt).
 	const k = [4, 7, 20].map(i => firstUserMessageText[i] ?? "0").join("");
-	const versionSuffix = nodeCrypto
-		.createHash("sha256")
-		.update(`59cf53e54c78${k}${claudeCodeVersion}`)
-		.digest("hex")
-		.slice(0, 3);
+	const version = getClaudeCodeVersion();
+	const versionSuffix = Bun.SHA256.hash(`59cf53e54c78${k}${version}`, "hex").slice(0, 3);
 	// cch=00000: placeholder replaced with the real attestation hash by wrapFetchForCch
 	// before the request hits the wire (see below).
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
@@ -730,145 +624,8 @@ export function wrapFetchForCch(base: FetchImpl): FetchImpl {
 	};
 }
 
-const CLAUDE_CLOAKING_USER_ID_REGEX =
-	/^user_[0-9a-fA-F]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-export function isClaudeCloakingUserId(userId: string): boolean {
-	return CLAUDE_CLOAKING_USER_ID_REGEX.test(userId);
-}
-
-/**
- * Real Claude Code sends `metadata.user_id` as a JSON-stringified object of the
- * shape `{ device_id, account_uuid, session_id, ...extra }` (see
- * services/api/claude.ts → getAPIMetadata). Accept that shape so callers that
- * supply a stable `session_id` aren't silently overwritten with fresh entropy
- * on every request, which would inflate the backend session count.
- */
-function isClaudeJsonUserId(userId: string): boolean {
-	if (userId.length === 0 || userId[0] !== "{") return false;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return false;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-	const obj = parsed as Record<string, unknown>;
-	return typeof obj.session_id === "string" && obj.session_id.length > 0;
-}
-
-function extractClaudeMetadataSessionId(userId: unknown): string | undefined {
-	if (typeof userId !== "string") return undefined;
-	if (isClaudeCloakingUserId(userId)) {
-		return userId.slice(userId.lastIndexOf("_session_") + "_session_".length);
-	}
-	if (userId.length === 0 || userId[0] !== "{") return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return undefined;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-	const sessionId = (parsed as Record<string, unknown>).session_id;
-	return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
-}
-
-export function generateClaudeCloakingUserId(): string {
-	const userHash = nodeCrypto.randomBytes(32).toString("hex");
-	const accountId = nodeCrypto.randomUUID().toLowerCase();
-	const sessionId = nodeCrypto.randomUUID().toLowerCase();
-	return `user_${userHash}_account_${accountId}_session_${sessionId}`;
-}
-
-const CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN = "omp-claude-device-id-v1:";
-const CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN = "omp-claude-device-id-v2";
-
-export function deriveClaudeDeviceId(installId: string, accountId?: string): string {
-	const hash = nodeCrypto.createHash("sha256");
-	if (accountId && accountId.length > 0) {
-		return hash
-			.update(CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN)
-			.update("\0")
-			.update(installId)
-			.update("\0")
-			.update(accountId)
-			.digest("hex");
-	}
-	return hash.update(CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN).update(installId).digest("hex");
-}
-
-function readMetadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
-	const value = metadata?.[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function readAnthropicMetadataAccountId(metadata: Record<string, unknown> | undefined): string | undefined {
-	return (
-		readMetadataString(metadata, "account_uuid") ??
-		readMetadataString(metadata, "accountId") ??
-		readMetadataString(metadata, "account_id")
-	);
-}
-
-function deriveClaudeDeviceIdFromInstallId(accountId?: string): string {
-	return deriveClaudeDeviceId(getInstallId(), accountId);
-}
-
-function generateClaudeJsonUserId(sessionId?: string, accountId?: string): string {
-	const userId: Record<string, string> = {
-		device_id: deriveClaudeDeviceIdFromInstallId(accountId),
-		session_id: sessionId ?? nodeCrypto.randomUUID().toLowerCase(),
-	};
-	if (accountId && accountId.length > 0) userId.account_uuid = accountId;
-	return JSON.stringify(userId);
-}
-
-/**
- * Resolve the `metadata.user_id` field for an Anthropic Messages request.
- *
- * For API-key tokens, an explicit caller-supplied `userId` is forwarded
- * verbatim and `undefined` yields no metadata. For OAuth tokens the value
- * must match the Claude Code attribution shape (`isClaudeCloakingUserId` or
- * the `{session_id, account_uuid?, device_id?}` JSON envelope) — anything
- * else is dropped and a fresh Claude-Code-style JSON id is generated from
- * `sessionId`/`accountId` so attribution stays consistent across the main
- * streaming path and provider-specific request builders (e.g. web search).
- */
-export function resolveAnthropicMetadataUserId(
-	userId: unknown,
-	isOAuthToken: boolean,
-	sessionId?: string,
-	accountId?: string,
-): string | undefined {
-	if (typeof userId === "string") {
-		if (!isOAuthToken || isClaudeCloakingUserId(userId) || isClaudeJsonUserId(userId)) {
-			return userId;
-		}
-	}
-
-	if (!isOAuthToken) return undefined;
-	return generateClaudeJsonUserId(sessionId, accountId);
-}
-const ANTHROPIC_BUILTIN_TOOL_NAMES = new Set(["web_search", "code_execution", "text_editor", "computer"]);
 const UMANS_WEBSEARCH_PROVIDER_HEADER = "X-Umans-Websearch-Provider";
 const UMANS_WEBSEARCH_TOOL_NAME = "web_search";
-export const applyClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (ANTHROPIC_BUILTIN_TOOL_NAMES.has(name.toLowerCase())) return name;
-	// Always prepend (no "already prefixed" short-circuit): the prefix is a wire
-	// transport detail applied once to internal tool names, and `stripClaudeToolPrefix`
-	// removes exactly one prefix on receive. Skipping names that already start with the
-	// prefix would make a tool literally named `_foo` lose its leading underscore on the
-	// return trip (`_foo` → wire `_foo` → strip → `foo`), so the agent loop can't find it.
-	return `${claudeToolPrefix}${name}`;
-};
-
-export const stripClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (!name.toLowerCase().startsWith(claudeToolPrefix.toLowerCase())) return name;
-	return name.slice(claudeToolPrefix.length);
-};
 
 function normalizeUmansWebSearchProvider(value: string | undefined): "native" | "exa" | undefined {
 	const normalized = value?.trim().toLowerCase();
@@ -881,15 +638,11 @@ function getUmansWebSearchProvider(headers: Record<string, string> | undefined):
 	return normalizeUmansWebSearchProvider($env.UMANS_WEBSEARCH_PROVIDER);
 }
 
-function isUmansAnthropicModel(model: Model<"anthropic-messages">): boolean {
-	return model.provider === "umans" || model.baseUrl.toLowerCase().includes("api.code.umans.ai");
-}
-
 function getUmansWebSearchHeader(
 	model: Model<"anthropic-messages">,
 	headers: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
-	if (!isUmansAnthropicModel(model)) return undefined;
+	if (!modelMatchesHost(model, "umans")) return undefined;
 	const provider = getUmansWebSearchProvider(headers);
 	return provider ? { [UMANS_WEBSEARCH_PROVIDER_HEADER]: provider } : undefined;
 }
@@ -914,166 +667,6 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 	return name;
 }
 
-const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
-const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
-
-function countAnthropicImageBlocks(messages: Message[]): number {
-	let count = 0;
-	for (const message of messages) {
-		if (message.role !== "user" && message.role !== "developer" && message.role !== "toolResult") continue;
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if (block.type === "image") count++;
-		}
-	}
-	return count;
-}
-
-const ANTHROPIC_IMAGE_RESIZE_CONCURRENCY = 4;
-
-/**
- * Memoized resize results keyed on ImageContent identity. Callers keep message
- * objects stable across turns, so without this every request (and every
- * in-provider retry of a fresh turn) re-decodes and re-encodes the same
- * oversized screenshots. A cached value identical to the key means "already
- * within bounds / unresizable — skip the decode".
- */
-const anthropicManyImageResizeCache = new WeakMap<ImageContent, ImageContent>();
-
-type ResizeLimiter = <R>(fn: () => Promise<R>) => Promise<R>;
-
-/**
- * Bounded-concurrency gate for image decode/encode work. The many-image path
- * fans out over every block of every message; unbounded, 100+ oversized images
- * would decode concurrently (two encode pipelines each) and spike memory by
- * gigabytes. Slots are handed off directly to the next waiter on release.
- */
-function createResizeLimiter(limit: number): ResizeLimiter {
-	let active = 0;
-	const queue: (() => void)[] = [];
-	return async fn => {
-		if (active >= limit) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			queue.push(resolve);
-			await promise;
-		} else {
-			active++;
-		}
-		try {
-			return await fn();
-		} finally {
-			const next = queue.shift();
-			if (next) next();
-			else active--;
-		}
-	};
-}
-
-async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<ImageContent> {
-	try {
-		const inputBuffer = Buffer.from(block.data, "base64");
-		const { width, height } = await new Bun.Image(inputBuffer).metadata();
-		if (!width || !height) return block;
-		if (width <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION && height <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION) return block;
-
-		const scale = Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / width, ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / height);
-		const targetWidth = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(width * scale)));
-		const targetHeight = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(height * scale)));
-
-		const [png, jpeg] = await Promise.all([
-			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).png().bytes(),
-			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).jpeg({ quality: 85 }).bytes(),
-		]);
-		const best =
-			png.length <= jpeg.length ? { buffer: png, mimeType: "image/png" } : { buffer: jpeg, mimeType: "image/jpeg" };
-
-		return {
-			type: "image",
-			data: Buffer.from(best.buffer).toString("base64"),
-			mimeType: best.mimeType,
-		};
-	} catch (error) {
-		logger.warn("anthropic: failed to resize oversized image for many-image request", {
-			mimeType: block.mimeType,
-			error: error instanceof Error ? error.message : String(error),
-		});
-		return block;
-	}
-}
-
-async function resizeAnthropicManyImageContent(
-	content: (TextContent | ImageContent)[],
-	state: { resized: number },
-	limit: ResizeLimiter,
-): Promise<(TextContent | ImageContent)[]> {
-	let changed = false;
-	const next = await Promise.all(
-		content.map(async block => {
-			// Remotely referenced blocks never put base64 on the wire, so their size
-			// cannot violate the many-image request budget — and resizing would
-			// desync fallback bytes from the advertised remote image.
-			if (
-				block.type !== "image" ||
-				block.url ||
-				(block.providerFile?.provider === "anthropic" && block.providerFile.id)
-			)
-				return block;
-			let resized = anthropicManyImageResizeCache.get(block);
-			if (resized === undefined) {
-				resized = await limit(() => resizeAnthropicManyImageBlock(block));
-				anthropicManyImageResizeCache.set(block, resized);
-			}
-			if (resized !== block) {
-				changed = true;
-				state.resized++;
-			}
-			return resized;
-		}),
-	);
-	return changed ? next : content;
-}
-
-async function resizeAnthropicManyImageMessage(
-	message: Message,
-	state: { resized: number },
-	limit: ResizeLimiter,
-): Promise<Message> {
-	if (message.role === "user" || message.role === "developer") {
-		if (!Array.isArray(message.content)) return message;
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
-		return content === message.content ? message : { ...message, content };
-	}
-	if (message.role === "toolResult") {
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
-		return content === message.content ? message : { ...message, content };
-	}
-	return message;
-}
-
-async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
-	if (!supportsImages) return context;
-	const imageCount = countAnthropicImageBlocks(context.messages);
-	if (imageCount <= ANTHROPIC_MANY_IMAGE_THRESHOLD) return context;
-
-	let changed = false;
-	const state = { resized: 0 };
-	const limit = createResizeLimiter(ANTHROPIC_IMAGE_RESIZE_CONCURRENCY);
-	const messages = await Promise.all(
-		context.messages.map(async message => {
-			const next = await resizeAnthropicManyImageMessage(message, state, limit);
-			if (next !== message) changed = true;
-			return next;
-		}),
-	);
-	if (!changed) return context;
-	logger.debug("anthropic: resized oversized images for many-image request", {
-		imageCount,
-		resized: state.resized,
-		maxDimension: ANTHROPIC_MANY_IMAGE_MAX_DIMENSION,
-	});
-	return { ...context, messages };
-}
-
 type AnthropicImageSource =
 	| { type: "base64"; media_type: AnthropicImageMediaType; data: string }
 	| { type: "url"; url: string }
@@ -1084,12 +677,21 @@ type AnthropicToolResultContent =
 	| Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }>;
 
 /**
- * Convert content blocks to Anthropic API format
+ * Convert content blocks to Anthropic API format.
+ *
+ * Inline media this path cannot send as an `image` block (video, PDF, HEIC, …)
+ * fails the request when `rejectUnsupportedMedia` is set, so the turn that
+ * attached it errors instead of being answered as if nothing were attached.
+ * Elsewhere it keeps its `[unsupported image: …]` stub: an older turn has
+ * already been answered, failing on it would fail every later request of the
+ * conversation, and changing the stub's bytes would break the replayed prefix
+ * that signed thinking is bound to.
  */
 function convertContentBlocks(
 	content: (TextContent | ImageContent)[],
-	supportsImages = true,
+	options: { supportsImages: boolean; rejectUnsupportedMedia?: boolean },
 ): AnthropicToolResultContent {
+	const { supportsImages, rejectUnsupportedMedia = false } = options;
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
 	let sawImage = false;
@@ -1116,6 +718,11 @@ function convertContentBlocks(
 		} else {
 			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
 			if (!mediaType) {
+				if (rejectUnsupportedMedia) {
+					throw new AIError.ValidationError(
+						`${block.mimeType} attachments are not supported here; send JPEG, PNG, GIF or WebP images instead`,
+					);
+				}
 				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
 				continue;
 			}
@@ -1144,7 +751,6 @@ function convertContentBlocks(
 	return blocks;
 }
 
-export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
@@ -1216,7 +822,8 @@ export interface AnthropicOptions extends StreamOptions {
 	 * header is auto-attached; the response parser then honors mid-stream
 	 * `fallback` content blocks and `usage.iterations` for served-model
 	 * promotion and per-attempt pricing. Opt-in ONLY — leaving this
-	 * undefined preserves the pre-fallback behavior on every code path.
+	 * undefined sends neither and keeps both off; a `fallback` block in the
+	 * response (a gateway opted in) is still persisted as a replay boundary.
 	 */
 	fallbacks?: FallbackParam[];
 }
@@ -1231,12 +838,29 @@ export type AnthropicClientOptionsArgs = {
 	dynamicHeaders?: Record<string, string>;
 	isOAuth?: boolean;
 	hasTools?: boolean;
+	/** Whether a tool in ANTHROPIC_BUFFERED_INPUT_TOOLS is present; suppresses the request-wide fine-grained streaming beta. */
+	hasBufferedInputTools?: boolean;
 	thinkingEnabled?: boolean;
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	disableStrictTools?: boolean;
+	/**
+	 * Withhold the prompt-cache betas (see `buildClaudeCodeBetas`). Set when the
+	 * request carries no breakpoint at all, and also when it carries breakpoints
+	 * stripped of `ttl`/`scope`: both betas govern those options, so a body
+	 * without them must advertise neither.
+	 */
+	dropPromptCacheBetas?: boolean;
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
+	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
+	copilotCacheKey?: string;
+	/**
+	 * Build-time cache provenance for the wrapper: the cached value the
+	 * outgoing headers were built from, or `null` when the cache was empty at
+	 * build. `undefined` rereads the cache at dispatch.
+	 */
+	copilotCacheSnapshot?: string | null;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -1250,63 +874,6 @@ export type AnthropicClientOptionsResult = {
 	fetch?: FetchImpl;
 	fetchOptions?: AnthropicFetchOptions;
 };
-
-const CLAUDE_CODE_TLS_CIPHERS = tls.DEFAULT_CIPHERS;
-
-type FoundryTlsOptions = {
-	ca?: string | string[];
-	cert?: string;
-	key?: string;
-};
-
-const foundryTlsOptionsCache = new Map<string, FoundryTlsOptions | undefined>();
-
-function foundryTlsCacheKeyComponent(value: string | undefined): string | null {
-	if (!value) return null;
-	const trimmed = value.trim();
-	// For path-valued vars, fold the file mtime into the key so on-disk cert
-	// rotation (common for short-lived corporate mTLS certs) invalidates the
-	// cached TLS options instead of pinning the first read forever.
-	if (trimmed && !trimmed.includes("-----BEGIN") && looksLikeFilePath(trimmed)) {
-		try {
-			return `${trimmed}@${fs.statSync(trimmed).mtimeMs}`;
-		} catch {
-			return trimmed;
-		}
-	}
-	return value;
-}
-
-function foundryTlsOptionsCacheKey(): string {
-	return JSON.stringify([
-		foundryTlsCacheKeyComponent($env.NODE_EXTRA_CA_CERTS),
-		foundryTlsCacheKeyComponent($env.CLAUDE_CODE_CLIENT_CERT),
-		foundryTlsCacheKeyComponent($env.CLAUDE_CODE_CLIENT_KEY),
-	]);
-}
-
-function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
-	if (model.provider === "github-copilot") {
-		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
-	}
-	if (model.provider === "anthropic" && isFoundryEnabled()) {
-		const foundryBaseUrl = normalizeAnthropicBaseUrl($env.FOUNDRY_BASE_URL);
-		if (foundryBaseUrl) {
-			return foundryBaseUrl;
-		}
-	}
-	if (model.provider === "anthropic") {
-		const configured = normalizeAnthropicBaseUrl(model.baseUrl);
-		// An explicitly configured non-official baseUrl (e.g. a models.yml provider
-		// override) is more specific than the generic env fallback and wins.
-		if (configured && !isOfficialAnthropicApiUrl(configured)) return configured;
-		// Otherwise ANTHROPIC_BASE_URL routes chat through an enterprise gateway
-		// (docs/environment-variables.md), ahead of the official default. The
-		// Foundry redirect is already handled above.
-		return normalizeAnthropicBaseUrl($env.ANTHROPIC_BASE_URL) ?? configured ?? "https://api.anthropic.com";
-	}
-	return normalizeAnthropicBaseUrl(model.baseUrl);
-}
 
 function resolveEagerToolInputStreamingSupport(
 	model: Model<"anthropic-messages">,
@@ -1327,147 +894,12 @@ function resolveEagerToolInputStreamingSupport(
 	return !model.compat.officialEndpoint;
 }
 
-function parseAnthropicCustomHeaders(rawHeaders: string | undefined): Record<string, string> | undefined {
-	const source = rawHeaders?.trim();
-	if (!source) return undefined;
-
-	const parsed: Record<string, string> = {};
-	for (const token of source.split(/\r?\n|,/)) {
-		const entry = token.trim();
-		if (!entry) continue;
-		const separatorIndex = entry.indexOf(":");
-		if (separatorIndex <= 0) continue;
-		const key = entry.slice(0, separatorIndex).trim();
-		const value = entry.slice(separatorIndex + 1).trim();
-		if (!key || !value) continue;
-		parsed[key] = value;
-	}
-
-	return Object.keys(parsed).length > 0 ? parsed : undefined;
-}
-
-/**
- * Returns env-supplied custom headers (`ANTHROPIC_CUSTOM_HEADERS`) when they
- * should be forwarded to the upstream endpoint.
- *
- * Foundry mode forwards them unconditionally. Outside Foundry, they're applied
- * only when the configured base URL is a non-Anthropic host — i.e. an
- * enterprise/corporate gateway that may require its own proprietary auth
- * header. Stock `api.anthropic.com` would reject unknown headers, so they're
- * omitted there.
- */
-export function resolveAnthropicCustomHeadersForBaseUrl(
-	baseUrl: string | undefined,
-): Record<string, string> | undefined {
-	if (!isFoundryEnabled() && isOfficialAnthropicApiUrl(baseUrl)) return undefined;
-	return parseAnthropicCustomHeaders($env.ANTHROPIC_CUSTOM_HEADERS);
-}
-
 function resolveAnthropicCustomHeaders(
 	model: Model<"anthropic-messages">,
 	baseUrl: string | undefined,
 ): Record<string, string> | undefined {
-	if (model.provider !== "anthropic") return undefined;
+	if (!model.compat.firstPartyProvider) return undefined;
 	return resolveAnthropicCustomHeadersForBaseUrl(baseUrl);
-}
-
-function looksLikeFilePath(value: string): boolean {
-	return value.includes("/") || value.includes("\\") || /\.(pem|crt|cer|key)$/i.test(value);
-}
-
-function resolvePemValue(value: string | undefined, name: string): string | undefined {
-	const trimmed = value?.trim();
-	if (!trimmed) return undefined;
-
-	const inline = trimmed.replace(/\\n/g, "\n");
-	if (inline.includes("-----BEGIN")) {
-		return inline;
-	}
-
-	if (looksLikeFilePath(trimmed)) {
-		try {
-			return fs.readFileSync(trimmed, "utf8");
-		} catch (error) {
-			if (isEnoent(error)) {
-				throw new AIError.ValidationError(`${name} path does not exist: ${trimmed}`);
-			}
-			throw error;
-		}
-	}
-
-	return inline;
-}
-
-function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTlsOptions | undefined {
-	if (model.provider !== "anthropic") return undefined;
-	if (!isFoundryEnabled()) return undefined;
-
-	const cacheKey = foundryTlsOptionsCacheKey();
-	if (foundryTlsOptionsCache.has(cacheKey)) return foundryTlsOptionsCache.get(cacheKey);
-
-	const ca = resolvePemValue($env.NODE_EXTRA_CA_CERTS, "NODE_EXTRA_CA_CERTS");
-	const cert = resolvePemValue($env.CLAUDE_CODE_CLIENT_CERT, "CLAUDE_CODE_CLIENT_CERT");
-	const key = resolvePemValue($env.CLAUDE_CODE_CLIENT_KEY, "CLAUDE_CODE_CLIENT_KEY");
-
-	if ((cert && !key) || (!cert && key)) {
-		throw new AIError.ConfigurationError(
-			"Both CLAUDE_CODE_CLIENT_CERT and CLAUDE_CODE_CLIENT_KEY must be set for mTLS.",
-		);
-	}
-
-	const options: FoundryTlsOptions = {};
-	if (ca) options.ca = [...tls.rootCertificates, ca];
-	if (cert) options.cert = cert;
-	if (key) options.key = key;
-	const resolved = Object.keys(options).length > 0 ? options : undefined;
-	foundryTlsOptionsCache.set(cacheKey, resolved);
-	return resolved;
-}
-
-function buildClaudeCodeTlsFetchOptions(
-	model: Model<"anthropic-messages">,
-	baseUrl: string | undefined,
-): AnthropicFetchOptions | undefined {
-	if (model.provider !== "anthropic") return undefined;
-	if (!baseUrl) return undefined;
-
-	let serverName: string;
-	try {
-		serverName = new URL(baseUrl).hostname;
-	} catch {
-		return undefined;
-	}
-
-	if (!serverName) return undefined;
-
-	const foundryTlsOptions = resolveFoundryTlsOptions(model);
-
-	return {
-		tls: {
-			rejectUnauthorized: true,
-			serverName,
-			...(CLAUDE_CODE_TLS_CIPHERS ? { ciphers: CLAUDE_CODE_TLS_CIPHERS } : {}),
-			...foundryTlsOptions,
-		},
-	};
-}
-function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
-	// Case-insensitive merge: later sources win and keep their casing. A plain
-	// Object.assign would let `authorization` and `Authorization` coexist, and
-	// the Headers constructor then joins both values comma-separated on the wire.
-	const merged: Record<string, string> = {};
-	const keyByLower = new Map<string, string>();
-	for (const headers of headerSources) {
-		if (!headers) continue;
-		for (const [key, value] of Object.entries(headers)) {
-			const lower = key.toLowerCase();
-			const existing = keyByLower.get(lower);
-			if (existing !== undefined && existing !== key) delete merged[existing];
-			keyByLower.set(lower, key);
-			merged[key] = value;
-		}
-	}
-	return merged;
 }
 
 const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
@@ -1491,26 +923,62 @@ const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
- * Surface the structured type + message instead of the raw JSON blob; the
- * error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
+ * Surface the structured type, code and message instead of the raw JSON blob;
+ * the error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings.
+ *
+ * `midMessage` marks a frame that lands inside an open message envelope — after
+ * `message_start`, before the terminal frame (`message_stop`, or a
+ * `message_delta` carrying `stop_reason`). Such a frame ends a message the wire
+ * can never complete, exactly as a connection dropped before `message_stop`
+ * does, so it is reported as a stream-envelope truncation
+ * ({@link AIError.AnthropicStreamEnvelopeError}) rather than as a completed-turn
+ * provider rejection: the envelope wording makes the turn retryable before
+ * replay-unsafe content streams and lets turn recovery continue a turn whose
+ * text is already committed instead of ending it. The provider's `type` and
+ * `code` stay in the diagnostic as `type=`/`code=` tokens, the same shape the
+ * Codex native-lane steer rejection uses, so a gateway-cut stream is
+ * identifiable after the `Error` instance is gone.
+ *
+ * Only frame types the provider loop already retries take the truncation path.
+ * A deterministic rejection (`invalid_request_error`, `authentication_error`,
+ * `billing_error`, `permission_error`, an account cap) is a decision the
+ * provider made about the request, not a cut wire: rewriting it as a truncation
+ * would replay a request that can never succeed and, once text is committed,
+ * continue a turn the provider refused. The gate is
+ * {@link AIError.isProviderRetryableError} on the very error that is otherwise
+ * thrown, so a frame keeps exactly the verdict it had before this classification
+ * existed — the retry decision moves nowhere, only the shape of a retryable
+ * failure changes.
  */
-function createAnthropicSseStreamError(data: string): Error {
+function createAnthropicSseStreamError(data: string, midMessage: boolean): Error {
+	let parsed: { error?: { type?: unknown; code?: unknown; message?: unknown } } | undefined;
 	try {
-		const parsed = JSON.parse(data) as { error?: { type?: unknown; message?: unknown } };
-		const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
-		const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
-		if (message) {
-			return new AIError.ProviderResponseError(
-				errorType ? `Anthropic stream error (${errorType}): ${message}` : `Anthropic stream error: ${message}`,
-				{ provider: "anthropic", kind: "output" },
-			);
-		}
+		parsed = JSON.parse(data) as { error?: { type?: unknown; code?: unknown; message?: unknown } };
 	} catch {
-		// Not a JSON envelope; fall through to the raw payload.
+		// Not a JSON envelope; the raw payload is the diagnostic.
 	}
-	return new AIError.ProviderResponseError(data, { provider: "anthropic", kind: "output" });
+	const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
+	const errorCode = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
+	const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
+	const rejection = new AIError.ProviderResponseError(
+		message
+			? errorType
+				? `Anthropic stream error (${errorType}): ${message}`
+				: `Anthropic stream error: ${message}`
+			: data,
+		{ provider: "anthropic", kind: "output" },
+	);
+	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
+		return rejection;
+	}
+	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
+		.filter(field => field !== undefined)
+		.join(" ");
+	return new AIError.AnthropicStreamEnvelopeError(
+		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	);
 }
 
 async function* iterateAnthropicEvents(
@@ -1524,11 +992,21 @@ async function* iterateAnthropicEvents(
 
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
+	// A `message_delta` carrying `stop_reason` is the consumer's terminal stop
+	// signal: generation finished there, and a non-conforming gateway only omits
+	// the trailing `message_stop`. A later `error` frame is a completed-turn
+	// report, not a truncation, so the envelope has to count as closed here too.
+	let sawTerminalDelta = false;
 
-	for await (const sse of readSseEvents(response.body, signal)) {
+	// Capture `raw` only when the diagnostic observer exists; otherwise the
+	// per-frame wire-line array is pure token-path garbage.
+	for await (const sse of readSseEvents(response.body, signal, onSseEvent ? { captureRaw: true } : undefined)) {
 		notifyRawSseEvent(onSseEvent, sse);
+		// A frame inside an open message envelope ends a message the wire can never
+		// complete: classify it as the truncation family so the failure is
+		// retryable/continuable instead of a completed-turn provider rejection.
 		if (sse.event === "error") {
-			throw createAnthropicSseStreamError(sse.data);
+			throw createAnthropicSseStreamError(sse.data, sawMessageStart && !sawMessageEnd && !sawTerminalDelta);
 		}
 
 		if (sse.event === "ping") {
@@ -1550,6 +1028,8 @@ async function* iterateAnthropicEvents(
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
 				sawMessageEnd = true;
+			} else if (event.type === "message_delta" && event.delta?.stop_reason) {
+				sawTerminalDelta = true;
 			}
 			yield event;
 		} catch (error) {
@@ -1575,7 +1055,7 @@ function hasAnthropicRawResponseRequest(request: unknown): request is AnthropicR
 
 type AnthropicStreamWithResponseRequest = {
 	withResponse(): Promise<{
-		data: AsyncIterable<RawMessageStreamEvent>;
+		data: AsyncIterable<AnthropicStreamEvent>;
 		response: Response;
 		request_id: string | null;
 	}>;
@@ -1611,13 +1091,13 @@ async function getAnthropicStreamResponse(
 	throw new AIError.AnthropicStreamEnvelopeError("Anthropic SDK request did not expose a stream response");
 }
 
-async function* observeDecodedAnthropicSdkEvents(
+async function* observeDecodedAnthropicEvents(
 	events: AsyncIterable<AnthropicStreamEvent>,
 	observer: (event: RawSseEvent) => void,
 ): AsyncGenerator<AnthropicStreamEvent> {
 	for await (const event of events) {
 		const data = JSON.stringify(event);
-		// Reconstructed from decoded SDK event; not literal wire bytes.
+		// Reconstructed from decoded transport events; not literal wire bytes.
 		notifyRawSseEvent(observer, { event: event.type, data, raw: [`event: ${event.type}`, `data: ${data}`] });
 		yield event;
 	}
@@ -1663,6 +1143,102 @@ function unwrapAnthropicThinkingEnvelope(text: string): string | undefined {
 		stripped = true;
 	}
 	return stripped ? current : undefined;
+}
+
+/**
+ * Whether the block at `index` is output a model streamed before declining at
+ * a server-side fallback handoff (the last `fallback` block, `boundary`): its
+ * reasoning or a tool call. The serving model never saw those tool calls, so
+ * they must not run, and replaying reasoning signed on both sides of a
+ * handoff is refused by the API. Text is not: the serving model continued
+ * from it. Server tool blocks are kept as they are: an unpaired
+ * `server_tool_use` before the boundary is still replayed.
+ */
+function isDeclinedBeforeFallback(
+	block: AssistantMessage["content"][number],
+	index: number,
+	boundary: number,
+): boolean {
+	return (
+		index < boundary && (block.type === "thinking" || block.type === "redactedThinking" || block.type === "toolCall")
+	);
+}
+
+/**
+ * `content` without the declining model's output (see
+ * {@link isDeclinedBeforeFallback}); `content` itself when the turn had no
+ * handoff. Never mutates it: streamed events index into the live message.
+ */
+function withoutDeclinedFallbackOutput(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	const boundary = content.findLastIndex(block => block.type === "fallback");
+	if (boundary <= 0) return content;
+	return content.filter((block, index) => !isDeclinedBeforeFallback(block, index, boundary));
+}
+
+/**
+ * The refused response's content as the continuation prefix: client tool
+ * calls (no matching tool_result) are omitted and a trailing text block is
+ * right-trimmed, per the fallback-credit continuation contract.
+ *
+ * A `fallback` boundary stays exactly where it appeared: the API accepts it on
+ * any request, beta or not, and uses its position to validate the thinking
+ * blocks on either side, so the echo must not collapse or move it.
+ */
+function refusalContinuationPrefix(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	const prefix = structuredClone(content.filter(block => block.type !== "toolCall"));
+	const last = prefix.at(-1);
+	if (last?.type === "text") last.text = last.text.trimEnd();
+	return prefix;
+}
+
+/**
+ * Wire form of {@link refusalContinuationPrefix} for the appended assistant
+ * message. Blocks with no valid continuation wire shape (unsigned thinking,
+ * anything the Anthropic stream cannot have produced) are dropped.
+ */
+function formatEchoedRefusalContent(content: AssistantMessage["content"]): ContentBlockParam[] {
+	const echoed: ContentBlockParam[] = [];
+	for (const block of refusalContinuationPrefix(content)) {
+		switch (block.type) {
+			case "text":
+				echoed.push({ type: "text", text: block.text });
+				break;
+			case "thinking":
+				if (block.thinkingSignature) {
+					echoed.push({ type: "thinking", thinking: block.thinking, signature: block.thinkingSignature });
+				}
+				break;
+			case "redactedThinking":
+				echoed.push({ type: "redacted_thinking", data: block.data });
+				break;
+			case "fallback":
+				echoed.push({ type: "fallback", from: block.from, to: block.to });
+				break;
+			case "anthropicServerTool":
+				echoed.push(block.block);
+				break;
+		}
+	}
+	return echoed;
+}
+
+/**
+ * The refused request's frozen body retargeted at the fallback model with the
+ * credit token, optionally followed by the echoed refusal prefix.
+ */
+function fallbackCreditRequestBody(
+	redemption: AnthropicFallbackCreditHandle,
+	targetModelId: string,
+	continuation: ContentBlockParam[] | undefined,
+): MessageCreateParamsStreaming {
+	const body = structuredClone(redemption.params);
+	body.model = targetModelId;
+	body.fallback_credit_token = redemption.token;
+	delete body.fallbacks;
+	if (continuation && continuation.length > 0) {
+		body.messages = [...body.messages, { role: "assistant", content: continuation }];
+	}
+	return body;
 }
 
 function createEmptyUsage(premiumRequests?: number): Usage {
@@ -1716,37 +1292,156 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
-function parseAnthropicWireUsage(value: unknown): AnthropicWireUsage | undefined {
-	if (!isRecord(value)) return undefined;
-	const cacheCreation = isRecord(value.cache_creation)
-		? {
-				...(typeof value.cache_creation.ephemeral_5m_input_tokens === "number"
-					? { ephemeral_5m_input_tokens: value.cache_creation.ephemeral_5m_input_tokens }
-					: {}),
-				...(typeof value.cache_creation.ephemeral_1h_input_tokens === "number"
-					? { ephemeral_1h_input_tokens: value.cache_creation.ephemeral_1h_input_tokens }
-					: {}),
-			}
-		: undefined;
-	return {
-		...(typeof value.input_tokens === "number" ? { input_tokens: value.input_tokens } : {}),
-		...(typeof value.output_tokens === "number" ? { output_tokens: value.output_tokens } : {}),
-		...(typeof value.cache_read_input_tokens === "number"
-			? { cache_read_input_tokens: value.cache_read_input_tokens }
-			: {}),
-		...(typeof value.cache_creation_input_tokens === "number"
-			? { cache_creation_input_tokens: value.cache_creation_input_tokens }
-			: {}),
-		...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
-	};
-}
-
 function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackContent | undefined {
 	if (!isRecord(value) || value.type !== "fallback") return undefined;
 	const from = isRecord(value.from) && typeof value.from.model === "string" ? value.from.model : undefined;
 	const to = isRecord(value.to) && typeof value.to.model === "string" ? value.to.model : undefined;
 	if (!from?.trim() || !to?.trim()) return undefined;
 	return { type: "fallback", from: { model: from }, to: { model: to } };
+}
+
+/**
+ * Whether a persisted compaction summary replays as a native `compaction`
+ * block: only the provider that produced it may replay it, and only on a
+ * request whose endpoint supports compaction (the caller decides that with
+ * {@link supportsAnthropicCompaction}); every other model reads the text.
+ */
+function isReplayableAnthropicCompaction(
+	payload: ProviderPayload | undefined,
+	model: Model<"anthropic-messages">,
+): payload is AnthropicCompactionPayload {
+	return payload?.type === "anthropicCompaction" && payload.provider === model.provider && payload.content.length > 0;
+}
+
+/** Which persisted compaction summaries a request replays as native blocks. */
+interface AnthropicCompactionReplay {
+	model: Model<"anthropic-messages">;
+	/** Replay persisted legacy threshold blocks (encrypted content) too. */
+	legacy: boolean;
+}
+
+/**
+ * Whether `payload` goes on the wire as a `compaction` block under `replay`:
+ * replayable for the model, and carrying a signature or (when legacy replay is
+ * on) the legacy ciphertext. Anything else is sent as the summary's text.
+ */
+function replaysAnthropicCompactionBlock(
+	payload: ProviderPayload | undefined,
+	replay: AnthropicCompactionReplay,
+): payload is AnthropicCompactionPayload {
+	return (
+		isReplayableAnthropicCompaction(payload, replay.model) &&
+		(payload.signature !== undefined || (replay.legacy && payload.encryptedContent !== undefined))
+	);
+}
+
+/** The wire block for a replayed compaction payload, opaque state included. */
+function compactionBlockParam(payload: AnthropicCompactionPayload): CompactionBlockParam {
+	const { content, signature, encryptedContent, toolChanges } = payload;
+	return {
+		type: "compaction",
+		content,
+		...(signature !== undefined ? { signature } : {}),
+		...(encryptedContent !== undefined ? { encrypted_content: encryptedContent } : {}),
+		...(toolChanges !== undefined ? { tool_changes: toolChanges } : {}),
+	};
+}
+
+/**
+ * Whether any message in `messages` replays a native compaction block: the
+ * harness's user-role summary message, or the assistant message that
+ * produced the block when a caller appends the response itself.
+ */
+function contextReplaysAnthropicCompaction(
+	messages: readonly Message[],
+	model: Model<"anthropic-messages">,
+	format: "signed" | "legacy",
+): boolean {
+	return messages.some(message => {
+		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return false;
+		const payload = message.providerPayload;
+		return (
+			isReplayableAnthropicCompaction(payload, model) &&
+			(format === "signed" ? payload.signature !== undefined : payload.encryptedContent !== undefined)
+		);
+	});
+}
+
+/**
+ * The persisted payload for a streamed `compaction` content block, or
+ * `undefined` when the block carries no summary or malformed `tool_changes`.
+ * `tool_changes` is covered by the signature, so it is kept verbatim.
+ */
+function parseAnthropicCompactionBlock(value: unknown, provider: string): AnthropicCompactionPayload | undefined {
+	if (!isRecord(value) || value.type !== "compaction" || typeof value.content !== "string" || !value.content) {
+		return undefined;
+	}
+	const toolChanges = value.tool_changes;
+	if (toolChanges !== undefined && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
+	const { content, signature, encrypted_content } = value;
+	return {
+		type: "anthropicCompaction",
+		provider,
+		content,
+		...(typeof signature === "string" ? { signature } : {}),
+		...(typeof encrypted_content === "string" && encrypted_content ? { encryptedContent: encrypted_content } : {}),
+		...(toolChanges !== undefined ? { toolChanges } : {}),
+	};
+}
+
+/**
+ * Persisted encrypted threshold blocks still require a legacy strategy.
+ * This edit is replay-only and cannot trigger a new threshold compaction.
+ */
+function buildAnthropicCompactionReplayEdit(model: Model<"anthropic-messages">): CompactionEdit {
+	return {
+		type: "compact_20260112",
+		trigger: { type: "input_tokens", value: Math.max(50_000, model.contextWindow ?? 0) },
+	};
+}
+
+/** Legacy threshold block replay requires its original beta and replay edit. */
+function carriesLegacyCompactionEdit(params: MessageCreateParams): boolean {
+	return params.context_management?.edits.some(edit => edit.type === "compact_20260112") ?? false;
+}
+
+/** Signed replay blocks and on-demand requests require the current compaction beta. */
+function carriesSignedCompaction(params: MessageCreateParams): boolean {
+	return (
+		params.compaction !== undefined ||
+		params.messages.some(
+			message =>
+				Array.isArray(message.content) &&
+				message.content.some(block => block.type === "compaction" && block.signature !== undefined),
+		)
+	);
+}
+
+/**
+ * Replace the top-level zero token counts with the sum over every sampling
+ * iteration on an on-demand compaction response. The iteration list is the
+ * documented billing total. Requests without a compaction iteration retain
+ * their top-level usage.
+ */
+function applyCompactionIterationUsage(usage: Usage, source: AnthropicWireUsage): boolean {
+	const iterations = source.iterations;
+	if (!iterations?.some(iteration => iteration?.type === "compaction")) return false;
+	let input = 0;
+	let output = 0;
+	let cacheRead = 0;
+	let cacheWrite = 0;
+	for (const iteration of iterations) {
+		if (!iteration) continue;
+		input += iteration.input_tokens ?? 0;
+		output += iteration.output_tokens ?? 0;
+		cacheRead += iteration.cache_read_input_tokens ?? 0;
+		cacheWrite += iteration.cache_creation_input_tokens ?? 0;
+	}
+	usage.input = input;
+	usage.output = output;
+	usage.cacheRead = cacheRead;
+	usage.cacheWrite = cacheWrite;
+	return true;
 }
 
 /**
@@ -1765,20 +1460,6 @@ function fallbackServedModelFromUsage(source: AnthropicWireUsage): string | unde
 }
 
 /**
- * Price a fallback turn per the fallback billing cookbook §4:
- *   • A pre-served attempt with zero output/cache-creation is not billed
- *     (waived classifier block); its iteration is skipped.
- *   • Mid-stream refusals bill their attempting model's input+output at
- *     that model's normal rates.
- *   • The `fallback_message` attempt's input tokens are rebilled at the
- *     served model's cache-read rate (fallback credit — 10% of base input).
- *
- * Top-level `usage.input/output/cacheRead/cacheWrite` stay Anthropic's raw
- * served-attempt counts; `usage.cost` reflects the per-iteration attributed
- * total. Non-fallback turns skip this path entirely and use the requested
- * model at the normal `calculateCost` call.
- */
-/**
  * Resolve a served/iteration model id to its bundled catalog entry when
  * possible so the per-iteration cost uses the served model's pricing
  * (e.g. Opus 4.8 rates for a Fable→Opus fallback). Falls back to
@@ -1786,25 +1467,42 @@ function fallbackServedModelFromUsage(source: AnthropicWireUsage): string | unde
  * catalog has no entry under it — the caller keeps the requested-model
  * pricing as the safe default and logs at the source.
  */
-function resolveIterationModel(
-	requestModel: Model<"anthropic-messages">,
-	iterationModelId: string | null | undefined,
-): Model<Api> {
+function resolveIterationModel(requestModel: Model<Api>, iterationModelId: string | null | undefined): Model<Api> {
 	const id = iterationModelId?.trim();
 	if (!id || id === requestModel.id) return requestModel;
 	// Bundled catalog lookup: only Anthropic provider entries are safe to
 	// reference (dated snapshots resolve to their alias entry when present).
-	if (requestModel.provider === "anthropic") {
+	if (requestModel.provider === "anthropic" && requestModel.api === "anthropic-messages") {
 		const bundled = getBundledModel("anthropic", id);
 		if (bundled?.api === "anthropic-messages") return bundled;
 	}
 	return requestModel;
 }
 
-function calculateFallbackTurnCost(
-	requestModel: Model<"anthropic-messages">,
+/**
+ * Price a turn per sampling iteration whenever the API reports one per
+ * iteration — a server-side fallback or a server-side compaction. Each
+ * iteration is priced on its own prompt size, so a long-context tier applies
+ * only to an iteration that itself crosses the threshold, never to the
+ * summed totals of two sub-threshold samplings. Fallback turns follow the
+ * fallback billing cookbook §4 on top:
+ *   • A pre-served attempt with zero output/cache-creation is not billed
+ *     (waived classifier block); its iteration is skipped.
+ *   • Mid-stream refusals bill their attempting model's input+output at
+ *     that model's normal rates.
+ *   • The `fallback_message` attempt's input tokens are rebilled at the
+ *     served model's cache-read rate (fallback credit — 10% of base input).
+ *
+ * Top-level `usage.input/output/cacheRead/cacheWrite` keep their summed
+ * counts; `usage.cost` reflects the per-iteration attributed total. Turns
+ * without iterations use the requested model at the normal `calculateCost`
+ * call.
+ */
+function calculateIterationTurnCost(
+	requestModel: Model<Api>,
 	usage: Usage,
 	source: AnthropicWireUsage,
+	timestamp: number,
 ): boolean {
 	const iterations = source.iterations ?? [];
 	if (iterations.length === 0) return false;
@@ -1830,7 +1528,7 @@ function calculateFallbackTurnCost(
 		iterationUsage.cacheWrite = cacheWriteTokens;
 		iterationUsage.totalTokens =
 			iterationUsage.input + iterationUsage.output + iterationUsage.cacheRead + iterationUsage.cacheWrite;
-		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage);
+		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage, timestamp);
 		cost.input += iterationUsage.cost.input;
 		cost.output += iterationUsage.cost.output;
 		cost.cacheRead += iterationUsage.cost.cacheRead;
@@ -1863,10 +1561,15 @@ const THINKING_PREFIX_BINDING_PATTERN =
 
 /** Detects the preserved-thinking error caused by rewriting a signed block's conversation prefix. */
 export function isThinkingPrefixBindingError(message: string): boolean {
-	return INVALID_THINKING_SIGNATURE_PATTERN.test(message) && THINKING_PREFIX_BINDING_PATTERN.test(message);
+	return (
+		!/\bcompaction_[a-z_]+\b/i.test(message) &&
+		INVALID_THINKING_SIGNATURE_PATTERN.test(message) &&
+		THINKING_PREFIX_BINDING_PATTERN.test(message)
+	);
 }
 
 export function isInvalidThinkingSignatureError(message: string): boolean {
+	if (/\bcompaction_[a-z_]+\b/i.test(message)) return false;
 	return INVALID_THINKING_SIGNATURE_PATTERN.test(message) || MISSING_THINKING_SIGNATURE_PATTERN.test(message);
 }
 
@@ -1914,6 +1617,33 @@ function rememberPrefixDroppedThinking(
 	}
 }
 
+/**
+ * Replay keys of the thinking blocks in the request's latest assistant turn.
+ * Anthropic validates every assistant message after the last user message
+ * carrying more than tool results as one "latest assistant message" (its error
+ * indices count blocks across that whole run).
+ */
+function latestAssistantTurnThinkingKeys(params: MessageCreateParamsStreaming): string[] {
+	const keys: string[] = [];
+	for (let index = params.messages.length - 1; index >= 0; index--) {
+		const message = params.messages[index]!;
+		if (message.role !== "assistant") {
+			const toolResultsOnly =
+				Array.isArray(message.content) &&
+				message.content.length > 0 &&
+				message.content.every(block => block.type === "tool_result");
+			if (!toolResultsOnly) break;
+			continue;
+		}
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			const key = thinkingReplayKey(block);
+			if (key) keys.push(key);
+		}
+	}
+	return keys;
+}
+
 function rememberPrefixBindingFailure(
 	params: MessageCreateParamsStreaming,
 	message: string,
@@ -1939,12 +1669,50 @@ function rememberPrefixBindingFailure(
 	return true;
 }
 
+/** Identify a reported drop by the dropped block's replay key, falling back to its wire path. */
+function reportedDropKey(params: MessageCreateParamsStreaming, path: string | undefined): string | undefined {
+	if (path === undefined) return undefined;
+	const match = INPUT_TRANSFORMATION_PATH_PATTERN.exec(path);
+	if (match) {
+		const content = params.messages[Number(match[1])]?.content;
+		const block = Array.isArray(content) ? content[Number(match[2])] : undefined;
+		const key = block ? thinkingReplayKey(block) : undefined;
+		if (key) return key;
+	}
+	return `path:${path}`;
+}
+
+/**
+ * Warn once for the signed thinking blocks the API dropped from one request
+ * after the conversation prefix changed: the count and first path at warn,
+ * every path at debug. One prefix change can drop hundreds of blocks in a
+ * single request, which would otherwise flood the log one line per block.
+ */
+export function logDroppedThinking(provider: string, model: string, paths: Array<string | undefined>): void {
+	if (paths.length === 0) return;
+	logger.warn(`${provider}: dropped thinking block after conversation prefix changed`, {
+		model,
+		count: paths.length,
+		path: paths[0],
+	});
+	if (paths.length > 1) logger.debug(`${provider}: dropped thinking block paths`, { model, paths });
+}
+
+/**
+ * Record server-reported input rewrites on the response. A `drop_block`
+ * request keeps replaying the transcript verbatim afterwards: the API drops
+ * the same invalid blocks again on every later request (unbilled), while
+ * omitting them client-side would change the bytes the drop request just
+ * cached and can cost another message-prefix cache miss from the first
+ * dropped block on. Newly dropped blocks warn once per report (see
+ * {@link logDroppedThinking}); repeats of already-warned drops log at debug.
+ */
 function applyReportedInputTransformations(
 	output: AssistantMessage,
-	params: MessageCreateParamsStreaming,
-	state: AnthropicProviderSessionState | undefined,
 	value: unknown,
 	seen: Set<string>,
+	params: MessageCreateParamsStreaming,
+	state: AnthropicProviderSessionState | undefined,
 	replace = false,
 ): void {
 	if (value === undefined || value === null) return;
@@ -1961,12 +1729,25 @@ function applyReportedInputTransformations(
 	}
 	if (fresh.length === 0) return;
 	output.inputTransformations = [...(output.inputTransformations ?? []), ...fresh];
-	rememberPrefixDroppedThinking(params, fresh, state);
+	const dropped: Array<string | undefined> = [];
+	let repeated = 0;
 	for (const transformation of fresh) {
 		if (transformation.reason !== "prefix_binding_mismatch") continue;
-		logger.warn("anthropic: dropped thinking block after conversation prefix changed", {
+		const dropKey = reportedDropKey(params, transformation.path);
+		if (state && dropKey !== undefined) {
+			if (state.reportedPrefixDroppedThinking.has(dropKey)) {
+				repeated++;
+				continue;
+			}
+			state.reportedPrefixDroppedThinking.add(dropKey);
+		}
+		dropped.push(transformation.path);
+	}
+	logDroppedThinking("anthropic", output.model, dropped);
+	if (repeated > 0) {
+		logger.debug("anthropic: API re-dropped previously reported thinking blocks", {
 			model: output.model,
-			path: transformation.path,
+			count: repeated,
 		});
 	}
 }
@@ -1987,10 +1768,30 @@ export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messa
 	return `${hint}\n\n${message}`;
 }
 
+/**
+ * A non-Anthropic transport that reuses this stream consumer: it owns the
+ * request body and HTTP exchange, while events, usage, and errors keep the
+ * source model's identity and pricing.
+ */
+type AnthropicStreamTransport = {
+	sourceModel: Model<"bedrock-converse-stream">;
+	/** Encode reasoning-off; `forceThinkingOffFields` supplies the source model's explicit disabled form. */
+	forceThinkingOff: boolean;
+	forceThinkingOffFields?: Record<string, unknown>;
+	prefixMismatchBehavior?: "drop_block" | "error";
+	prepareRequest: (
+		params: MessageCreateParamsStreaming,
+		betas: readonly string[],
+	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>;
+	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike;
+	prepareOptions: (options: AnthropicOptions) => AnthropicOptions;
+};
+
 const streamAnthropicOnce = (
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: AnthropicOptions,
+	transport?: AnthropicStreamTransport,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
@@ -1998,44 +1799,99 @@ const streamAnthropicOnce = (
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
+		const sourceModel = transport?.sourceModel ?? model;
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
+			api: sourceModel.api,
+			provider: sourceModel.provider,
+			model: sourceModel.id,
 			usage: createEmptyUsage(),
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 
 		const onSseEvent = options?.onSseEvent;
-		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, model) : undefined;
+		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
+		// A request that opts into server-side fallbacks holds its tool-call events
+		// until the turn ends: a model that declines later in the same response
+		// hands it to the fallback model, and its tool calls must not reach
+		// speculative execution, a gateway client or the UI first. Each event keeps
+		// the block it belongs to, so a retry that resets the content releases none.
+		type ToolCallEvent = Extract<
+			AssistantMessageEvent,
+			{ type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }
+		>;
+		let holdToolCallEvents = false;
+		const heldToolCallEvents: Array<{
+			event: ToolCallEvent;
+			block: AssistantMessage["content"][number] | undefined;
+		}> = [];
+		const pushToolCallEvent = (event: ToolCallEvent): void => {
+			if (holdToolCallEvents) heldToolCallEvents.push({ event, block: output.content[event.contentIndex] });
+			else stream.push(event);
+		};
+		// Release the held events except the declining model's, with the indices
+		// every earlier event of the stream used, and return the content the
+		// finished turn keeps. The live message stays whole: queued events index
+		// into it.
+		const settleFallbackHandoff = (): AssistantMessage["content"] => {
+			const boundary = output.content.findLastIndex(block => block.type === "fallback");
+			for (const { event, block } of heldToolCallEvents) {
+				if (!block || output.content[event.contentIndex] !== block) continue;
+				if (isDeclinedBeforeFallback(block, event.contentIndex, boundary)) continue;
+				stream.push(event);
+			}
+			heldToolCallEvents.length = 0;
+			return withoutDeclinedFallbackOutput(output.content);
+		};
 
 		try {
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
-			const copilotDynamicHeaders =
+			if (transport) options = transport.prepareOptions(options ?? {});
+			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
+			const copilotApiKey = model.provider === "github-copilot" ? parseGitHubCopilotApiKey(apiKey) : undefined;
+			const copilotBaseUrl =
 				model.provider === "github-copilot"
-					? buildCopilotDynamicHeaders({
-							messages: context.messages,
-							hasImages: hasCopilotVisionInput(context.messages),
-							premiumMultiplier: model.premiumMultiplier,
-							headers: { ...model.headers, ...options?.headers },
-							initiatorOverride: options?.initiatorOverride,
-						})
+					? (resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com")
 					: undefined;
+			const copilotCacheKey =
+				model.provider === "github-copilot" ? getCopilotIntegrationCacheKey(apiKey, copilotBaseUrl) : undefined;
+			const copilotCached =
+				model.provider === "github-copilot" ? getCachedCopilotIntegrationId(copilotCacheKey) : undefined;
+			const copilotDynamicHeaders = copilotApiKey
+				? buildCopilotDynamicHeaders({
+						messages: context.messages,
+						hasImages: hasCopilotVisionInput(context.messages),
+						premiumMultiplier: model.premiumMultiplier,
+						headers: { ...model.headers, ...options?.headers },
+						integrationId: resolveCopilotRequestIdentity(options?.headers),
+						initiatorOverride: options?.initiatorOverride,
+						enterpriseUrl: copilotApiKey.enterpriseUrl,
+						cachedIntegrationId: copilotCached,
+					})
+				: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
-			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
-			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
+			const baseUrl = copilotBaseUrl ?? resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
+			// A caller-owned client decides the endpoint itself (its `baseURL`, or an
+			// explicit opt-in); it receives the compaction beta per request. A transport
+			// exists only to compact, so its endpoint supports the beta.
+			const compactionSupported =
+				transport !== undefined ||
+				(options?.client
+					? supportsAnthropicCompactionOnClient(model, options.client)
+					: supportsAnthropicCompaction(model, baseUrl));
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
+				options?.client,
 				baseUrl,
 				model.id,
 			);
@@ -2043,15 +1899,90 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
-			let dropAllThinking = false;
+			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
+			// Seeded from the session so a `cache_control` rejection learned on an
+			// earlier turn is honored on this turn's first attempt. Whichever of the
+			// two flags the session latched decides where this turn's ladder starts,
+			// so a session that learned only the narrow one keeps sending
+			// breakpoints — without `ttl`/`scope` — rather than none.
+			let dropCacheControl = providerSessionState?.cacheControlUnsupported ?? false;
+			let dropCacheControlOptions = providerSessionState?.cacheControlOptionsUnsupported ?? false;
+			// Set when this turn replayed because the endpoint refused
+			// `cache_control`. The endpoint-level latch is written from the turn's
+			// success path rather than from the parsed 400, so a misparsed error
+			// message costs one wasted retry instead of a whole session of
+			// suppressed prompt caching. Two flags, one per rung, because the
+			// success path records which rung carried the turn.
+			let cacheControlRejectionReplayed = false;
+			let cacheControlOptionRejectionReplayed = false;
+			// Whether this request's breakpoints carry an option a nested refusal
+			// could be about. `getCacheControl` is the only source of the breakpoint
+			// every call site applies, so asking it is asking the wire body. False
+			// means no nested refusal is possible — `type` is mandatory and its only
+			// legal value is constant — and the ladder skips its first rung.
+			// Re-read per rung because `isOAuthToken` is resolved with the client.
+			const requestCarriesCacheControlOptions = (): boolean => {
+				const cacheControl = getCacheControl(model, options?.cacheRetention, isOAuthToken).cacheControl;
+				return cacheControl !== undefined && (cacheControl.ttl !== undefined || cacheControl.scope !== undefined);
+			};
+			let dropAllThinking = droppedAllThinkingForSignature;
 			let prefixBindingRetryAttempted = false;
-			let prefixMismatchBehavior =
-				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
+			let latestTurnThinkingRetryAttempted = false;
+			// Claude Code's `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`; the wrapper
+			// already turned the gated compat off, this covers caller/frozen inputs.
+			const killSwitchActive = experimentalBetasDisabled(model);
+			// A live fallback-credit redemption replays its frozen body.
+			const frozenRedemption =
+				options?.fallbackCreditRedemption && Date.now() <= options.fallbackCreditRedemption.expiresAt
+					? options.fallbackCreditRedemption
+					: undefined;
+			// A body frozen before the kill switch was set still carries the fields
+			// it withholds; the credit token is bound to that body, so forfeit it
+			// and build a fresh request. Server tools that already ran would re-run
+			// and re-bill on a tokenless retry, so surface that case instead.
+			const frozenBody = frozenRedemption?.params;
+			// The redemption drops `fallbacks` before sending, so they cannot force a forfeit.
+			const forfeitFrozenForKillSwitch =
+				killSwitchActive &&
+				frozenBody !== undefined &&
+				carriesKillSwitchField({ ...frozenBody, fallbacks: undefined });
+			if (
+				forfeitFrozenForKillSwitch &&
+				frozenRedemption?.refusedContent?.some(block => block.type === "anthropicServerTool")
+			) {
+				throw new AIError.ConfigurationError(
+					"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS was set after a refused turn that ran server tools; its fallback credit cannot be redeemed without the experimental fields the switch withholds.",
+				);
+			}
+			// Collected at most once, on first params build; a frozen redemption
+			// body never builds params.
+			let controlRecords: AnthropicControlRecord[] | undefined;
+			const getControlRecords = () => (controlRecords ??= collectAnthropicControlRecords(context.messages));
+			let prefixMismatchBehavior = transport
+				? transport.prefixMismatchBehavior
+				: model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
 					: undefined;
-			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior);
+			// The binding-controls beta follows the finalized body's
+			// `thinking.block_binding` per request (see below), not the client.
+			const controlBetas = resolveAnthropicControlBetas(model, undefined);
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
+			// Base for the per-request beta override an injected client needs.
+			// `mergeAnthropicBetaHeader` seeds from the caller's own
+			// `anthropic-beta` value, so once breakpoints are dropped an unstripped
+			// base would re-attach the very cache beta the replay abandoned. Both
+			// prompt-cache betas govern `ttl`/`scope`, so the options rung has to
+			// strip them too. The kill switch's betas never ride, whatever the
+			// caller's header says. Read through a closure because both cache
+			// flags flip mid-turn.
+			const callerBetaBaseHeaders = (): Record<string, string> => {
+				const headers =
+					dropCacheControl || dropCacheControlOptions
+						? stripHeaderBetas(mergedCallerHeaders, promptCacheBetas)
+						: mergedCallerHeaders;
+				return killSwitchActive ? stripHeaderBetas(headers, killSwitchBetas) : headers;
+			};
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
 			// no nested effort field means the fallback scan cannot re-add its beta.
 			let fallbacks = options?.fallbacks;
@@ -2070,20 +2001,22 @@ const streamAnthropicOnce = (
 				});
 			}
 
-			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
-			let client: AnthropicMessagesClientLike;
-			let isOAuthToken: boolean;
-
-			if (options?.client) {
-				client = options.client;
-				isOAuthToken = false;
-			} else {
-				const extraBetas = normalizeExtraBetas(options?.betas);
-				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
+			let clientArgs: AnthropicClientOptionsArgs | undefined;
+			let requestExtraBetas: readonly string[] = [];
+			let clientDefaultHeaders: Record<string, string> | undefined;
+			// Rebuild headers when a retry changes the advertised beta set.
+			const resolveClient = (): { client: AnthropicMessagesClientLike; isOAuthToken: boolean } => {
+				if (options?.client && !transport) {
+					return { client: options.client, isOAuthToken: false };
+				}
+				let extraBetas = normalizeExtraBetas(options?.betas);
+				if (dropCacheControl || dropCacheControlOptions) {
+					extraBetas = extraBetas.filter(beta => promptCacheBetas[beta] !== true);
+				}
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
 				// too (dropFastMode), so the request stays a faithful non-fast request.
-				if (wantsAnthropicPriority && !dropFastMode && !extraBetas.includes(fastModeBeta)) {
+				if (wantsAnthropicFastMode(model, options) && !dropFastMode && !extraBetas.includes(fastModeBeta)) {
 					extraBetas.push(fastModeBeta);
 				}
 				if (options?.taskBudget && !extraBetas.includes(taskBudgetBeta)) {
@@ -2099,15 +2032,21 @@ const streamAnthropicOnce = (
 				// so the effort field is dropped from the body there too (see buildParams)
 				// and advertising the beta would only earn a 400 (#5614).
 				const sendsAdaptiveEffortPin =
+					!transport?.forceThinkingOff &&
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
-				if (
-					model.reasoning &&
-					model.compat.supportsOutputEffort &&
-					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
-					!extraBetas.includes(effortBeta)
-				) {
+				// A resolved `effortBeta` (Factory Droid routes, whose Bedrock/Vertex
+				// upstreams gate the beta themselves) replaces the heuristic: the beta
+				// rides exactly when an output effort does. Efforts the body pins
+				// without a caller effort are added per request (see below).
+				const emitsEffortBeta =
+					model.compat.effortBeta !== undefined
+						? model.compat.effortBeta && options?.effort !== undefined
+						: model.reasoning &&
+							model.compat.supportsOutputEffort &&
+							((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin);
+				if (emitsEffortBeta && !extraBetas.includes(effortBeta)) {
 					extraBetas.push(effortBeta);
 				}
 				if (!isVertexRawPredictUrl(baseUrl)) {
@@ -2115,29 +2054,66 @@ const streamAnthropicOnce = (
 						if (!extraBetas.includes(beta)) extraBetas.push(beta);
 					}
 				}
-				// `context_management.clear_thinking_20251015` requires this beta. OAuth
-				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
-				// need it added explicitly so the field is honored instead of rejected
-				// (#3288). Provider deployment contracts that cannot deliver or accept
-				// context management disable it through model compatibility policy.
-				if (
-					model.reasoning &&
-					options?.thinkingEnabled &&
-					model.compat.supportsContextManagement !== false &&
-					!extraBetas.includes(contextManagementBeta)
-				) {
-					extraBetas.push(contextManagementBeta);
+				// Vertex rawPredict takes betas in the body; other routes use the
+				// header. Legacy encrypted replay keeps its original beta.
+				if (compactionSupported && !isVertexRawPredictUrl(baseUrl)) {
+					if (
+						(options?.anthropicCompaction !== undefined ||
+							contextReplaysAnthropicCompaction(context.messages, model, "signed")) &&
+						!extraBetas.includes(COMPACTION_BETA)
+					) {
+						extraBetas.push(COMPACTION_BETA);
+					}
+					if (
+						options?.anthropicCompaction === undefined &&
+						contextReplaysAnthropicCompaction(context.messages, model, "legacy") &&
+						!extraBetas.includes(LEGACY_COMPACTION_BETA)
+					) {
+						extraBetas.push(LEGACY_COMPACTION_BETA);
+					}
 				}
 				// `ttl: "1h"` requires the extended-cache-ttl beta on API-key
-				// requests. OAuth requests never add it here: agent requests
-				// already carry it in the Claude Code beta list, and utility
+				// requests. OAuth requests never add it here: Anthropic honors
+				// `ttl: "1h"` on the OAuth path without it (verified against live
+				// traffic: writes land in the `ephemeral_1h` bucket), and utility
 				// requests must not deviate from CC's header fingerprint.
+				// `dropCacheControl` short-circuits it for the same reason the
+				// fast-mode beta is skipped above: a request that carries no
+				// breakpoint must not advertise a cache beta, and
+				// `dropCacheControlOptions` short-circuits it because the breakpoint
+				// it does carry has no `ttl` left to authorize. Both this gate and
+				// buildParams resolve the breakpoint behind the same flags so the
+				// header and the body can never disagree. Routes that honor
+				// `ttl: "1h"` without the beta and reject it (Vertex rawPredict,
+				// Factory's proxy) skip it: Vertex by URL, others via `extendedCacheTtlBeta: false`.
+				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
-					!(options?.isOAuth ?? isAnthropicOAuthToken(apiKey)) &&
-					getCacheControl(model, options?.cacheRetention).cacheControl?.ttl === "1h" &&
+					!isOAuth &&
+					!dropCacheControl &&
+					!dropCacheControlOptions &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					model.compat.extendedCacheTtlBeta !== false &&
+					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
 					extraBetas.push(extendedCacheTtlBeta);
+				}
+				if (!isOAuth && isOfficialAnthropicApiUrl(baseUrl) && !extraBetas.includes(fallbackCreditBeta)) {
+					extraBetas.push(fallbackCreditBeta);
+				}
+				// A forfeited frozen body is rebuilt fresh, so it keeps the betas
+				// computed above instead of the saved list describing the old body.
+				if (options?.fallbackCreditRedemption && !forfeitFrozenForKillSwitch) {
+					const frozenBetas = (options.fallbackCreditRedemption.betas ?? []).filter(
+						b => !b.startsWith("server-side-fallback-"),
+					);
+					extraBetas.length = 0;
+					for (const beta of frozenBetas) {
+						extraBetas.push(beta);
+					}
+					if (!extraBetas.some(beta => beta.startsWith("fallback-credit-"))) {
+						extraBetas.push(fallbackCreditBeta);
+					}
 				}
 				// Server-side fallback beta chain: opt-in via `options.fallbacks`.
 				// Nested overrides (`speed`, `output_config.effort`,
@@ -2160,133 +2136,188 @@ const streamAnthropicOnce = (
 						}
 					}
 				}
+				// Caller betas and a frozen redemption's beta list bypass compat.
+				if (killSwitchActive) extraBetas = extraBetas.filter(beta => killSwitchBetas[beta] !== true);
 
-				const created = createClient(model, {
+				requestExtraBetas = extraBetas;
+				if (transport) {
+					return {
+						client: transport.createClient(() => transportPayload),
+						isOAuthToken: false,
+					};
+				}
+				clientArgs = {
 					model,
 					apiKey,
 					extraBetas,
-					stream: !zeroOutputCacheRefresh,
+					stream: true,
 					interleavedThinking: options?.interleavedThinking ?? true,
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
 					isOAuth: options?.isOAuth,
 					hasTools: !!context.tools?.length,
+					hasBufferedInputTools:
+						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
 					fetch: options?.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
+					copilotCacheKey,
+					copilotCacheSnapshot: copilotCached ?? null,
 					sessionId:
 						options?.sessionId ??
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
 					disableStrictTools,
-				});
-				client = created.client;
-				isOAuthToken = created.isOAuthToken;
-			}
-			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
+					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
+				};
+				const created = createClient(model, clientArgs);
+				clientDefaultHeaders = created.defaultHeaders;
+				return created;
+			};
+			let { client, isOAuthToken } = resolveClient();
+			const preparedContext = await prepareAnthropicImageContext(context, model);
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
+				if (transport) rawRequestDump = undefined;
+				const built = buildParams(model, preparedContext, isOAuthToken, options, {
+					compactionSupported,
+					forceThinkingOff: transport?.forceThinkingOff,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
 					supportsEagerToolInputStreaming,
 					prefixMismatchBehavior,
 					dropAllThinking,
+					dropCacheControl,
+					dropCacheControlOptions,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
-					providerSessionState,
+					controlRecords: getControlRecords(),
 					fallbacks,
+					effectiveBaseUrl: baseUrl,
 				});
+				let nextParams = built.params;
+				if (transport?.forceThinkingOffFields) {
+					const offFields = transport.forceThinkingOffFields;
+					if (offFields.thinking !== undefined) {
+						nextParams.thinking = offFields.thinking as MessageCreateParamsStreaming["thinking"];
+					}
+					const offOutputConfig = offFields.output_config;
+					if (isRecord(offOutputConfig)) {
+						nextParams.output_config = {
+							...nextParams.output_config,
+							...offOutputConfig,
+						} as MessageCreateParamsStreaming["output_config"];
+					}
+					const offBetas = Array.isArray(offFields.anthropic_beta)
+						? offFields.anthropic_beta.filter((beta): beta is string => typeof beta === "string")
+						: [];
+					if (isRecord(offOutputConfig) && offOutputConfig.effort !== undefined) {
+						offBetas.push(effortBeta);
+					}
+					if (offBetas.length > 0) {
+						const bodyParams = nextParams as { anthropic_beta?: string[] };
+						bodyParams.anthropic_beta = Array.from(new Set([...(bodyParams.anthropic_beta ?? []), ...offBetas]));
+					}
+				}
+				// The last build wins: a retry may rebuild with different controls.
+				if (built.requestControls) output.requestControls = built.requestControls;
+				else delete output.requestControls;
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
 				}
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
-				const replacementPayload = await options?.onPayload?.(nextParams, model);
+				const replacementPayload = transport ? undefined : await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
+				// After `onPayload`, so a hook cannot restore a field the switch withholds.
+				if (killSwitchActive) withholdKillSwitchFields(nextParams);
+				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
+				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
+				if (!transport && model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
+				// Vertex rawPredict carries betas in the body. The binding token omp
+				// adds is decided here, from the final params after any hook; a token
+				// the hook itself put in `anthropic_beta` is left as it is.
+				const bodyBetas = (nextParams as { anthropic_beta?: string[] }).anthropic_beta;
+				if (
+					isVertexRawPredictUrl(
+						options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl,
+					) &&
+					nextParams.thinking &&
+					carriesThinkingBinding(nextParams.thinking) &&
+					!bodyBetas?.includes(THINKING_BINDING_CONTROLS_BETA)
+				) {
+					(nextParams as { anthropic_beta?: string[] }).anthropic_beta = [
+						...(bodyBetas ?? []),
+						THINKING_BINDING_CONTROLS_BETA,
+					];
+				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
+				if (transport) {
+					const preparedRequest = await transport.prepareRequest(nextParams, requestExtraBetas);
+					transportPayload = preparedRequest.payload;
+					rawRequestDump = preparedRequest.rawRequestDump;
+				} else {
+					rawRequestDump = {
+						provider: model.provider,
+						api: output.api,
+						model: model.id,
+						method: "POST",
+						url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
+						body: nextParams,
+					};
+				}
+				return nextParams;
+			};
+			let usingFallbackCredit = false;
+			let fallbackCreditShape: "continuation" | "unchanged" | undefined = undefined;
+			let fallbackCreditTransientRetries = 0;
+			let params: MessageCreateParamsStreaming;
+			// Recheck expiry here: preparation (image resizing) is async, and an
+			// expired token must fall back to a fresh request as before.
+			if (frozenRedemption && !forfeitFrozenForKillSwitch && Date.now() <= frozenRedemption.expiresAt) {
+				usingFallbackCredit = true;
+				const echoed =
+					frozenRedemption.prefillClaim !== false && frozenRedemption.refusedContent
+						? formatEchoedRefusalContent(frozenRedemption.refusedContent)
+						: [];
+				fallbackCreditShape = echoed.length > 0 ? "continuation" : "unchanged";
+				params = fallbackCreditRequestBody(
+					frozenRedemption,
+					options?.requestModelId ?? model.requestModelId ?? model.id,
+					echoed,
+				);
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
 					model: model.id,
 					method: "POST",
 					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: nextParams,
+					body: params,
 				};
-				return nextParams;
-			};
-			let params = await prepareParams();
+			} else {
+				params = await prepareParams();
+			}
 			const seenInputTransformations = new Set<string>();
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
+			const idleTimeoutMs =
+				options?.streamIdleTimeoutMs ??
+				getStreamIdleTimeoutMs(
+					transport?.sourceModel.compat.streamIdleTimeoutMs ?? model.compat.streamIdleTimeoutMs,
+				);
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
-
-			if (zeroOutputCacheRefresh) {
-				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
-				rawRequestDump = {
-					provider: model.provider,
-					api: output.api,
-					model: model.id,
-					method: "POST",
-					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: refreshParams,
-				};
-				const { requestSignal } = activeAbortTracker;
-				const requestOptions = {
-					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
-					maxRetries: 0,
-				};
-				const request: unknown =
-					isOAuthToken && client.beta
-						? client.beta.messages.create(refreshParams, requestOptions)
-						: client.messages.create(refreshParams, requestOptions);
-				if (!hasAnthropicRawResponseRequest(request)) {
-					throw new AIError.AnthropicStreamEnvelopeError(
-						"Anthropic cache refresh request did not expose a raw response",
-					);
-				}
-				const response = await request.asResponse();
-				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
-				const body: unknown = await response.json();
-				if (!isRecord(body)) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh returned a malformed response");
-				}
-				const wireUsage = parseAnthropicWireUsage(body.usage);
-				if (!wireUsage) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh response omitted usage");
-				}
-				if (typeof body.id === "string") output.responseId = body.id;
-				applyReportedInputTransformations(
-					output,
-					params,
-					providerSessionState,
-					body.input_transformations,
-					seenInputTransformations,
-				);
-				output.usage.input = wireUsage.input_tokens ?? 0;
-				output.usage.output = wireUsage.output_tokens ?? 0;
-				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
-				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
-				applyAnthropicUsageExtras(output.usage, wireUsage);
-				output.usage.totalTokens =
-					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-				calculateCost(model, output.usage);
-				output.duration = performance.now() - startTime;
-				stream.push({ type: "start", partial: output });
-				stream.push({ type: "done", reason: "stop", message: output });
-				stream.end();
-				return;
-			}
 
 			// Opt-in flag: the response parser only honors `fallback` content
 			// blocks and `usage.iterations` when the current request opted into
 			// server-side-fallback beta chain. Leaving `fallbacks` unset preserves
 			// the pre-fallback stream shape on every event.
 			const serverSideFallback = !!fallbacks?.length;
+			// A fallback-credit redemption sends its frozen body without `fallbacks`, so
+			// no handoff can happen on it until the credit is forfeited.
+			holdToolCallEvents = serverSideFallback && !usingFallbackCredit;
 			type Block = (
 				| ThinkingContent
 				| RedactedThinkingContent
@@ -2304,6 +2335,14 @@ const streamAnthropicOnce = (
 					if (unwrappedThinking !== undefined) {
 						block.thinking = unwrappedThinking;
 						block.thinkingSignature = undefined;
+					} else if (block.thinkingSignature) {
+						// The signature names the model that actually produced the
+						// block; a gateway serving a different model than requested
+						// cannot mint one that says otherwise.
+						if (!output.upstreamModel) {
+							output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
+						}
+						if (isAnthropicNarrationSignature(block.thinkingSignature)) block.narration = true;
 					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				} else if (block.type === "anthropicServerTool" && block.block.type === "server_tool_use") {
@@ -2328,29 +2367,15 @@ const streamAnthropicOnce = (
 						block[kStreamingPartialJson].length > 0
 							? block[kStreamingPartialJson]
 							: JSON.stringify(block.arguments ?? {});
-					try {
-						block.arguments = parseJsonWithRepair(finalJson) as ToolCall["arguments"];
-					} catch (parseError) {
-						// Non-fatal: keep the best-effort arguments recovered by the throttled streaming
-						// parser instead of failing the turn on malformed/truncated tool-argument JSON.
+					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
+					block.arguments = parseToolCallArguments(finalJson);
+					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
 						reportAnthropicEnvelopeAnomaly(
-							`tool_use ${block.id} arguments are not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
 						);
-						const recoveredKeys = Object.keys(block.arguments ?? {});
-						if (recoveredKeys.length === 0) {
-							const maxLen = 512;
-							const truncatedJson =
-								finalJson.length <= maxLen
-									? finalJson
-									: `${finalJson.slice(0, maxLen)}… [truncated ${finalJson.length - maxLen} chars]`;
-							block.arguments = {
-								__parseError: parseError instanceof Error ? parseError.message : String(parseError),
-								__rawJson: truncatedJson,
-							};
-						}
 					}
 					clearStreamingPartialJson(block);
-					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
+					pushToolCallEvent({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 				}
 			};
 			stream.push({ type: "start", partial: output });
@@ -2364,6 +2389,60 @@ const streamAnthropicOnce = (
 			const idleTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream stalled while waiting for the next event",
 			);
+			const resetStreamOutputState = (): void => {
+				providerRetryAttempt = 0;
+				output.content.length = 0;
+				output.model = sourceModel.id;
+				output.responseId = undefined;
+				output.upstreamModel = undefined;
+				output.errorMessage = undefined;
+				output.stopDetails = undefined;
+				output.inputTransformations = undefined;
+				output.providerPayload = undefined;
+				output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+				output.stopReason = "stop";
+				firstTokenTime = undefined;
+			};
+			// A rebuilt body no longer matches the refused request, so it cannot carry
+			// the credit token. When the refused turn already ran server tools, a
+			// tokenless retry would re-run and re-bill them: surface the failure instead.
+			const forfeitFallbackCredit = (streamFailure: unknown): void => {
+				if (
+					options?.fallbackCreditRedemption?.refusedContent?.some(block => block.type === "anthropicServerTool")
+				) {
+					logger.warn("anthropic: fallback credit cannot be forfeited after server tools ran; surfacing error", {
+						model: model.id,
+					});
+					throw streamFailure;
+				}
+				usingFallbackCredit = false;
+				fallbackCreditShape = undefined;
+				holdToolCallEvents = serverSideFallback;
+			};
+			const rebuildParams = async (streamFailure: unknown): Promise<MessageCreateParamsStreaming> => {
+				if (usingFallbackCredit) forfeitFallbackCredit(streamFailure);
+				return prepareParams();
+			};
+			// Subscription slow mode (Claude Code `/low-priority`): first-party OAuth
+			// requests only. Capacity waits are tracked per request so the caller's
+			// max-wait budget covers the whole wait, not one attempt.
+			const slowMode =
+				options?.anthropicSlowMode !== undefined &&
+				model.compat.firstPartyProvider &&
+				isOAuthToken &&
+				!options.client &&
+				isOfficialAnthropicApiUrl(baseUrl)
+					? options.anthropicSlowMode
+					: undefined;
+			// Slow-lane state is per Claude account: key it by the stored credential
+			// that served this request, else by a digest of the bearer.
+			const slowLane =
+				options?.credentialId !== undefined
+					? `cred:${options.credentialId}`
+					: `key:${Bun.hash(apiKey).toString(36)}`;
+			let slowWaitSinceMs: number | undefined;
+			let slowWaitAttempts = 0;
+			let sentSlow = false;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
@@ -2375,24 +2454,124 @@ const streamAnthropicOnce = (
 				// every beta required by fields this request actually carries. Vertex
 				// rawPredict is excluded because its betas live in `anthropic_beta`.
 				let injectedClientBetaHeaders: Record<string, string> | undefined;
-				if (options?.client !== undefined && !isVertexRawPredictUrl(baseUrl)) {
+				// A caller-owned client targets its own endpoint: route betas by
+				// the client's URL when it exposes one, not the model's routing.
+				const injectedBetaRouteUrl =
+					options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl;
+				if (options?.client !== undefined && !isVertexRawPredictUrl(injectedBetaRouteUrl)) {
 					for (const beta of controlBetas) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							beta,
 						);
 					}
 					if ((params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							effortBeta,
 						);
 					}
+					if (carriesThinkingBinding(params.thinking)) {
+						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
+							THINKING_BINDING_CONTROLS_BETA,
+						);
+					}
+					if (carriesSignedCompaction(params)) {
+						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
+							COMPACTION_BETA,
+						);
+					}
+					if (carriesLegacyCompactionEdit(params)) {
+						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
+							LEGACY_COMPACTION_BETA,
+						);
+					}
 				}
-				const perRequestHeaders =
-					umansGatewayWebSearchHeader || injectedClientBetaHeaders
-						? { ...umansGatewayWebSearchHeader, ...injectedClientBetaHeaders }
+				sentSlow = slowMode?.isActive(slowLane) === true;
+				let perRequestHeaders: Record<string, string> | undefined =
+					umansGatewayWebSearchHeader || injectedClientBetaHeaders || options?.userProfileId || sentSlow
+						? {
+								...umansGatewayWebSearchHeader,
+								...injectedClientBetaHeaders,
+								...(options?.userProfileId ? { "anthropic-user-profile-id": options.userProfileId } : {}),
+								...(sentSlow ? { [ANTHROPIC_USAGE_LIMIT_HEADER]: ANTHROPIC_SLOW_USAGE_LIMIT } : {}),
+							}
 						: undefined;
+				if (usingFallbackCredit && options?.fallbackCreditRedemption?.betaHeader) {
+					const rawBetas = options.fallbackCreditRedemption.betaHeader
+						.split(",")
+						.map(b => b.trim())
+						.filter(
+							b =>
+								b &&
+								!b.startsWith("server-side-fallback-") &&
+								(!killSwitchActive || killSwitchBetas[b] !== true),
+						);
+					if (!rawBetas.some(beta => beta.startsWith("fallback-credit-"))) {
+						rawBetas.push(fallbackCreditBeta);
+					}
+					perRequestHeaders = {
+						...perRequestHeaders,
+						"anthropic-beta": rawBetas.join(","),
+					};
+				}
+				// A route that requires the effort beta gets it from the effort the
+				// finalized body carries (a pinned between_tools effort, a rebuilt
+				// forfeited redemption), unioned with the client's own betas. A frozen
+				// redemption body keeps its saved header contract.
+				if (
+					!usingFallbackCredit &&
+					model.compat.effortBeta === true &&
+					options?.client === undefined &&
+					(params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined
+				) {
+					perRequestHeaders = {
+						...perRequestHeaders,
+						...mergeAnthropicBetaHeader(clientDefaultHeaders ?? {}, effortBeta),
+					};
+				}
+				// The binding-controls beta rides exactly with the finalized body's
+				// `thinking.block_binding`, unioned with the betas already chosen.
+				if (
+					!usingFallbackCredit &&
+					options?.client === undefined &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					carriesThinkingBinding(params.thinking)
+				) {
+					perRequestHeaders = {
+						...perRequestHeaders,
+						...mergeAnthropicBetaHeader(
+							perRequestHeaders?.["anthropic-beta"] !== undefined
+								? perRequestHeaders
+								: (clientDefaultHeaders ?? {}),
+							THINKING_BINDING_CONTROLS_BETA,
+						),
+					};
+				}
+				// `context_management.clear_thinking_20251015` requires its beta, so the
+				// beta rides exactly with the finalized body's edit (#3288). The edit
+				// follows the built `thinking`, which a thinking-off request still sends
+				// as adaptive when prefix binding re-adds it; `thinkingEnabled` is no
+				// proxy for it. OAuth defaults already carry the beta; the merge dedupes.
+				if (
+					!usingFallbackCredit &&
+					options?.client === undefined &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					params.context_management?.edits.some(edit => edit.type === "clear_thinking_20251015")
+				) {
+					perRequestHeaders = {
+						...perRequestHeaders,
+						...mergeAnthropicBetaHeader(
+							perRequestHeaders?.["anthropic-beta"] !== undefined
+								? perRequestHeaders
+								: (clientDefaultHeaders ?? {}),
+							contextManagementBeta,
+						),
+					};
+				}
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
@@ -2431,7 +2610,11 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
-					await notifyProviderResponse(options, response, model, requestId);
+					await notifyProviderResponse(options, response, sourceModel, requestId);
+					if (slowMode) {
+						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
+						if (slowSignal) slowMode.observe(slowSignal, slowLane);
+					}
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -2452,9 +2635,13 @@ const streamAnthropicOnce = (
 								| "fallback"
 								| "anthropicServerTool"
 								| "toolCall"
+								| "compaction"
 								| "ignored";
 						}
 					>();
+					// A compaction block is complete at content_block_start, not streamed
+					// through deltas. Hold it until the stop reason confirms compaction.
+					let compactionPayload: AnthropicCompactionPayload | undefined;
 
 					// Pings keep the idle deadline alive once content is flowing (Anthropic
 					// bridges legitimate generation gaps with keepalives), but only within a
@@ -2491,7 +2678,7 @@ const streamAnthropicOnce = (
 					});
 					const observedAnthropicStream =
 						rawSseObserver && !recordsRawSseEvents
-							? observeDecodedAnthropicSdkEvents(timedAnthropicStream, rawSseObserver)
+							? observeDecodedAnthropicEvents(timedAnthropicStream, rawSseObserver)
 							: timedAnthropicStream;
 					for await (const event of observedAnthropicStream) {
 						sawEvent = true;
@@ -2511,10 +2698,10 @@ const streamAnthropicOnce = (
 							if (startMessage?.id) output.responseId = startMessage.id;
 							applyReportedInputTransformations(
 								output,
-								params,
-								providerSessionState,
 								startMessage?.input_transformations,
 								seenInputTransformations,
+								params,
+								providerSessionState,
 							);
 							const startUsage = startMessage?.usage;
 							if (startUsage) {
@@ -2523,16 +2710,18 @@ const streamAnthropicOnce = (
 								output.usage.output = startUsage.output_tokens || 0;
 								output.usage.cacheRead = startUsage.cache_read_input_tokens || 0;
 								output.usage.cacheWrite = startUsage.cache_creation_input_tokens || 0;
+								const compacted = applyCompactionIterationUsage(output.usage, startUsage);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(startUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, startUsage)) {
-										calculateCost(model, output.usage);
-									}
-								} else {
-									calculateCost(model, output.usage);
+								}
+								if (
+									!(serverSideFallback || compacted) ||
+									!calculateIterationTurnCost(sourceModel, output.usage, startUsage, output.timestamp)
+								) {
+									calculateCost(sourceModel, output.usage, output.timestamp);
 								}
 							} else {
 								reportAnthropicEnvelopeAnomaly("message_start missing usage");
@@ -2572,15 +2761,15 @@ const streamAnthropicOnce = (
 							}
 							if (!firstTokenTime) firstTokenTime = performance.now();
 							if (event.content_block.type === "fallback") {
-								// Fallback boundary is only meaningful when the request
-								// opted into the beta chain — silently drop otherwise so
-								// unopted-in sessions never see the block persisted or
-								// influence downstream converters.
+								// The boundary between the primary's output and the
+								// fallback model's. Persist it even when this request did
+								// not opt into the beta chain: a gateway can opt in on the
+								// client's behalf, and without the marker the replay
+								// converter cannot tell the two models' signed reasoning
+								// apart (see `collapseFallbackSegments`).
 								const fallback = parseAnthropicFallbackWireBlock(event.content_block);
-								if (!serverSideFallback || !fallback) {
-									if (!fallback) {
-										reportAnthropicEnvelopeAnomaly("fallback content_block missing model refs");
-									}
+								if (!fallback) {
+									reportAnthropicEnvelopeAnomaly("fallback content_block missing model refs");
 									openBlocks.set(event.index, { contentIndex: -1, kind: "ignored" });
 									continue;
 								}
@@ -2594,8 +2783,9 @@ const streamAnthropicOnce = (
 								// classifier block on the primary was retried on the
 								// fallback model. Adopt the served id immediately so
 								// pricing decisions downstream (final usage.iterations may
-								// arrive before/after) see the right model.
-								output.model = fallback.to.model;
+								// arrive before/after) see the right model. Served-model
+								// promotion and per-iteration pricing stay opt-in.
+								if (serverSideFallback) output.model = fallback.to.model;
 								continue;
 							}
 							if (event.content_block.type === "text") {
@@ -2685,11 +2875,14 @@ const streamAnthropicOnce = (
 								output.content.push(block);
 								const contentIndex = output.content.length - 1;
 								openBlocks.set(event.index, { contentIndex, kind: "toolCall" });
-								stream.push({
+								pushToolCallEvent({
 									type: "toolcall_start",
 									contentIndex,
 									partial: output,
 								});
+							} else if (event.content_block.type === "compaction") {
+								compactionPayload = parseAnthropicCompactionBlock(event.content_block, sourceModel.provider);
+								openBlocks.set(event.index, { contentIndex: -1, kind: "compaction" });
 							} else {
 								openBlocks.set(event.index, { contentIndex: -1, kind: "ignored" });
 							}
@@ -2761,7 +2954,7 @@ const streamAnthropicOnce = (
 									block.arguments = throttled.value;
 									block[kStreamingLastParseLen] = throttled.parsedLen;
 								}
-								stream.push({
+								pushToolCallEvent({
 									type: "toolcall_delta",
 									contentIndex: openBlock.contentIndex,
 									delta: event.delta.partial_json,
@@ -2790,6 +2983,11 @@ const streamAnthropicOnce = (
 								openBlocks.delete(event.index);
 								continue;
 							}
+							if (openBlock.kind === "compaction") {
+								openBlocks.delete(event.index);
+								closedBlockIndexes.add(event.index);
+								continue;
+							}
 							const block = blocks[openBlock.contentIndex];
 							if (!block || block.type !== openBlock.kind) {
 								reportAnthropicEnvelopeAnomaly(`content_block_stop kind mismatch for index ${event.index}`);
@@ -2809,16 +3007,22 @@ const streamAnthropicOnce = (
 							const delta = event.delta;
 							applyReportedInputTransformations(
 								output,
-								params,
-								providerSessionState,
 								event.input_transformations,
 								seenInputTransformations,
+								params,
+								providerSessionState,
 								true,
 							);
 							const rawStopReason = delta?.stop_reason;
 							if (rawStopReason) {
 								output.stopReason = mapStopReason(rawStopReason);
 								sawTerminalEnvelope = true;
+								// On-demand compaction ends with no ordinary assistant content.
+								// A non-compaction stop (e.g. max_tokens) is not a usable summary.
+								if (rawStopReason === "compaction") {
+									output.stopDetails = { type: "compaction" };
+									output.providerPayload = compactionPayload;
+								}
 							}
 							if (output.stopReason === "error") {
 								const stopDetails = delta?.stop_details;
@@ -2828,7 +3032,25 @@ const streamAnthropicOnce = (
 									const category = stopDetails.category;
 									const label = category ? `Refusal (${category})` : "Refusal";
 									output.errorMessage = explanation ? `${label}: ${explanation}` : label;
-								} else if (!output.errorMessage) {
+								}
+								// Only a refusal carries a credit token. Refusal turns are never
+								// written to the session, so the frozen body stays in memory.
+								if (stopDetails?.type === "refusal" && stopDetails.fallback_credit_token) {
+									const sentBetaHeader =
+										getHeaderCaseInsensitive(perRequestHeaders ?? {}, "anthropic-beta") ??
+										getHeaderCaseInsensitive(clientDefaultHeaders ?? {}, "anthropic-beta") ??
+										requestExtraBetas.join(",");
+									output.fallbackCreditHandle = {
+										token: stopDetails.fallback_credit_token,
+										prefillClaim: stopDetails.fallback_has_prefill_claim,
+										params: structuredClone(params),
+										betas: Array.from(requestExtraBetas),
+										betaHeader: sentBetaHeader,
+										expiresAt: Date.now() + FALLBACK_CREDIT_TTL_MS,
+										refusedContent: output.content ? structuredClone(output.content) : undefined,
+									};
+								}
+								if (!output.errorMessage) {
 									// Anthropic flagged an error-class stop (refusal / sensitive) without
 									// populating stop_details. Surface the raw reason instead of falling
 									// through to the generic "unknown error" string when we throw below.
@@ -2855,16 +3077,18 @@ const streamAnthropicOnce = (
 									output.usage.cacheWrite = deltaUsage.cache_creation_input_tokens;
 								}
 								applyAnthropicUsageExtras(output.usage, deltaUsage);
+								const compacted = applyCompactionIterationUsage(output.usage, deltaUsage);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(deltaUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, deltaUsage)) {
-										calculateCost(model, output.usage);
-									}
-								} else {
-									calculateCost(model, output.usage);
+								}
+								if (
+									!(serverSideFallback || compacted) ||
+									!calculateIterationTurnCost(sourceModel, output.usage, deltaUsage, output.timestamp)
+								) {
+									calculateCost(sourceModel, output.usage, output.timestamp);
 								}
 							}
 						} else if (event.type === "message_stop") {
@@ -2923,7 +3147,10 @@ const streamAnthropicOnce = (
 					}
 					break;
 				} catch (streamError) {
-					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
+					const localAbortReason = activeAbortTracker.getLocalAbortReason();
+					const preserveTransportStatus = transport && AIError.status(streamError) !== undefined;
+					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
+					if (transport) throw streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
@@ -2940,11 +3167,86 @@ const streamAnthropicOnce = (
 							providerSessionState.strictToolsDisabled = true;
 						}
 						disableStrictTools = true;
-						params = await prepareParams();
+						params = await rebuildParams(streamFailure);
+						resetStreamOutputState();
+						continue;
+					}
+					if (
+						usingFallbackCredit &&
+						frozenRedemption &&
+						firstTokenTime === undefined &&
+						AIError.status(streamFailure) === 400
+					) {
+						const errMessage = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+						const redemption = frozenRedemption;
+						if (errMessage.includes("redemption temporarily unavailable")) {
+							if (Date.now() < redemption.expiresAt && fallbackCreditTransientRetries < 2) {
+								fallbackCreditTransientRetries++;
+								logger.warn(
+									"anthropic: fallback credit redemption temporarily unavailable, retrying same shape",
+									{
+										model: model.id,
+										attempt: fallbackCreditTransientRetries,
+									},
+								);
+								await waitForRetry(options?.providerRetryWait, 500, options?.signal);
+								resetStreamOutputState();
+								continue;
+							}
+							throw streamFailure;
+						}
+						if (fallbackCreditShape === "continuation") {
+							logger.warn(
+								"anthropic: fallback credit continuation shape rejected, retrying with unchanged body",
+								{
+									model: model.id,
+									error: errMessage,
+								},
+							);
+							fallbackCreditShape = "unchanged";
+							params = fallbackCreditRequestBody(
+								redemption,
+								options?.requestModelId ?? model.requestModelId ?? model.id,
+								undefined,
+							);
+							resetStreamOutputState();
+							continue;
+						}
+						if (errMessage.includes("fallback_credit_token")) {
+							forfeitFallbackCredit(streamFailure);
+							logger.warn(
+								"anthropic: fallback credit token rejected, falling back to standard request without token",
+								{
+									model: model.id,
+									error: errMessage,
+								},
+							);
+							dropAllThinking = true;
+							params = await prepareParams();
+							resetStreamOutputState();
+							continue;
+						}
+					}
+					const streamFailureMessage =
+						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+					if (
+						isOAuthToken &&
+						clientArgs &&
+						firstTokenTime === undefined &&
+						adoptRequiredClaudeCodeVersion(streamFailure)
+					) {
+						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
+							model: model.id,
+							version: getClaudeCodeVersion(),
+						});
+						client = createClient(model, { ...clientArgs, disableStrictTools }).client;
+						// The version only changes client headers; a redemption keeps its frozen body.
+						if (!usingFallbackCredit) params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -2952,8 +3254,6 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
-					const streamFailureMessage =
-						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
 					if (
 						!prefixBindingRetryAttempted &&
 						options?.anthropicPrefixMismatchBehavior !== "error" &&
@@ -2969,11 +3269,12 @@ const streamAnthropicOnce = (
 						prefixBindingRetryAttempted = true;
 						prefixMismatchBehavior = undefined;
 						dropAllThinking = !rememberPrefixBindingFailure(params, streamFailureMessage, providerSessionState);
-						params = await prepareParams();
+						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
@@ -2981,6 +3282,50 @@ const streamAnthropicOnce = (
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
+					}
+					if (
+						!latestTurnThinkingRetryAttempted &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						AIError.isImmutableLatestThinkingText(streamFailureMessage)
+					) {
+						// The API refused the latest assistant turn's reasoning as modified
+						// (e.g. a mid-turn fallback persisted without its boundary marker).
+						// Resending the turn fails the same way forever, so drop its
+						// reasoning on the wire — stored history keeps it — and retry once.
+						// The session remembers the dropped blocks so later requests replay
+						// the same prefix; without session state, drop every block instead.
+						const keys = latestAssistantTurnThinkingKeys(params);
+						if (keys.length > 0) {
+							logger.warn(
+								"anthropic: latest assistant turn's thinking rejected as modified, dropping it and retrying",
+								{
+									provider: model.provider,
+									model: model.id,
+									baseUrl,
+									blocks: keys.length,
+								},
+							);
+							latestTurnThinkingRetryAttempted = true;
+							if (providerSessionState) {
+								for (const key of keys) providerSessionState.prefixDroppedThinkingBlocks.add(key);
+							} else {
+								dropAllThinking = true;
+							}
+							params = await rebuildParams(streamFailure);
+							providerRetryAttempt = 0;
+							output.content.length = 0;
+							output.model = sourceModel.id;
+							output.responseId = undefined;
+							output.upstreamModel = undefined;
+							output.errorMessage = undefined;
+							output.inputTransformations = undefined;
+							output.providerPayload = undefined;
+							output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+							output.stopReason = "stop";
+							firstTokenTime = undefined;
+							continue;
+						}
 					}
 					if (
 						!forceDemoteUnsignedThinking &&
@@ -3002,11 +3347,12 @@ const streamAnthropicOnce = (
 							providerSessionState.replayUnsignedThinkingDisabled = true;
 						}
 						forceDemoteUnsignedThinking = true;
-						params = await prepareParams();
+						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3015,9 +3361,50 @@ const streamAnthropicOnce = (
 						continue;
 					}
 					if (
+						!dropAllThinking &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						!isThinkingPrefixBindingError(streamFailureMessage) &&
+						isInvalidThinkingSignatureError(streamFailureMessage)
+					) {
+						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
+						// when every replayed block carries a signature the signer no
+						// longer accepts (e.g. a failover proxy swapped upstreams
+						// mid-conversation and minted foreign signatures), the retry
+						// resends a byte-identical body and the session 400s forever.
+						// Escalate: drop all replayed thinking — prior-turn reasoning
+						// is optional context — and retry once. Stored history keeps
+						// its thinking blocks; only the wire payload changes.
+						logger.warn(
+							"anthropic: thinking signatures still rejected after unsigned demotion, dropping replayed thinking and retrying",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						if (providerSessionState) {
+							providerSessionState.thinkingReplayDisabled = true;
+						}
+						droppedAllThinkingForSignature = true;
+						dropAllThinking = true;
+						params = await rebuildParams(streamFailure);
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = sourceModel.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.inputTransformations = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
 						!dropFastMode &&
-						model.provider === "anthropic" &&
-						options?.serviceTier === "priority" &&
+						wantsAnthropicFastMode(model, options) &&
 						firstTokenTime === undefined &&
 						AIError.isFastModeUnsupported(streamFailure)
 					) {
@@ -3029,10 +3416,115 @@ const streamAnthropicOnce = (
 							providerSessionState.fastModeDisabled = true;
 						}
 						dropFastMode = true;
+						params = await rebuildParams(streamFailure);
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = sourceModel.id;
+						output.responseId = undefined;
+						output.upstreamModel = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					// First rung, and only when the failing request carried an option a
+					// nested refusal could be about: keep every breakpoint, drop
+					// `ttl`/`scope`, withhold the betas that govern them. The 400 cannot
+					// say whether the field or one of its options was refused, so ask.
+					// If this rung carries the turn, the field is supported and an
+					// option was not; if it is refused the same way, the rung below
+					// strips everything.
+					if (
+						!dropCacheControl &&
+						!dropCacheControlOptions &&
+						firstTokenTime === undefined &&
+						AIError.isCacheControlUnsupported(streamFailure) &&
+						requestCarriesCacheControlOptions()
+					) {
+						logger.warn(
+							"anthropic: endpoint rejected cache_control, retrying with breakpoints but no ttl/scope",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						cacheControlOptionRejectionReplayed = true;
+						dropCacheControlOptions = true;
+						// Rebuild the client too: the retry must stop advertising the
+						// extended-cache-ttl beta, and that lives in the default headers.
+						({ client, isOAuthToken } = resolveClient());
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
+						slowMode &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						!activeAbortTracker.wasCallerAbort()
+					) {
+						const failureStatus = (streamFailure as { status?: unknown } | null)?.status;
+						const httpStatus = typeof failureStatus === "number" ? failureStatus : undefined;
+						const failureText = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+						const slowRetry = await slowMode.onFailure({
+							lane: slowLane,
+							httpStatus,
+							overloaded: httpStatus === 529 || failureText.includes("overloaded_error"),
+							signal: parseAnthropicSlowModeHeaders(getHeadersFromError(streamFailure)),
+							sentSlow,
+							waitedMs: slowWaitSinceMs === undefined ? 0 : Date.now() - slowWaitSinceMs,
+							attempts: slowWaitAttempts,
+						});
+						if (slowRetry) {
+							if (slowRetry.capacityWait) {
+								slowWaitSinceMs ??= Date.now();
+								slowWaitAttempts++;
+							}
+							logger.debug("anthropic: slow mode retry", {
+								model: model.id,
+								status: httpStatus,
+								delayMs: slowRetry.delayMs,
+								attempt: slowWaitAttempts,
+							});
+							if (slowRetry.delayMs > 0) {
+								await waitForRetry(options?.providerRetryWait, slowRetry.delayMs, options?.signal);
+							}
+							resetStreamOutputState();
+							continue;
+						}
+					}
+					if (
+						!dropCacheControl &&
+						firstTokenTime === undefined &&
+						AIError.isCacheControlUnsupported(streamFailure)
+					) {
+						logger.warn("anthropic: endpoint rejected cache_control, retrying without prompt-cache breakpoints", {
+							provider: model.provider,
+							model: model.id,
+							baseUrl,
+							error: streamFailureMessage,
+						});
+						cacheControlRejectionReplayed = true;
+						dropCacheControl = true;
+						// Rebuild the client too: the retry must stop advertising the
+						// extended-cache-ttl beta, and that lives in the default headers.
+						({ client, isOAuthToken } = resolveClient());
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
@@ -3073,13 +3565,9 @@ const streamAnthropicOnce = (
 						throw streamFailure;
 					}
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					output.content.length = 0;
-					output.model = model.id;
+					output.model = sourceModel.id;
 					output.responseId = undefined;
 					output.errorMessage = undefined;
 					output.stopDetails = undefined;
@@ -3089,33 +3577,80 @@ const streamAnthropicOnce = (
 					firstTokenTime = undefined;
 				}
 			}
+			const retained = settleFallbackHandoff();
+			if (usingFallbackCredit && fallbackCreditShape === "continuation" && frozenRedemption?.refusedContent) {
+				// The response continues the echoed prefix; keep it, signatures included, in
+				// the stored turn. A tool loop requires the turn to open with its thinking
+				// block, and a later rejection of the refused model's signature is
+				// recovered by the invalid-signature retry.
+				const prefix = refusalContinuationPrefix(frozenRedemption.refusedContent);
+				output.content.unshift(...prefix);
+				if (retained !== output.content) retained.unshift(...prefix);
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			if (dropFastMode && model.provider === "anthropic" && options?.serviceTier === "priority") {
+			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "priority"];
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
 			}
-			stream.push({ type: "done", reason: output.stopReason, message: output });
+			if (droppedAllThinkingForSignature) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "thinking-replay"];
+			}
+			if (dropCacheControl) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prompt-cache"];
+			} else if (dropCacheControlOptions) {
+				// Not `prompt-cache`: the breakpoints still went out and the endpoint
+				// still reads and writes the 5m cache. What this turn gave up is the
+				// extended retention / global scope the options ask for, and a
+				// consumer syncing a toggle off `prompt-cache` here would switch off
+				// a feature that is working.
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prompt-cache-retention"];
+			}
+			// Latch the refusal only now that the breakpoint-free replay has
+			// actually carried a turn to completion. `isCacheControlUnsupported`
+			// classifies a free-text 400, so a misparse must not outlive the one
+			// request it cost.
+			if (providerSessionState) {
+				if (cacheControlRejectionReplayed) {
+					providerSessionState.cacheControlUnsupported = true;
+				} else if (cacheControlOptionRejectionReplayed) {
+					// The narrow latch, so the rest of the session keeps sending
+					// breakpoints. Exclusive with the one above: when both rungs ran,
+					// the field refusal is what carried the turn and what the next turn
+					// must start from.
+					providerSessionState.cacheControlOptionsUnsupported = true;
+				}
+			}
+			stream.push({
+				type: "done",
+				reason: output.stopReason,
+				message: retained === output.content ? output : { ...output, content: retained },
+			});
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
+			const retained = settleFallbackHandoff();
 			const result = await AIError.finalize(error, {
-				api: model.api,
-				provider: model.provider,
+				api: sourceModel.api,
+				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
-			output.errorMessage = maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({
+				type: "error",
+				reason: output.stopReason,
+				error: retained === output.content ? output : { ...output, content: retained },
+			});
 			stream.end();
 		}
 	})();
@@ -3128,9 +3663,96 @@ const streamAnthropicOnce = (
  * loop. The inner attempt owns Anthropic provider-failure retries.
  */
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
+	withReplaySafeStreamRetry(withoutDisabledExperimentalBetas(model), context, options, streamAnthropicOnce, {
 		retryEmptyCompletion: true,
 	});
+
+/** Whether Claude Code's `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` applies to this model's provider. */
+function experimentalBetasDisabled(model: Model<"anthropic-messages">): boolean {
+	return model.compat.honorsClaudeCodeBetaKillSwitch === true && $flag("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+}
+
+/**
+ * Whether a request body carries a field the kill switch withholds. A frozen
+ * fallback-credit body that does cannot be redeemed under the switch. Defined
+ * as "the sanitizer would change it" so detection and stripping cannot drift.
+ */
+function carriesKillSwitchField(params: MessageCreateParamsStreaming): boolean {
+	const sanitized = structuredClone(params);
+	withholdKillSwitchFields(sanitized);
+	return !Bun.deepEquals(sanitized, params);
+}
+
+/**
+ * Remove every field the kill switch withholds from a final request body, for
+ * payloads an `onPayload` hook replaced after compat already shaped them, and
+ * for the switch's fields compat has no axis for (task budgets). Compaction
+ * blocks keep their readable summary as text, the same form an endpoint
+ * without compaction support receives.
+ */
+function withholdKillSwitchFields(params: MessageCreateParamsStreaming): void {
+	withholdKillSwitchControls(params);
+	delete params.context_management;
+	delete params.compaction;
+	// Server-side fallback entries carry their own per-attempt controls.
+	for (const entry of params.fallbacks ?? []) withholdKillSwitchControls(entry);
+	for (const tool of params.tools ?? []) {
+		if ("strict" in tool) delete tool.strict;
+		if ("defer_loading" in tool) delete tool.defer_loading;
+		if ("eager_input_streaming" in tool) delete tool.eager_input_streaming;
+	}
+	for (const message of params.messages) {
+		// Per-message `output_config` (mid-conversation effort) may carry the same controls.
+		if ("output_config" in message && message.output_config) withholdKillSwitchControls(message);
+		if (!Array.isArray(message.content)) continue;
+		for (let i = 0; i < message.content.length; i++) {
+			const block = message.content[i];
+			if (block.type === "compaction") message.content[i] = { type: "text", text: block.content };
+		}
+	}
+	if (params.anthropic_beta) {
+		params.anthropic_beta = params.anthropic_beta.filter(beta => killSwitchBetas[beta] !== true);
+	}
+}
+
+/** Withhold the kill switch's thinking/output controls on a body, fallback entry, or message. */
+function withholdKillSwitchControls(holder: { thinking?: ThinkingConfigParam; output_config?: OutputConfig }): void {
+	if (holder.thinking && "block_binding" in holder.thinking) delete holder.thinking.block_binding;
+	if (!holder.output_config) return;
+	delete holder.output_config.task_budget;
+	delete holder.output_config.format;
+	if (Object.keys(holder.output_config).length === 0) delete holder.output_config;
+}
+
+/**
+ * Honor Claude Code's `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` kill switch on
+ * providers whose compat opts in (`honors-claude-code-beta-kill-switch`).
+ * Gateways behind `ANTHROPIC_BASE_URL` often reject pre-release body fields,
+ * so the switch withholds what Claude Code's gateway contract lists — context
+ * management, beta tool fields (`strict`, `defer_loading`,
+ * `eager_input_streaming`), tool search (mid-conversation tool changes),
+ * structured-output format, task budgets — plus `thinking.block_binding` and
+ * server compaction (whose legacy replay needs a `context_management` edit),
+ * together with their betas. Effort, adaptive thinking, interleaved thinking
+ * and extended context stay, as in Claude Code. Applied through compat so every
+ * request builder and retry rung sees one decision; {@link withholdKillSwitchFields}
+ * and {@link killSwitchBetas} cover the rest where bodies and betas are finalized.
+ */
+function withoutDisabledExperimentalBetas(model: Model<"anthropic-messages">): Model<"anthropic-messages"> {
+	if (!experimentalBetasDisabled(model)) return model;
+	return {
+		...model,
+		compat: {
+			...model.compat,
+			supportsContextManagement: false,
+			supportsThinkingBindingControls: false,
+			supportsServerCompaction: false,
+			disableStrictTools: true,
+			supportsEagerToolInputStreaming: false,
+			supportsMidConversationToolChanges: false,
+		},
+	};
+}
 
 export type AnthropicSystemBlock = {
 	type: "text";
@@ -3140,29 +3762,44 @@ export type AnthropicSystemBlock = {
 type SystemBlockOptions = {
 	includeClaudeCodeInstruction?: boolean;
 	extraInstructions?: string[];
-	/** Text of the first user message — used as fingerprint seed for the billing header. */
+	/** Text of the first conversational wire user turn, used as the billing fingerprint seed. */
 	firstUserMessageText?: string;
-	/** Cache lifetime shared by the OAuth system breakpoint and later message breakpoints. */
+	/**
+	 * Cache lifetime shared by the OAuth system breakpoint and later message
+	 * breakpoints. Omitted → the identity block keeps its default `ephemeral`
+	 * breakpoint; see `dropCacheControl` to emit none at all.
+	 */
 	cacheControl?: AnthropicCacheControl;
+	/**
+	 * Emit no `cache_control` on any block: the endpoint rejected the field.
+	 * Distinct from an undefined `cacheControl`, which only means "default".
+	 */
+	dropCacheControl?: boolean;
 };
 
 export function buildAnthropicSystemBlocks(
 	systemPrompt: readonly string[] | undefined,
 	options: SystemBlockOptions = {},
 ): AnthropicSystemBlock[] | undefined {
-	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText, cacheControl } = options;
+	const {
+		includeClaudeCodeInstruction = false,
+		extraInstructions = [],
+		firstUserMessageText,
+		cacheControl,
+		dropCacheControl = false,
+	} = options;
 	const sanitizedPrompts = normalizeSystemPrompts(systemPrompt);
 	const trimmedInstructions = extraInstructions.map(instruction => instruction.trim()).filter(Boolean);
 	const hasBillingHeader = sanitizedPrompts.some(prompt => prompt.startsWith(CLAUDE_BILLING_HEADER_PREFIX));
 
 	if (includeClaudeCodeInstruction && !hasBillingHeader) {
+		const identityBlock: AnthropicSystemBlock = { type: "text", text: claudeCodeSystemInstruction };
+		if (!dropCacheControl) {
+			identityBlock.cache_control = cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" };
+		}
 		const blocks: AnthropicSystemBlock[] = [
 			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "") },
-			{
-				type: "text",
-				text: claudeCodeSystemInstruction,
-				cache_control: cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" },
-			},
+			identityBlock,
 		];
 
 		for (const instruction of trimmedInstructions) {
@@ -3185,12 +3822,6 @@ export function buildAnthropicSystemBlocks(
 	return blocks.length > 0 ? blocks : undefined;
 }
 
-export function normalizeExtraBetas(betas?: string[] | string): string[] {
-	if (!betas) return [];
-	const raw = Array.isArray(betas) ? betas : betas.split(",");
-	return raw.map(beta => beta.trim()).filter(beta => beta.length > 0);
-}
-
 export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): AnthropicClientOptionsResult {
 	const {
 		model,
@@ -3201,11 +3832,15 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		headers,
 		dynamicHeaders,
 		hasTools = false,
+		hasBufferedInputTools = false,
 		thinkingEnabled = false,
 		isOAuth,
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
+		dropPromptCacheBetas = false,
+		copilotCacheKey,
+		copilotCacheSnapshot,
 	} = args;
 	const compat = model.compat;
 	const disableStrictTools = disableStrictToolsOverride ?? compat.disableStrictTools;
@@ -3236,8 +3871,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				!hostMatchesUrl(baseUrl, "githubCopilot")));
 	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
 	const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
+	// The beta streams every tool eagerly, so it is skipped when a tool needs buffered input.
 	const needsFineGrainedToolStreamingBeta =
-		hasTools && isOfficialAnthropicApiUrl(baseUrl) && !supportsEagerToolInputStreaming;
+		hasTools && !hasBufferedInputTools && isOfficialAnthropicApiUrl(baseUrl) && !supportsEagerToolInputStreaming;
 	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model, baseUrl);
 	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
 	// Disable Bun's native ~300s pre-response fetch timeout (issue #2422).
@@ -3245,7 +3881,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// per request, so the native ceiling can only short-circuit slow-prefill
 	// streams before the configured watchdog gets to govern them.
 	const fetchOptions: AnthropicFetchOptions = { ...tlsFetchOptions, timeout: false };
-	const baseFetch = args.fetch ?? fetch;
+	// Compression sits beneath the cch rewriter, which must hash the uncompressed
+	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
+	// proxies pass through.
+	const baseFetch = wrapFetchForRequestCompression(args.fetch ?? fetch, model);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
@@ -3254,11 +3893,11 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
-		const defaultHeaders = mergeHeaders(
+		const mergedCopilotHeaders = mergeHeaders(
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
 				"Content-Type": "application/json",
-				"anthropic-version": "2023-06-01",
+				"anthropic-version": resolveAnthropicApiVersion(baseUrl),
 				"Anthropic-Dangerous-Direct-Browser-Access": "true",
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
@@ -3267,8 +3906,15 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			dynamicHeaders,
 			headers,
 		);
+		// Unlike the generic builder below, this branch has no enforced-key
+		// filter: a caller-supplied `anthropic-beta` lands in the default
+		// headers verbatim, cache betas included.
+		const defaultHeaders = dropPromptCacheBetas
+			? stripHeaderBetas(mergedCopilotHeaders, promptCacheBetas)
+			: mergedCopilotHeaders;
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
+			providerType: model.providerType,
 			protocol: "anthropic",
 			sessionId,
 		});
@@ -3281,7 +3927,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			maxRetries: 5,
 			maxRetryDelayMs,
 			defaultHeaders,
-			fetch: cchFetch,
+			fetch: wrapFetchForCopilotFallback(
+				cchFetch,
+				true,
+				resolveCopilotRequestIdentity(headers),
+				copilotCacheKey ?? getCopilotIntegrationCacheKey(apiKey, baseUrl),
+				copilotCacheSnapshot,
+			),
 			fetchOptions,
 		};
 	}
@@ -3294,13 +3946,24 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		betaFeatures.push(interleavedThinkingBeta);
 	}
 
-	const requestModelHeaders = mergeHeaders(
+	const mergedRequestHeaders = mergeHeaders(
 		model.headers,
 		foundryCustomHeaders,
 		getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)),
 		headers,
 		dynamicHeaders,
 	);
+	// `anthropic-beta` is an enforced key, so most endpoints drop a caller's
+	// value outright — but `allowAnthropicHeaderOverrides` lets it replace our
+	// built beta header wholesale, which would put a cache beta back on a
+	// breakpoint-free request.
+	// The kill switch's betas are stripped on the same channel.
+	const cacheStrippedHeaders = dropPromptCacheBetas
+		? stripHeaderBetas(mergedRequestHeaders, promptCacheBetas)
+		: mergedRequestHeaders;
+	const requestModelHeaders = experimentalBetasDisabled(model)
+		? stripHeaderBetas(cacheStrippedHeaders, killSwitchBetas)
+		: cacheStrippedHeaders;
 	const defaultHeaders = buildAnthropicHeaders({
 		apiKey,
 		baseUrl,
@@ -3317,11 +3980,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 					thinkingRequest: thinkingEnabled,
 					disableStrictTools,
 					supportsContextManagement: model.compat.supportsContextManagement,
+					dropPromptCacheBetas,
 				})
 			: [],
 	});
 	applyInferenceHeaders(defaultHeaders, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "anthropic",
 		sessionId,
 	});
@@ -3366,8 +4031,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// the proxy to deal with two competing credentials when the user explicitly
 	// asked for one.
 	const authorizationHeader = getHeaderCaseInsensitive(defaultHeaders, "Authorization");
+	// A keyless provider resolves to the `N/A` sentinel, for which no
+	// Authorization was built above; the client would otherwise inject a
+	// bogus `X-Api-Key: N/A` of its own.
 	const shouldSuppressClientApiKey =
-		!oauthToken && !model.compat.officialEndpoint && typeof authorizationHeader === "string";
+		!oauthToken &&
+		!model.compat.officialEndpoint &&
+		(typeof authorizationHeader === "string" || apiKey === NO_AUTH_SENTINEL);
 
 	return {
 		isOAuthToken: oauthToken,
@@ -3385,10 +4055,27 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 function createClient(
 	model: Model<"anthropic-messages">,
 	args: AnthropicClientOptionsArgs,
-): { client: AnthropicMessagesClient; isOAuthToken: boolean } {
+): { client: AnthropicMessagesClient; isOAuthToken: boolean; defaultHeaders?: Record<string, string> } {
 	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
 	const client = new AnthropicMessagesClient(clientOptions);
-	return { client, isOAuthToken: oauthToken };
+	return { client, isOAuthToken: oauthToken, defaultHeaders: clientOptions.defaultHeaders };
+}
+
+/** The compaction request is a standalone summary call, not a generation turn. */
+function stripCompactionIncompatibleParams(params: MessageCreateParamsStreaming): void {
+	delete params.context_management;
+	delete params.stop_sequences;
+	if (params.tool_choice?.type === "any" || params.tool_choice?.type === "tool") {
+		params.tool_choice = { type: "auto" };
+	}
+	if (params.output_config) {
+		delete params.output_config.format;
+		if (params.output_config.task_budget?.remaining !== undefined) {
+			params.output_config.task_budget = { ...params.output_config.task_budget };
+			delete params.output_config.task_budget.remaining;
+		}
+		if (Object.keys(params.output_config).length === 0) delete params.output_config;
+	}
 }
 
 function disableThinkingIfToolChoiceForced(
@@ -3400,7 +4087,14 @@ function disableThinkingIfToolChoiceForced(
 	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
 
 	delete params.thinking;
-	delete params.context_management;
+	// Preserve the replay-only legacy edit when disabling thinking. Signed
+	// compaction blocks need no edit and keep their normal context management.
+	const compactionEdits = params.context_management?.edits.filter(edit => edit.type === "compact_20260112") ?? [];
+	if (compactionEdits.length > 0) {
+		params.context_management = { edits: compactionEdits };
+	} else {
+		delete params.context_management;
+	}
 
 	// Adaptive-only models can't be switched off by omitting `thinking` — a bare
 	// omission defaults to adaptive thinking ON, so a forced-tool turn would still
@@ -3433,22 +4127,17 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	const budgetTokens = thinking.budget_tokens ?? 0;
 	if (budgetTokens <= 0) return;
 
-	const currentMaxTokens = Math.min(params.max_tokens ?? maxAllowedTokens, maxAllowedTokens);
-	const raisedMaxTokens = Math.min(
-		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
-		maxAllowedTokens,
-	);
-	params.max_tokens = raisedMaxTokens;
+	const output = budgetThinkingOutput(params.max_tokens, budgetTokens, maxAllowedTokens);
+	params.max_tokens = output.maxTokens;
 
-	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= raisedMaxTokens) return;
+	if (output.budgetTokens === budgetTokens) return;
 
-	const clampedBudget = raisedMaxTokens - OUTPUT_FALLBACK_BUFFER;
-	if (clampedBudget <= 0) {
+	if (output.budgetTokens <= 0) {
 		throw new AIError.ConfigurationError(
-			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${raisedMaxTokens}`,
+			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${output.maxTokens}`,
 		);
 	}
-	thinking.budget_tokens = clampedBudget;
+	thinking.budget_tokens = output.budgetTokens;
 }
 
 function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl: AnthropicCacheControl): boolean {
@@ -3474,10 +4163,54 @@ function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl:
 	return false;
 }
 
+/** True for a mid-conversation tool-control message (`role: "system"`, tool-change blocks only). */
+function isToolControlMessage(message: MessageParam): boolean {
+	return (
+		message.role === "system" &&
+		typeof message.content !== "string" &&
+		Array.isArray(message.content) &&
+		message.content.length > 0 &&
+		message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
+	);
+}
+
+const ANTHROPIC_MAX_BREAKPOINTS = 4;
+const ANTHROPIC_DECIMATION_INTERVAL = 15;
+
+function countHeadBreakpoints(params: MessageCreateParamsStreaming): number {
+	let count = 0;
+	if (Array.isArray(params.system)) {
+		for (const block of params.system) {
+			if (typeof block !== "string" && block?.cache_control != null) count++;
+		}
+	}
+	if (Array.isArray(params.tools)) {
+		for (const tool of params.tools) {
+			if (tool?.cache_control != null) count++;
+		}
+	}
+	return count;
+}
+
+function applyCacheControlToMessage(message: MessageParam, cacheControl: AnthropicCacheControl): boolean {
+	if (typeof message.content === "string") {
+		message.content = [
+			{ type: "text", text: message.content, cache_control: cloneAnthropicCacheControl(cacheControl) },
+		];
+		return true;
+	} else if (Array.isArray(message.content)) {
+		return applyCacheControlToLastBlock(message.content, cacheControl);
+	}
+	return false;
+}
+
 function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
 	if (!cacheControl) return;
 
-	// `convertAnthropicMessages` appends this neutral pad after a trailing
+	const headBreakpoints = countHeadBreakpoints(params);
+	const messageBudget = Math.max(0, ANTHROPIC_MAX_BREAKPOINTS - headBreakpoints);
+	if (messageBudget <= 0 || params.messages.length === 0) return;
+	// `convertAnthropicMessages` appends a neutral `Continue.` pad after a trailing
 	// assistant because Anthropic rejects assistant-prefill endings. It is absent
 	// from the next normal turn, so anchor the rolling window on the preceding
 	// real assistant instead.
@@ -3486,48 +4219,185 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	const hasTrailingAssistantPad =
 		trailingMessage?.role === "user" &&
 		trailingMessage.content === "Continue." &&
+		!isConversationalUser(trailingMessage) &&
 		params.messages[trailingIndex - 1]?.role === "assistant";
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
-	let eligibleMessages = 0;
-	for (let index = messageEnd; index >= 0 && eligibleMessages < 2; index--) {
+
+	// A breakpoint caches every preceding byte, not only the decorated message.
+	// A per-call or turn-scoped message is rebuilt next request, so a prefix
+	// spanning it cannot match — but only at its own position. Messages after
+	// the mark are ordinary persisted history with stable bytes, so a later
+	// breakpoint still matches everything after the mark. The cost is bounded
+	// to re-billing the marked bytes themselves, not the growing tail.
+	// Hence two anchors, not a truncation: the newest candidate at or before
+	// the first per-call/turn-scoped message (when one exists) pins the
+	// reusable prefix behind the mark, and the rolling tail candidates pin
+	// the suffix after it. Turn-scoped `clear_at` messages are absent next
+	// request, so they still truncate the decimation range (ordinals would
+	// shift), but per-call marks no longer freeze the tail.
+	//
+	// One backward walk over the message tail resolves everything the anchor
+	// selection needs at once: the trailing candidates, the stable prefix end,
+	// and the conversational-turn count under it. The first per-call/turn-scoped
+	// message from the start is the last mark this walk sees (so `markIndex` ends
+	// up as that boundary), and the turn counter — reset on every mark — ends up
+	// counting exactly the conversational turns before the first mark (the range
+	// the old forward scan covered). Nothing is materialized: the checkpoint
+	// search below walks the same history backwards and stops as soon as the
+	// breakpoint budget is spent.
+	let markIndex = -1;
+	let stableUserTurns = 0;
+	// Collect up to 2 trailing candidates from the message tail, skipping
+	// per-call messages, turn-scoped messages, and mid-conversation
+	// tool-control messages. A per-call tail candidate is rebuilt next request
+	// (fresh timestamps on appended probes, fresh redaction bytes), so a
+	// breakpoint on it cannot match — it would spend the tail anchor on bytes
+	// that never repeat while the persisted history behind it gets uncached.
+	// Turn-scoped messages are absent next request for the same reason, and
+	// tool controls reject cache_control outright. The walk starts at the
+	// message tail (not the truncated prefix end) so the anchor advances every
+	// turn; the sub-prefix candidate below covers the reusable region behind
+	// a mark.
+	const trailingCandidates: number[] = [];
+	for (let index = messageEnd; index >= 0; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message") continue;
-		eligibleMessages++;
-		if (typeof message.content === "string") {
-			message.content = [
-				{ type: "text", text: message.content, cache_control: cloneAnthropicCacheControl(cacheControl) },
-			];
-		} else if (Array.isArray(message.content)) {
-			applyCacheControlToLastBlock(message.content, cacheControl);
+		if (!message) continue;
+		if (message.clear_at === "next_user_message" || isPerCallContextMessage(message)) {
+			markIndex = index;
+			stableUserTurns = 0;
+			continue;
+		}
+		if (trailingCandidates.length < 2 && !isToolControlMessage(message)) {
+			trailingCandidates.push(index);
+		}
+		// Decimation counts conversational turns, so it reads the provenance marker
+		// `convertAnthropicMessages` records rather than the wire role. A wire `user`
+		// can also be a serialized `developer` message, a tool_result run, or an
+		// interior `Continue.` pad, none of which advance the user turn ordinal.
+		if (isConversationalUser(message)) stableUserTurns++;
+	}
+	const stableMessageEnd = markIndex === -1 ? messageEnd : markIndex - 1;
+
+	// Decimation checkpoints are generated newest-first on demand instead of
+	// being materialized as index arrays: the newest sits `stableUserTurns %
+	// ANTHROPIC_DECIMATION_INTERVAL` conversational turns back from the stable
+	// prefix end and every 15th turn follows it, so the walk stops as soon as the
+	// breakpoint budget is spent. Candidates repeat when a trailing or sub-prefix
+	// anchor is already a checkpoint; re-decorating the same message is a no-op
+	// (its block already carries cache_control), so the budget accounting is
+	// unchanged.
+	//
+	// Priority order:
+	// 1. Most recent trailing message
+	// 2. Latest decimation checkpoints (newest first) to maintain stable long-context anchors
+	// 3. Newest message at or before the first per-call/turn-scoped mark, so a
+	//    volatile interior message costs only its own re-billed bytes instead
+	//    of invalidating the whole reusable prefix behind it
+	// 4. Second trailing message
+	//
+	// Count only successful block decorations toward the message budget so an uncacheable
+	// block (such as a thinking-only assistant) does not silently consume a breakpoint.
+	let appliedCount = 0;
+	if (trailingCandidates.length > 0 && appliedCount < messageBudget) {
+		const message = params.messages[trailingCandidates[0]];
+		if (message && applyCacheControlToMessage(message, cacheControl)) {
+			appliedCount++;
+		}
+	}
+	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
+	if (stableUserTurns >= ANTHROPIC_DECIMATION_INTERVAL) {
+		let turnsSinceCheckpoint = stableUserTurns % ANTHROPIC_DECIMATION_INTERVAL;
+		for (let index = stableMessageEnd; index >= 0 && appliedCount < messageBudget; index--) {
+			const message = params.messages[index];
+			if (!message || !isConversationalUser(message)) continue;
+			if (turnsSinceCheckpoint > 0) {
+				turnsSinceCheckpoint--;
+				continue;
+			}
+			turnsSinceCheckpoint = ANTHROPIC_DECIMATION_INTERVAL - 1;
+			if (applyCacheControlToMessage(message, cacheControl)) {
+				appliedCount++;
+			}
+		}
+	}
+	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && appliedCount < messageBudget) {
+		const message = params.messages[stableMessageEnd];
+		if (message && applyCacheControlToMessage(message, cacheControl)) {
+			appliedCount++;
+		}
+	}
+	for (const index of trailingCandidates) {
+		if (appliedCount >= messageBudget) break;
+		const message = params.messages[index];
+		if (message && applyCacheControlToMessage(message, cacheControl)) {
+			appliedCount++;
 		}
 	}
 }
 
 /**
+ * System-prompt segments whose bytes differ between sessions or turns of the
+ * same agent: per-turn memory recall (`<memories>`) and the coding agent's
+ * working-directory context (`<project-context>`: context files with their
+ * paths, workspace tree, workspace roots, session append text; advisors use
+ * the same tag for their context-file block). The coding agent renders them
+ * as their own `systemPrompt` array elements after the large static prompt.
+ * The system cache breakpoint anchors on the block right before the first
+ * such segment, so the static head is shared byte-for-byte across sessions in
+ * different directories (e.g. one git worktree per task) and a recall refresh
+ * re-bills only the suffix and the message tail.
+ *
+ * Everything from the first volatile segment on sits after the head
+ * breakpoint, including stable blocks appended behind it (per-spawn subagent
+ * role text, `before_agent_start` extension policy): prefix caching is
+ * positional, so bytes after a changing segment can never extend the cached
+ * head anyway; the rolling message breakpoints still cover them.
+ *
+ * Detection is by our own markup, not model identity: only a leading tag
+ * counts, so stable segments quoting these tags elsewhere are unaffected.
+ */
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>", "<project-context>"];
+
+function volatileSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	const start = systemBlocks.findIndex(block =>
+		VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => block.text.startsWith(marker)),
+	);
+	return start === -1 ? systemBlocks.length : start;
+}
+
+/**
  * Anchor cache_control on the stable request head — the last (non-deferred)
- * tool definition and the last system block. The canonical cache order is
- * tools → system → messages, so a breakpoint on the final system block caches
- * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * tool definition and the last stable system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final stable system block caches
+ * the entire tools+stable-system prefix, and the extra tool breakpoint keeps the tool
  * definitions cached even when the system text changes. This guarantees the
  * large, unchanging head is a cache hit on every turn regardless of how the
  * message tail churns — the breakpoint placement first-party Anthropic clients
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
  *
- * Anthropic allows at most 4 cache breakpoints per request. At most one is
- * spent on tools and one on system here, leaving two for the message tail in
- * `applyPromptCaching`. Head caching is skipped entirely when the head is
- * already anchored — the OAuth Claude Code path caches its own instruction
- * block at buildAnthropicSystemBlocks, and via the canonical tools → system
- * order that single system breakpoint already caches every preceding tool. Re-
- * anchoring there would be redundant, would change the OAuth wire, and could
- * push a tool-heavy request over the 4-breakpoint budget, so the general
- * API-key path (nothing cached upstream) is the only one decorated here.
+ * Volatile segments (memory recall, working-directory context) sit after the
+ * breakpoint, so a recall refresh or a different cwd re-bills only the suffix
+ * and the tail instead of the whole head. When every system block is volatile
+ * there is no stable boundary and the breakpoint stays on the array tail.
  *
- * Runs after the byte-stability plane (planStableAnthropicSystem /
- * planStableAnthropicTools), which hands back fresh block/tool copies each turn
- * and keys tool identity off a fingerprint that excludes cache_control — so
- * decorating here is byte-stable across turns and never forces a re-baseline.
+ * Anthropic allows at most 4 cache breakpoints per request. At most one is
+ * spent on tools and one on system here, leaving the remaining budget for
+ * the message tail and historical decimation checkpoints in `applyPromptCaching`.
+ *
+ * The tool array is anchored on both API-key and OAuth paths: the tool definitions
+ * sit first in wire order and survive message rewrites, and sibling subagents of
+ * the same definition share this prefix byte for byte.
+ *
+ * The OAuth Claude Code path pre-decorates its identity system block in
+ * buildAnthropicSystemBlocks. That breakpoint moves to the anchor block instead
+ * of a second one being added: the identity block is a prefix of the anchored
+ * head, so the move keeps the budget at last tool + last stable system block +
+ * 2 message breakpoints while the agent's static system prompt, not just the
+ * identity line, becomes a cached prefix of its own.
+ *
+ * Runs on the fresh system blocks and wire tools built for this request, after
+ * the declared tool list was derived from the transcript's request controls.
  */
 function applyHeadCaching(
 	systemBlocks: AnthropicSystemBlock[] | undefined,
@@ -3536,15 +4406,7 @@ function applyHeadCaching(
 ): void {
 	if (!cacheControl) return;
 
-	// If anything in the head already carries a breakpoint, the head is already
-	// cached (OAuth anchors its identity system block, which — canonical order
-	// tools → system — caches all tools too). Leave it untouched.
-	const headAlreadyCached =
-		(systemBlocks?.some(block => block.cache_control != null) ?? false) ||
-		(tools?.some(tool => tool.cache_control != null) ?? false);
-	if (headAlreadyCached) return;
-
-	if (tools && tools.length > 0) {
+	if (tools && tools.length > 0 && !tools.some(tool => tool.cache_control != null)) {
 		// Deferred tools are not part of the checked prefix until referenced, so
 		// anchor the last tool that actually sits in the stable prefix.
 		for (let index = tools.length - 1; index >= 0; index--) {
@@ -3556,8 +4418,21 @@ function applyHeadCaching(
 	}
 
 	if (systemBlocks && systemBlocks.length > 0) {
-		const lastBlock = systemBlocks[systemBlocks.length - 1];
-		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+		// Anchor on the last block before the volatile suffix so a recall
+		// refresh or a different working directory re-bills only the suffix,
+		// not the whole head. An earlier system breakpoint (the OAuth identity
+		// block) moves to the anchor rather than staying as a second one: a
+		// breakpoint left on the identity block caches only tools + identity,
+		// and keeping both would take a rolling message breakpoint from
+		// `applyPromptCaching` (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring.
+		const suffixStart = volatileSystemSuffixStart(systemBlocks);
+		const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+		const anchor = systemBlocks[anchorIndex];
+		if (anchor && anchor.cache_control == null) {
+			for (const block of systemBlocks) delete block.cache_control;
+			anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		}
 	}
 }
 
@@ -3570,6 +4445,41 @@ function usesAdaptiveThinkingTagOnly(model: Model<"anthropic-messages">): boolea
 		if (effortMap[effort] !== "adaptive") return false;
 	}
 	return thinking.efforts.length > 0;
+}
+
+/**
+ * True when enabled thinking on `model` is budget thinking
+ * (`thinking.type: "enabled"` with `budget_tokens`) rather than adaptive.
+ */
+export function usesBudgetThinking(model: Model<"anthropic-messages">): boolean {
+	return model.thinking?.mode !== "anthropic-adaptive" || model.compat.disableAdaptiveThinking === true;
+}
+
+/** The most output tokens a request to `model` may ask for (`max_tokens` ceiling). */
+export function anthropicOutputLimit(model: Model<"anthropic-messages">): number {
+	return model.maxTokens ?? UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
+}
+
+/**
+ * The `max_tokens` and thinking budget of budget thinking: `max_tokens`
+ * rises to leave {@link OUTPUT_FALLBACK_BUFFER} visible output tokens after
+ * the budget, within `maxAllowedTokens`, and the budget shrinks when that
+ * ceiling leaves less (a non-positive budget means the ceiling is too low).
+ */
+export function budgetThinkingOutput(
+	maxTokens: number | undefined,
+	budgetTokens: number,
+	maxAllowedTokens: number,
+): { maxTokens: number; budgetTokens: number } {
+	const currentMaxTokens = Math.min(maxTokens ?? maxAllowedTokens, maxAllowedTokens);
+	const raisedMaxTokens = Math.min(
+		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
+		maxAllowedTokens,
+	);
+	return {
+		maxTokens: raisedMaxTokens,
+		budgetTokens: Math.min(budgetTokens, raisedMaxTokens - OUTPUT_FALLBACK_BUFFER),
+	};
 }
 
 /**
@@ -3598,276 +4508,349 @@ function resolveAnthropicAdaptiveEffort(
 	return mapEffortToAnthropicAdaptiveEffort(model, requestedEffort);
 }
 
-function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): string {
+function extractClaudeCodeFirstWireUserMessageText(messages: readonly Message[]): string {
 	for (const message of messages) {
-		if (message.role !== "user") continue;
+		if ((message.role !== "user" && message.role !== "developer") || anthropicControlOf(message)) continue;
 		const { content } = message;
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-		for (const block of content) {
-			if (block.type === "text") return block.text;
+		if (typeof content === "string") {
+			if (content.trim()) return content;
+			continue;
 		}
-		return "";
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if (block.type === "text" && block.text.trim()) return block.text;
+		}
+		if (content.some(block => block.type === "image")) return "";
 	}
 	return "";
 }
 
-const MAX_ANTHROPIC_CONTROL_STATES = 16;
+/**
+ * Marks a developer message synthesized from {@link AnthropicRequestControls}
+ * records. {@link convertAnthropicMessages} renders it as a bare
+ * mid-conversation `role: "system"` control. Object spread copies symbol keys,
+ * so the marker survives `transformMessages`.
+ */
+const ANTHROPIC_CONTROL = Symbol("anthropicControl");
 
-function resetAnthropicControlState(state: AnthropicControlState): void {
-	state.declaredTools = undefined;
-	state.activeToolNames.clear();
-	state.stableSystemBlocks = undefined;
-	state.systemFingerprint = undefined;
-	state.controlTransitions = [];
-	state.baseEffort = undefined;
-	state.baseEffortWire = undefined;
-	state.currentEffort = undefined;
+/** `max_tokens` requested when the catalog has no output ceiling for the model. */
+const UNKNOWN_MODEL_MAX_OUTPUT_TOKENS = 64_000;
+
+/** One control message: tool changes (removals first) and an optional per-message effort. */
+type AnthropicControlSpec = { toolChanges: AnthropicToolChange[]; effort?: AnthropicOutputEffort };
+
+type AnthropicControlCarrier = object & { [ANTHROPIC_CONTROL]?: AnthropicControlSpec };
+
+/**
+ * An assistant message in `context.messages` whose request declared controls.
+ * `live` when it still sits at the index it was written at: the history before
+ * it is the one its request sent.
+ */
+type AnthropicControlRecord = { index: number; live: boolean; controls: AnthropicRequestControls };
+
+/** A control to splice in before `context.messages[index]`. */
+type AnthropicControlInsert = { index: number; spec: AnthropicControlSpec };
+
+type AnthropicToolControls = NonNullable<AnthropicRequestControls["tools"]>;
+type AnthropicEffortControls = NonNullable<AnthropicRequestControls["effort"]>;
+
+function anthropicControlOf(message: Message): AnthropicControlSpec | undefined {
+	const carrier: AnthropicControlCarrier = message;
+	return message.role === "developer" ? carrier[ANTHROPIC_CONTROL] : undefined;
 }
 
-function anthropicControlMessageProjection(message: MessageParam): MessageParam {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+function collectAnthropicControlRecords(messages: readonly Message[]): AnthropicControlRecord[] {
+	const records: AnthropicControlRecord[] = [];
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message?.role === "assistant" && message.requestControls) {
+			records.push({
+				index,
+				live: message.requestControls.messageIndex === index,
+				controls: message.requestControls,
+			});
+		}
+	}
+	return records;
+}
+
+/**
+ * Slot for an effort control of the request whose response lands at `end`:
+ * before the turn's user message, where Anthropic applies it to that
+ * response, or at `end` when the request continues a tool loop. It never
+ * lands between a `tool_use` and its `tool_result`, where `transformMessages`
+ * would flush synthetic aborted results; a mid-turn change therefore takes
+ * effect from the next step.
+ *
+ * A summary replayed as a `compaction` block is never a slot: the block must
+ * open the request, so nothing may precede it. A response opened by the block
+ * (no real user turn between them) takes the change from its next step. A
+ * summary sent as text is an ordinary user turn.
+ */
+function anthropicEffortInsertIndex(
+	messages: readonly Message[],
+	end: number,
+	compactionReplay: AnthropicCompactionReplay | undefined,
+): number {
+	for (let i = end - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message?.role === "assistant") return end;
+		if (message?.role !== "user") continue;
+		if (!compactionReplay || !replaysAnthropicCompactionBlock(message.providerPayload, compactionReplay)) return i;
+		let next = end;
+		if (messages[next]?.role === "assistant") next++;
+		while (messages[next]?.role === "toolResult") next++;
+		return next;
+	}
+	return end;
+}
+
+/** `tool_removal`s (in `previous` order) then `tool_addition`s (in `next` order), limited to `declared`. */
+function diffAnthropicActiveTools(
+	previous: readonly string[],
+	next: readonly string[],
+	declared: ReadonlySet<string>,
+): AnthropicToolChange[] {
+	const previousSet = new Set(previous);
+	const nextSet = new Set(next);
+	const changes: AnthropicToolChange[] = [];
+	for (const name of previous) {
+		if (!nextSet.has(name) && declared.has(name)) changes.push({ type: "tool_removal", name });
+	}
+	for (const name of next) {
+		if (!previousSet.has(name) && declared.has(name)) changes.push({ type: "tool_addition", name });
+	}
+	return changes;
+}
+
+/**
+ * Keep top-level `tools` byte-stable across a conversation. The declared list
+ * is the latest record's, minus names with no definition in `tools` or
+ * `inactiveTools`, plus newly active tools appended with `defer_loading`.
+ * Every recorded active-set change is replayed as a control before the
+ * response of the request that made it; the change this request makes goes
+ * at the tail. Records at a different index than they were written at are
+ * rewritten history: they keep the declaration but emit no controls, so the
+ * net change from the declared baseline lands at the first live position.
+ * Without `ownChange` (an on-demand compaction request, which ends inside the
+ * conversation) the tail control is left out: there it would sit between the
+ * summarized prefix and the retained turns, where live requests never sent
+ * it, and invalidate their signed thinking. The next live turn sends it.
+ */
+function planAnthropicToolControls(
+	context: Context,
+	records: readonly AnthropicControlRecord[],
+	enabled: boolean,
+	ownChange: boolean,
+): { tools: Tool[] | undefined; inserts: AnthropicControlInsert[]; record: AnthropicToolControls | undefined } {
+	if (!enabled || !context.tools) return { tools: context.tools, inserts: [], record: undefined };
+	const definitions = new Map<string, Tool>();
+	for (const tool of context.tools) definitions.set(tool.name, tool);
+	for (const tool of context.inactiveTools ?? []) {
+		if (!definitions.has(tool.name)) definitions.set(tool.name, tool);
+	}
+	const activeNames = context.tools.map(tool => tool.name);
+
+	const toolRecords: { index: number; live: boolean; tools: AnthropicToolControls }[] = [];
+	for (const record of records) {
+		if (record.controls.tools) {
+			toolRecords.push({ index: record.index, live: record.live, tools: record.controls.tools });
+		}
+	}
+	const inserts: AnthropicControlInsert[] = [];
+	let declared = activeNames;
+	const deferred = new Set<string>();
+	const latest = toolRecords.at(-1);
+	if (latest) {
+		// A declared name without a definition cannot be re-sent: accepted cache miss (e.g. after a resume).
+		declared = latest.tools.declared.filter(name => definitions.has(name));
+		const declaredSet = new Set(declared);
+		for (const name of latest.tools.deferred) {
+			if (declaredSet.has(name)) deferred.add(name);
+		}
+		for (const name of activeNames) {
+			if (declaredSet.has(name)) continue;
+			declared.push(name);
+			declaredSet.add(name);
+			deferred.add(name);
+		}
+		// The API rejects a declaration whose tools are all deferred (a tool-less
+		// conversation gaining tools, or a resume that kept none of the loaded
+		// ones), so load them all and let the controls below replay availability.
+		if (declared.every(name => deferred.has(name))) deferred.clear();
+		// The chain starts from what the top-level declaration makes active, so a
+		// rewritten history converges on the current roster instead of trusting a
+		// record whose earlier controls were summarized away.
+		let previous = declared.filter(name => !deferred.has(name));
+		for (const record of toolRecords) {
+			if (!record.live) continue;
+			const toolChanges = diffAnthropicActiveTools(previous, record.tools.active, declaredSet);
+			if (toolChanges.length > 0) inserts.push({ index: record.index, spec: { toolChanges } });
+			previous = record.tools.active;
+		}
+		const toolChanges = ownChange ? diffAnthropicActiveTools(previous, activeNames, declaredSet) : [];
+		if (toolChanges.length > 0) inserts.push({ index: context.messages.length, spec: { toolChanges } });
+	}
+
+	const tools: Tool[] = [];
+	for (const name of declared) {
+		const tool = definitions.get(name);
+		if (tool) tools.push(deferred.has(name) ? { ...tool, deferLoading: true } : tool);
+	}
 	return {
-		...message,
-		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
+		tools,
+		inserts,
+		record: {
+			declared: tools.map(tool => tool.name),
+			deferred: tools.filter(tool => tool.deferLoading === true).map(tool => tool.name),
+			active: activeNames,
+		},
 	};
 }
 
-function getAnthropicControlState(
-	state: AnthropicProviderSessionState | undefined,
-	sessionId: string | undefined,
-	system: readonly AnthropicSystemBlock[] | undefined,
-	messages: readonly MessageParam[],
-): AnthropicControlState | undefined {
-	if (!state) return undefined;
-	const root = messages[0];
-	const fingerprint = String(
-		Bun.hash(
-			JSON.stringify([
-				sessionId ?? "",
-				system?.map(block => block.text) ?? null,
-				root ? anthropicControlMessageProjection(root) : null,
-			]),
-		),
-	);
-	const existing = state.controlStates.get(fingerprint);
-	if (existing) {
-		state.controlStates.delete(fingerprint);
-		state.controlStates.set(fingerprint, existing);
-		return existing;
-	}
-	const created = createAnthropicControlState();
-	state.controlStates.set(fingerprint, created);
-	if (state.controlStates.size > MAX_ANTHROPIC_CONTROL_STATES) {
-		const oldest = state.controlStates.keys().next().value;
-		if (oldest !== undefined) state.controlStates.delete(oldest);
-	}
-	return created;
-}
-
-/** Fingerprint of the wire message a control transition is attached after. */
-function anthropicControlAnchor(messages: readonly MessageParam[], messageCount: number): string {
-	if (messageCount === 0) return "";
-	const message = messages[messageCount - 1];
-	return message ? String(Bun.hash(JSON.stringify(anthropicControlMessageProjection(message)))) : "";
-}
-
 /**
- * Discard the control baseline when the request no longer continues the
- * conversation it was captured for: a different model, or a wire history that
- * shrank or was rewritten under a recorded transition (compaction, branch
- * switch, `/clear`). The next request re-baselines from its own payload.
+ * Keep top-level `output_config.effort` byte-stable across a conversation and
+ * replay every recorded change as a per-message effort control. An omitted
+ * effort means the API's per-model default, which a per-message control cannot
+ * restore, so a request without an explicit effort keeps the level in force.
+ * Records at a different index than they were written at are rewritten history:
+ * they keep the top-level effort but emit no controls, so the net change lands
+ * at the first live position. Without `ownChange` (an on-demand compaction
+ * request) `current` is not applied: the request runs at the effort in force.
  */
-function syncAnthropicControlState(state: AnthropicControlState, messages: readonly MessageParam[]): void {
-	for (const transition of state.controlTransitions) {
-		if (
-			transition.messageCount > messages.length ||
-			transition.anchor !== anthropicControlAnchor(messages, transition.messageCount)
-		) {
-			resetAnthropicControlState(state);
-			return;
-		}
-	}
-}
-
-/**
- * Keep the top-level `system` array byte-stable across a session. The blocks
- * captured on the first request are replayed verbatim (with the current
- * request's cache breakpoints) while their text is unchanged. A text change
- * re-baselines instead of duplicating the prompt as a mid-conversation
- * system message: omp's system prompt is one rendered segment that embeds
- * the tool roster, so replaying a second copy on every later request would
- * cost the full prompt again per change. The prefix rewrite is absorbed by
- * `prefix_mismatch_behavior: "drop_block"` and one cache miss.
- */
-function planStableAnthropicSystem(
-	current: AnthropicSystemBlock[] | undefined,
-	state: AnthropicControlState | undefined,
-	enabled: boolean,
-): AnthropicSystemBlock[] | undefined {
-	if (!state || !enabled) return current;
-	const fingerprint = JSON.stringify(current?.map(block => block.text) ?? null);
-	if (state.systemFingerprint !== fingerprint) {
-		resetAnthropicControlState(state);
-		state.systemFingerprint = fingerprint;
-		state.stableSystemBlocks = current?.map(block => ({ type: block.type, text: block.text }));
-	}
-	return state.stableSystemBlocks?.map((block, index) => {
-		const cacheControl = current?.[index]?.cache_control;
-		return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
-	});
-}
-
-function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
-	const stable = { ...tool };
-	delete stable.defer_loading;
-	delete stable.description;
-	return JSON.stringify(stable);
-}
-
-function cloneAnthropicTools(tools: readonly AnthropicWireTool[]): AnthropicWireTool[] {
-	return tools.map(tool => ({ ...tool }));
-}
-
-function recordAnthropicControlTransition(
-	state: AnthropicControlState,
-	messages: readonly MessageParam[],
-	messageCount: number,
-	content: ContentBlockParam[],
-	effort?: AnthropicOutputEffort,
-): void {
-	const existing = state.controlTransitions.findLast(transition => transition.messageCount === messageCount);
-	if (existing) {
-		existing.content.push(...content);
-		if (effort !== undefined) existing.effort = effort;
-		return;
-	}
-	state.controlTransitions.push({
-		messageCount,
-		anchor: anthropicControlAnchor(messages, messageCount),
-		content,
-		effort,
-	});
-}
-
-/**
- * Keep the top-level `tools` array byte-stable across a session. Tools that
- * leave the active set are withdrawn with `tool_removal`; tools that join are
- * appended with `defer_loading: true` (not part of the checked prefix until
- * referenced) and offered with `tool_addition`. A changed definition for an
- * already-declared name cannot be expressed as a control and re-baselines.
- */
-function planStableAnthropicTools(
-	current: AnthropicWireTool[] | undefined,
-	messages: readonly MessageParam[],
-	state: AnthropicControlState | undefined,
-	enabled: boolean,
-): AnthropicWireTool[] | undefined {
-	if (!state || !enabled || !current) return current;
-	if (!state.declaredTools) {
-		state.declaredTools = cloneAnthropicTools(current);
-		state.activeToolNames = new Set(current.map(tool => tool.name));
-		return cloneAnthropicTools(state.declaredTools);
-	}
-
-	const declaredByName = new Map(state.declaredTools.map(tool => [tool.name, tool]));
-	for (const tool of current) {
-		const declared = declaredByName.get(tool.name);
-		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
-			resetAnthropicControlState(state);
-			state.declaredTools = cloneAnthropicTools(current);
-			state.activeToolNames = new Set(current.map(candidate => candidate.name));
-			return cloneAnthropicTools(state.declaredTools);
-		}
-	}
-
-	const nextActive = new Set(current.map(tool => tool.name));
-	const changes: ContentBlockParam[] = [];
-	for (const activeName of state.activeToolNames) {
-		if (nextActive.has(activeName)) continue;
-		changes.push({
-			type: "tool_removal",
-			tool: { type: "tool_reference", name: activeName },
-		});
-	}
-	for (const tool of current) {
-		if (state.activeToolNames.has(tool.name)) continue;
-		if (!declaredByName.has(tool.name)) {
-			const deferred = { ...tool, defer_loading: true };
-			state.declaredTools.push(deferred);
-			declaredByName.set(tool.name, deferred);
-		}
-		changes.push({
-			type: "tool_addition",
-			tool: { type: "tool_reference", name: tool.name },
-		});
-	}
-	if (changes.length > 0) recordAnthropicControlTransition(state, messages, messages.length, changes);
-	state.activeToolNames = nextActive;
-	return cloneAnthropicTools(state.declaredTools);
-}
-
-/**
- * Keep top-level `output_config.effort` byte-stable across a session and carry
- * later changes as per-message effort. Anthropic applies a system message's
- * `output_config.effort` from the next `user` turn on, so the control is
- * anchored before the latest user message to take effect on this response.
- */
-function planStableAnthropicEffort(
+function planAnthropicEffortControls(
 	current: AnthropicOutputEffort | undefined,
-	messages: readonly MessageParam[],
-	state: AnthropicControlState | undefined,
+	messages: readonly Message[],
+	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
-): AnthropicOutputEffort | undefined {
-	if (!state || !enabled) return current;
-	const effective = current ?? "high";
-	if (state.baseEffort === undefined) {
-		state.baseEffort = effective;
-		state.baseEffortWire = current;
-		state.currentEffort = effective;
-		return current;
+	compactionReplay: AnthropicCompactionReplay | undefined,
+	ownChange: boolean,
+): {
+	topLevel: AnthropicOutputEffort | undefined;
+	inserts: AnthropicControlInsert[];
+	record: AnthropicEffortControls | undefined;
+} {
+	if (!enabled) return { topLevel: current, inserts: [], record: undefined };
+	const effortRecords: { index: number; live: boolean; effort: AnthropicEffortControls }[] = [];
+	for (const record of records) {
+		if (record.controls.effort) {
+			effortRecords.push({ index: record.index, live: record.live, effort: record.controls.effort });
+		}
 	}
-	if (state.currentEffort !== effective) {
-		const lastUserIndex = messages.findLastIndex(message => message.role === "user");
-		const messageCount = lastUserIndex >= 0 ? lastUserIndex : messages.length;
-		recordAnthropicControlTransition(state, messages, messageCount, [], effective);
-		state.currentEffort = effective;
+	const latest = effortRecords.at(-1);
+	if (!latest) {
+		return { topLevel: current, inserts: [], record: { topLevel: current ?? null, tail: current ?? null } };
 	}
-	return state.baseEffortWire;
+	const topLevel = latest.effort.topLevel ?? undefined;
+	const inserts: AnthropicControlInsert[] = [];
+	let tail = topLevel;
+	for (const record of effortRecords) {
+		if (!record.live) continue;
+		const recorded = record.effort.tail;
+		if (recorded !== null && recorded !== tail) {
+			inserts.push({
+				index: anthropicEffortInsertIndex(messages, record.index, compactionReplay),
+				spec: { toolChanges: [], effort: recorded },
+			});
+		}
+		tail = recorded ?? tail;
+	}
+	if (ownChange && current !== undefined && current !== tail) {
+		inserts.push({
+			index: anthropicEffortInsertIndex(messages, messages.length, compactionReplay),
+			spec: { toolChanges: [], effort: current },
+		});
+		tail = current;
+	}
+	return { topLevel, inserts, record: { topLevel: topLevel ?? null, tail: tail ?? null } };
 }
 
-function materializeAnthropicControlTransitions(
-	messages: MessageParam[],
-	state: AnthropicControlState | undefined,
-): MessageParam[] {
-	if (!state || state.controlTransitions.length === 0) return messages;
-	const result = messages.slice();
-	// Insert in slot order so each splice offsets only the transitions after it.
-	const ordered = state.controlTransitions.toSorted((a, b) => a.messageCount - b.messageCount);
-	let offset = 0;
-	for (const transition of ordered) {
-		const index = Math.min(transition.messageCount + offset, result.length);
-		const previous = result[index - 1];
-		if (previous?.role === "system" && previous.clear_at === undefined) {
-			const content: ContentBlockParam[] =
-				typeof previous.content === "string"
-					? [{ type: "text", text: previous.content }, ...transition.content]
-					: [...previous.content, ...transition.content];
-			result[index - 1] = {
-				...previous,
-				content,
-				...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
-			};
+/**
+ * The effort whose thinking allowance an on-demand compaction request over
+ * `messages` gets. It sends no effort change of its own, so once an earlier
+ * request recorded an effort, the one it left in force applies, even when
+ * `requested` differs or is off. When that request named none, the API's
+ * per-model default applies, which is not known here: the request gets the
+ * largest effort's allowance (`max_tokens` is a cap, not spend). Without a
+ * recorded effort the request sets its own.
+ */
+export function resolveAnthropicCompactionEffort(
+	model: Model<"anthropic-messages">,
+	messages: readonly Message[],
+	requested: Effort | undefined,
+): Effort | undefined {
+	if (model.compat.supportsPerMessageEffort !== true) return requested;
+	const records = collectAnthropicControlRecords(messages);
+	if (!records.some(record => record.controls.effort)) return requested;
+	const inForce = planAnthropicEffortControls(undefined, messages, records, true, undefined, false).record?.tail;
+	if (!inForce) return requested && (model.thinking?.efforts.at(-1) ?? requested);
+	if (requested && mapEffortToAnthropicAdaptiveEffort(model, requested) === inForce) return requested;
+	return (
+		model.thinking?.efforts?.findLast(effort => mapEffortToAnthropicAdaptiveEffort(model, effort) === inForce) ??
+		requested
+	);
+}
+
+/**
+ * Whether effort controls earlier requests left in `messages` rule out
+ * `thinking: {type: "disabled"}`: Anthropic rejects a per-message effort
+ * control with thinking off, and `disabled` above `high` effort. Both stay in
+ * force across a thinking toggle, so such a request falls back to the
+ * adaptive-only off path (lowest effort) instead of a 400.
+ */
+function effortControlsBlockDisabledThinking(
+	model: Model<"anthropic-messages">,
+	messages: readonly Message[],
+	records: readonly AnthropicControlRecord[],
+): boolean {
+	if (model.compat.supportsPerMessageEffort !== true) return false;
+	const plan = planAnthropicEffortControls(undefined, messages, records, true, undefined, false);
+	return plan.inserts.length > 0 || plan.topLevel === "xhigh" || plan.topLevel === "max";
+}
+
+/**
+ * Splice control markers into `messages`. Inserts sharing an index come from
+ * one request and merge into one control: tool changes first, then the effort.
+ */
+function insertAnthropicControlMarkers(messages: Message[], inserts: readonly AnthropicControlInsert[]): Message[] {
+	if (inserts.length === 0) return messages;
+	const merged = new Map<number, AnthropicControlSpec>();
+	for (const { index, spec } of inserts) {
+		const existing = merged.get(index);
+		if (!existing) {
+			merged.set(index, { ...spec, toolChanges: [...spec.toolChanges] });
 			continue;
 		}
-		result.splice(index, 0, {
-			role: "system",
-			content: transition.content.map(block => ({ ...block })),
-			...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
-		});
-		offset++;
+		existing.toolChanges.push(...spec.toolChanges);
+		if (spec.effort !== undefined) existing.effort = spec.effort;
+	}
+	const result = messages.slice();
+	for (const [index, spec] of [...merged].sort((a, b) => b[0] - a[0])) {
+		const marker: DeveloperMessage & AnthropicControlCarrier = {
+			role: "developer",
+			content: [],
+			attribution: "agent",
+			timestamp: messages[index - 1]?.timestamp ?? 0,
+		};
+		marker[ANTHROPIC_CONTROL] = spec;
+		result.splice(index, 0, marker);
 	}
 	return result;
+}
+
+/** Wire `tool_addition`/`tool_removal` blocks for `changes`. */
+function anthropicToolChangeBlocks(
+	changes: readonly AnthropicToolChange[],
+	isOAuthToken: boolean,
+	model: Model<"anthropic-messages">,
+): ContentBlockParam[] {
+	return changes.map((change): ContentBlockParam => ({
+		type: change.type,
+		tool: {
+			type: "tool_reference",
+			name: encodeAnthropicToolName(change.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
+		},
+	}));
 }
 
 type AnthropicParamBuildOptions = {
@@ -3877,11 +4860,115 @@ type AnthropicParamBuildOptions = {
 	supportsEagerToolInputStreaming: boolean;
 	prefixMismatchBehavior?: "drop_block" | "error";
 	dropAllThinking: boolean;
+	/**
+	 * Drop every prompt-cache breakpoint: the endpoint rejected `cache_control`
+	 * with a 400. `applyHeadCaching` / `applyPromptCaching` no-op on an
+	 * undefined breakpoint, and `buildAnthropicSystemBlocks` is told
+	 * explicitly, because an undefined `cacheControl` there means "default
+	 * ephemeral" on the OAuth identity block, not "none".
+	 */
+	dropCacheControl?: boolean;
+	/**
+	 * Keep every breakpoint but emit no `ttl` and no `scope` on any of them: the
+	 * endpoint refused a nested option rather than the field. Ignored when
+	 * `dropCacheControl` already removes the breakpoints outright.
+	 */
+	dropCacheControlOptions?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
-	providerSessionState?: AnthropicProviderSessionState;
+	/** Control records of `context.messages`, when the caller already collected them. */
+	controlRecords?: readonly AnthropicControlRecord[];
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
+	/**
+	 * Whether the endpoint this request reaches accepts server-side compaction
+	 * (see {@link supportsAnthropicCompaction}); false keeps the edit, the beta,
+	 * and block replay inert. Defaults to the model's static resolution.
+	 */
+	compactionSupported?: boolean;
+	/** Omit thinking/effort controls entirely (a transport's reasoning-off request). */
+	forceThinkingOff?: boolean;
+	/**
+	 * Already-resolved effective endpoint for this request (reroutes applied).
+	 * Beta routing reads this instead of the spec URL so environment reroutes
+	 * land on the right channel. Defaults to `model.baseUrl`.
+	 */
+	effectiveBaseUrl?: string;
 };
+
+/**
+ * Fast mode (`speed: "fast"` plus its beta): a KDL fast-mode SKU, or a
+ * priority-tier request to first-party Anthropic.
+ */
+function wantsAnthropicFastMode(model: Model<"anthropic-messages">, options: AnthropicOptions | undefined): boolean {
+	return model.compat.fastMode === true || (model.compat.firstPartyProvider && options?.serviceTier === "priority");
+}
+
+/**
+ * The block that decides whether an assistant turn is thinking-led. A
+ * `fallback` boundary is bookkeeping, not model output: a response that fell
+ * back before the primary emitted any reasoning opens with
+ * `[fallback, thinking(fallbackModel), …]` and is still a thinking-led turn,
+ * so treat the marker as transparent. Tolerates malformed blocks replayed off
+ * disk.
+ */
+function thinkingLedLeadBlock(content: readonly unknown[]): { type?: unknown } | undefined {
+	for (const block of content) {
+		if (block == null || typeof block !== "object") return undefined;
+		const typed = block as { type?: unknown };
+		if (typed.type !== "fallback") return typed;
+	}
+	return undefined;
+}
+
+/**
+ * Native Factory Droid history predicate (ported from the CLI's request
+ * builder): true when the conversation contains assistant turns but none of
+ * them leads with a `thinking`/`redactedThinking` block.
+ */
+function hasThinkinglessAssistantHistory(messages: readonly Message[]): boolean {
+	let hasAssistant = false;
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		if (!Array.isArray(message.content) || message.content.length === 0) continue;
+		hasAssistant = true;
+		const first = thinkingLedLeadBlock(message.content);
+		if (first?.type === "thinking" || first?.type === "redactedThinking") return false;
+	}
+	return hasAssistant;
+}
+
+/**
+ * Native Factory Droid history predicate: true when the message after the last
+ * user turn is an assistant turn whose first block is not
+ * `thinking`/`redactedThinking` (the conversation is not resuming a
+ * thinking-led chain).
+ */
+function hasNonThinkingTurnAfterLastUser(messages: readonly Message[]): boolean {
+	let lastUser = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "user") {
+			lastUser = i;
+			break;
+		}
+	}
+	if (lastUser === -1 || lastUser === messages.length - 1) return false;
+	const next = messages[lastUser + 1];
+	if (next.role !== "assistant") return false;
+	if (!Array.isArray(next.content) || next.content.length === 0) return false;
+	const first = thinkingLedLeadBlock(next.content);
+	if (first === undefined) return false;
+	return first.type !== "thinking" && first.type !== "redactedThinking";
+}
+
+/**
+ * Whether the conversation has stopped being thinking-led, so routes with
+ * `compat.stripThinkingHistory` drop the budget `thinking` config and replay
+ * history without thinking blocks. Exported so the factory-droid provider can
+ * gate its header-level interleaved beta on the same decision.
+ */
+export function shouldStripThinkingHistory(messages: readonly Message[]): boolean {
+	return hasThinkinglessAssistantHistory(messages) || hasNonThinkingTurnAfterLastUser(messages);
+}
 
 function buildParams(
 	model: Model<"anthropic-messages">,
@@ -3889,7 +4976,7 @@ function buildParams(
 	isOAuthToken: boolean,
 	options: AnthropicOptions | undefined,
 	buildOptions: AnthropicParamBuildOptions,
-): MessageCreateParamsStreaming {
+): { params: MessageCreateParamsStreaming; requestControls: AnthropicRequestControls | undefined } {
 	const {
 		disableStrictTools,
 		useUmansGatewayWebSearch,
@@ -3897,9 +4984,14 @@ function buildParams(
 		supportsEagerToolInputStreaming,
 		prefixMismatchBehavior,
 		dropAllThinking,
+		dropCacheControl = false,
+		dropCacheControlOptions = false,
 		droppedThinkingBlocks,
-		providerSessionState,
+		controlRecords,
 		fallbacks = options?.fallbacks,
+		compactionSupported = supportsAnthropicCompaction(model),
+		forceThinkingOff,
+		effectiveBaseUrl,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
 	// resolved compat with `replayUnsignedThinking: false` so every subsequent
@@ -3909,24 +5001,42 @@ function buildParams(
 		forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking
 			? { ...model, compat: { ...model.compat, replayUnsignedThinking: false } }
 			: model;
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const resolvedCacheControl = dropCacheControl
+		? undefined
+		: getCacheControl(model, options?.cacheRetention, isOAuthToken).cacheControl;
+	const cacheControl =
+		dropCacheControlOptions && resolvedCacheControl ? { type: resolvedCacheControl.type } : resolvedCacheControl;
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
-		? extractClaudeCodeFirstUserMessageText(context.messages)
+		? extractClaudeCodeFirstWireUserMessageText(context.messages)
 		: "";
-	let systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
+	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
+		dropCacheControl,
 	});
+
+	// An on-demand compaction request ends inside the conversation: it gets
+	// nothing live requests lack there, so it makes no tool or effort change.
+	const compactionRequest = compactionSupported ? options?.anthropicCompaction : undefined;
+	// Controls earlier requests recorded on their responses fix the declared
+	// tools, the top-level effort and every control message in between.
+	const records = controlRecords ?? collectAnthropicControlRecords(context.messages);
+	const toolPlan = planAnthropicToolControls(
+		context,
+		records,
+		model.compat.supportsMidConversationToolChanges === true,
+		!compactionRequest,
+	);
 
 	// Pre-compute tools.
 	let tools: AnthropicWireTool[] | undefined;
-	if (context.tools) {
+	if (toolPlan.tools) {
 		tools = convertTools(
-			context.tools,
+			toolPlan.tools,
 			isOAuthToken,
 			disableStrictTools,
 			supportsEagerToolInputStreaming,
@@ -3940,7 +5050,7 @@ function buildParams(
 	// Pre-compute metadata.
 	const metadataAccountId = readAnthropicMetadataAccountId(options?.metadata);
 	const metadataUserId = resolveAnthropicMetadataUserId(
-		readMetadataString(options?.metadata, "user_id") ??
+		readAnthropicMetadataString(options?.metadata, "user_id") ??
 			// Deliberately share the normalized affinity identity across Kimi's two transports.
 			(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
 		isOAuthToken,
@@ -3952,13 +5062,32 @@ function buildParams(
 	// Pre-compute thinking + output_config effort.
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
-	if (model.reasoning) {
-		if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
+	if (!forceThinkingOff && model.reasoning) {
+		const disabledThinking = model.compat.disabledThinking;
+		if (
+			options?.thinkingEnabled === false &&
+			disabledThinking !== undefined &&
+			!(disabledThinking === "disabled" && effortControlsBlockDisabledThinking(model, context.messages, records))
+		) {
+			if (disabledThinking === "between-tools") {
+				thinking = { type: "between_tools" };
+				outputConfigEffort = model.compat.betweenToolsEffort;
+			} else if (disabledThinking !== "omit") {
+				thinking =
+					disabledThinking === "adaptive"
+						? {
+								type: "adaptive",
+								...(model.thinking?.supportsDisplay
+									? { display: options.thinkingDisplay ?? "summarized" }
+									: {}),
+							}
+						: { type: "disabled" };
+			}
+		} else if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
 			const thinkingOptions = options ?? {};
 			const mode = model.thinking?.mode;
 			const effort = resolveAnthropicAdaptiveEffort(model, thinkingOptions);
-			const compat = model.compat;
-			if (mode === "anthropic-adaptive" && !compat.disableAdaptiveThinking) {
+			if (!usesBudgetThinking(model)) {
 				const adaptive: { type: "adaptive"; display?: AnthropicThinkingDisplay } = { type: "adaptive" };
 				// Starting with Claude Opus 4.7 and Claude Fable/Mythos 5, adaptive thinking
 				// content is omitted from the response by default. Opt into summarized
@@ -3975,12 +5104,23 @@ function buildParams(
 				thinking = {
 					type: "enabled",
 					budget_tokens: thinkingOptions.thinkingBudgetTokens || 1024,
-					display: thinkingOptions.thinkingDisplay ?? "summarized",
+					// Budget thinking accepts `display` unless a host explicitly declares
+					// it unsupported (proxies whose native clients never send it).
+					...(model.thinking?.supportsDisplay === false
+						? {}
+						: { display: thinkingOptions.thinkingDisplay ?? "summarized" }),
 				};
 				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
-			if (isAdaptiveOnlyThinking(model)) {
+			if (model.compat.supportsBetweenToolsThinking) {
+				// Sonnet 5.5 rejects `disabled` with a 400; `between_tools` is its lowest
+				// thinking setting. It takes no other field and leaves effort untouched
+				// unless the route pins one: pinning `low` here would cap the whole
+				// turn's quality, not only thinking.
+				thinking = { type: "between_tools" };
+				outputConfigEffort = model.compat.betweenToolsEffort;
+			} else if (isAdaptiveOnlyThinking(model)) {
 				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
 				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
 				// Omit the thinking field (the API defaults to adaptive) and pin the
@@ -3996,13 +5136,30 @@ function buildParams(
 	}
 
 	if (prefixMismatchBehavior) {
-		if (!thinking && model.thinking?.mode === "anthropic-adaptive") {
+		if (
+			!thinking &&
+			model.thinking?.mode === "anthropic-adaptive" &&
+			!(options?.thinkingEnabled === false && model.compat.disabledThinking === "omit")
+		) {
 			thinking = { type: "adaptive" };
 		}
 		if (thinking?.type === "adaptive" || thinking?.type === "enabled") {
 			thinking.block_binding = { prefix_mismatch_behavior: prefixMismatchBehavior };
 		}
 	}
+
+	// Factory Droid's native thinking-history rule. For non-adaptive budget
+	// models, when the conversation is not thinking-led (an assistant turn
+	// exists but none opens with a thinking block, or the turn after the last
+	// user does not), the CLI drops the `thinking` field and replays the
+	// history without thinking blocks — budget-effort models keep
+	// `output_config.effort`, interleaved budget models carry none. A turn that
+	// sends `thinking: { type: "disabled" }` always replays without thinking
+	// blocks, which an assistant message may not carry once thinking is off.
+	const stripThinkingHistory =
+		model.compat.stripThinkingHistory === true &&
+		(thinking?.type === "disabled" || (thinking?.type === "enabled" && shouldStripThinkingHistory(context.messages)));
+	if (stripThinkingHistory && thinking?.type === "enabled") thinking = undefined;
 
 	// Pre-compute context_management. Send keep: "all" for every enabled or
 	// adaptive thinking request (OAuth + API-key) — not just OAuth. Without
@@ -4018,71 +5175,151 @@ function buildParams(
 	const shouldKeepThinkingContext =
 		!options?.client &&
 		model.compat.supportsContextManagement !== false &&
+		(effectiveBaseUrl === undefined || !isVertexRawPredictUrl(effectiveBaseUrl)) &&
 		(thinking?.type === "adaptive" || thinking?.type === "enabled");
-	const contextManagement = shouldKeepThinkingContext
-		? { edits: [{ type: "clear_thinking_20251015" as const, keep: "all" as const }] }
-		: undefined;
+	// A new on-demand compaction request cannot carry context_management.
+	// Later turns carrying its signed block may keep clear_thinking as usual.
+	// Persisted encrypted threshold blocks alone need a legacy replay edit.
+	const signedReplay = compactionSupported && contextReplaysAnthropicCompaction(context.messages, model, "signed");
+	const legacyReplay =
+		compactionSupported && !signedReplay && contextReplaysAnthropicCompaction(context.messages, model, "legacy");
+	const contextManagementEdits: NonNullable<MessageCreateParams["context_management"]>["edits"] = [];
+	if (!compactionRequest && shouldKeepThinkingContext) {
+		contextManagementEdits.push({ type: "clear_thinking_20251015", keep: "all" });
+	}
+	if (legacyReplay && !compactionRequest) {
+		contextManagementEdits.push(buildAnthropicCompactionReplayEdit(model));
+	}
+	const contextManagement = contextManagementEdits.length > 0 ? { edits: contextManagementEdits } : undefined;
 
 	// Pre-compute output_config. Skip `effort` on Vertex rawPredict: it requires
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
-	let wireMessages = convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
-		serverSideFallbackEnabled: !!fallbacks?.length,
-		dropAllThinking,
-		droppedThinkingBlocks,
-	});
-	const controlState = getAnthropicControlState(providerSessionState, options?.sessionId, systemBlocks, wireMessages);
-	if (controlState) syncAnthropicControlState(controlState, wireMessages);
-	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
-	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	const compactionReplay: AnthropicCompactionReplay | undefined = compactionSupported
+		? { model: effectiveModel, legacy: !compactionRequest && !signedReplay }
+		: undefined;
+	// `minimizeEffort` lowers only an effort a per-message control can carry: once an
+	// earlier request recorded one, the plan keeps the top-level effort in force.
+	const lowestEffort = model.thinking?.efforts[0];
+	const minimizedEffort =
+		options?.minimizeEffort &&
+		outputConfigEffort !== undefined &&
+		lowestEffort !== undefined &&
+		model.compat.supportsPerMessageEffort === true &&
+		records.some(record => record.controls.effort)
+			? mapEffortToAnthropicAdaptiveEffort(model, lowestEffort)
+			: undefined;
+	const effortPlan = planAnthropicEffortControls(
+		minimizedEffort && minimizedEffort !== "adaptive" ? minimizedEffort : outputConfigEffort,
+		context.messages,
+		records,
+		model.compat.supportsPerMessageEffort === true,
+		compactionReplay,
+		!compactionRequest,
+	);
+	// `between_tools` returns a 400 at `xhigh`/`max` effort, and the effort in
+	// force from earlier turns outlives a thinking toggle. Fall back to the
+	// default adaptive request, which accepts every effort level.
+	if (thinking?.type === "between_tools" && (effortPlan.topLevel === "xhigh" || effortPlan.topLevel === "max")) {
+		thinking = undefined;
+	}
+	const wireMessages = convertAnthropicMessages(
+		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
+		effectiveModel,
+		isOAuthToken,
+		{
+			serverSideFallbackEnabled: !!fallbacks?.length,
+			replayCompaction: compactionSupported,
+			replayLegacyCompaction: compactionReplay?.legacy,
+			dropAllThinking: dropAllThinking || stripThinkingHistory,
+			thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
+			droppedThinkingBlocks,
+			credentialId: options?.credentialId,
+			compactionRequest,
+		},
+	);
+
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
 	applyHeadCaching(systemBlocks, tools, cacheControl);
-	const topLevelEffort = planStableAnthropicEffort(
-		outputConfigEffort,
-		wireMessages,
-		controlState,
-		model.compat.supportsPerMessageEffort,
-	);
-	wireMessages = materializeAnthropicControlTransitions(wireMessages, controlState);
+	const requestControls: AnthropicRequestControls | undefined =
+		toolPlan.record || effortPlan.record
+			? {
+					messageIndex: context.messages.length,
+					...(toolPlan.record && { tools: toolPlan.record }),
+					...(effortPlan.record && { effort: effortPlan.record }),
+				}
+			: undefined;
 
 	const outputConfigEntries: AnthropicOutputConfig = {};
-	if (topLevelEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = topLevelEffort;
-	if (options?.taskBudget) outputConfigEntries.task_budget = options.taskBudget;
+	if (effortPlan.topLevel && model.compat.supportsOutputEffort) outputConfigEntries.effort = effortPlan.topLevel;
+	if (options?.taskBudget) {
+		if (compactionRequest || signedReplay) {
+			const taskBudget = { ...options.taskBudget };
+			delete taskBudget.remaining;
+			outputConfigEntries.task_budget = taskBudget;
+		} else {
+			outputConfigEntries.task_budget = options.taskBudget;
+		}
+	}
 	const outputConfig = Object.keys(outputConfigEntries).length ? outputConfigEntries : undefined;
 
-	// Claude Code requests at most 64k output tokens; clamp only OAuth requests,
-	// where the wire fingerprint must match. API-key callers keep the full model
-	// ceiling (e.g. 128k on Opus 4.8).
-	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
-	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
+	// OAuth and API-key requests alike get the full model ceiling; Claude Code
+	// itself requests 128k on Opus 5.5.
+	const maxOutputTokens = anthropicOutputLimit(model);
 
-	const vertexControlBetas = isVertexRawPredictUrl(model.baseUrl)
-		? resolveAnthropicControlBetas(model, prefixMismatchBehavior)
+	// A caller-owned client targets its own endpoint: route body betas by the
+	// client's URL when it exposes one, not the model's routing. Otherwise the
+	// already-resolved effective URL wins over the spec URL so environment
+	// reroutes land on the right channel.
+	const vertexRequestUrl =
+		(options?.client !== undefined ? injectedClientBaseUrl(options.client) : undefined) ??
+		effectiveBaseUrl ??
+		model.baseUrl;
+	const vertexControlBetas = isVertexRawPredictUrl(vertexRequestUrl)
+		? resolveAnthropicControlBetas(model, undefined)
 		: [];
+	// Vertex rawPredict routes on-demand and legacy replay betas in the body.
+	if (isVertexRawPredictUrl(vertexRequestUrl)) {
+		if ((compactionRequest || signedReplay) && compactionSupported && !vertexControlBetas.includes(COMPACTION_BETA)) {
+			vertexControlBetas.push(COMPACTION_BETA);
+		}
+		if (legacyReplay && !compactionRequest && !vertexControlBetas.includes(LEGACY_COMPACTION_BETA)) {
+			vertexControlBetas.push(LEGACY_COMPACTION_BETA);
+		}
+	}
 
 	// Build params in the canonical field order: model → messages → system → tools →
-	// metadata → max_tokens → thinking → context_management → output_config → stream.
+	// metadata → max_tokens → thinking → context_management/compaction → output_config → stream.
 	const params: MessageCreateParamsStreaming = {
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
 		messages: wireMessages,
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
-		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? modelMaxTokens),
+		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? maxOutputTokens),
 		...(thinking && { thinking }),
 		...(contextManagement && { context_management: contextManagement }),
+		...(compactionRequest && {
+			compaction: {
+				type: "summarize",
+				...(compactionRequest.instructions ? { instructions: compactionRequest.instructions } : {}),
+			},
+		}),
 		...(outputConfig && { output_config: outputConfig }),
 		...(fallbacks?.length ? { fallbacks } : {}),
 		...(vertexControlBetas.length > 0 ? { anthropic_beta: vertexControlBetas } : {}),
 		stream: true,
 	};
 
-	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error.
+	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error,
+	// and API version 2026-10-21 rejects them on every model.
 	const thinkingType = params.thinking?.type;
 	const allowSamplingParams =
-		model.compat.supportsSamplingParams && (thinkingType === undefined || thinkingType === "disabled");
+		model.compat.supportsSamplingParams &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(vertexRequestUrl)) &&
+		(thinkingType === undefined || thinkingType === "disabled");
 	if (allowSamplingParams && options?.temperature !== undefined) {
 		params.temperature = options.temperature;
 	}
@@ -4092,7 +5329,7 @@ function buildParams(
 	if (allowSamplingParams && options?.topK !== undefined) {
 		params.top_k = options.topK;
 	}
-	if (options?.stopSequences?.length) {
+	if (!compactionRequest && options?.stopSequences?.length) {
 		const seqs = options.stopSequences;
 		if (seqs.length > ANTHROPIC_STOP_SEQUENCES_MAX && !warnedStopSequencesTrim) {
 			warnedStopSequencesTrim = true;
@@ -4105,7 +5342,7 @@ function buildParams(
 			seqs.length > ANTHROPIC_STOP_SEQUENCES_MAX ? seqs.slice(0, ANTHROPIC_STOP_SEQUENCES_MAX) : seqs;
 	}
 
-	if (model.provider === "anthropic" && options?.serviceTier === "priority") {
+	if (wantsAnthropicFastMode(model, options)) {
 		params.speed = "fast";
 	}
 
@@ -4128,7 +5365,10 @@ function buildParams(
 		// request succeeds; the tool stays available and the caller's prompt steers
 		// the model toward it.
 		const choiceType = params.tool_choice?.type;
-		if ((choiceType === "any" || choiceType === "tool") && !model.compat.supportsForcedToolChoice) {
+		if (
+			(choiceType === "any" || choiceType === "tool") &&
+			(compactionRequest || !model.compat.supportsForcedToolChoice)
+		) {
 			params.tool_choice = { type: "auto" };
 		}
 	}
@@ -4137,7 +5377,59 @@ function buildParams(
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
 
-	return params;
+	return { params, requestControls };
+}
+
+/** Project a Bedrock Converse model onto Anthropic Messages so the shared encoder resolves canonical wire compat. */
+function buildBedrockAnthropicEncoderModel(model: Model<"bedrock-converse-stream">): Model<"anthropic-messages"> {
+	const {
+		compat: _bedrockCompat,
+		compatConfig: _bedrockCompatConfig,
+		identity: _bedrockIdentity,
+		remoteCompaction: _bedrockRemoteCompaction,
+		...sharedSpec
+	} = model;
+	const spec: ModelSpec<"anthropic-messages"> = {
+		...sharedSpec,
+		api: "anthropic-messages",
+	};
+	return buildModel(spec);
+}
+
+/**
+ * Route Bedrock's on-demand Anthropic compaction through the shared Messages
+ * stream consumer while keeping source-provider identity and pricing.
+ */
+export function streamBedrockAnthropicCompaction(
+	sourceModel: Model<"bedrock-converse-stream">,
+	context: Context,
+	options: AnthropicOptions,
+	prepareRequest: (
+		params: MessageCreateParamsStreaming,
+		betas: readonly string[],
+	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>,
+	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike,
+	prepareOptions: (options: AnthropicOptions) => AnthropicOptions,
+	forceThinkingOffFields?: Record<string, unknown>,
+): AssistantMessageEventStream {
+	const anthropicModel = withoutDisabledExperimentalBetas(buildBedrockAnthropicEncoderModel(sourceModel));
+	const forceThinkingOff = options.reasoning === undefined;
+	const prefixMismatchBehavior =
+		!forceThinkingOff && anthropicModel.thinking?.prefixBinding && sourceModel.compat.supportsThinkingBindingControls
+			? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
+			: undefined;
+	const compactionOptions = { ...options };
+	delete compactionOptions.toolChoice;
+	delete compactionOptions.fallbacks;
+	return streamAnthropicOnce(anthropicModel, context, compactionOptions, {
+		sourceModel,
+		forceThinkingOff,
+		forceThinkingOffFields,
+		prefixMismatchBehavior,
+		prepareOptions,
+		prepareRequest,
+		createClient,
+	});
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";
@@ -4166,7 +5458,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	let content = convertContentBlocks(msg.content, { supportsImages: model.input.includes("image") });
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
@@ -4224,7 +5516,8 @@ function toWellFormedDeep(value: unknown): unknown {
 		let changed = false;
 		const next: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
-			const sanitized = toWellFormedDeep(entry);
+			// The compaction signature covers this opaque list; don't sanitize any nested values.
+			const sanitized = value.type === "compaction" && key === "tool_changes" ? entry : toWellFormedDeep(entry);
 			if (sanitized !== entry) changed = true;
 			next[key] = sanitized;
 		}
@@ -4234,13 +5527,56 @@ function toWellFormedDeep(value: unknown): unknown {
 }
 
 /**
+ * Collapse a server-side-fallback turn for a request that cannot carry the
+ * `fallback` boundary marker: drop the markers and keep reasoning from one
+ * model only — the last segment that has any. Each model signed its reasoning
+ * against the turn's original prefix; replayed back-to-back without the
+ * marker, Anthropic validates them as one chain and rejects the latest turn
+ * with "`thinking` or `redacted_thinking` blocks in the latest assistant
+ * message cannot be modified". A turn whose reasoning sits in one segment
+ * keeps all of it.
+ */
+function collapseFallbackSegments(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	let segments = 0;
+	let reasoningSegment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") segments++;
+		else if (block.type === "thinking" || block.type === "redactedThinking") reasoningSegment = segments;
+	}
+	if (segments === 0) return content;
+	const collapsed: AssistantMessage["content"] = [];
+	let segment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") {
+			segment++;
+			continue;
+		}
+		if ((block.type === "thinking" || block.type === "redactedThinking") && segment !== reasoningSegment) continue;
+		collapsed.push(block);
+	}
+	return collapsed;
+}
+
+/**
  * Serialize omp {@link Message}s to Anthropic wire messages.
  *
  * `opts.serverSideFallbackEnabled` — when the CURRENT request itself
- * opts into the server-side-fallback beta chain. Only then may a persisted
- * `fallback` content block from a prior turn be replayed on the wire;
- * otherwise the block is dropped to avoid a 400 on non-fallback requests
- * that don't send the beta.
+ * opts into the server-side-fallback beta chain. Only then, and only on the
+ * official endpoint, may a persisted `fallback` content block from a prior
+ * turn be replayed on the wire; otherwise the block is dropped to avoid a 400
+ * on requests that don't send the beta, and its turn keeps one model's
+ * reasoning (see {@link collapseFallbackSegments}).
+ *
+ * `opts.replayCompaction` — replay a user-role compaction summary that
+ * carries an {@link AnthropicCompactionPayload} from this provider as a
+ * native `compaction` block instead of its text. The API drops every block
+ * before the compaction block, so the assistant turn carrying it may open
+ * the conversation; the request must send the compaction beta (the stream
+ * entry point adds it whenever such a payload is present).
+ *
+ * `opts.thinkingEnabled` — the CURRENT request enables thinking. Combined with
+ * `model.compat.requiresThinkingPresence` this pads assistant turns that carry
+ * no thinking block at all (see the guard below).
  */
 export function convertAnthropicMessages(
 	messages: Message[],
@@ -4248,22 +5584,155 @@ export function convertAnthropicMessages(
 	isOAuthToken: boolean,
 	opts?: {
 		serverSideFallbackEnabled?: boolean;
+		replayCompaction?: boolean;
+		replayLegacyCompaction?: boolean;
 		dropAllThinking?: boolean;
+		thinkingEnabled?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
+		credentialId?: number;
+		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
+		compactionRequest?: AnthropicCompactionRequest;
 	},
 ): AnthropicMessageParam[] {
-	// Indices of params emitted from `developer` messages. After the main pass,
-	// the ones whose placement satisfies Anthropic's mid-conversation rules are
-	// upgraded from the `user` role to the authoritative `system` role.
+	// Indices of params emitted from agent-owned `developer` messages. After the
+	// main pass, the ones whose placement satisfies Anthropic's mid-conversation
+	// rules are upgraded from the `user` role to the authoritative `system` role.
 	const developerParams: Array<{ index: number; payload?: AnthropicMessagePayload }> = [];
 	const params: AnthropicMessageParam[] = [];
+	// Controls rendered from request-control markers. The assistant repairs
+	// and the developer upgrade below look through them: they were inserted
+	// by this provider, not authored in the conversation.
+	const controlParams = new Set<AnthropicMessageParam>();
+	// Harness file metadata queued behind a replayed compaction block, oldest
+	// replay point first. Messages kept after a summary must reach the API
+	// exactly as they were sent before, or their signed thinking no longer
+	// matches its prefix; each entry therefore waits for the first message
+	// created after its replay point (past any tool results that close an open
+	// tool_use turn), or the end of the list.
+	let pendingCompactionFiles: AnthropicCompactionFiles[] = [];
+	const pushCompactionFiles = (filesText: string): void => {
+		if (filesText.trim().length === 0) return;
+		// The payload bypassed the `transformMessages` redaction pass, so
+		// the metadata takes the same credential redaction here that the
+		// dropped message text received there.
+		params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+	};
+	const flushCompactionFiles = (before: number): void => {
+		const due = pendingCompactionFiles.filter(files => files.after < before);
+		pendingCompactionFiles = pendingCompactionFiles.filter(files => files.after >= before);
+		for (const files of due) pushCompactionFiles(files.text);
+	};
+	// Summaries without `exactTail` replay their metadata after the first param
+	// boundary past the block (clear of the fold and of an open tool_use turn):
+	// thinking created after them was signed against that layout.
+	let legacyCompactionFiles: string | undefined;
+	const flushLegacyCompactionFiles = (): void => {
+		if (legacyCompactionFiles === undefined) return;
+		pushCompactionFiles(legacyCompactionFiles);
+		legacyCompactionFiles = undefined;
+	};
 
-	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(
+		messages,
+		model,
+		id => normalizeToolCallId(id),
+		undefined,
+		undefined,
+		undefined,
+		opts?.credentialId,
+	);
+	// The turn this request answers: the last message that started a run (a
+	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
+	// or the continue shortcut, which is `synthetic` or user-attributed) with no
+	// assistant reply after it. Developer reminders after it don't move it.
+	// Media Claude cannot read fails the request there (see
+	// convertContentBlocks). Only that turn is checked: once another prompt
+	// follows, the failed one is history and gets the omission note, so the
+	// session never stays stuck. A compaction request only summarizes, so it
+	// never fails on an attachment.
+	// Strict thinking-replay validators (DeepSeek's Anthropic endpoint) validate
+	// only the current turn: every assistant message that follows the last
+	// text-bearing `user` message must carry a `thinking` block, while turns
+	// before it are exempt. Proven against the live endpoint — appending one user
+	// prompt moves the window past a thinking-less turn (accepted), while a
+	// thinking-less assistant after that boundary re-triggers the 400. Skip the
+	// scan entirely for every other request: no compat member reads the result.
+	const padsThinkingWindow =
+		opts?.thinkingEnabled === true && !opts.dropAllThinking && model.compat.requiresThinkingPresence === true;
+	let thinkingWindowStart = -1;
+	if (padsThinkingWindow) {
+		for (let index = transformedMessages.length - 1; index >= 0; index--) {
+			const message = transformedMessages[index];
+			if (message.role !== "user" && message.role !== "developer") continue;
+			const content = message.content;
+			const hasText =
+				typeof content === "string"
+					? content.trim().length > 0
+					: content.some(block => block.type === "text" && block.text.trim().length > 0);
+			if (!hasText) continue;
+			thinkingWindowStart = index;
+			break;
+		}
+	}
+	let unansweredUserIndex = -1;
+	if (!opts?.compactionRequest) {
+		for (let index = transformedMessages.length - 1; index >= 0; index--) {
+			const message = transformedMessages[index];
+			if (message.role === "assistant") break;
+			if (
+				message.role === "user" ||
+				(message.role === "developer" && (message.synthetic === true || message.attribution === "user"))
+			) {
+				unansweredUserIndex = index;
+				break;
+			}
+		}
+	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
+		const control = anthropicControlOf(msg);
+		if (control) {
+			const controlParam: AnthropicMessageParam = {
+				role: "system",
+				content: anthropicToolChangeBlocks(control.toolChanges, isOAuthToken, model),
+				...(control.effort ? { output_config: { effort: control.effort } } : {}),
+			};
+			controlParams.add(controlParam);
+			params.push(controlParam);
+			continue;
+		}
+		if (
+			opts?.replayCompaction &&
+			(msg.role === "user" || msg.role === "developer") &&
+			replaysAnthropicCompactionBlock(msg.providerPayload, { model, legacy: opts.replayLegacyCompaction !== false })
+		) {
+			const compactionParam: AnthropicMessageParam = {
+				role: "assistant",
+				content: [compactionBlockParam(msg.providerPayload)],
+			};
+			copyPerCallContextMessage(compactionParam, msg);
+			params.push(compactionParam);
+			// The block carries the verbatim API summary, so the message text
+			// (which holds the harness file lists) would be dropped with it.
+			// Queue the file metadata past the retained tail (see above); the
+			// summary message carries the compaction's commit time.
+			const { filesText, retainedFiles, exactTail } = msg.providerPayload;
+			if (exactTail) {
+				pendingCompactionFiles = [
+					...(retainedFiles ?? []),
+					...(filesText !== undefined ? [{ text: filesText, after: msg.timestamp }] : []),
+				].sort((a, b) => a.after - b.after);
+			} else {
+				pendingCompactionFiles = [];
+				legacyCompactionFiles = filesText;
+			}
+			continue;
+		}
+		if (msg.role !== "toolResult") flushCompactionFiles(msg.timestamp);
 		if (msg.role === "user" || msg.role === "developer") {
+			flushLegacyCompactionFiles();
 			const payload =
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
@@ -4282,7 +5751,10 @@ export function convertAnthropicMessages(
 					content = msg.content.toWellFormed();
 				}
 			} else {
-				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"));
+				const contentBlocks = convertContentBlocks(msg.content, {
+					supportsImages: model.input.includes("image"),
+					rejectUnsupportedMedia: i === unansweredUserIndex,
+				});
 				if (typeof contentBlocks === "string") {
 					if (contentBlocks.trim().length === 0) {
 						if (!hasProviderControls) continue;
@@ -4298,27 +5770,57 @@ export function convertAnthropicMessages(
 			if (payload?.toolChanges && model.compat.supportsMidConversationToolChanges) {
 				const blocks: ContentBlockParam[] =
 					typeof content === "string" ? [{ type: "text", text: content }] : content;
-				for (const change of payload.toolChanges) {
-					blocks.push({
-						type: change.type,
-						tool: {
-							type: "tool_reference",
-							name: encodeAnthropicToolName(change.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
-						},
-					});
-				}
+				blocks.push(...anthropicToolChangeBlocks(payload.toolChanges, isOAuthToken, model));
 				content = blocks;
 			}
-			if (msg.role === "developer") developerParams.push({ index: params.length, payload });
-			params.push({ role: "user", content });
+			// User-attributed developer turns (text `@file` mentions, hidden extension
+			// messages) only borrow the slot: their content is the user's, so it stays
+			// on `user` instead of gaining system authority or ending the request in
+			// place of the user's turn. Provider controls only exist on `system`.
+			if (msg.role === "developer" && (msg.attribution !== "user" || hasProviderControls)) {
+				developerParams.push({ index: params.length, payload });
+			}
+			const param: AnthropicMessageParam & ConversationalUserCarrier = { role: "user", content };
+			// Record that this wire `user` came from a real conversational turn, so
+			// prompt-cache decimation can tell it apart from everything else that
+			// serializes as `role: "user"`: a `developer` message, a tool_result run,
+			// a synthetic `Continue.` pad, the stale-tool-result note, and any
+			// agent-authored turn (`synthetic`, or `attribution: "agent"`, which is
+			// what compaction and branch summaries carry).
+			const agentAuthored = msg.synthetic === true || msg.attribution === "agent";
+			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
+				param[kConversationalUser] = true;
+			}
+			copyPerCallContextMessage(param, msg);
+			params.push(param);
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
-			const hasSignedThinking = msg.content.some(
+			// The fallback boundary replays ONLY when both sides are aligned: the
+			// current request opted into the beta chain, and the target is
+			// official Anthropic (the only endpoint that accepts the block).
+			const content =
+				opts?.serverSideFallbackEnabled && model.compat.officialEndpoint
+					? msg.content
+					: collapseFallbackSegments(msg.content);
+			const hasSignedThinking = content.some(
 				block =>
 					block.type === "thinking" && !!block.thinkingSignature && block.thinkingSignature.trim().length > 0,
 			);
 
-			for (const block of msg.content) {
+			// A caller that appends the compacting response itself holds the block
+			// on the assistant message; it opened that response, so it opens the
+			// replayed turn.
+			if (
+				opts?.replayCompaction &&
+				replaysAnthropicCompactionBlock(msg.providerPayload, {
+					model,
+					legacy: opts.replayLegacyCompaction !== false,
+				})
+			) {
+				blocks.push(compactionBlockParam(msg.providerPayload));
+			}
+
+			for (const block of content) {
 				if (block.type === "text") {
 					if (block.text.trim().length === 0) continue;
 					blocks.push({
@@ -4379,13 +5881,7 @@ export function convertAnthropicMessages(
 				} else if (block.type === "anthropicServerTool") {
 					blocks.push(block.block);
 				} else if (block.type === "fallback") {
-					// Replay ONLY when both sides are aligned: the current
-					// request opted into the beta chain, and the target is
-					// official Anthropic (the only endpoint that accepts the
-					// block on the wire). `transformMessages` already drops
-					// the block for cross-provider / non-official replays, so
-					// this is defense-in-depth for direct convert calls.
-					if (!opts?.serverSideFallbackEnabled || !model.compat.officialEndpoint) continue;
+					// Present only when this request can carry it (see `content`).
 					blocks.push({
 						type: "fallback",
 						from: block.from,
@@ -4440,24 +5936,52 @@ export function convertAnthropicMessages(
 				blocks.push(...nonToolUse, ...toolUse);
 			}
 			if (blocks.length === 0) continue;
-			params.push({
+			// Strict replay validators (DeepSeek's Anthropic endpoint) reject a
+			// thinking-mode request when an assistant turn inside the current turn
+			// carries no `thinking` block — "The `content[].thinking` in the
+			// thinking mode must be passed back to the API." A gateway model group
+			// that can fail over to such an endpoint inherits the stricter
+			// contract, so a turn another upstream produced without reasoning still
+			// needs the block. Presence is the only requirement there, but the text
+			// must be non-blank: the litellm Anthropic adapter drops blank thinking
+			// blocks while normalizing the body, which turns the pad back into a
+			// missing block (verified 400). Turns before the last user prompt are
+			// exempt (verified 200).
+			// Only a `thinking` block satisfies the strict contract: a turn carrying
+			// just `redacted_thinking` still serializes without one. (DeepSeek's
+			// endpoint rejects `redacted_thinking` outright — "unknown variant" — so
+			// that shape fails for a different reason, but the presence rule stays
+			// literal.)
+			if (padsThinkingWindow && i > thinkingWindowStart && !blocks.some(block => block.type === "thinking")) {
+				blocks.unshift({ type: "thinking", thinking: "(no reasoning was returned for this turn)", signature: "" });
+			}
+			const assistantParam: AnthropicMessageParam = {
 				role: "assistant",
 				content: blocks,
-			});
+			};
+			copyPerCallContextMessage(assistantParam, msg);
+			params.push(assistantParam);
+			if (!blocks.some(block => block.type === "tool_use")) flushLegacyCompactionFiles();
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
 			// Images stripped out of error tool results, re-attached after the run.
 			const hoistedImages: ContentBlockParam[] = [];
+			const toolResultParam: AnthropicMessageParam = {
+				role: "user",
+				content: toolResults,
+			};
 
 			// Add the current tool result
 			toolResults.push(buildToolResultBlock(model, msg, hoistedImages));
+			copyPerCallContextMessage(toolResultParam, msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
 				toolResults.push(buildToolResultBlock(model, nextMsg, hoistedImages));
+				copyPerCallContextMessage(toolResultParam, nextMsg);
 				j++;
 			}
 
@@ -4472,11 +5996,24 @@ export function convertAnthropicMessages(
 			}
 
 			// Add a single user message with all tool results
-			params.push({
-				role: "user",
-				content: toolResults,
-			});
+			params.push(toolResultParam);
+			flushLegacyCompactionFiles();
 		}
+	}
+
+	// Queued compaction metadata lands before the passes below, which place
+	// `system` params by their neighbours.
+	if (opts?.compactionRequest) {
+		// Metadata due before `filesDueBefore` ends the summarized range; the
+		// rest replays with the retained tail and is carried by the new summary
+		// instead. Legacy metadata still pending here belongs after the first
+		// retained turn, outside this request.
+		flushCompactionFiles(opts.compactionRequest.filesDueBefore ?? Number.POSITIVE_INFINITY);
+	} else {
+		// A trailing compaction summary leaves its file metadata queued; emit it
+		// before the prefill check so the list ends the request as a user turn.
+		flushCompactionFiles(Number.POSITIVE_INFINITY);
+		flushLegacyCompactionFiles();
 	}
 
 	// Upgrade developer-origin params to mid-conversation `system` messages where
@@ -4486,12 +6023,19 @@ export function convertAnthropicMessages(
 	// never consecutive. Requiring the next param to be `assistant` (or absent)
 	// covers both the "followed by assistant / last" and "no consecutive system"
 	// constraints. Anything that does not qualify stays a `user` message.
+	// Request controls are looked through, so recording one never demotes a
+	// neighbouring developer message on a later request.
+	const skipControls = (index: number, step: 1 | -1): number => {
+		let next = index + step;
+		while (next >= 0 && next < params.length && controlParams.has(params[next])) next += step;
+		return next;
+	};
 	if (developerParams.length > 0 && model.compat.supportsMidConversationSystem) {
 		for (const developer of developerParams.toReversed()) {
 			const idx = developer.index;
-			const followsUser = idx > 0 && params[idx - 1]?.role === "user";
-			const next = params[idx + 1];
-			const lastOrBeforeAssistant = idx === params.length - 1 || next?.role === "assistant";
+			const followsUser = params[skipControls(idx, -1)]?.role === "user";
+			const nextIndex = skipControls(idx, 1);
+			const lastOrBeforeAssistant = nextIndex >= params.length || params[nextIndex]?.role === "assistant";
 			const content = params[idx].content;
 			const systemCompatible =
 				typeof content === "string" ||
@@ -4509,20 +6053,24 @@ export function convertAnthropicMessages(
 				const controlContent = content.filter(block => block.type !== "text");
 				if (scopedContent.length > 0) {
 					params[idx] = {
+						...params[idx],
 						role: "system",
 						content: scopedContent,
 						clear_at: "next_user_message",
 					};
-					params.splice(idx + 1, 0, {
+					const controlParam: AnthropicMessageParam = {
 						role: "system",
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
-					});
+					};
+					copyPerCallContextMessage(controlParam, params[idx]);
+					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
 			}
 
 			params[idx] = {
+				...params[idx],
 				role: "system",
 				content,
 				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),
@@ -4530,16 +6078,62 @@ export function convertAnthropicMessages(
 			};
 		}
 	}
+	// A replayed compaction block opens the assistant response it was produced
+	// in, so when the retained tail begins with an assistant turn the block
+	// belongs at the head of that turn — the API's own response shape — rather
+	// than in a standalone assistant param that would force a synthetic
+	// `Continue.` user turn between two assistants.
+	for (let i = params.length - 2; i >= 0; i--) {
+		const current = params[i];
+		const next = params[i + 1];
+		if (
+			current.role !== "assistant" ||
+			next?.role !== "assistant" ||
+			typeof current.content === "string" ||
+			current.content.length !== 1 ||
+			current.content[0]?.type !== "compaction" ||
+			typeof next.content === "string"
+		) {
+			continue;
+		}
+		params.splice(i, 2, { ...next, content: [current.content[0], ...next.content] });
+	}
 	// Dropped empty user/developer turns can leave two assistant params adjacent;
 	// the API rejects consecutive assistant messages. Repair with the same neutral
-	// nudge used for trailing-assistant prefill below.
+	// nudge used for trailing-assistant prefill below, directly after the earlier
+	// assistant so request controls between them keep their slot.
 	for (let i = params.length - 1; i > 0; i--) {
-		if (params[i].role === "assistant" && params[i - 1]?.role === "assistant") {
-			params.splice(i, 0, { role: "user", content: "Continue." });
-		}
+		if (params[i].role !== "assistant") continue;
+		const previous = skipControls(i, -1);
+		if (params[previous]?.role !== "assistant") continue;
+		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
+		i = previous + 1;
 	}
-	if (params.length > 0 && params[params.length - 1]?.role === "assistant") {
-		params.push({ role: "user", content: "Continue." });
+	// A control carrying tool changes must precede an `assistant` turn or end
+	// the request (only the directive-only effort form is accepted anywhere),
+	// or every later request in the session fails with a 400. Its slot is the
+	// response of the request that sent it; when a `user` param follows instead
+	// — that response was an empty interrupted or failed turn `transformMessages`
+	// dropped, or compaction file metadata was flushed after it — it moves to
+	// the next assistant turn, the first response that saw the change. Every
+	// later request derives the same slot, so continuations stay cache-stable.
+	for (let i = 0; i < params.length; i++) {
+		const control = params[i];
+		if (!controlParams.has(control) || control.content.length === 0) continue;
+		const next = skipControls(i, 1);
+		if (params[next]?.role !== "user") continue;
+		let slot = next;
+		while (slot < params.length && params[slot].role !== "assistant") slot++;
+		// Controls already waiting for that turn came from later requests.
+		while (controlParams.has(params[slot - 1])) slot--;
+		params.splice(slot, 0, control);
+		params.splice(i, 1);
+		i--;
+	}
+	if (opts?.compactionRequest) return params;
+	const last = skipControls(params.length, -1);
+	if (params[last]?.role === "assistant") {
+		params.splice(last + 1, 0, { role: "user", content: "Continue." });
 	}
 
 	return params;
@@ -4596,10 +6190,23 @@ const ANTHROPIC_TOOL_SCHEMA_STRING_FORMATS = new Set([
 	"ipv6",
 	"uuid",
 ]);
-const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["bash", "python", "edit", "find"]);
+// Not `bash`: strict decoding fixes property order, so an optional key declared
+// before one the model has already written can no longer be emitted, and bash's
+// `timeout` vanished from every `async`-first call.
+// `yield` carries a subagent's whole structured result. Its properties (`type`,
+// `data`, `error`) are declared in the order callers write them; schema-less and
+// workpool yields report `strict: false`. Strict only holds together with buffered
+// input streaming (see ANTHROPIC_BUFFERED_INPUT_TOOLS).
+const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["python", "edit", "find", "yield"]);
 const MAX_ANTHROPIC_STRICT_TOOLS = 20;
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
 const MAX_ANTHROPIC_STRICT_UNION_PARAMETERS = 16;
+// Tools sent with `eager_input_streaming: false`, so the API buffers and validates
+// their input. Eagerly streamed `yield` input from Claude Haiku arrived as invalid
+// JSON (a large nested result closed with one brace too many) even with `strict`
+// set; buffered, it did not. Where the per-tool flag is unsupported, their presence
+// drops the request-wide fine-grained streaming beta instead.
+const ANTHROPIC_BUFFERED_INPUT_TOOLS = new Set(["yield"]);
 
 /** `minItems` / `maxItems` apply to arrays; Anthropic rejects them on `type: "object"` (including `minItems: 0`/`1`). */
 function isJsonSchemaArrayNode(schema: Record<string, unknown>): boolean {
@@ -4773,8 +6380,107 @@ function normalizeAnthropicToolSchemaNode(
 	return result;
 }
 
+function stringEntries(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/**
+ * Whether a root combinator variant can merge into the root object. `allOf` branches
+ * may be open (every branch must hold, so an open one loosens nothing); an open
+ * `anyOf`/`oneOf` variant admits any value for keys other variants declare.
+ */
+function isFoldableAnthropicRootVariant(variant: unknown, conjunctive: boolean): variant is Record<string, unknown> {
+	if (!isRecord(variant)) return false;
+	const type = pickAnthropicEffectiveScalarType(variant);
+	if (type !== undefined && type !== "object") return false;
+	if (variant.$ref !== undefined || variant.not !== undefined || variant.if !== undefined) return false;
+	if (COMBINATOR_KEYS.some(key => variant[key] !== undefined)) return false;
+	return conjunctive || variant.additionalProperties === undefined || variant.additionalProperties === false;
+}
+
+/**
+ * Fold root `anyOf`/`oneOf`/`allOf` object variants into the root object.
+ *
+ * Messages rejects combinators at the tool `input_schema` root, so
+ * {@link normalizeAnthropicToolSchemaNode} spills them into `description`. Without
+ * this fold a pure root union reaches the wire as a closed object with no
+ * properties, which admits only `{}`. The folded root admits every value the
+ * union admits:
+ * - properties merge; a key declared differently by several variants keeps every
+ *   declaration under a nested `anyOf` (`allOf` for a root `allOf`);
+ * - `required` gains the keys every `anyOf`/`oneOf` variant requires, or every
+ *   key any `allOf` branch requires;
+ * - variants that cannot merge (non-object, `$ref`, nested combinators, open
+ *   `anyOf`/`oneOf` members) open the root with `additionalProperties: true`.
+ *
+ * The exact union still reaches the model through the spilled description, and
+ * {@link validateToolArguments} enforces it against the original tool schema.
+ */
+function foldAnthropicRootCombinators(schema: Record<string, unknown>): Record<string, unknown> {
+	const rootType = pickAnthropicEffectiveScalarType(schema);
+	if (rootType !== undefined && rootType !== "object") return schema;
+	if (!COMBINATOR_KEYS.some(key => Array.isArray(schema[key]) && schema[key].length > 0)) return schema;
+
+	const properties: Record<string, unknown> = isRecord(schema.properties) ? { ...schema.properties } : {};
+	const required = new Set(stringEntries(schema.required));
+	let open = false;
+	for (const key of COMBINATOR_KEYS) {
+		const variants = schema[key];
+		if (!Array.isArray(variants) || variants.length === 0) continue;
+		const conjunctive = key === "allOf";
+		if (!variants.every(variant => isFoldableAnthropicRootVariant(variant, conjunctive))) {
+			open = true;
+			continue;
+		}
+
+		const declared = new Map<string, unknown[]>();
+		let shared: Set<string> | undefined;
+		for (const variant of variants) {
+			if (isRecord(variant.properties)) {
+				for (const name in variant.properties) {
+					if (!Object.hasOwn(variant.properties, name)) continue;
+					const propertySchema = variant.properties[name];
+					const declarations = declared.get(name) ?? [];
+					if (!declarations.some(entry => Bun.deepEquals(entry, propertySchema)))
+						declarations.push(propertySchema);
+					declared.set(name, declarations);
+				}
+			}
+			const variantRequired = stringEntries(variant.required);
+			if (conjunctive) {
+				for (const name of variantRequired) required.add(name);
+			} else {
+				shared = new Set(shared ? variantRequired.filter(name => shared?.has(name)) : variantRequired);
+			}
+			if (variant.additionalProperties !== undefined && variant.additionalProperties !== false) open = true;
+		}
+		for (const name of shared ?? []) required.add(name);
+		// A key the root (or an earlier combinator) already declares keeps that
+		// declaration: both must hold, so either alone admits every valid value.
+		for (const [name, declarations] of declared) {
+			if (Object.hasOwn(properties, name)) continue;
+			properties[name] =
+				declarations.length === 1 ? declarations[0] : { [conjunctive ? "allOf" : "anyOf"]: declarations };
+		}
+	}
+
+	const folded: Record<string, unknown> = { ...schema };
+	if (Object.keys(properties).length > 0 || isRecord(schema.properties)) folded.properties = properties;
+	if (required.size > 0) folded.required = [...required];
+	if (open && folded.additionalProperties === undefined && isRecord(folded.properties)) {
+		folded.additionalProperties = true;
+	}
+	return folded;
+}
+
+/**
+ * Normalize a tool parameter schema into an Anthropic `input_schema`: root
+ * combinators fold into the root object ({@link foldAnthropicRootCombinators}),
+ * then {@link normalizeAnthropicToolSchemaNode} applies the keyword whitelist.
+ */
 export function normalizeAnthropicToolSchema(schema: unknown): unknown {
-	return normalizeAnthropicToolSchemaNode(schema, new WeakMap(), true);
+	const root = isRecord(schema) ? foldAnthropicRootCombinators(schema) : schema;
+	return normalizeAnthropicToolSchemaNode(root, new WeakMap(), true);
 }
 
 type AnthropicToolSchemaPlan = {
@@ -4785,6 +6491,12 @@ type AnthropicToolSchemaPlan = {
 type AnthropicStrictBudget = {
 	optionalRemaining: number;
 	unionRemaining: number;
+	optionalCount: number;
+	unionCount: number;
+};
+
+type AnthropicStrictSchemaResult = {
+	schema: Record<string, unknown>;
 	optionalCount: number;
 	unionCount: number;
 };
@@ -4836,7 +6548,7 @@ function makeAnthropicNullableSchema(schema: unknown, budget: AnthropicStrictBud
 function normalizeAnthropicStrictSchemaNode(
 	schema: unknown,
 	budget: AnthropicStrictBudget,
-	cache: WeakMap<Record<string, unknown>, Record<string, unknown>>,
+	cache: WeakMap<Record<string, unknown>, AnthropicStrictSchemaResult | null>,
 ): unknown | undefined {
 	if (Array.isArray(schema)) {
 		const result: unknown[] = [];
@@ -4851,8 +6563,21 @@ function normalizeAnthropicStrictSchemaNode(
 	if (!isRecord(schema)) return schema;
 
 	const cached = cache.get(schema);
-	if (cached) return cached;
+	if (cached === null) return undefined;
+	if (
+		cached !== undefined &&
+		cached.optionalCount <= budget.optionalRemaining &&
+		cached.unionCount <= budget.unionRemaining
+	) {
+		// JSON repeats shared nodes; Anthropic charges every serialized occurrence.
+		budget.optionalRemaining -= cached.optionalCount;
+		budget.optionalCount += cached.optionalCount;
+		budget.unionRemaining -= cached.unionCount;
+		budget.unionCount += cached.unionCount;
+		return cached.schema;
+	}
 
+	// Re-normalize an overflowing occurrence so optionals can become nullable-required.
 	if (!hasAnthropicSchemaDefiningKeyword(schema)) return undefined;
 
 	// Strict tool use only supports closed objects. Open maps stay available on
@@ -4862,7 +6587,10 @@ function normalizeAnthropicStrictSchemaNode(
 	}
 
 	const result: Record<string, unknown> = { ...schema };
-	cache.set(schema, result);
+	const optionalCountBefore = budget.optionalCount;
+	const unionCountBefore = budget.unionCount;
+	// An unfinished entry denotes a cycle, not a reusable serialized subtree.
+	cache.set(schema, null);
 
 	if (hasAnthropicUnionType(result)) {
 		if (budget.unionRemaining <= 0) return undefined;
@@ -4941,6 +6669,11 @@ function normalizeAnthropicStrictSchemaNode(
 		result[defsKey] = normalizedDefinitions;
 	}
 
+	cache.set(schema, {
+		schema: result,
+		optionalCount: budget.optionalCount - optionalCountBefore,
+		unionCount: budget.unionCount - unionCountBefore,
+	});
 	return result;
 }
 
@@ -4980,7 +6713,7 @@ function normalizeAnthropicStrictSchema(
 	schema: Record<string, unknown>,
 	optionalRemaining: number,
 	unionRemaining: number,
-): { schema: Record<string, unknown>; optionalCount: number; unionCount: number } | undefined {
+): AnthropicStrictSchemaResult | undefined {
 	const budget: AnthropicStrictBudget = {
 		optionalRemaining,
 		unionRemaining,
@@ -4998,9 +6731,7 @@ function buildAnthropicBaseToolInputSchema(tool: Tool): Record<string, unknown> 
 		...jsonSchema,
 		type: "object",
 		properties: isRecord(jsonSchema.properties) ? jsonSchema.properties : {},
-		required: Array.isArray(jsonSchema.required)
-			? jsonSchema.required.filter((entry): entry is string => typeof entry === "string")
-			: [],
+		required: stringEntries(jsonSchema.required),
 	}) as Record<string, unknown>;
 }
 
@@ -5063,7 +6794,9 @@ function convertTools(
 		};
 		return {
 			...baseTool,
-			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
+			...(supportsEagerToolInputStreaming
+				? { eager_input_streaming: !ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name) }
+				: {}),
 			...(plan.strict ? { strict: true } : {}),
 			...(tool.deferLoading ? { defer_loading: true } : {}),
 		};
@@ -5085,6 +6818,8 @@ function mapStopReason(reason: string): StopReason {
 		case "refusal":
 			return "error";
 		case "pause_turn": // Stop is good enough -> resubmit
+			return "stop";
+		case "compaction": // pause_after_compaction: the summary block is the whole response
 			return "stop";
 		case "stop_sequence":
 			return "stop"; // A caller-supplied stop_sequences entry matched; the turn completed normally.

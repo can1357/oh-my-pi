@@ -267,10 +267,11 @@ export async function applyUserinfo(
 	userinfo: CompiledUserinfo | undefined,
 	credentials: OAuthCredentials,
 	context: RequestContext,
+	vars: TemplateVars = {},
 ): Promise<OAuthCredentials> {
 	if (!userinfo) return credentials;
 	try {
-		const response = await context.fetch(userinfo.url, {
+		const response = await context.fetch(template(userinfo.url, vars), {
 			headers: { ...context.headers, Authorization: `Bearer ${credentials.access}` },
 			signal: context.signal,
 		});

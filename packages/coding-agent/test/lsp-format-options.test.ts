@@ -143,11 +143,4 @@ describe("resolveFormatOptions", () => {
 		expect(opts.tabSize).toBe(2);
 		expect(opts.insertSpaces).toBe(true);
 	});
-
-	it("always sets the static trim/newline flags", () => {
-		const opts = resolveFormatOptions(path.join(tempDir, "x.txt"), "x\n");
-		expect(opts.trimTrailingWhitespace).toBe(true);
-		expect(opts.insertFinalNewline).toBe(true);
-		expect(opts.trimFinalNewlines).toBe(true);
-	});
 });

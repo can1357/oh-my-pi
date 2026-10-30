@@ -39,7 +39,7 @@ describe("AuthBrokerRefresher", () => {
 		const now = 1_700_000_000_000;
 		const skew = 5 * 60_000;
 		// Credential expires in 1 minute — well within the 5-min skew → must refresh.
-		store!.saveOAuth("anthropic", {
+		await store!.saveOAuth("anthropic", {
 			access: "old",
 			refresh: "old-refresh",
 			expires: now + 60_000,
@@ -53,7 +53,7 @@ describe("AuthBrokerRefresher", () => {
 		});
 
 		storage = new AuthStorage(store!);
-		await storage.reload();
+		await storage.credentials.reload();
 		const refresher = new AuthBrokerRefresher({
 			storage,
 			refreshSkewMs: skew,
@@ -70,7 +70,7 @@ describe("AuthBrokerRefresher", () => {
 	test("does not refresh credentials safely outside the skew window", async () => {
 		const now = 1_700_000_000_000;
 		const skew = 5 * 60_000;
-		store!.saveOAuth("anthropic", {
+		await store!.saveOAuth("anthropic", {
 			access: "ok",
 			refresh: "ok-refresh",
 			expires: now + 60 * 60_000, // 1 hour out
@@ -83,7 +83,7 @@ describe("AuthBrokerRefresher", () => {
 		});
 
 		storage = new AuthStorage(store!);
-		await storage.reload();
+		await storage.credentials.reload();
 		const refresher = new AuthBrokerRefresher({
 			storage,
 			refreshSkewMs: skew,
@@ -96,7 +96,7 @@ describe("AuthBrokerRefresher", () => {
 
 	test("disables credentials on definitive failure (invalid_grant)", async () => {
 		const now = 1_700_000_000_000;
-		store!.saveOAuth("anthropic", {
+		await store!.saveOAuth("anthropic", {
 			access: "old",
 			refresh: "old-refresh",
 			expires: now + 60_000,
@@ -106,10 +106,10 @@ describe("AuthBrokerRefresher", () => {
 
 		storage = new AuthStorage(store!);
 		const disableEvents: string[] = [];
-		storage.onCredentialDisabled(event => {
+		storage.credentials.onDisabled(event => {
 			disableEvents.push(event.disabledCause);
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 		const refresher = new AuthBrokerRefresher({
 			storage,
 			refreshSkewMs: 5 * 60_000,
@@ -120,12 +120,12 @@ describe("AuthBrokerRefresher", () => {
 		expect(disableEvents).toHaveLength(1);
 		expect(disableEvents[0]).toMatch(/invalid_grant/);
 		// The active row is now disabled; storage.exportSnapshot reflects it.
-		expect(storage.exportSnapshot().credentials).toHaveLength(0);
+		expect(storage.credentials.snapshot().credentials).toHaveLength(0);
 	});
 
 	test("keeps credentials on transient failures (timeout/network)", async () => {
 		const now = 1_700_000_000_000;
-		store!.saveOAuth("anthropic", {
+		await store!.saveOAuth("anthropic", {
 			access: "old",
 			refresh: "old-refresh",
 			expires: now + 60_000,
@@ -135,10 +135,10 @@ describe("AuthBrokerRefresher", () => {
 
 		storage = new AuthStorage(store!);
 		const disableEvents: string[] = [];
-		storage.onCredentialDisabled(event => {
+		storage.credentials.onDisabled(event => {
 			disableEvents.push(event.disabledCause);
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 		const refresher = new AuthBrokerRefresher({
 			storage,
 			refreshSkewMs: 5 * 60_000,
@@ -147,12 +147,12 @@ describe("AuthBrokerRefresher", () => {
 		await refresher.tick();
 
 		expect(disableEvents).toHaveLength(0);
-		expect(storage.exportSnapshot().credentials).toHaveLength(1);
+		expect(storage.credentials.snapshot().credentials).toHaveLength(1);
 	});
 
 	test("does not disable a credential a peer rotated during the refresh (CAS)", async () => {
 		const now = 1_700_000_000_000;
-		store!.saveOAuth("anthropic", {
+		await store!.saveOAuth("anthropic", {
 			access: "stale",
 			refresh: "stale-refresh",
 			expires: now + 60_000,
@@ -160,10 +160,10 @@ describe("AuthBrokerRefresher", () => {
 		});
 		storage = new AuthStorage(store!);
 		const disableEvents: string[] = [];
-		storage.onCredentialDisabled(event => {
+		storage.credentials.onDisabled(event => {
 			disableEvents.push(event.disabledCause);
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 		const id = store!.listAuthCredentials("anthropic")[0]!.id;
 
 		// Our refresh fails with a dead-grant error, but a peer (another process /
@@ -195,5 +195,39 @@ describe("AuthBrokerRefresher", () => {
 		if (rows[0]?.credential.type === "oauth") {
 			expect(rows[0].credential.refresh).toBe("fresh-refresh-from-peer");
 		}
+	});
+
+	test("a sweep whose credential reload fails resolves and the next sweep retries", async () => {
+		const now = 1_700_000_000_000;
+		await store!.saveOAuth("anthropic", {
+			access: "old",
+			refresh: "old-refresh",
+			expires: now + 60_000,
+			accountId: "a",
+		});
+		const refreshSpy = vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+			access: "fresh",
+			refresh: "fresh-refresh",
+			expires: now + 2 * 60 * 60_000,
+			accountId: "a",
+		});
+		storage = new AuthStorage(store!);
+		await storage.credentials.reload();
+		// The sweep runs unawaited from a timer; a rejection here is process-fatal.
+		vi.spyOn(store!, "listAuthCredentials").mockImplementationOnce(() => {
+			throw new Error("database disk image is malformed");
+		});
+		const refresher = new AuthBrokerRefresher({
+			storage,
+			refreshSkewMs: 5 * 60_000,
+			now: () => now,
+		});
+
+		await expect(refresher.tick()).resolves.toBeUndefined();
+		expect(refreshSpy).not.toHaveBeenCalled();
+
+		await refresher.tick();
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(store!.getOAuth("anthropic")?.access).toBe("fresh");
 	});
 });

@@ -8,10 +8,11 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { getSessionAccentAnsi } from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import { getSessionAccentAnsi } from "@oh-my-pi/pi-tui/theme/session-color";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -64,7 +65,7 @@ function fakeSession(): AgentSession {
 
 /** Brand-only bottom bar through the real segment pipeline. */
 function makeComponent(): StatusLineComponent {
-	const component = new StatusLineComponent(fakeSession());
+	const component = new StatusLineComponent(fakeSession(), statusLineHost);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: ["pi"],
@@ -85,14 +86,14 @@ describe("status line brand fade", () => {
 		const component = makeComponent();
 		try {
 			// Idle: omp icon settled in the dim color.
-			expect(component.renderBottomBar(80, "full")).toContain(`${dimAnsi}${theme.icon.omp} `);
+			expect(component.renderBottomBar(80, "full")).toContain(`${dimAnsi}${theme.icon.omp}`);
 
 			// Turn start: the glyph becomes a spinner + whole-second timer at
 			// once, but the color starts from the on-screen dim — no instant swap.
 			component.markActivityStart();
 			now += 10;
 			const early = component.renderBottomBar(80, "full");
-			expect(early).toContain(" 0s ");
+			expect(early).toContain(" 0s");
 			expect(early).not.toContain(theme.icon.omp);
 			expect(early).toContain(dimAnsi);
 			expect(early).not.toContain(accentAnsi);
@@ -139,7 +140,7 @@ describe("status line brand fade", () => {
 			expect(mid).not.toContain(accentAnsi);
 
 			now += 300;
-			expect(component.renderBottomBar(80, "full")).toContain(`${dimAnsi}${theme.icon.omp} `);
+			expect(component.renderBottomBar(80, "full")).toContain(`${dimAnsi}${theme.icon.omp}`);
 		} finally {
 			component.dispose();
 		}

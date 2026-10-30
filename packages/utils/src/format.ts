@@ -10,7 +10,11 @@ const DAY = 24 * HOUR;
 export function formatDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "0ms";
 	if (ms < SEC) return `${Math.floor(ms)}ms`;
-	if (ms < MIN) return `${(ms / SEC).toFixed(1)}s`;
+	if (ms < MIN) {
+		// Round to tenths first: `toFixed(1)` alone turns 59.95s+ into an impossible `60.0s`.
+		const tenths = Math.round(ms / 100);
+		return tenths < 600 ? `${(tenths / 10).toFixed(1)}s` : "1m";
+	}
 	if (ms < HOUR) {
 		const mins = Math.floor(ms / MIN);
 		const secs = Math.floor((ms % MIN) / SEC);
@@ -29,10 +33,14 @@ export function formatDuration(ms: number): string {
 /**
  * Format a number with K/M/B suffix for compact display.
  * Uses 1 decimal for small leading digits when non-zero, rounded otherwise.
+ * Values below 1,000 print as-is unless `maxFractionDigits` caps their decimals.
  * Examples: "999", "1K", "1.5K", "25K", "1M", "1.5M", "25M", "1.5B"
  */
-export function formatNumber(n: number): string {
-	if (n < 1_000) return n.toString();
+export function formatNumber(n: number, maxFractionDigits?: number): string {
+	if (n < 1_000) {
+		if (maxFractionDigits === undefined || Number.isInteger(n)) return n.toString();
+		return Number(n.toFixed(maxFractionDigits)).toString();
+	}
 	if (n < 10_000) return `${trim1(n / 1_000)}K`;
 	if (n < 1_000_000) return `${Math.round(n / 1_000)}K`;
 	if (n < 10_000_000) return `${trim1(n / 1_000_000)}M`;
@@ -56,6 +64,22 @@ export function formatBytes(bytes: number): string {
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
 	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
+/**
+ * Count `\n` code units via native `indexOf` — no split array, roughly an
+ * order of magnitude cheaper than a per-code-unit loop on multi-MiB text.
+ * Line-count semantics are the caller's (empty text is 0 or 1 lines
+ * depending on the contract).
+ */
+export function countNewlines(text: string): number {
+	let count = 0;
+	let pos = text.indexOf("\n");
+	while (pos !== -1) {
+		count++;
+		pos = text.indexOf("\n", pos + 1);
+	}
+	return count;
 }
 
 /**
@@ -110,4 +134,9 @@ export function pluralize(label: string, count: number): string {
  */
 export function formatPercent(ratio: number): string {
 	return `${(ratio * 100).toFixed(1)}%`;
+}
+
+/** Round premium-request counters without losing legitimate fractional requests. */
+export function normalizePremiumRequests(value: number): number {
+	return Math.round((value + Number.EPSILON) * 100) / 100;
 }

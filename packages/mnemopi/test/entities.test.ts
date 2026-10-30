@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	ENTITY_EXTRACTION_STOP_WORDS,
 	extractEntitiesRegex,
 	findSimilarEntities,
 	levenshteinDistance,
@@ -58,11 +57,5 @@ describe("entity utilities", () => {
 		const result = findSimilarEntities("Abdias", ["Maya", "Abdias Moya", "Abdias J.", "Zebra"], 0.7);
 		expect(result.map(([name]) => name)).toEqual(["Abdias J.", "Abdias Moya"]);
 		expect(findSimilarEntities("Zebra", ["Abdias", "Maya"], 0.8)).toEqual([]);
-	});
-
-	it("exports the stop-word set used by extraction", () => {
-		expect(ENTITY_EXTRACTION_STOP_WORDS.has("the")).toBe(true);
-		expect(ENTITY_EXTRACTION_STOP_WORDS.has("and")).toBe(true);
-		expect(ENTITY_EXTRACTION_STOP_WORDS.has("for")).toBe(true);
 	});
 });

@@ -9,7 +9,7 @@ import {
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 
 const FIXTURE_SOURCE = "provider-registry-test";
 const ENV_KEYS = [
@@ -82,6 +82,8 @@ describe("provider registry auth surface", () => {
 				"google-gemini-cli",
 				"openai-codex",
 				"openrouter",
+				"snowflake",
+				"stencil",
 				"zai-coding-plan",
 			].sort(),
 		);
@@ -117,7 +119,7 @@ describe("provider registry auth surface", () => {
 	test("login dispatcher handles runtime-registered extension providers", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		registerOAuthProvider({
 			id: "fixture-x",
 			name: "Fixture X",
@@ -125,7 +127,7 @@ describe("provider registry auth surface", () => {
 			login: async () => "fixture-key",
 		});
 
-		await storage.login("fixture-x", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("fixture-x", { onAuth: () => {}, onPrompt: async () => "" });
 
 		expect(store.getApiKey("fixture-x")).toBe("fixture-key");
 	});
@@ -133,9 +135,9 @@ describe("provider registry auth surface", () => {
 	test("llama.cpp login stores a local no-auth token when no key is entered", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
-		await storage.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
 
 		expect(store.getApiKey("llama.cpp")).toBe("llama-cpp-local");
 	});

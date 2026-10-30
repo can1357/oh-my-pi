@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -155,19 +156,15 @@ describe("readImageFromClipboard dispatch", () => {
 		expect(nativeSpy).not.toHaveBeenCalled();
 	});
 
-	it("uses the PowerShell bridge on native Windows when arboard has no image payload", async () => {
+	it("trusts the native no-image answer on Windows without spawning PowerShell", async () => {
+		// Regression: a text-only clipboard used to wait ~1s on a cold
+		// powershell.exe GetImage() before Ctrl+V could paste the text.
 		setPlatform("win32");
-		const calls: SpawnCall[] = [];
-		spySpawn(calls, RED_1X1_PNG_BASE64);
+		const spawnSpy = vi.spyOn(Bun, "spawn");
 		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
 
-		const image = await readImageFromClipboard();
-
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
-		expect(image?.mimeType).toBe("image/png");
-		expect(Array.from(image!.data.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-		expect(calls[0]?.cmd).toContain("-Sta");
+		expect(await readImageFromClipboard()).toBeNull();
+		expect(spawnSpy).not.toHaveBeenCalled();
 	});
 
 	it("falls back to PowerShell when native Windows image conversion fails", async () => {
@@ -378,5 +375,44 @@ describe("readTextFromClipboard", () => {
 		// fires the expired interval at least once — even under heavy parallel
 		// test load, where wall-clock tick counts are unreliable.
 		expect(ticks).toBeGreaterThanOrEqual(1);
+	});
+
+	it("reads Windows text natively with LF newlines and no PowerShell spawn", async () => {
+		setPlatform("win32");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		vi.spyOn(native, "readTextFromClipboard").mockResolvedValue("line one\r\nline two");
+
+		expect(await readTextFromClipboard()).toBe("line one\nline two");
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns an empty string when the Windows clipboard holds no text", async () => {
+		setPlatform("win32");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		vi.spyOn(native, "readTextFromClipboard").mockResolvedValue(null);
+
+		expect(await readTextFromClipboard()).toBe("");
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("falls back to PowerShell when the native Windows text read fails", async () => {
+		setPlatform("win32");
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "from powershell\r\n");
+		vi.spyOn(native, "readTextFromClipboard").mockRejectedValue(new Error("Failed to access clipboard"));
+
+		expect(await readTextFromClipboard()).toBe("from powershell\n");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+	});
+});
+
+describe("isClipboardTerminalLocal", () => {
+	it("never trusts the system clipboard over SSH, even with a forwarded-looking display", () => {
+		const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
+		// A tmux session can keep a stale forward whose port a later SSH session now owns.
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ DISPLAY: ":0" })).toBe(true);
 	});
 });

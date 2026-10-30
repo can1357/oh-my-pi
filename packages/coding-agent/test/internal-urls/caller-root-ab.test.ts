@@ -5,8 +5,8 @@
  * (transcript + `.md` output). The process-global registry's single `Main`
  * ref belongs to B, and B's roster scan ran first, so every global-first
  * lookup points at B. When a session rooted in A resolves `history://Worker`
- * or `agent://Worker` through the tool paths — grep, find, and bash URL
- * expansion — the caller's own root must win:
+ * or `agent://Worker` through the tool paths — grep, find, and the bash shell
+ * filesystem — the caller's own root must win:
  *
  * - `history://Worker` serves A's transcript (roster refresh per caller root),
  * - `agent://Worker` scans A's canonical artifact directory first,
@@ -22,13 +22,13 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { ensurePersistedRoster } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { expandInternalUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
-import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { ShellFsOp } from "@oh-my-pi/pi-natives";
 
 function sessionHeader(id: string): string {
 	return JSON.stringify({
@@ -197,40 +197,22 @@ describe("internal URL tools resolve against the caller root (A/B same ids)", ()
 		expect(getResultText(result)).not.toContain("B OUTPUT");
 	});
 
-	it("find history://Worker resolves the caller root's transcript file when the global Main is the other root", async () => {
+	it("bash opens the caller root's agent:// output when the global Main is the other root", async () => {
 		const registry = AgentRegistry.global();
 		await installGlobalMainB(registry, rootB);
+		const open = { read: true, write: false, append: false, truncate: false, create: false, createNew: false };
+		const openWorker = (context: { cwd: string; sessionFile?: string }) =>
+			new InternalUrlFilesystem({ context, tier: "exec" }).handle({
+				op: ShellFsOp.Open,
+				path: "agent://Worker",
+				open,
+			});
 
-		const tool = new GlobTool(makeSession(dir, rootA));
-		const result = await tool.execute("find-history-a", { path: "history://Worker" });
-		const text = getResultText(result);
-		expect(text).toContain("# a/main/");
-		expect(text).toContain("Worker.jsonl");
-		expect(text).not.toContain("# b/main/");
-	});
-
-	it("bash agent:// expansion resolves the caller root's output path when the global Main is the other root", async () => {
-		const registry = AgentRegistry.global();
-		await installGlobalMainB(registry, rootB);
-
-		const expanded = await expandInternalUrls("cat agent://Worker", {
-			skills: [],
-			internalRouter: InternalUrlRouter.instance(),
-			cwd: dir,
-			sessionFile: rootA,
-		});
-		expect(expanded).toContain(artifactA);
-		expect(expanded).not.toContain(artifactB);
+		expect((await openWorker({ cwd: dir, sessionFile: rootA })).local).toBe(artifactA);
 
 		// No caller session file: keep the pre-existing global behavior (B's
 		// Main-owned dir wins) instead of guessing a caller root.
-		const noSession = await expandInternalUrls("cat agent://Worker", {
-			skills: [],
-			internalRouter: InternalUrlRouter.instance(),
-			cwd: dir,
-		});
-		expect(noSession).toContain(artifactB);
-		expect(noSession).not.toContain(artifactA);
+		expect((await openWorker({ cwd: dir })).local).toBe(artifactB);
 	});
 
 	it("switching the caller root switches which root's history and agent output win", async () => {

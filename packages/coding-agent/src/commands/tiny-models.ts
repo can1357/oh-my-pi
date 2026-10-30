@@ -13,7 +13,7 @@ export default class TinyModels extends Command {
 			options: ACTIONS,
 		}),
 		model: Args.string({
-			description: "Model key, or all",
+			description: "Model key (`smollm` = word completion), or all",
 			required: false,
 		}),
 	};

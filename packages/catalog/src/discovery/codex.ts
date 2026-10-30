@@ -69,7 +69,8 @@ const codexModelEntrySchema = type({
 	"priority?": "unknown",
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
-	"tool_mode?": "unknown",
+	"available_access_programs?": "unknown",
+	"service_tiers?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -112,12 +113,11 @@ export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
 	/**
-	 * Set when the backend rejected the credential itself (401/403, e.g.
-	 * `token_revoked`); `models` is empty. A definitive per-account denial,
-	 * unlike the `null` result for transport/parse failures, so multi-account
-	 * discovery can skip the account instead of aborting.
+	 * A definitive per-account denial (401/403 auth, 402 payment). `models` is
+	 * empty; unlike transport/parse failures, sibling accounts can still supply
+	 * an authoritative catalog.
 	 */
-	rejectedStatus?: 401 | 403;
+	rejectedStatus?: 401 | 402 | 403;
 }
 
 /**
@@ -147,7 +147,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
-		if (response.status === 401 || response.status === 403) {
+		if (response.status === 401 || response.status === 402 || response.status === 403) {
 			return { models: [], rejectedStatus: response.status };
 		}
 		if (!response.ok) {
@@ -161,7 +161,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
-		const models = normalizeCodexModels(payload, baseUrl);
+		const models = normalizeCodexModels(payload, baseUrl, options.accountId);
 		if (models === null) {
 			continue;
 		}
@@ -223,7 +223,11 @@ function normalizeClientVersion(value: unknown): string | undefined {
 	return trimmed;
 }
 
-function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"openai-codex-responses">[] | null {
+function normalizeCodexModels(
+	payload: unknown,
+	baseUrl: string,
+	accountId: string | undefined,
+): ModelSpec<"openai-codex-responses">[] | null {
 	const parsedResponse = codexModelsResponseSchema(payload);
 	if (parsedResponse instanceof type.errors) {
 		return null;
@@ -250,10 +254,10 @@ function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"ope
 	const normalized: NormalizedCodexModel[] = [];
 	for (const parsed of parsedEntries) {
 		const canonicalSlug = plainCounterpartForWorkerSlug(parsed.slug, bundledCodexModelIds) ?? parsed.slug;
-		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl));
+		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId));
 		const plainSlug = canonicalSlug !== parsed.slug ? canonicalSlug : null;
 		if (plainSlug && !advertisedSlugs.has(plainSlug)) {
-			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl));
+			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId));
 		}
 	}
 
@@ -288,6 +292,7 @@ function plainCounterpartForWorkerSlug(slug: string, bundledCodexModelIds: Reado
 
 interface ParsedCodexModelEntry {
 	slug: string;
+	cyberPrograms: string[] | undefined;
 	name: string;
 	contextWindow: number | null;
 	maxContextWindow: number | null;
@@ -295,8 +300,9 @@ interface ParsedCodexModelEntry {
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
-	toolMode: boolean;
 	priority: number;
+	/** Advertised tier ids; `undefined` when the entry has no `service_tiers` array. */
+	serviceTiers: string[] | undefined;
 }
 
 function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
@@ -316,8 +322,30 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		return null;
 	}
 
+	const programs = payload.available_access_programs;
+	let cyberPrograms: string[] | undefined;
+	if (programs !== null && typeof programs === "object" && "cyber" in programs && Array.isArray(programs.cyber)) {
+		cyberPrograms = [];
+		for (const program of programs.cyber) {
+			const name = toNonEmptyString(program);
+			if (name) cyberPrograms.push(name);
+		}
+	}
+
+	// codex-rs `ModelServiceTier { id, name, description }`; only the id reaches the wire.
+	// An explicit empty array is kept: it means the model offers no optional tier.
+	let serviceTiers: string[] | undefined;
+	if (Array.isArray(payload.service_tiers)) {
+		serviceTiers = [];
+		for (const tier of payload.service_tiers) {
+			const id = tier !== null && typeof tier === "object" && "id" in tier ? toNonEmptyString(tier.id) : null;
+			if (id && !serviceTiers.includes(id)) serviceTiers.push(id);
+		}
+	}
+
 	return {
 		slug,
+		cyberPrograms,
 		name: toNonEmptyString(payload.display_name) ?? slug,
 		contextWindow: toPositiveInt(payload.context_window),
 		maxContextWindow: toPositiveInt(payload.max_context_window),
@@ -325,8 +353,8 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
-		toolMode: payload.tool_mode === "code_mode_only",
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
+		serviceTiers,
 	};
 }
 
@@ -342,6 +370,7 @@ function buildNormalizedCodexModel(
 	slug: string,
 	canonicalSlug: string,
 	baseUrl: string,
+	accountId: string | undefined,
 ): NormalizedCodexModel {
 	// Codex discovery historically omitted `context_window` for GPT-5.6-family
 	// SKUs (#5705); luna/sol/terra additionally floor the reported value because
@@ -371,6 +400,13 @@ function buildNormalizedCodexModel(
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl,
+			...(accountId && accountId.trim().length > 0
+				? {
+						accountAccess: {
+							[accountId]: parsed.cyberPrograms === undefined ? {} : { cyberPrograms: parsed.cyberPrograms },
+						},
+					}
+				: {}),
 			reasoning: parsed.reasoning,
 			input: parsed.input,
 			// Codex discovery omits pricing; documented subscription credit-equivalent
@@ -382,7 +418,7 @@ function buildNormalizedCodexModel(
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
-			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
+			...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},
 	};

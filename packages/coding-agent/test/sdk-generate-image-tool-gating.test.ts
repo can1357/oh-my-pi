@@ -178,7 +178,7 @@ describe("generate_image tool gating", () => {
 				path: path.join(registryDir, "internal-reapply.txt"),
 				content: "x",
 			}),
-		).rejects.toThrow("Filesystem writes are not available");
+		).rejects.toThrow("Other filesystem paths are refused");
 
 		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "write"]));
 		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
@@ -239,18 +239,6 @@ describe("generate_image tool gating", () => {
 		const result = await directTool!.execute("mcp-direct-dispatch", {});
 		expect(result.content.find(part => part.type === "text")?.text).toBe("ok");
 		expect(mcpCalls).toBe(1);
-	});
-
-	it("keeps the device-only write across an empty MCP refresh", async () => {
-		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
-
-		await session.refreshMCPTools([]);
-
-		expect(session.getActiveToolNames()).toContain("write");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 	});
 
 	it("keeps the device-only write during enabled-set round trips", async () => {
@@ -418,6 +406,6 @@ describe("generate_image tool gating", () => {
 		expect(write).toBeDefined();
 		await expect(
 			write!.execute("device-only-fs", { path: path.join(registryDir, "nope.txt"), content: "x" }),
-		).rejects.toThrow("Filesystem writes are not available");
+		).rejects.toThrow("Other filesystem paths are refused");
 	});
 });

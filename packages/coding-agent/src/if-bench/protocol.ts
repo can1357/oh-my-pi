@@ -8,6 +8,7 @@
  * so a model cannot succeed by only attending to the prompt's edges.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
+import type { IfBenchFailure } from "@oh-my-pi/pi-tui/apps/if-bench-board";
 import type { Action } from "./actions";
 import { encodeAction } from "./actions";
 import catDirectiveTemplate from "./prompts/cat-directive.md" with { type: "text" };
@@ -18,16 +19,6 @@ import turnTemplate from "./prompts/turn.md" with { type: "text" };
 export const CAT_PLACEMENTS = ["beginning", "middle", "end"] as const;
 
 export type CatPlacement = (typeof CAT_PLACEMENTS)[number];
-
-/**
- * Why a turn was scored as a failure:
- * - `result`: array wrong, cat sound present.
- * - `cat`: array right, cat sound missing.
- * - `result+cat`: both wrong.
- * - `format`: no `<...>` block at all, so the array could not even be read.
- * - `provider`: the request itself failed (error, refusal, empty stream).
- */
-export type IfBenchFailure = "result" | "cat" | "result+cat" | "format" | "provider";
 
 /** Longest accepted cat sound, i.e. the `N` in `nya{1,N}`. */
 export const DEFAULT_NYA_MAX = 8;

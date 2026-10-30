@@ -1,6 +1,10 @@
 // Provider-wire compat for "wafer-serverless"; regenerated from the frozen census using deployment contract selectors.
 
 provider "wafer-serverless" {
+	default-model "GLM-5.1"
+	env "WAFER_SERVERLESS_API_KEY"
+	discovery label="Wafer Serverless" oauth-provider="wafer-serverless"
+
 	thinking-mode "effort"
 	class "glm" {
 		reasoning-content-field "reasoning_content"

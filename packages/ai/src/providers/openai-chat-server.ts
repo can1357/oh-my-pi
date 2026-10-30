@@ -30,6 +30,7 @@ import {
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
 import { decodeDataUri } from "./openai-data-uri";
+import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -90,6 +91,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
 	// vendor-neutral headers when the body doesn't carry one.
 	rejectUnsupportedExplicitPromptCacheFields(body);
+	const request =
+		typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+	coerceNullMessageContentInPlace(request?.messages, message => message.role !== "function");
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
@@ -196,7 +200,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.user !== undefined) options.user = data.user;
 	if (data.response_format !== undefined) options.responseFormat = data.response_format;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
-	if (data.reasoning_effort !== undefined && isReasoningEffort(data.reasoning_effort)) {
+	if (data.reasoning_effort === "none") {
+		options.forceReasoningOff = true;
+	} else if (data.reasoning_effort !== undefined && isReasoningEffort(data.reasoning_effort)) {
 		options.reasoning = data.reasoning_effort;
 	}
 	if (data.service_tier !== undefined && isServiceTier(data.service_tier)) {
@@ -525,6 +531,13 @@ function makeId(): string {
 // encodeStream (SSE)
 // ---------------------------------------------------------------------------
 
+// Keepalive cadence for the SSE encoder. Some upstreams go silent for minutes
+// mid-stream (e.g. xAI emits a large tool call's arguments only when complete);
+// without bytes on the wire the listener's idle timeout and client watchdogs
+// drop a healthy stream. SSE comment lines are ignored by spec-compliant clients.
+const STREAM_KEEPALIVE_INTERVAL_MS = 15_000;
+const SSE_KEEPALIVE = ": keepalive\n\n";
+
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
@@ -540,6 +553,13 @@ export function encodeStream(
 		cancelled = true;
 	};
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
+	let keepaliveTimer: NodeJS.Timeout | undefined;
+	const stopKeepalive = () => {
+		if (keepaliveTimer !== undefined) {
+			clearInterval(keepaliveTimer);
+			keepaliveTimer = undefined;
+		}
+	};
 
 	const baseChunk = (delta: Record<string, unknown>, finishReason: string | null) => ({
 		id,
@@ -577,6 +597,19 @@ export function encodeStream(
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
+
+			keepaliveTimer = setInterval(() => {
+				try {
+					if (cancelled) {
+						stopKeepalive();
+						return;
+					}
+					controller.enqueue(encoder.encode(SSE_KEEPALIVE));
+				} catch {
+					// Controller already closed/errored (client gone); stop the timer.
+					stopKeepalive();
+				}
+			}, STREAM_KEEPALIVE_INTERVAL_MS);
 
 			try {
 				if (cancelled) {
@@ -727,11 +760,13 @@ export function encodeStream(
 					controller.close();
 				}
 			} finally {
+				stopKeepalive();
 				control?.signal?.removeEventListener("abort", markCancelled);
 			}
 		},
 		cancel(reason) {
 			cancelled = true;
+			stopKeepalive();
 			control?.signal?.removeEventListener("abort", markCancelled);
 			control?.onCancel?.(reason);
 		},

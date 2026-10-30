@@ -1,15 +1,17 @@
-import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
+import {
+	type Agent,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTurnEndContext,
+	createToolScopedAbortReason,
+} from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, Model } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
-import type { SecretObfuscator } from "../secrets/obfuscator";
-import { assertEditableFile } from "../tools/auto-generated-guard";
-import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { ToolError } from "../tools/tool-errors";
+import streamingEditRecoveryTemplate from "../prompts/system/streaming-edit-recovery.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {
@@ -18,30 +20,58 @@ import {
 	toolCallLoopRedirectDetails,
 } from "./tool-call-loop-redirect";
 
+import { cfgEditStreamingAbort } from "../edit/settings";
+import {
+	cfgModelLoopGuardEnabled,
+	cfgModelLoopGuardToolCallReminder,
+	cfgModelToolCallLoopGuardEnabled,
+	cfgModelToolCallLoopGuardExemptTools,
+	cfgModelToolCallLoopGuardThreshold,
+} from "./settings";
+
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
+/** Abort reason (and aborted-message `errorMessage`) for a failed streamed edit preview. */
+const STREAMING_EDIT_ABORT_REASON = "Streaming edit preview failed";
+const STREAMING_EDIT_RECOVERY_TYPE = "streaming-edit-recovery";
+/**
+ * Recovery continuations allowed per user prompt. Each failed preview spends
+ * one; when the budget is spent the guard stops and warns instead of looping
+ * on a patch the model keeps re-emitting.
+ */
+const STREAMING_EDIT_RECOVERY_LIMIT = 2;
+/** Notice `source` label for streaming-edit guard messages. */
+const STREAMING_EDIT_NOTICE_SOURCE = "streaming-edit";
+// Prefix of the native no-op diagnostic emitted by the Rust edit engine when a
+// preview produces byte-identical content. Kept in sync with
+// crates/pi-edit/src/modes/replace.rs and crates/pi-edit/src/hashline/preview.rs
+// ("No changes would be made to <path>..."). Prefix match (not equality)
+// because the Rust messages append the path and mode-specific suffixes.
+const NO_CHANGES_PREVIEW_PREFIX = "No changes would be made";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
 	agent: Agent;
 	settings: Settings;
 	sessionManager: SessionManager;
-	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	isDisposed(): boolean;
 	promptGeneration(): number;
-	localProtocolOptions(): LocalProtocolOptions;
+	/** Monotonic per-prompt counter; changes on each user/agent prompt start. */
+	promptSequence(): number;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
 	discardAssistantTurn(message: AssistantMessage): void;
 }
 
-/** Guards streamed edit calls against generated files and invalid final previews. */
+/** Guards streamed edit calls against invalid final previews. */
 export class StreamingEditGuard {
 	readonly #host: StreamGuardsHost;
 	#abortTriggered = false;
-	#precheckedToolCallIds = new Set<string>();
-	#lastToolCallId: string | undefined;
+	/** Prompt sequence the recovery budget below belongs to. */
+	#recoverySequence = -1;
+	/** Recovery continuations already spent for {@link #recoverySequence}. */
+	#recoveryCount = 0;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
@@ -55,34 +85,12 @@ export class StreamingEditGuard {
 	/** Clears all turn-scoped streaming edit state. */
 	reset(): void {
 		this.#abortTriggered = false;
-		this.#precheckedToolCallIds.clear();
-		this.#lastToolCallId = undefined;
-	}
-
-	/** Validates a streamed edit target as its arguments arrive. */
-	preCache(event: AgentEvent): void {
-		if (this.#abortTriggered || event.type !== "message_update") return;
-		const assistantEvent = event.assistantMessageEvent;
-		if (
-			assistantEvent.type !== "toolcall_start" &&
-			assistantEvent.type !== "toolcall_delta" &&
-			assistantEvent.type !== "toolcall_end"
-		) {
-			return;
-		}
-		const streamingEdit = this.#getToolCall(event);
-		if (!streamingEdit) return;
-		const shouldCheckAutoGenerated =
-			!streamingEdit.toolCall.id || !this.#precheckedToolCallIds.has(streamingEdit.toolCall.id);
-		if (!shouldCheckAutoGenerated) return;
-		if (streamingEdit.toolCall.id) this.#precheckedToolCallIds.add(streamingEdit.toolCall.id);
-		this.#abortForAutoGeneratedPath(streamingEdit.toolCall, streamingEdit.path, streamingEdit.resolvedPath);
 	}
 
 	/** Aborts an edit when the native engine's final preview reports an error. */
 	maybeAbort(event: AgentEvent): void {
 		if (
-			!this.#host.settings.get("edit.streamingAbort") ||
+			!cfgEditStreamingAbort.get(this.#host.settings) ||
 			this.#abortTriggered ||
 			event.type !== "tool_stream_update" ||
 			event.toolName !== "edit"
@@ -109,56 +117,82 @@ export class StreamingEditGuard {
 				typeof file.path === "string" &&
 				"error" in file &&
 				typeof file.error === "string" &&
-				file.error.length > 0,
+				file.error.length > 0 &&
+				!file.error.startsWith(NO_CHANGES_PREVIEW_PREFIX),
 		);
-		if (failed) this.#abortPatch(event.toolCallId, failed.path, failed.error);
+		if (failed) this.#abortPatch({ toolCallId: event.toolCallId, filePath: failed.path, error: failed.error });
 	}
 
-	#getToolCall(event: AgentEvent): { toolCall: ToolCall; path: string; resolvedPath: string } | undefined {
-		if (event.type !== "message_update" || event.message.role !== "assistant") return undefined;
-		const contentIndex = event.assistantMessageEvent.contentIndex ?? 0;
-		const messageContent = event.message.content;
-		if (!Array.isArray(messageContent) || contentIndex < 0 || contentIndex >= messageContent.length) return undefined;
-		const toolCall = messageContent[contentIndex] as ToolCall;
-		if (toolCall.name !== "edit") return undefined;
-		const args = toolCall.arguments;
-		if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
-		const filePath = typeof args.path === "string" ? args.path : undefined;
-		if (!filePath) return undefined;
-		const resolvedPath = this.#resolveSessionFsPath(filePath);
-		if (resolvedPath === undefined) return undefined;
-		return { toolCall, path: filePath, resolvedPath };
-	}
-
-	#abortForAutoGeneratedPath(toolCall: ToolCall, filePath: string, resolvedPath: string): void {
-		if (this.#lastToolCallId === toolCall.id) return;
-		this.#lastToolCallId = toolCall.id;
-		void assertEditableFile(resolvedPath, filePath, this.#host.settings).catch(error => {
-			if (!(error instanceof ToolError) || this.#lastToolCallId !== toolCall.id) return;
-			if (!this.#abortTriggered) {
-				this.#abortTriggered = true;
-				logger.warn("Streaming edit aborted due to auto-generated file guard", {
-					toolCallId: toolCall.id,
-					path: filePath,
-				});
-				this.#host.agent.abort();
-			}
-		});
-	}
-
-	#resolveSessionFsPath(filePath: string): string | undefined {
-		const normalized = normalizeLocalScheme(filePath);
-		if (normalized.startsWith("local:")) {
-			return resolveLocalUrlToPath(normalized, this.#host.localProtocolOptions());
-		}
-		if (isInternalUrlPath(normalized)) return undefined;
-		return resolveToCwd(normalized, this.#host.sessionManager.getCwd());
-	}
-
-	#abortPatch(toolCallId: string, filePath: string, error: string): void {
+	#abortPatch(opts: { toolCallId: string; filePath: string; error: string }): void {
+		const { toolCallId, filePath, error } = opts;
 		this.#abortTriggered = true;
 		logger.warn("Streaming edit aborted due to patch preview failure", { toolCallId, path: filePath, error });
-		this.#host.agent.abort();
+		const diagnostic = `${STREAMING_EDIT_ABORT_REASON} for ${filePath}: ${error}`;
+		this.#host.agent.abort(
+			createToolScopedAbortReason(
+				STREAMING_EDIT_ABORT_REASON,
+				{ [toolCallId]: diagnostic },
+				STREAMING_EDIT_ABORT_REASON,
+			),
+		);
+		this.#scheduleRecovery({ diagnostic });
+	}
+
+	/**
+	 * Re-drives the run after a failed streamed edit preview so the model can
+	 * correct the patch instead of losing the turn. One recovery message (with
+	 * the preview diagnostic) is appended per failure; the budget is shared per
+	 * user prompt and a spent budget stops with a warning instead of looping.
+	 */
+	#scheduleRecovery(opts: { diagnostic: string }): void {
+		const sequence = this.#host.promptSequence();
+		if (this.#recoverySequence !== sequence) {
+			this.#recoverySequence = sequence;
+			this.#recoveryCount = 0;
+		}
+		this.#recoveryCount++;
+		if (this.#recoveryCount > STREAMING_EDIT_RECOVERY_LIMIT) {
+			logger.warn("Streaming edit recovery budget exhausted", {
+				sequence,
+				recoveries: this.#recoveryCount - 1,
+			});
+			this.#host.emitNotice(
+				"warning",
+				`Streaming edit preview failed ${this.#recoveryCount} times; stopped auto-recovery for this prompt.`,
+				STREAMING_EDIT_NOTICE_SOURCE,
+			);
+			return;
+		}
+		const diagnostic = opts.diagnostic;
+		const attempt = this.#recoveryCount;
+		const generation = this.#host.promptGeneration();
+		this.#host.schedulePostPromptTask(async signal => {
+			if (signal.aborted || this.#host.isDisposed()) return;
+			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
+			await this.#host.agent.waitForIdle();
+			if (signal.aborted || this.#host.isDisposed()) return;
+			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
+			const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
+			this.#host.agent.appendMessage({
+				role: "custom",
+				customType: STREAMING_EDIT_RECOVERY_TYPE,
+				content,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+			this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
+			this.#host.emitNotice(
+				"info",
+				`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
+				STREAMING_EDIT_NOTICE_SOURCE,
+			);
+			try {
+				await this.#host.agent.continue();
+			} catch (error) {
+				logger.warn("streaming edit recovery continue failed", { error: String(error) });
+			}
+		});
 	}
 }
 
@@ -179,6 +213,7 @@ export class LoopGuards {
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
+			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 		});
 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
 	}
@@ -199,14 +234,14 @@ export class LoopGuards {
 	}
 
 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
+		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
 			return undefined;
 		}
-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
-		const exemptTools = this.#host.settings
-			.get("model.toolCallLoopGuard.exemptTools")
+		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const exemptTools = cfgModelToolCallLoopGuardExemptTools
+			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
@@ -243,9 +278,8 @@ export class LoopGuards {
 	#geminiHeaderGuardActive(): boolean {
 		const model = this.#host.model();
 		return (
-			process.env.PI_NO_THINKING_LOOP_GUARD !== "1" &&
-			this.#host.settings.get("model.loopGuard.enabled") === true &&
-			this.#host.settings.get("model.loopGuard.toolCallReminder") === true &&
+			cfgModelLoopGuardEnabled.get(this.#host.settings) === true &&
+			cfgModelLoopGuardToolCallReminder.get(this.#host.settings) === true &&
 			model !== undefined &&
 			model.identity.class === "gemini"
 		);

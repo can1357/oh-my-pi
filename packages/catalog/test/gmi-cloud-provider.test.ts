@@ -1,24 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
-import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import {
-	GMI_CLOUD_STATIC_MODELS,
-	gmiCloudModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { gmiCloudModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+
+const GMI_CLOUD_SEED_MODELS = seedModels<"openai-completions">("gmi-cloud");
 
 describe("GMI Cloud provider", () => {
 	test("static seed covers the descriptor's default model", () => {
 		// Regression for the empty-slice bug: without this seed a regen run
 		// without a GMI_API_KEY bundles no gmi-cloud models, and the declared
 		// defaultModel is unresolvable at boot before async discovery fires.
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "gmi-cloud");
+		const descriptor = providerEntry("gmi-cloud");
 		expect(descriptor).toMatchObject({
 			defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
 			envVars: ["GMI_API_KEY"],
 			dynamicModelsAuthoritative: true,
 		});
-		expect(GMI_CLOUD_STATIC_MODELS.map(model => model.id)).toContain("deepseek-ai/DeepSeek-V4-Flash");
+		expect(GMI_CLOUD_SEED_MODELS.map(model => model.id)).toContain("deepseek-ai/DeepSeek-V4-Flash");
 	});
 
 	// GMI's `/v1/models` returns only bare `{id}` rows, so discovery defaults
@@ -32,7 +32,7 @@ describe("GMI Cloud provider", () => {
 		const index = getBundledModelReferenceIndex();
 		const resold = [...index.exact.values()].find(model => {
 			if (model.provider === "gmi-cloud" || !model.id.includes("/")) return false;
-			if (GMI_CLOUD_STATIC_MODELS.some(seed => seed.id === model.id)) return false;
+			if (GMI_CLOUD_SEED_MODELS.some(seed => seed.id === model.id)) return false;
 			const ref = resolveModelReference(model.id, index);
 			return ref?.reasoning === true && ref.thinking?.mode === "effort" && (ref.contextWindow ?? 0) > 0;
 		});

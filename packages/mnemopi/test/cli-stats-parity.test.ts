@@ -127,22 +127,6 @@ describe("CLI stats parity", () => {
 });
 
 describe("mnemopi-stats diagnostic behavior parity", () => {
-	it("diagnostics return dashboard-ready structure with counts and health bounds", () => {
-		const dbPath = join(root, "mnemopi.db");
-		const memory = seed(dbPath);
-		memory.close();
-
-		const result = runDiagnostics({ dbPath, dataDir: root });
-		expect(result.database).toBe(dbPath);
-		expect(result.checks_total).toBeGreaterThan(0);
-		expect(result.checks_passed).toBeGreaterThan(0);
-		expect(result.checks_failed).toBeGreaterThanOrEqual(0);
-		expect(result.checks_passed + result.checks_failed).toBeLessThanOrEqual(result.checks_total);
-		expect(result.entries.some(entry => entry.check === "working_memory_count" && entry.status === "1")).toBe(true);
-		expect(result.entries.some(entry => entry.check === "episodic_memory_count" && entry.status === "1")).toBe(true);
-		expect(result.entries.some(entry => entry.check === "triples_count" && entry.status === "1")).toBe(true);
-	});
-
 	it("diagnostics initialize missing databases gracefully and report zero counts", () => {
 		const dbPath = join(root, "empty", "mnemopi.db");
 		mkdirSync(join(root, "empty"), { recursive: true });

@@ -13,4 +13,7 @@ class "gpt-oss" {
 	on "venice" "vercel-ai-gateway" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
+	on "google-antigravity" "google-gemini-cli" {
+		supports-function-part-id #true
+	}
 }

@@ -7,7 +7,7 @@
  * id parsing, no host matching, no compat detection per request.
  */
 import { Effort, THINKING_EFFORTS } from "./effort";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, Model, ModelSpec, ThinkingConfig } from "./types";
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -25,6 +25,18 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 		return [];
 	}
 	return model.thinking?.efforts ?? [];
+}
+
+/**
+ * Neutral view of a model whose thinking ladder is unverified: `reasoning: false`
+ * and no ladder. Re-entering policy resolution starts from it (the ladder is
+ * derived output, not authored input), and requests without an effort send it so
+ * no reasoning or disable fields reach an upstream that may reject them.
+ */
+export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinking?: ThinkingConfig }>(model: T): T {
+	if (!model.thinking?.unverified) return model;
+	const { thinking: _derived, ...rest } = model;
+	return { ...rest, reasoning: false } as T;
 }
 
 /**
@@ -108,19 +120,22 @@ export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 /**
  * Maps a normalized thinking effort to Anthropic adaptive effort values via
  * the model's baked `thinking.effortMap` (identity for unmapped efforts).
+ *
+ * The Anthropic adaptive wire vocabulary has no `minimal` tier (valid values:
+ * `low`, `medium`, `high`, `xhigh`, `max`); a model ladder that exposes
+ * `minimal` — custom `anthropic-messages` providers do, unlike the built-in
+ * Claude ladders — would otherwise serialize `output_config.effort: "minimal"`
+ * and 400 (`level "minimal" not supported`). Clamp it to the lowest real tier,
+ * mirroring {@link mapEffortToGoogleThinkingLevel}'s `minimal` handling.
  */
 export function mapEffortToAnthropicAdaptiveEffort<TApi extends Api>(
 	model: ApiModel<TApi>,
 	effort: Effort,
 ): "low" | "medium" | "high" | "xhigh" | "max" | "adaptive" {
 	const supported = requireSupportedEffort(model, effort);
-	return (model.thinking?.effortMap?.[supported] ?? supported) as
-		| "low"
-		| "medium"
-		| "high"
-		| "xhigh"
-		| "max"
-		| "adaptive";
+	const mapped = model.thinking?.effortMap?.[supported] ?? supported;
+	if (mapped === Effort.Minimal) return "low";
+	return mapped as "low" | "medium" | "high" | "xhigh" | "max" | "adaptive";
 }
 
 /**

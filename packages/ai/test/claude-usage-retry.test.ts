@@ -57,7 +57,9 @@ describe("claudeUsageProvider retry contract", () => {
 
 	it("retries on 503 then succeeds", async () => {
 		let attempt = 0;
-		const fetchMock = (async () => {
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (new URL(url).search !== "") return jsonResponse(200, VALID_PAYLOAD);
 			attempt += 1;
 			if (attempt === 1) return jsonResponse(503, { error: "unavailable" });
 			return jsonResponse(200, VALID_PAYLOAD);
@@ -105,7 +107,9 @@ describe("claudeUsageProvider retry contract", () => {
 	it("honours Retry-After when retrying a 503", async () => {
 		let attempt = 0;
 		const retryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
-		const fetchMock = (async () => {
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (new URL(url).search !== "") return jsonResponse(200, VALID_PAYLOAD);
 			attempt += 1;
 			if (attempt === 1) {
 				// Retry-After: 1 second. Provider must compute a 1s backoff before re-attempting.
@@ -164,7 +168,8 @@ describe("claudeUsageProvider retry contract", () => {
 		// a 200 with a recognized shape but no usage data, we keep iterating.
 		// If we then 503 forever, we return what we have (null in this case).
 		let attempt = 0;
-		const fetchMock = (async () => {
+		const fetchMock = (async (url: string | URL | Request) => {
+			if (String(url).includes("?")) return jsonResponse(503, { error: "unavailable" });
 			attempt += 1;
 			if (attempt === 1) {
 				// 200 OK but no usage payload — provider continues to next attempt

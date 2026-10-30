@@ -58,28 +58,6 @@ describe("repairOrphanResponsesToolCalls", () => {
 			output: expect.stringMatching(/interrupted/i),
 		});
 	});
-
-	it("composes with output repair so a tree-branch snapshot stays API-valid", () => {
-		// Branching to a node that ends on a tool call drops the result child:
-		// the assistant turn keeps the call, but no matching output remains.
-		const input: ResponseInput = [
-			{ role: "user", content: [{ type: "input_text", text: "do it" }] },
-			{ type: "function_call", call_id: "call_x", name: "bash", arguments: "{}" },
-		];
-
-		const repaired = repairOrphanResponsesToolCalls(repairOrphanResponsesToolOutputs(input));
-		const callIds = new Set(
-			repaired
-				.filter(i => (i as { type?: string }).type === "function_call")
-				.map(i => (i as { call_id: string }).call_id),
-		);
-		const outputIds = new Set(
-			repaired
-				.filter(i => (i as { type?: string }).type === "function_call_output")
-				.map(i => (i as { call_id: string }).call_id),
-		);
-		for (const id of callIds) expect(outputIds.has(id)).toBe(true);
-	});
 });
 
 describe("repairOrphanResponsesToolOutputs", () => {

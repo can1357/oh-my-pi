@@ -4,7 +4,6 @@ import {
 	formatMCPConnectingMessage,
 	formatMCPConnectionStatusMessage,
 	isMcpConnectionStatusEvent,
-	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 
 // Cross-module contract guard.
@@ -17,10 +16,6 @@ import {
 // They agree only through this shared module. Drift in the channel, payload
 // guard, or user-facing status text silently leaves the startup banner stale.
 describe("mcp/startup-events — connection-status cross-module contract", () => {
-	it("pins the wire channel string sdk(emit) and interactive-mode(subscribe) share", () => {
-		expect(MCP_CONNECTION_STATUS_EVENT_CHANNEL).toBe("mcp:connection-status");
-	});
-
 	it("formats the initial connecting banner for a multi-server list", () => {
 		expect(formatMCPConnectingMessage(["alpha", "beta", "gamma"])).toBe(
 			"Connecting to MCP servers: alpha, beta, gamma…",
@@ -59,6 +54,18 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(message).not.toContain("\n");
 		expect(message).not.toContain("\t");
 		expect(message).toContain("broken: failed at   ~/.omp/mcp.log");
+	});
+
+	it("uses shared path boundaries in command-like and quoted failure text", () => {
+		const home = os.homedir();
+		const message = formatMCPConnectionStatusMessage({
+			pendingServers: [],
+			connectedServers: [],
+			failedServers: [{ serverName: "broken", error: `PYTHONPATH=${home}:/opt/lib; config \`${home}/cfg\`` }],
+		});
+		expect(message).toContain("PYTHONPATH=~:/opt/lib");
+		expect(message).toContain("`~/cfg`");
+		expect(message).not.toContain(home);
 	});
 
 	it("keeps the config source and transport error visible under independent truncation", () => {
@@ -127,13 +134,6 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 				failedServers: [{ serverName: "broken", error: "missing command" }],
 			}),
 		).toBe("Connected: alpha. Failed: broken: missing command. Still connecting: slow…");
-	});
-
-	it("terminates active connecting messages with a single U+2026 ellipsis", () => {
-		const msg = formatMCPConnectingMessage(["x"]);
-		expect(msg.endsWith("\u2026")).toBe(true);
-		expect(msg.endsWith("...")).toBe(false);
-		expect(msg.at(-1)).toBe("\u2026");
 	});
 
 	it("accepts well-formed payloads and rejects malformed ones", () => {

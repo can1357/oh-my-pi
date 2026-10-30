@@ -1,10 +1,7 @@
 import type { AgentStorage } from "../../../session/agent-storage";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	SearchProviderError,
-	type SearchProviderId,
-	type SearchSource,
-} from "../../../web/search/types";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
+import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
+import { decodeBody, readBodyCapped } from "../../response-body";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -127,4 +124,46 @@ export function classifyProviderHttpError(
 		return new SearchProviderError(provider, `${provider}: 403 forbidden`, status);
 	}
 	return null;
+}
+
+/**
+ * Collapse runs of whitespace in a loosely-typed provider field, returning
+ * `undefined` for missing/non-string/blank values. Shared so tab/newline
+ * folding cannot drift between providers.
+ */
+export function normalizeSearchText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = value.replace(/\s+/g, " ").trim();
+	return text.length > 0 ? text : undefined;
+}
+
+/**
+ * Bare, deduplicated hosts from `site:` values (`github.com/anthropics` → `github.com`)
+ * for provider domain filters; path parts are enforced by the central lenient post-filter.
+ */
+export function siteHosts(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const host = site.split("/", 1)[0];
+		if (host) hosts.add(host);
+	}
+	return [...hosts];
+}
+
+/**
+ * Read a provider response body up to a byte cap, truncating or throwing when
+ * the limit is exceeded. Shared so streaming-cap fixes land in one place.
+ */
+export async function readLimitedText(
+	response: Response,
+	provider: SearchProviderId,
+	maxBytes: number,
+	truncate = false,
+): Promise<string> {
+	const body = await readBodyCapped(response, maxBytes);
+	if (!body) return "";
+	if (body.truncated && !truncate) {
+		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);
+	}
+	return decodeBody(body.bytes, response.headers.get("content-type") ?? "");
 }

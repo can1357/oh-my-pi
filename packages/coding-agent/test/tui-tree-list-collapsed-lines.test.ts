@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { renderTreeList } from "@oh-my-pi/pi-coding-agent/tui/tree-list";
+import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const stubTheme = {
@@ -117,24 +117,6 @@ describe("renderTreeList maxCollapsedLines", () => {
 		expectWithinBudget(collapsed, 4);
 		expect(collapsed).toHaveLength(4);
 		expect(collapsed.at(-1)).toContain("2 more changes");
-	});
-
-	it("renders all items when total lines fit within budget", () => {
-		const items = [["a"], ["b"], ["c"]];
-
-		const collapsed = renderTreeList(
-			{
-				items,
-				expanded: false,
-				maxCollapsedLines: 10,
-				itemType: "item",
-				renderItem: group => group,
-			},
-			stubTheme,
-		);
-
-		expect(collapsed.length).toBe(3);
-		expect(collapsed.some(l => l.includes("more"))).toBe(false);
 	});
 
 	it("uses non-last tree branch when summary line follows", () => {

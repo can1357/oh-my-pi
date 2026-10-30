@@ -104,7 +104,7 @@ describe("GuestClient frame apply", () => {
 			vi.advanceTimersByTime(29_999);
 			expect(client.getSnapshot().phase).toBe("connecting");
 			client.applyFrameForTest(snapshotChunk([firstEntry], false));
-			expect(client.getSnapshot().entries).toEqual([firstEntry]);
+			expect(client.getSnapshot().entries).toEqual([]);
 			expect(client.getSnapshot().phase).toBe("connecting");
 
 			vi.advanceTimersByTime(29_999);
@@ -119,9 +119,72 @@ describe("GuestClient frame apply", () => {
 			completeClient.applyFrameForTest(snapshotChunk([firstEntry]));
 			vi.advanceTimersByTime(30_000);
 			expect(completeClient.getSnapshot().phase).toBe("live");
+			expect(completeClient.getSnapshot().entries).toEqual([firstEntry]);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("keeps the transcript on screen through a resync and swaps it in on the final chunk", () => {
+		const e1 = messageEntry("e1", { role: "user", content: "hi", timestamp: 1 });
+		const e2 = messageEntry("e2", { role: "user", content: "again", timestamp: 2 });
+		const client = liveClient([e1]);
+
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(snapshotChunk([e1], false));
+		expect(client.getSnapshot().entries).toEqual([e1]);
+		expect(client.getSnapshot().loading).toEqual({ received: 1, total: 2 });
+
+		client.applyFrameForTest(snapshotChunk([e2]));
+		expect(client.getSnapshot().entries).toEqual([e1, e2]);
+		expect(client.getSnapshot().loading).toBeNull();
+		expect(client.getSnapshot().phase).toBe("live");
+	});
+
+	it("publishes live entries that arrive mid-snapshot after the snapshot, not inside it", () => {
+		const e1 = messageEntry("e1", { role: "user", content: "one", timestamp: 1 });
+		const e2 = messageEntry("e2", { role: "user", content: "two", timestamp: 2 });
+		const live = messageEntry("live", { role: "user", content: "live", timestamp: 3 });
+		const client = new GuestClient(LINK, "tester");
+
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(snapshotChunk([e1], false));
+		client.applyFrameForTest({ t: "entry", entry: live });
+		expect(client.getSnapshot().entries).toEqual([]);
+		expect(client.getSnapshot().loading).toEqual({ received: 1, total: 2 });
+
+		client.applyFrameForTest(snapshotChunk([e2]));
+		expect(client.getSnapshot().entries).toEqual([e1, e2, live]);
+	});
+
+	it("drops the finished stream ghost when its entry lands mid-snapshot", () => {
+		const e1 = messageEntry("e1", { role: "user", content: "one", timestamp: 1 });
+		const e2 = messageEntry("e2", { role: "user", content: "two", timestamp: 2 });
+		const message = assistantMessage("hello");
+		const client = new GuestClient(LINK, "tester");
+
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(snapshotChunk([e1], false));
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("a1", message) });
+		client.applyFrameForTest(snapshotChunk([e2]));
+
+		const snap = client.getSnapshot();
+		expect(snap.entries).toEqual([e1, e2, messageEntry("a1", message)]);
+		expect(snap.stream).toBeNull();
+		expect(snap.streamDone).toBe(false);
+	});
+
+	it("completes the snapshot once every promised entry arrived, even without a final chunk", () => {
+		const e1 = messageEntry("e1", { role: "user", content: "one", timestamp: 1 });
+		const e2 = messageEntry("e2", { role: "user", content: "two", timestamp: 2 });
+		const client = new GuestClient(LINK, "tester");
+
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(snapshotChunk([e1, e2], false));
+		expect(client.getSnapshot().phase).toBe("live");
+		expect(client.getSnapshot().entries).toEqual([e1, e2]);
+		expect(client.getSnapshot().loading).toBeNull();
 	});
 
 	it("message_update sets the stream ghost (synthesizing a missed start)", () => {
@@ -246,6 +309,77 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().progress.get("Sub1")).toEqual(payload);
 	});
 
+	it("publishes streaming frames once per animation frame and flushes them with the next immediate frame", () => {
+		vi.useFakeTimers();
+		try {
+			const client = liveClient();
+			let commits = 0;
+			client.subscribe(() => commits++);
+			for (const text of ["a", "ab", "abc"]) {
+				client.applyFrameForTest(
+					{ t: "event", event: { type: "message_update", message: assistantMessage(text) } },
+					{ flush: false },
+				);
+			}
+			expect(commits).toBe(0);
+			expect(client.getSnapshot().stream).toBeNull();
+
+			vi.advanceTimersByTime(16);
+			expect(commits).toBe(1);
+			expect(client.getSnapshot().stream).toEqual(assistantMessage("abc"));
+
+			client.applyFrameForTest(
+				{ t: "event", event: { type: "message_update", message: assistantMessage("abcd") } },
+				{ flush: false },
+			);
+			client.applyFrameForTest({ t: "state", state: { ...STATE, isStreaming: true } }, { flush: false });
+			expect(commits).toBe(2);
+			expect(client.getSnapshot().stream).toEqual(assistantMessage("abcd"));
+			vi.advanceTimersByTime(16);
+			expect(commits).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("prunes subagent progress once the host stops listing the agent", () => {
+		const client = liveClient();
+		const payload = (id: string): SubagentProgressPayload => ({
+			index: 0,
+			agent: "task",
+			task: "t",
+			progress: {
+				index: 0,
+				id,
+				agent: "task",
+				status: "running",
+				task: "t",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+			},
+		});
+		const sub: AgentSnapshot = { ...AGENTS[0]!, id: "Sub1", kind: "sub" };
+		client.applyFrameForTest({ t: "bus", channel: "task:subagent:progress", data: payload("Sub1") });
+		// Progress may outrun its agent's first listing: one unlisted `agents` frame keeps it.
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+		client.applyFrameForTest({ t: "agents", agents: [...AGENTS, sub] });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+
+		const before = client.getSnapshot().progress;
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+		expect(client.getSnapshot().progress).toBe(before);
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(false);
+		expect(client.getSnapshot().progress).not.toBe(before);
+	});
+
 	it("bye ends the session with a reason", () => {
 		const client = liveClient();
 		client.applyFrameForTest({ t: "bye", reason: "host left" });
@@ -344,6 +478,26 @@ describe("GuestClient frame apply", () => {
 		const after = client.getSnapshot();
 		expect(after).not.toBe(before);
 		expect(after.agents).not.toBe(before.agents);
+		// Non-entry frames must not invalidate entry identity: Transcript's
+		// memo and useSyncExternalStore skip their O(n) scans per token.
 		expect(after.entries).toBe(before.entries);
+	});
+
+	it("replaces the entries reference when entry frames arrive", () => {
+		const client = liveClient();
+		const before = client.getSnapshot();
+		client.applyFrameForTest({
+			t: "entry",
+			entry: {
+				type: "message",
+				id: "m-new",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:02Z",
+				message: { role: "user", content: "hi", timestamp: 2 },
+			},
+		});
+		const after = client.getSnapshot();
+		expect(after.entries).not.toBe(before.entries);
+		expect(after.entries).toHaveLength(before.entries.length + 1);
 	});
 });

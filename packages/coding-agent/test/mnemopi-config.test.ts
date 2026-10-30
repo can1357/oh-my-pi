@@ -55,6 +55,20 @@ describe("loadMnemopiConfig embedding variant resolution", () => {
 		}
 	});
 
+	it("falls back to MNEMOPI_EMBEDDING_MODEL when the configured model is blank or null", () => {
+		const previous = Bun.env.MNEMOPI_EMBEDDING_MODEL;
+		Bun.env.MNEMOPI_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5";
+		try {
+			// Clearing the field in the settings panel must not permanently shadow the env model.
+			expect(embeddingModelFor({ "mnemopi.embeddingModel": "" })).toBe("BAAI/bge-large-en-v1.5");
+			expect(embeddingModelFor({ "mnemopi.embeddingModel": "  " })).toBe("BAAI/bge-large-en-v1.5");
+			expect(embeddingModelFor({ "mnemopi.embeddingModel": null })).toBe("BAAI/bge-large-en-v1.5");
+		} finally {
+			if (previous === undefined) delete Bun.env.MNEMOPI_EMBEDDING_MODEL;
+			else Bun.env.MNEMOPI_EMBEDDING_MODEL = previous;
+		}
+	});
+
 	it("lets an explicit embeddingModel setting win over the env var", () => {
 		const previous = Bun.env.MNEMOPI_EMBEDDING_MODEL;
 		Bun.env.MNEMOPI_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5";

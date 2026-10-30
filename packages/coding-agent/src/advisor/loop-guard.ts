@@ -5,6 +5,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { renderToolCallLoopRedirect } from "../session/tool-call-loop-redirect";
 
+import {
+	cfgModelToolCallLoopGuardEnabled,
+	cfgModelToolCallLoopGuardExemptTools,
+	cfgModelToolCallLoopGuardThreshold,
+} from "../session/settings";
+
 /** Capabilities the advisor loop guard borrows from its agent. */
 export interface AdvisorLoopGuardHost {
 	settings: Settings;
@@ -50,6 +56,7 @@ export class AdvisorLoopGuard {
 		const detection = this.#activeGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
+			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 		});
 		if (!detection) return;
 		if (this.#redirectIssued) {
@@ -89,13 +96,13 @@ export class AdvisorLoopGuard {
 	}
 
 	#activeGuard(): ToolCallLoopGuard | undefined {
-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
+		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
 			this.reset();
 			return undefined;
 		}
-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
-		const exemptTools = this.#host.settings
-			.get("model.toolCallLoopGuard.exemptTools")
+		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const exemptTools = cfgModelToolCallLoopGuardExemptTools
+			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#guard || this.#guardSettingsKey !== settingsKey) {

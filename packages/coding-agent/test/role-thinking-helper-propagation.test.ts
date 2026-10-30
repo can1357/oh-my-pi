@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as ai from "@oh-my-pi/pi-ai";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateCommitMessage } from "@oh-my-pi/pi-coding-agent/utils/commit-message-generator";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
@@ -11,19 +12,16 @@ function getModelOrThrow(id: string) {
 	return model;
 }
 
-function createSettings(modelRoles: Record<string, string>) {
+function createRegistry(model: Model<Api>) {
 	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return "online";
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return modelRoles[role];
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+		getAvailable: (_kind = "chat") => [model],
+		getApiKey: async () => "test-key",
+		resolver: vi.fn(() => async () => "test-key"),
+	};
+}
+
+function createSettings(modelRoles: Record<string, string>) {
+	return Settings.isolated({ modelRoles });
 }
 
 beforeEach(() => {
@@ -41,11 +39,7 @@ describe("role thinking helper propagation", () => {
 			default: `${model.provider}/${model.id}:high`,
 			smol: "@default:minimal",
 		});
-		const registry = {
-			getAvailable: () => [model],
-			getApiKey: async () => "test-key",
-			resolver: vi.fn(() => async () => "test-key"),
-		};
+		const registry = createRegistry(model);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "end_turn",
 			content: [{ type: "text", text: "fix scope handling" }],
@@ -64,11 +58,7 @@ describe("role thinking helper propagation", () => {
 		const settings = createSettings({
 			smol: `${model.provider}/${model.id}`,
 		});
-		const registry = {
-			getAvailable: () => [model],
-			getApiKey: async () => "test-key",
-			resolver: vi.fn(() => async () => "test-key"),
-		};
+		const registry = createRegistry(model);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "end_turn",
 			content: [{ type: "text", text: "fix qwen title budget" }],
@@ -87,11 +77,7 @@ describe("role thinking helper propagation", () => {
 			default: `${model.provider}/${model.id}:high`,
 			smol: "@default:low",
 		});
-		const registry = {
-			getAvailable: () => [model],
-			getApiKey: async () => "test-key",
-			resolver: vi.fn(() => async () => "test-key"),
-		};
+		const registry = createRegistry(model);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "end_turn",
 			content: [{ type: "text", text: "<title>Investigate resolver</title>" }],

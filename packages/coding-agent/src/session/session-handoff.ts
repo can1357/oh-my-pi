@@ -18,6 +18,8 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
 
+import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
 	return `handoff-${fileTimestamp}.md`;
@@ -41,15 +43,16 @@ export interface SessionHandoffHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
+	getPromptCacheKeyForModel(model: Model): string | undefined;
 	baseSystemPrompt(): string[];
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
-	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
+	convertMessagesToLlm(messages: AgentMessage[], signal: AbortSignal | undefined, model: Model): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
 }
@@ -132,11 +135,11 @@ export class SessionHandoff {
 			// effective provider cache key with a unique side `sessionId` so
 			// OpenAI/Codex append-only state never mixes with the live turn.
 			const cacheSessionId = this.#host.sessionId();
-			// The loop sends `promptCacheKey` (providerPromptCacheKey) and falls back to
+			// The loop sends an explicit or model-gated Task key, falling back to
 			// the provider session id; providers route on `promptCacheKey ?? sessionId`.
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
-			const handoffPromptCacheKey = this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId;
+			const handoffPromptCacheKey = this.#host.getPromptCacheKeyForModel(model) ?? this.#host.agent.sessionId;
 			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
 			const handoffSnapshot: AgentMessage[] = [
 				...this.#host.agent.state.messages,
@@ -147,7 +150,7 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal);
+			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the document seeds the post-compaction context and must not carry
 			// prompt-specific hook state.
@@ -169,7 +172,7 @@ export class SessionHandoff {
 				model.provider,
 			);
 			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
+				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
 				{
 					streamOptions: handoffStreamOptions,
@@ -194,7 +197,7 @@ export class SessionHandoff {
 				// cancelled"; an empty document is the remaining path that produced the
 				// same misleading, undebuggable message (#7993).
 				logger.warn("Handoff generation produced no content", {
-					sessionId: this.#host.sessionId(),
+					providerSessionId: this.#host.sessionId(),
 					autoTriggered: options?.autoTriggered ?? false,
 				});
 				// Auto-handoff is best-effort: returning undefined lets maintenance fall
@@ -207,7 +210,7 @@ export class SessionHandoff {
 			}
 
 			let savedPath: string | undefined;
-			if (options?.autoTriggered && this.#host.settings.get("compaction.handoffSaveToDisk")) {
+			if (options?.autoTriggered && cfgCompactionHandoffSaveToDisk.get(this.#host.settings)) {
 				const artifactsDir = this.#host.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());

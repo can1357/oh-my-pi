@@ -1,14 +1,16 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import {
-	autolinkSchemeScanIndex,
 	clearRenderCache,
 	extractMarkdownLinks,
+	holdPartialTableRow,
 	Markdown,
+	speculativeStreamingSource,
 	renderInlineMarkdown,
-	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
+import { getSymbolTheme, setThemeInstance } from "@oh-my-pi/pi-tui/theme/theme";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
@@ -185,6 +187,39 @@ describe("Markdown component", () => {
 
 			expect(plainLines.every(line => visibleWidth(line) <= 8)).toBe(true);
 			expect(plainLines.join("")).toContain("x");
+		});
+
+		it("renders a table inside an ordered list item under its continuation indent", () => {
+			const source = `10. **Keep:**
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |
+11. Next item`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(30).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.filter(line => line.startsWith("    |"))).toHaveLength(2);
+			expect(lines.some(line => line.includes("pi") && line.includes("MIT"))).toBe(true);
+			expect(lines.at(-1)).toBe("11. Next item");
+			expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);
+		});
+
+		it("keeps a narrow list-item table visible as raw markdown", () => {
+			const source = `10. Keep:
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(10)
+				.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.slice(1).join("\n")).toContain("Part");
+			expect(lines.slice(1).join("\n")).toContain("MIT");
+			expect(lines.every(line => visibleWidth(line) <= 10)).toBe(true);
 		});
 
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
@@ -376,6 +411,216 @@ Average Latency: 1,240 ms
 			const dividerLines = plainLines.filter(line => line.includes("+"));
 
 			expect(dividerLines.length >= 2, "Expected header + row divider").toBeTruthy();
+		});
+
+		it("shows a streaming table's growing row without re-laying out the rows above it", () => {
+			const table = "| PR | Title |\n| --- | --- |\n| [#1](https://example.com/pull/1) | short title |\n";
+			const plain = (md: Markdown) => md.render(60).map(line => stripVTControlCharacters(line).trimEnd());
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			const settled = plain(markdown);
+			// Until its `)` arrives the link renders speculatively closed, with the URL so far.
+			for (const [partial, shown] of [
+				["| [#2](https://example.com/pull/2", "#2 (https://example.com/pull/2)"],
+				["| [#2](https://example.com/pull/2) | a much longer title than the others", "a much"],
+			]) {
+				clearRenderCache();
+				markdown.setText(table + partial);
+				const rendered = plain(markdown);
+				expect(rendered.slice(0, settled.length - 1)).toEqual(settled.slice(0, -1));
+				expect(rendered.slice(settled.length - 1).some(line => line.includes(shown))).toBe(true);
+			}
+		});
+
+		it("keeps a streaming table's height while its last row's open cell grows, then shows it whole", () => {
+			const table = "| # | Name | Score |\n| --- | --- | --- |\n| 1 | black | 1.1 |\n| 2 | bright";
+			const label = "green with a long label that wraps";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			const frame = (tail: string): string[] => {
+				clearRenderCache();
+				markdown.setText(table + tail);
+				return markdown.render(40).map(line => stripVTControlCharacters(line));
+			};
+			const open = [" gr", " green", ` ${label}`].map(frame);
+			const closed = frame(` ${label} | 2.2 |`);
+			clearRenderCache();
+			// Rows below the table would move by the difference between any two frames.
+			const height = open[0]!.length;
+			expect(open.map(lines => lines.length)).toEqual([height, height, height]);
+			// The held-back tail of the open cell reads as hidden.
+			expect(open[2]!.some(line => line.includes("…"))).toBe(true);
+			// Closing the cell never shrinks the table, and every word of the label shows.
+			expect(closed.length).toBeGreaterThanOrEqual(height);
+			const shown = closed
+				.join(" ")
+				.replace(/[│|]/g, " ")
+				.split(/\s+/);
+			expect(label.split(" ").every(word => shown.includes(word))).toBe(true);
+		});
+
+		it("marks a held streaming cell's hidden lines even when they came from explicit breaks", () => {
+			const table = "| # | Description of the row |\n| --- | --- |\n| 1 | short |\n| 2 | First<br><br>Second";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(60).map(line => stripVTControlCharacters(line));
+			clearRenderCache();
+			const row = lines.filter(line => line.includes("First"));
+			// The row keeps its settled single line and says lines are held back.
+			expect(row.length).toBe(1);
+			expect(row[0]).toContain("…");
+			expect(lines.some(line => line.includes("Second"))).toBe(false);
+		});
+
+		it("keeps a held streaming cell's visible lines when its column is one cell wide", () => {
+			const markdown = new Markdown(
+				"| a | b |\n| --- | --- |\n| 1 | 2 |\n| x<br>y<br>z | defgh",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+			clearRenderCache();
+			// Only the last held line gives way to the marker; the lines above it fit and stay.
+			expect(lines.slice(-4, -1)).toEqual(["| x | d |", "| y | e |", "| z | … |"]);
+		});
+
+		it("keeps a held streaming cell's marker inside a two-cell column holding wide glyphs", () => {
+			const markdown = new Markdown(
+				"| a | bb |\n| --- | --- |\n| 1 | 22 |\n| x<br>y | 漢字漢",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12);
+			clearRenderCache();
+			const widths = new Set(lines.map(line => visibleWidth(line)));
+			// Every row, the held one included, keeps the table's border column.
+			expect(widths.size).toBe(1);
+			expect(lines.map(line => stripVTControlCharacters(line).trimEnd()).slice(-3, -1)).toEqual([
+				"| x | 漢 |",
+				"| y | …  |",
+			]);
+		});
+
+		it("measures a streaming table's finished last row even without its trailing newline", () => {
+			// Assistant text reaches Markdown trimmed, so a finished row is told apart by its closing `|`.
+			const text =
+				"| PR | Title |\n| --- | --- |\n| #1 | short |\n| #2 | a considerably longer finished title here |";
+			const streaming = new Markdown(text, 0, 0, defaultMarkdownTheme);
+			streaming.transientRenderCache = true;
+			clearRenderCache();
+			const rendered = streaming.render(80);
+			clearRenderCache();
+			expect(rendered).toEqual(new Markdown(text, 0, 0, defaultMarkdownTheme).render(80));
+		});
+
+		describe("holdPartialTableRow", () => {
+			const table = "Intro.\n\n| PR | Title |\n| --- | :-: |\n| #1 | one |";
+
+			it("drops only the growing row of a table, keeping the newline before it", () => {
+				expect(holdPartialTableRow(`${table}\n| [#2](https://exa`)).toBe(`${table}\n`);
+				expect(holdPartialTableRow(`${table}\n`)).toBe(`${table}\n`);
+			});
+
+			it("holds the growing row of a table without outer pipes", () => {
+				const bare = "PR | Title\n--- | ---\n#1 | one";
+				expect(holdPartialTableRow(`${bare}\n#2 | tw`)).toBe(`${bare}\n`);
+			});
+
+			it("only grows while a blockquote table streams, whatever the chunk boundaries", () => {
+				// GFM keeps any non-blank line in the table, so the quote's prose follows a blank quoted line.
+				const stream = "> | h |\n> | - |\n> | a |\n> | b |\n>\n> after";
+				let sent = "";
+				for (let length = 1; length <= stream.length; length++) {
+					const next = holdPartialTableRow(stream.slice(0, length));
+					expect(next.startsWith(sent)).toBe(true);
+					sent = next;
+				}
+				expect(sent).toBe(stream);
+			});
+
+			it("keeps pipe lines that are not a table: no delimiter row yet, or inside an open code fence", () => {
+				for (const text of [
+					"| a |\n| b",
+					"| a |\n| --- | -",
+					`\`\`\`md\n${table}\n| #2`,
+					`~~~~\n\`\`\`\n~~~\n${table}\n| #2`,
+				]) {
+					expect(holdPartialTableRow(text)).toBe(text);
+				}
+			});
+
+			it("holds a table row again once the fence before it closes", () => {
+				expect(holdPartialTableRow(`\`\`\`ts\nx\n\`\`\`\n\n${table}\n| #2`)).toBe(
+					`\`\`\`ts\nx\n\`\`\`\n\n${table}\n`,
+				);
+				// Four columns in, outside a list item, is indented code, not a fence.
+				expect(holdPartialTableRow(`    \`\`\`\n    code\n\n${table}\n| #2`)).toBe(
+					`    \`\`\`\n    code\n\n${table}\n`,
+				);
+			});
+		});
+
+		describe("speculatively closed spans while streaming", () => {
+			const transient = (text: string) => {
+				clearRenderCache();
+				const markdown = new Markdown(text, 0, 0, defaultMarkdownTheme);
+				markdown.transientRenderCache = true;
+				return markdown.render(60);
+			};
+			const final = (text: string) => {
+				clearRenderCache();
+				return new Markdown(text, 0, 0, defaultMarkdownTheme).render(60);
+			};
+			const prose = "Opening prose long enough to wrap across a couple of terminal rows here.";
+
+			it("renders an open link, math span, or table-cell link as the closed form it streams toward", () => {
+				for (const [open, closed] of [
+					[`${prose} See [the docs](https://example.com/a/b`, `${prose} See [the docs](https://example.com/a/b)`],
+					[`${prose} Value $\\frac{a+b}{c`, `${prose} Value $\\frac{a+b}{c}$`],
+					[`${prose} Value \\(x^2 + \\sqr`, `${prose} Value \\(x^2 + \\)`],
+					[`- item\n- see [docs](https://ex`, `- item\n- see [docs](https://ex)`],
+					[`${prose} See [wiki](https://e.org/F_(m`, `${prose} See [wiki](https://e.org/F_(m))`],
+					[`${prose} Value $$x^2$`, `${prose} Value $$x^2$$`],
+				]) {
+					expect(transient(open)).toEqual(final(closed));
+				}
+			});
+
+			it("leaves currency, escapes, images, and code spans literal", () => {
+				for (const text of [
+					`${prose} It costs $5 per mo`,
+					`${prose} Escaped \\$x^2`,
+					`${prose} Escaped \\[docs](https://ex`,
+					`${prose} ![alt](https://ex`,
+					`${prose} Code \`[docs](https://ex`,
+					`${prose} Code \`$x^2`,
+					`${prose} Code \`$x^2\` and`,
+				]) {
+					expect(transient(text)).toEqual(final(text));
+				}
+			});
+
+			it("closes only the last block's span in a native terminal's source, and nothing inside an open fence", () => {
+				expect(speculativeStreamingSource("Paid $5 and $\n\nValue $x^")).toBe("Paid $5 and $\n\nValue $x$");
+				expect(speculativeStreamingSource("Value $x^\n\nNext")).toBe("Value $x^\n\nNext");
+				expect(speculativeStreamingSource("Done.\n\n```md\nSee [docs](https://ex")).toBe(
+					"Done.\n\n```md\nSee [docs](https://ex",
+				);
+				// A fence nested in a list item may sit four columns in; indented code elsewhere is no fence.
+				expect(speculativeStreamingSource("- item\n\n    ```md\n    See [docs](https://ex")).toBe(
+					"- item\n\n    ```md\n    See [docs](https://ex",
+				);
+				expect(speculativeStreamingSource("    ```\n    code\n\nSee [docs](https://ex")).toBe(
+					"    ```\n    code\n\nSee [docs](https://ex)",
+				);
+			});
 		});
 
 		it("should keep column width at least the longest word", () => {
@@ -1316,6 +1561,31 @@ bar`,
 			// Should have italic from quote styling (\x1b[3m)
 			expect(allOutput.includes("\x1b[3m")).toBeTruthy();
 		});
+
+		it("preserves quote foreground color after inline code spans in blockquotes", () => {
+			const quoteFg = "\x1b[38;2;119;125;136m";
+			const codeFg = "\x1b[38;2;229;193;255m";
+			const testTheme = {
+				...defaultMarkdownTheme,
+				quote: (text: string) => `${quoteFg}${text}\x1b[39m`,
+				code: (text: string) => `${codeFg}${text}\x1b[39m`,
+			};
+
+			const markdown = new Markdown("> before `code` after", 0, 0, testTheme);
+			const [line] = markdown.render(80);
+
+			expect(line).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+
+			const multiMarkdown = new Markdown("> start `first` middle `second` end", 0, 0, testTheme);
+			const [multiLine] = multiMarkdown.render(80);
+			expect(multiLine).toContain(`${codeFg}first\x1b[39m${quoteFg}`);
+			expect(multiLine).toContain(`${codeFg}second\x1b[39m${quoteFg}`);
+
+			const htmlMarkdown = new Markdown("<blockquote>before <code>code</code> after</blockquote>", 0, 0, testTheme);
+			const [htmlLine] = htmlMarkdown.render(80);
+			expect(htmlLine).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+		});
+
 		it("should render list content inside blockquotes", () => {
 			const markdown = new Markdown("> 1. bla bla\n>    - nested bullet", 0, 0, defaultMarkdownTheme);
 
@@ -1404,6 +1674,23 @@ bar`,
 			return { visible, targets };
 		}
 
+		it("keeps a held streaming cell's link from spilling into the marker and borders", () => {
+			// The link fills the open cell's first wrapped line, so holding the row
+			// at one line cuts the cell inside the link.
+			const table = "| # | Link |\n| --- | --- |\n| 1 | a |\n| 2 | [documentation](https://example.com/x) more";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(24);
+			clearRenderCache();
+			const row = lines.map(inspectHyperlinks).filter(line => line.visible.includes("…"));
+			expect(row.length).toBe(1);
+			// Only the link text itself may carry the target; the marker and the
+			// table borders after it must not become clickable.
+			const { visible, targets } = row[0]!;
+			for (let i = visible.indexOf("…"); i < visible.length; i++) expect(targets[i]).toBeNull();
+		});
+
 		it("should not duplicate URL for autolinked emails", () => {
 			const markdown = new Markdown("Contact user@example.com for help", 0, 0, defaultMarkdownTheme);
 
@@ -1447,6 +1734,63 @@ bar`,
 				expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
 				expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
 				expect(new Set(inspectHyperlinks(line).targets.filter(target => target !== null))).toEqual(new Set([url]));
+			}
+		});
+
+		it("links every wrapped fragment of a URL in a fenced code block, and only when hyperlinks are on (issue #12321)", () => {
+			const url =
+				"https://example.com/very/long/path/segment-one/segment-two/segment-three/segment-four?query=value&another=value";
+			const text = `\`\`\`\n${url}\n\`\`\``;
+			// Highlighters can split a URL across several SGR spans; the link must span them all.
+			const highlighted = {
+				...defaultMarkdownTheme,
+				highlightCode: (code: string): string[] =>
+					code.split("\n").map(line => `\x1b[32m${line.slice(0, 30)}\x1b[39m\x1b[33m${line.slice(30)}\x1b[39m`),
+			};
+
+			for (const theme of [defaultMarkdownTheme, highlighted]) {
+				clearRenderCache();
+				const lines = new Markdown(text, 0, 0, theme).render(40);
+				const fragments = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+				expect(fragments.length).toBeGreaterThan(2);
+				for (const line of fragments) {
+					const { visible, targets } = inspectHyperlinks(line);
+					expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
+					expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
+					expect(visible.length).toBeLessThanOrEqual(40);
+					for (let i = 0; i < visible.length; i++) {
+						if (visible[i] !== " ") expect(targets[i]).toBe(url);
+					}
+				}
+				const linkedText = fragments.map(line => inspectHyperlinks(line).visible.trimEnd()).join("");
+				expect(linkedText).toBe(url);
+
+				terminalState.hyperlinks = false;
+				try {
+					clearRenderCache();
+					const plainLines = new Markdown(text, 0, 0, theme).render(40);
+					expect(plainLines.join("")).not.toContain("\x1b]8;");
+					expect(plainLines.map(line => inspectHyperlinks(line).visible)).toEqual(
+						lines.map(line => inspectHyperlinks(line).visible),
+					);
+				} finally {
+					terminalState.hyperlinks = true;
+				}
+			}
+		});
+
+		it("leaves an unbalanced closing bracket after a code-block URL out of the link", () => {
+			const cases = [
+				["urls = [https://a.com/x]", "https://a.com/x"],
+				["{https://a.com/x}", "https://a.com/x"],
+				["(https://a.com/x),", "https://a.com/x"],
+				["https://a.com/w[1]", "https://a.com/w[1]"],
+			] as const;
+			for (const [code, target] of cases) {
+				clearRenderCache();
+				const lines = new Markdown(`\`\`\`\n${code}\n\`\`\``, 0, 0, defaultMarkdownTheme).render(80);
+				const targets = lines.flatMap(line => inspectHyperlinks(line).targets).filter(t => t !== null);
+				expect(new Set(targets)).toEqual(new Set([target]));
 			}
 		});
 
@@ -1616,6 +1960,16 @@ bar`,
 			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 			expect(protoOut.includes("\x1b]8;;")).toBe(false);
 			expect(stripTerminalSequences(protoOut)).toContain("proto");
+		});
+
+		it("autolinks urls and emails end-to-end", () => {
+			const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
+				...defaultMarkdownTheme,
+				link: (text: string) => `<L>${text}</L>`,
+			});
+			const plain = stripVTControlCharacters(rendered);
+			expect(plain).toContain("<L>https://example.com</L>");
+			expect(plain).toContain("<L>user@example.com</L>");
 		});
 	});
 
@@ -1806,6 +2160,42 @@ describe("Inline color swatches", () => {
 	});
 });
 
+describe("themes without symbols (upstream pi-tui MarkdownTheme shape)", () => {
+	// Legacy extensions build the upstream interface, which has no `symbols` map (#12311).
+	const { symbols: _, ...upstreamTheme } = defaultMarkdownTheme;
+	const activeSymbolsTheme = { ...upstreamTheme, symbols: getSymbolTheme() };
+
+	it.each([
+		["paragraph with inline code and a swatch", "text with `inline code` and #C5FFD6"],
+		["horizontal rule", "above\n\n---\n\nbelow"],
+		["blockquote", "> quoted line"],
+		["table", "| a | b |\n|---|---|\n| 1 | 2 |"],
+	])("renders a %s with the active theme's symbols", (_label, text) => {
+		const out = new Markdown(text, 0, 0, upstreamTheme).render(40);
+		expect(out).toEqual(new Markdown(text, 0, 0, activeSymbolsTheme).render(40));
+	});
+
+	it("renders streamed appends with the active theme's symbols", () => {
+		const streamed = new Markdown("Accent", 0, 0, upstreamTheme);
+		streamed.render(40);
+		streamed.setText("Accent is #C5FFD6");
+		const reference = new Markdown("Accent", 0, 0, activeSymbolsTheme);
+		reference.render(40);
+		reference.setText("Accent is #C5FFD6");
+		expect(streamed.render(40)).toEqual(reference.render(40));
+	});
+
+	it("does not reuse cached fallback glyphs after a symbol-preset switch", async () => {
+		const text = "> quoted across a preset switch";
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "unicode" }));
+		const before = new Markdown(text, 0, 0, upstreamTheme).render(40);
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		const after = new Markdown(text, 0, 0, upstreamTheme).render(40);
+		expect(after).not.toEqual(before);
+		expect(after).toEqual(new Markdown(text, 0, 0, { ...upstreamTheme, symbols: getSymbolTheme() }).render(40));
+	});
+});
+
 describe("Module-level LRU render cache", () => {
 	it("invokes highlightCode only once for two distinct instances with identical (text, width, theme)", () => {
 		// Build a theme with a spy on highlightCode. The theme object reference
@@ -1945,6 +2335,40 @@ describe("Module-level LRU render cache", () => {
 		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
 	});
 
+	it("settles an open fence's finished lines so a long block can retire", () => {
+		// A fenced block never reaches a "\n\n" boundary, so the block walk alone
+		// settles nothing for it and a long streamed SQL/log block stays in the
+		// mutable viewport, losing every row that leaves the screen (#9780).
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		// The last two lines stay live: the newest is still being written, and the
+		// cut keeps one more so the publisher always has a tail to extend.
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\n");
+
+		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("clears the settled fence text when a non-append edit rewinds it", () => {
+		// Regression: the stored prefix survived a rewind, so every later frame
+		// failed the prefix check and the block stayed unretirable for the rest
+		// of the stream.
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nold\nrow\n", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nold\n");
+
+		markdown.setText("```sql\nnew\nrow\n");
+		markdown.render(80);
+		markdown.setText("```sql\nnew\nrow\nthird\nfourth\n");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nnew\nrow\nthird\n");
+	});
+
 	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
 		clearRenderCache();
 		const themeWithStream = {
@@ -2054,19 +2478,6 @@ describe("Markdown.render reference stability", () => {
 	// and callers that decorate results must copy first; ask.ts was fixed to
 	// copy. These tests pin the reference-identity contract.
 	afterEach(() => clearRenderCache());
-
-	it("returns the identical reference for repeated renders of an unchanged instance", () => {
-		const md = new Markdown("Question text", 1, 0, defaultMarkdownTheme);
-		const first = md.render(40);
-		expect(md.render(40)).toBe(first);
-		expect(md.render(40)).toBe(first);
-	});
-
-	it("shares one array across instances with identical inputs via the L2 cache", () => {
-		const a = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		const b = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		expect(b.render(40)).toBe(a.render(40));
-	});
 
 	it("does not share oversized renders through the L2 cache", () => {
 		// Fixture must exceed RENDER_CACHE_MAX_ENTRY_SIZE (256 KiB of rendered
@@ -2374,6 +2785,22 @@ describe("Inline and block HTML tag rendering", () => {
 	});
 });
 
+describe("Hard line breaks", () => {
+	const secondRow = (md: string): string =>
+		stripVTControlCharacters(new Markdown(md, 0, 0, defaultMarkdownTheme).render(60)[1]!).trimEnd();
+
+	it("keeps the space after inline code, emphasis or math that starts the next line", () => {
+		// Only the new line's own leading spaces are dropped. The space after a
+		// styled span at its start is text between two words.
+		expect(secondRow("p  \n`c` b")).toBe("c b");
+		expect(secondRow("p  \n**s** b")).toBe("s b");
+		expect(secondRow("p\\\n*e* b")).toBe("e b");
+		expect(secondRow("p  \n~~d~~ b")).toBe("d b");
+		expect(secondRow("p  \n$a$ b")).toBe("a b");
+		expect(secondRow("p  \n   b")).toBe("b");
+	});
+});
+
 describe("Math rendering", () => {
 	const plain = (c: Markdown): string =>
 		c
@@ -2451,15 +2878,71 @@ describe("Math rendering", () => {
 	});
 });
 
-describe("inline start()/url-gate scanners (perf rewrites)", () => {
-	// The hand-rolled scanners replaced regex scans that marked runs on the
-	// remaining source at every inline position. They must return exactly what
-	// the old regexes returned for every input.
-	const OLD_MATH_START = /\$|\\\(|\\\[/;
-	const OLD_AUTOLINK_SCAN = /www\.|https?:\/\/|ftp:\/\//i;
-	// marked's bundled GFM inline url rule (verbatim, no flags).
-	const GFM_URL_REGEX =
-		/^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/;
+describe("Strikethrough", () => {
+	const strike = (text: string): string =>
+		stripVTControlCharacters(
+			renderInlineMarkdown(text, { ...defaultMarkdownTheme, strikethrough: (inner: string) => `<S>${inner}</S>` }),
+		);
+
+	it("strikes through as GFM's `~~` rule reads it", () => {
+		expect(strike("~~a~~ ~~a ~~b~~ c")).toBe("<S>a</S> <S>a ~~b</S> c");
+		expect(strike("~~a~~~ b~~ ~~ c~~ d~~")).toBe("<S>a~~~ b</S> ~~ c~~ d~~");
+		expect(strike("~~a\\~~ b~~ ~~a \\\\~~")).toBe("<S>a~~ b</S> <S>a \\</S>");
+		expect(strike("x~~y~~z ~~~~ ~~a\\")).toBe("x<S>y</S>z ~~~~ ~~a\\");
+	});
+
+	it("still strikes through past an opener whose text a backslash before a line break ends", () => {
+		expect(strike("~~a\\\nb~~ ~~c\nd~~")).toBe("~~ab~~ <S>c\nd</S>");
+	});
+
+	// Inside emphasis or a link label the text ends before its closer: a `~~` past that end closes nothing there.
+	it("strikes through inside emphasis and a link label only up to their end", () => {
+		expect(strike("*a ~~b* c~~ [d ~~e](u) f~~")).toBe("a ~~b c~~ d ~~e f~~");
+		expect(strike("*a ~~b~~* [c ~~d~~](u)")).toBe("a <S>b</S> c <S>d</S>");
+	});
+});
+
+describe("inline rendering stays linear on long paragraphs", () => {
+	// Generous bound: each shape took v18.4.4 several seconds at 40 KB; linear lexing takes well under 300 ms.
+	it.each([
+		["unclosed strikethrough (80 KB)", "~~a ".repeat(20_000)],
+		["unclosed $ before digits (80 KB)", "$1*".repeat(26_667)],
+	])("renders a long paragraph of %s in under two seconds", (_name, text) => {
+		// Compile the rendering paths first, so the bound measures the rendering.
+		renderInlineMarkdown(text.slice(0, 2_000), defaultMarkdownTheme);
+		const start = performance.now();
+		renderInlineMarkdown(text, defaultMarkdownTheme);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+
+	// The same bound on lexing alone: styling nested emphasis costs more than lexing it.
+	it.each([
+		// Every nesting level holds the long word, so a math start hint searched per level reads it once per level.
+		[
+			"nested emphasis around a long word (800 KB)",
+			`${"*a ".repeat(4_000)}${"a".repeat(800_000)}${" b*".repeat(4_000)}`,
+		],
+		// Each level's `~~` scan finds no closer before the end of the paragraph.
+		[
+			"nested emphasis with an unclosed ~~ at every level (80 KB)",
+			`${"*a ~~b ".repeat(8_000)}${" b*".repeat(8_000)}`,
+		],
+		// Each level's `~~` closes only past the last level; the long word makes every scan to that closer long.
+		[
+			"nested emphasis with a ~~ at every level closed past it (70 KB)",
+			`${"*a ~~b ".repeat(2_000)}${"a".repeat(50_000)}${" b*".repeat(2_000)} x~~`,
+		],
+	])("lexes a long paragraph of %s in under two seconds", (_name, text) => {
+		extractMarkdownLinks(text.slice(0, 2_000));
+		const start = performance.now();
+		extractMarkdownLinks(text);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+});
+
+describe("math start hint", () => {
+	// mathStartIndex must find the offsets `/\$|\\\(|\\\[/` finds.
+	const MATH_OPENER = /\$|\\\(|\\\[/;
 
 	const fixtures = [
 		"",
@@ -2473,73 +2956,19 @@ describe("inline start()/url-gate scanners (perf rewrites)", () => {
 		"backslash only \\ then ( apart",
 		"ends with backslash \\",
 		"ends with dollar $",
-		"www.example.com leading",
-		"see www.example.com mid-string",
-		"see WWW.EXAMPLE.COM upper",
-		"mixed WwW.case.com scan",
-		"http://example.com leading",
-		"prose http://example.com mid",
-		"prose HTTPS://EXAMPLE.COM upper",
-		"HtTpS://mixed.example",
-		"ftp://files.example mid ftp",
-		"prose FTP://FILES.EXAMPLE",
-		"ftps:// is not ftp:// until here ftp://x",
-		"wwww.overlap.example",
-		"hhttp://overlap.example",
-		"http:/ missing slash then https://real.example",
-		"www without dot www. with dot",
-		"w h f teaser chars but no scheme",
-		"user@example.com email",
-		"prose user.name+tag@example.co.uk",
-		"trailing at sign only@ ",
-		"@leading-at no local part",
-		"a".repeat(400), // long identifier run, no @
-		`${"a".repeat(400)}@example.com`, // long local part (past gate scan limit)
-		"short@x",
-		"dots...and+plus_under-score@host.tld",
 	];
 
-	it("mathStartIndex matches the old /\\$|\\\\\\(|\\\\\\[/ scan on every fixture", () => {
+	it("mathStartIndex finds the offsets /\\$|\\\\\\(|\\\\\\[/ finds on every fixture", () => {
 		for (const src of fixtures) {
-			const m = OLD_MATH_START.exec(src);
+			const m = MATH_OPENER.exec(src);
 			expect(mathStartIndex(src)).toBe(m ? m.index : undefined);
 		}
 	});
-
-	it("autolinkSchemeScanIndex matches the old /www\\.|https?:\\/\\/|ftp:\\/\\//i scan on every fixture", () => {
-		for (const src of fixtures) {
-			const m = OLD_AUTOLINK_SCAN.exec(src);
-			expect(autolinkSchemeScanIndex(src)).toBe(m ? m.index : undefined);
-		}
-	});
-
-	it("urlTokenPossible is conservative: never false when the GFM url regex matches", () => {
-		for (const src of fixtures) {
-			if (GFM_URL_REGEX.test(src)) {
-				expect(urlTokenPossible(src)).toBeTrue();
-			}
-		}
-		// And it actually gates: plain prose with no scheme/email head is rejected.
-		expect(urlTokenPossible("plain prose, nothing linkable here")).toBeFalse();
-		expect(urlTokenPossible("@leading-at no local part")).toBeFalse();
-	});
-
-	it("gated tokenizer still autolinks urls and emails end-to-end", () => {
-		const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
-			...defaultMarkdownTheme,
-			link: (text: string) => `<L>${text}</L>`,
-		});
-		const plain = stripVTControlCharacters(rendered);
-		expect(plain).toContain("<L>https://example.com</L>");
-		expect(plain).toContain("<L>user@example.com</L>");
-	});
 });
 
-describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
-	// Large documents are lexed in bounded windows because Bun's regex engine
-	// rescans the whole remaining source for marked's `^`-anchored block rules.
-	// Every construct below straddles window cuts; a bad cut is visible in the
-	// rendered output.
+describe("large documents", () => {
+	// Large documents lex in one pass; these pin the constructs that span many
+	// blocks and the linear cost of the display-math block scans.
 	afterEach(() => clearRenderCache());
 
 	const filler = (label: string, lines: number) =>
@@ -2552,7 +2981,11 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 			.render(width)
 			.map(line => stripVTControlCharacters(line).trimEnd());
 
-	it("resolves a reference definition that lands in a later window", () => {
+	// marked normalizes CRLF before tokenizing, so the CRLF twin is an oracle
+	// for the LF document.
+	const onePass = (text: string, width = 100) => plain(text.replaceAll("\n", "\r\n"), width);
+
+	it("resolves a reference definition at the end of a large document", () => {
 		const doc = `Follow [the label][ref] first.\n\n${filler("body", 400)}\n\n[ref]: https://example.com/late\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
 
@@ -2564,14 +2997,13 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(rendered.filter(line => line.includes("https://example.com/late"))).toHaveLength(1);
 	});
 
-	it("keeps a fenced block longer than one window intact", () => {
+	it("keeps a long fenced block intact", () => {
 		const code = Array.from({ length: 200 }, (_, i) => `const value${i} = ${i};`).join("\n");
 		const doc = `${filler("intro", 300)}\n\n\`\`\`ts\n${code}\n\`\`\`\n\n${filler("outro", 20)}`;
 		expect(code.length).toBeGreaterThan(2 * 1024);
 
 		const rendered = plain(doc);
-		// Exactly one fence pair: a window cut inside the block would close and
-		// reopen it (or spill code lines into prose).
+		// Exactly one fence pair: no code line spills into prose.
 		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
 		const first = rendered.findIndex(line => line.includes("const value0 = 0;"));
 		expect(first).toBeGreaterThan(-1);
@@ -2580,7 +3012,7 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		}
 	});
 
-	it("numbers an ordered list continuously across window cuts", () => {
+	it("numbers a long ordered list continuously", () => {
 		const items = Array.from({ length: 400 }, (_, i) => `${i + 1}. item ${i} padded with extra words to add bytes`);
 		const doc = `${filler("intro", 60)}\n\n${items.join("\n")}\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
@@ -2589,7 +3021,138 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		for (const n of [1, 137, 400]) {
 			expect(rendered.some(line => line.includes(`${n}. item ${n - 1} `))).toBe(true);
 		}
-		// A window cut that restarted the list would renumber later items.
+		// A restarted list would renumber later items.
 		expect(rendered.filter(line => line.includes(" 1. item 0 ")).length).toBeLessThanOrEqual(1);
+	});
+
+	const mathLines = Array.from({ length: 150 }, (_, i) => `x_{${i}} = y_{${i}} + z_{${i}}`).join("\n\n");
+
+	for (const [opener, closer] of [
+		["$$", "$$"],
+		["\\[", "\\]"],
+	] as const) {
+		it(`keeps a ${opener} display-math block with blank lines intact`, () => {
+			const doc = ["Intro line before the math.", "", opener, mathLines, closer, "", filler("outro", 250)].join(
+				"\n",
+			);
+			expect(doc.length).toBeGreaterThan(16 * 1024);
+			expect(doc.lastIndexOf(closer) - doc.indexOf(opener)).toBeGreaterThan(2 * 1024);
+
+			const rendered = plain(doc);
+			// A split block renders the delimiters (`$$`, or `[` for the escaped
+			// bracket) and the raw TeX (`x{0} = y{0} + z_{0}`) as prose.
+			expect(rendered.slice(0, 3)).toEqual(["Intro line before the math.", "", "x₀ = y₀ + z₀"]);
+			expect(rendered.filter(line => ["$$", "[", "]"].includes(line.trim()))).toEqual([]);
+			expect(rendered.filter(line => line.includes("{"))).toEqual([]);
+			expect(rendered).toEqual(onePass(doc));
+		});
+	}
+
+	it("renders an own-line $$ that never closes as the one-pass lex does", () => {
+		const doc = `Intro.\n\n$$\nx = 1\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		// No math block: the opener renders as text.
+		expect(rendered.slice(0, 4)).toEqual(["Intro.", "", "$$", "x = 1"]);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("renders a $$ pair around a blank body as the one-pass lex does", () => {
+		// mathBlockAt rejects a whitespace-only body, so this is no math block.
+		const doc = `Intro.\n\n$$\n \n$$\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.slice(0, 5)).toEqual(["Intro.", "", "$$", "", "$$"]);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	// The display-math block scans must not rescan the rest of the document for
+	// every opener.
+	const displayMathScans: ReadonlyArray<readonly [string, (bytes: number) => string]> = [
+		// Each paragraph opens a `\[` block that no `\]` line ever closes.
+		[
+			"own-line `\\[` openers that never close",
+			bytes => {
+				const unit = "\\[\nprose that never closes the bracket\n\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
+		],
+		// One `\[` block spans the document.
+		[
+			"one `\\[` block whose `\\]` ends the document",
+			bytes => `Intro.\n\n\\[\n${filler("inside", Math.ceil(bytes / 60))}\n\\]\n\nOutro.\n`,
+		],
+		// Each heading is followed by a bare environment that no `\end` closes.
+		[
+			"bare math environments that never close",
+			bytes => {
+				const unit = "# heading\n\\begin{align}\na &= b\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
+		],
+		// Consecutive closed bare environments with no blank line between them.
+		[
+			"consecutive closed bare math environments",
+			bytes => {
+				const unit = "\\begin{align}\na &= b\n\\end{align}\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
+		],
+	];
+	for (const [name, doc] of displayMathScans) {
+		it(`lexes ${name} in time proportional to the document`, () => {
+			// CPU time, not wall time: a parallel run deschedules this process,
+			// which stretches wall time without adding work. Some platforms
+			// (Windows) account CPU time in ~16ms ticks, coarser than one lex of
+			// the small document, so each sample repeats the lex until it spans
+			// many ticks and reports the cost of one pass.
+			const minSampleMicros = 100_000;
+			const cost = (text: string): number => {
+				const start = process.cpuUsage();
+				let passes = 0;
+				let elapsed = 0;
+				do {
+					extractMarkdownLinks(text);
+					passes++;
+					const { user, system } = process.cpuUsage(start);
+					elapsed = user + system;
+				} while (elapsed < minSampleMicros);
+				return elapsed / passes;
+			};
+			const small = doc(32 * 1024);
+			const large = doc(512 * 1024);
+			cost(small); // warm the lexer so the first small sample is not the cold one
+			// 16 times the text: linear work costs about 16 times as much, a rescan
+			// per opener about 256 times. Interleaved best-of-five rounds keep a
+			// burst from landing on one size only.
+			let smallCost = Number.POSITIVE_INFINITY;
+			let largeCost = Number.POSITIVE_INFINITY;
+			for (let round = 0; round < 5 && !(largeCost < 48 * smallCost); round++) {
+				smallCost = Math.min(smallCost, cost(small));
+				largeCost = Math.min(largeCost, cost(large));
+			}
+			expect(largeCost).toBeLessThan(48 * smallCost);
+		});
+	}
+
+	it("continues a numbered list across a no-break-space line", () => {
+		// The lexer's blank line is any whitespace-only line, so the list goes on
+		// past the no-break-space line.
+		let list = "";
+		let count = 0;
+		while (list.length <= 2048) list += `${++count}. step ${count} of a tight numbered list\n`;
+		const doc = `${list}\n\u00a0\n1. the step after the spacer line\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.some(line => line.includes(`${count + 1}. the step after the spacer line`))).toBe(true);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("keeps the blank line before a bare math environment after a long tight list", () => {
+		const list = Array.from({ length: 80 }, (_, i) => `- item ${i} of a tight list`).join("\n");
+		const doc = `${list}\n\n\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}\n\n${filler("body", 350)}\n`;
+		const rendered = plain(doc);
+		expect(rendered[rendered.findIndex(line => line.includes("item 79")) + 1]).toBe("");
+		expect(rendered).toEqual(onePass(doc));
 	});
 });

@@ -2,7 +2,7 @@
  * `omp auth-broker` command handlers.
  *
  * Sub-verbs:
- *   - `serve [--bind=…]` — boots the broker against the local SQLite store.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store.
  *   - `token` / `token --regenerate` — manages the bearer token file.
  *   - `login <provider> [--via=user@host]` — logs into a provider locally, or
  *     via SSH tunnel into a remote broker host.
@@ -13,35 +13,36 @@
  *     the broker already has.
  *   - `status` — health-pings the configured remote broker.
  */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import {
 	type AuthCredential,
+	type AuthCredentialSnapshotEntry,
 	AuthStorage,
-	type CredentialDisabledEvent,
 	getEnvApiKey,
 	getOAuthProviders,
+	isSameOAuthAccount,
 	listProvidersWithEnvKey,
+	matchesReplacementCredential,
 	type OAuthCredential,
 	type OAuthProvider,
-	type OAuthProviderInfo,
-	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -50,6 +51,7 @@ export interface AuthBrokerCommandArgs {
 	flags: {
 		json?: boolean;
 		bind?: string;
+		trustProxyHeaders?: boolean;
 		regenerate?: boolean;
 		via?: string;
 		provider?: string;
@@ -89,37 +91,11 @@ function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
 }
 
-async function readToken(): Promise<string | null> {
-	try {
-		const raw = await Bun.file(getTokenFilePath()).text();
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
-	}
-}
-
-async function writeToken(token: string): Promise<void> {
-	const file = getTokenFilePath();
-	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await Bun.write(file, token);
-	try {
-		await fs.chmod(file, 0o600);
-	} catch {
-		// Best-effort (e.g. Windows).
-	}
-}
-
-function generateToken(): string {
-	return crypto.randomBytes(32).toString("base64url");
-}
-
 async function ensureToken(): Promise<string> {
-	const existing = await readToken();
+	const existing = await readTokenFile(getTokenFilePath());
 	if (existing) return existing;
 	const token = generateToken();
-	await writeToken(token);
+	await writeTokenFile(getTokenFilePath(), token);
 	return token;
 }
 
@@ -148,7 +124,16 @@ export function refreshBrokerOAuthCredential(
 	}
 	// Non-MCP rows: same per-provider path AuthStorage would take by default
 	// (the serve process registers no custom OAuth providers).
-	return refreshOAuthToken(provider as OAuthProvider, credential);
+	return refreshOAuthToken(provider as OAuthProvider, credential, signal);
+}
+
+/** The `omp auth-broker serve` vault: tokens refresh in this process through {@link refreshBrokerOAuthCredential}. */
+export function createBrokerAuthStorage(store: SqliteAuthCredentialStore): AuthStorage {
+	return new AuthStorage(store, {
+		refreshOAuthCredential: (provider, _credentialId, credential, signal) =>
+			refreshBrokerOAuthCredential(provider, credential, signal),
+		refreshOAuthCredentialMints: true,
+	});
 }
 
 async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
@@ -161,27 +146,20 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const token = await ensureToken();
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
-	const storage = new AuthStorage(store, {
-		refreshOAuthCredential: (provider, _credentialId, credential, signal) =>
-			refreshBrokerOAuthCredential(provider, credential, signal),
-	});
-	await storage.reload();
+	const storage = createBrokerAuthStorage(store);
+	await storage.credentials.reload();
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
+		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
-	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
-		logger.warn("auth-broker credential disabled", { ...event });
-	});
-
 	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
 		logger.info("auth-broker shutting down", { signal });
-		credentialDisabledUnsub();
 		await handle.close();
 		storage.close();
 		process.exit(0);
@@ -196,7 +174,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	if (flags.regenerate) {
 		const next = generateToken();
-		await writeToken(next);
+		await writeTokenFile(getTokenFilePath(), next);
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ token: next, path: getTokenFilePath() })}\n`);
 		} else {
@@ -213,173 +191,45 @@ async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	if (flags.via && !flags.provider) {
+		throw new Error("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)");
+	}
 	const providers = getOAuthProviders();
-	let providerArg = flags.provider;
-	if (!providerArg) {
-		if (flags.via) {
+	// One interface for picker + login prompts; closed before `--via` hands
+	// stdin to ssh.
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	let providerArg: string;
+	try {
+		providerArg = flags.provider ?? (await pickOAuthProvider(rl, providers));
+		if (!providers.some(p => p.id === providerArg)) {
 			throw new Error(
-				"Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)",
+				`Unknown OAuth provider '${providerArg}'. Known: ${providers
+					.map(p => p.id)
+					.sort()
+					.join(", ")}`,
 			);
 		}
-		providerArg = await pickProviderInteractively(providers);
+		if (!flags.via) {
+			await runLocalLogin(rl, providerArg);
+			return;
+		}
+	} finally {
+		rl.close();
 	}
-	if (!providers.some(p => p.id === providerArg)) {
-		throw new Error(
-			`Unknown OAuth provider '${providerArg}'. Known: ${providers
-				.map(p => p.id)
-				.sort()
-				.join(", ")}`,
-		);
-	}
-	if (flags.via) {
-		await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
-		return;
-	}
-	await runLocalLogin(providerArg as OAuthProvider);
+	await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
 }
 
-async function runLocalLogin(provider: OAuthProvider): Promise<void> {
+async function runLocalLogin(rl: readline.Interface, provider: string): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string, signal?: AbortSignal) => promptLine(rl, `${msg} `, signal);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
+	await storage.credentials.reload();
 	try {
-		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
-		// Agent's vscode:// URI) get the manual paste fallback. An explicit
-		// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
-		// so for loopback providers we do not pass it: an eager readline prompt adds
-		// noise to a flow that normally completes through HTTP. `AuthStorage.login`
-		// independently refuses to synthesize the default prompt
-		// for non-paste-code providers, so this is defense-in-depth on the same gate.
-		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
-		await storage.login(provider, {
-			onAuth({ url, launchUrl, instructions }) {
-				process.stdout.write("\nOpen this URL in your browser:\n");
-				// Full URL first so the CLI works from any machine, including SSH
-				// sessions where a `launchUrl` (loopback `/launch` on the OMP
-				// host) would resolve against the caller's browser and fail.
-				// Headless capture is unaffected: it reads the first URL line.
-				process.stdout.write(`${url}\n`);
-				if (launchUrl && launchUrl !== url) {
-					// Local shortcut for the machine running OMP. Terminals or
-					// screen-scrapers narrower than the full URL still get an
-					// unbroken copy target here.
-					process.stdout.write(`Local shortcut (this machine only): ${launchUrl}\n`);
-				}
-				if (instructions) process.stdout.write(`${instructions}\n`);
-				process.stdout.write("\n");
-			},
-			onProgress(message) {
-				process.stdout.write(`${message}\n`);
-			},
-			onPrompt(p) {
-				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
-			},
-			...(usesManualInput
-				? {
-						onManualCodeInput(signal) {
-							return ask("Paste the authorization code (or full redirect URL):", signal);
-						},
-					}
-				: undefined),
-		});
+		await runTerminalOAuthLogin(rl, storage, provider);
 		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
 	} finally {
 		store.close();
-		rl.close();
-	}
-}
-
-/**
- * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
- * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
- */
-function promptLine(rl: readline.Interface, question: string, signal?: AbortSignal): Promise<string> {
-	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	const input = process.stdin as NodeJS.ReadStream;
-	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
-	const wasRaw = supportsRawMode ? input.isRaw : false;
-	let settled = false;
-
-	const cleanup = () => {
-		rl.off("SIGINT", onSigint);
-		signal?.removeEventListener("abort", onAbort);
-		if (supportsRawMode) {
-			input.off("keypress", onKeypress);
-			input.setRawMode?.(wasRaw);
-		}
-	};
-
-	const finish = (result: () => void) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		result();
-	};
-
-	const cancel = () => {
-		finish(() => reject(new Error("Login cancelled")));
-	};
-
-	const onSigint = () => {
-		cancel();
-	};
-
-	const onAbort = () => {
-		finish(() => reject(signal?.reason instanceof Error ? signal.reason : new Error("Login input cancelled")));
-	};
-
-	const onKeypress = (_str: string, key: readline.Key) => {
-		if (key.name === "escape" || (key.ctrl && key.name === "c")) {
-			cancel();
-			rl.close();
-		}
-	};
-
-	if (supportsRawMode) {
-		readline.emitKeypressEvents(input, rl);
-		input.setRawMode(true);
-		input.on("keypress", onKeypress);
-	}
-
-	rl.once("SIGINT", onSigint);
-	if (signal?.aborted) {
-		onAbort();
-	} else if (signal) {
-		signal.addEventListener("abort", onAbort, { once: true });
-		rl.question(question, { signal }, answer => {
-			finish(() => resolve(answer));
-		});
-	} else {
-		rl.question(question, answer => {
-			finish(() => resolve(answer));
-		});
-	}
-	return promise;
-}
-
-async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]): Promise<string> {
-	if (providers.length === 0) {
-		throw new Error("No OAuth providers registered");
-	}
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i].name}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index].id;
-	} finally {
-		rl.close();
 	}
 }
 
@@ -428,31 +278,17 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				process.stdout.write("No credentials stored.\n");
 				return;
 			}
-			providerArg = await pickStoredProviderInteractively(stored);
+			const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+			try {
+				providerArg = stored[await pickIndex(rl, "Select a provider to logout:", stored)];
+			} finally {
+				rl.close();
+			}
 		}
-		store.deleteAuthCredentialsForProvider(providerArg, "logged out by user");
+		await store.deleteAuthCredentials(providerArg, "logged out by user");
 		process.stdout.write(`Logged out of ${providerArg}\n`);
 	} finally {
 		store.close();
-	}
-}
-
-async function pickStoredProviderInteractively(providers: string[]): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider to logout:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i]}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index];
-	} finally {
-		rl.close();
 	}
 }
 
@@ -554,7 +390,7 @@ async function loadImportPlan(
 	for (const file of files) {
 		let json: CliProxyCredentialJson;
 		try {
-			json = (await Bun.file(file).json()) as CliProxyCredentialJson;
+			json = JSON.parse(await fs.readFile(file, "utf8")) as CliProxyCredentialJson;
 		} catch (err) {
 			skipped.push({ file, reason: `unreadable JSON: ${String(err)}` });
 			continue;
@@ -682,7 +518,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	try {
 		for (const entry of entries) {
-			store.upsertAuthCredentialForProvider(entry.provider, entry.credential);
+			await store.upsertAuthCredential(entry.provider, entry.credential);
 			if (!flags.json) process.stdout.write(`${chalk.green("imported")} ${describeImportEntry(entry)}\n`);
 		}
 	} finally {
@@ -713,58 +549,26 @@ function credentialIdentity(provider: string, credential: AuthCredential): strin
 }
 
 /**
- * Build the set of "identities already on the broker" so re-runs are idempotent.
- * For OAuth, identity = email|accountId|projectId, each org-qualified when the
- * row carries an organization (one Anthropic email can hold a Team seat AND a
- * personal Max plan — those must migrate as two rows). A row with NO base
- * identity but an orgId (login recovered neither email nor account) is marked
- * by the org alone, so re-running migrate does not re-upload a stale refresh
- * token over the broker's newer one. For api_key, we collapse to a single
- * marker per provider (broker has no concept of "multiple api keys per
- * provider with different identities"; upsert would coalesce them).
+ * Whether the broker already holds this credential, so re-runs are idempotent.
+ * An OAuth row is held when uploading it would replace a broker row (the store's
+ * own identity match), so no upload overwrites the broker's newer refresh token,
+ * or when a broker row is the same account stored under another identity key, so
+ * no upload duplicates it. API keys collapse to a single one per provider.
  */
-function indexBrokerSnapshot(snapshot: {
-	credentials: Array<{
-		provider: string;
-		credential: { type: string; email?: string; accountId?: string; projectId?: string; orgId?: string };
-	}>;
-}): Map<string, Set<string>> {
-	const out = new Map<string, Set<string>>();
-	for (const entry of snapshot.credentials) {
-		const ids = out.get(entry.provider) ?? new Set<string>();
-		if (entry.credential.type === "api_key") {
-			ids.add("@api_key");
-		} else {
-			const orgSuffix = entry.credential.orgId ? `|org:${entry.credential.orgId}` : "";
-			if (entry.credential.email) ids.add(`email:${entry.credential.email}${orgSuffix}`);
-			if (entry.credential.accountId) ids.add(`accountId:${entry.credential.accountId}${orgSuffix}`);
-			if (entry.credential.projectId) ids.add(`projectId:${entry.credential.projectId}${orgSuffix}`);
-			if (
-				!entry.credential.email &&
-				!entry.credential.accountId &&
-				!entry.credential.projectId &&
-				entry.credential.orgId
-			) {
-				ids.add(`org:${entry.credential.orgId}`);
-			}
-		}
-		out.set(entry.provider, ids);
-	}
-	return out;
-}
-
-function brokerAlreadyHas(existing: Map<string, Set<string>>, provider: string, credential: AuthCredential): boolean {
-	const ids = existing.get(provider);
-	if (!ids) return false;
-	if (credential.type === "api_key") return ids.has("@api_key");
-	const orgSuffix = credential.orgId ? `|org:${credential.orgId}` : "";
-	if (credential.email && ids.has(`email:${credential.email}${orgSuffix}`)) return true;
-	if (credential.accountId && ids.has(`accountId:${credential.accountId}${orgSuffix}`)) return true;
-	if (credential.projectId && ids.has(`projectId:${credential.projectId}${orgSuffix}`)) return true;
-	if (!credential.email && !credential.accountId && !credential.projectId && credential.orgId) {
-		return ids.has(`org:${credential.orgId}`);
-	}
-	return false;
+function brokerAlreadyHas(
+	existing: readonly AuthCredentialSnapshotEntry[],
+	provider: string,
+	credential: AuthCredential,
+): boolean {
+	return existing.some(entry => {
+		if (entry.provider !== provider) return false;
+		if (credential.type === "api_key") return entry.credential.type === "api_key";
+		return (
+			entry.credential.type === "oauth" &&
+			(matchesReplacementCredential(provider, entry.credential, entry.identityKey, credential) ||
+				isSameOAuthAccount(entry.credential, credential))
+		);
+	});
 }
 
 async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
@@ -783,7 +587,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 	const snapshotResult = await client.fetchSnapshot();
 	if (snapshotResult.status !== 200) throw new Error("Auth broker returned no snapshot");
-	const existing = indexBrokerSnapshot(snapshotResult.snapshot);
+	const existing = snapshotResult.snapshot.credentials;
 
 	const plan: MigratePlanEntry[] = [];
 	const skipped: MigrateSkip[] = [];

@@ -10,7 +10,7 @@
  */
 
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
-import type { Api, Context, Model } from "../types";
+import type { Context, Model } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	type OpenAIAnthropicApiFormat,
@@ -45,11 +45,4 @@ export function streamKimi(
 		forwardCacheOptions: true,
 		extraHeaders: getKimiCommonHeaders,
 	});
-}
-
-/**
- * Check if a model is a Kimi Code model.
- */
-export function isKimiModel(model: Model<Api>): boolean {
-	return model.provider === "kimi-code";
 }

@@ -28,6 +28,15 @@ describe("isRetryableCodexFailureEvent", () => {
 		expect(isRetryableCodexFailureEvent({})).toBe(false);
 	});
 
+	it.each([
+		"generic provider failure",
+		"malformed chunk footer",
+		"<StreamReset stream_id:1283, error_code:8, remote_reset:True>",
+		"<StreamReset stream_id:1283, error_code:2, remote_reset:False>",
+	])("keeps api_error with %s outside transport retry", message => {
+		expect(isRetryableCodexFailureEvent({ type: "error", error: { type: "api_error", message } })).toBe(false);
+	});
+
 	it("falls back to response.error when rawEvent.error is not an object", () => {
 		expect(isRetryableCodexFailureEvent({ error: "boom", response: { error: { code: "server_error" } } })).toBe(true);
 	});
@@ -62,6 +71,17 @@ describe("createCodexProviderStreamError", () => {
 		expect(err.code).toBe("server_error");
 		expect(err.message).toContain("error event");
 		expect(err.message).toContain("kaboom");
+	});
+
+	it("preserves a refused remote stream diagnostic while enabling nested response-failure retry", () => {
+		const message = "<StreamReset stream_id:1283, error_code:7, remote_reset:True>";
+		const err = createCodexProviderStreamError({
+			type: "response.failed",
+			response: { error: { type: "api_error", message } },
+		});
+		expect(err.retryable).toBe(true);
+		expect(err.code).toBe("api_error");
+		expect(err.message).toContain(message);
 	});
 
 	it("formats non-error failures via the response-failure path", () => {

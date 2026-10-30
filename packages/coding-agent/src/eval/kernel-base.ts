@@ -1,18 +1,36 @@
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
+import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import { type KernelDisplayOutput, renderKernelDisplay } from "./py/display";
+import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
+import { type EvalDisplayOutput, evalImageMetadata } from "./types";
+
+const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
+
+async function raceControlTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
+	const signal = AbortSignal.timeout(timeoutMs);
+	const { promise: timeout, reject } = Promise.withResolvers<never>();
+	const onAbort = (): void => reject(new Error(reason));
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
 
 export type KernelRuntimeEnv = Record<string, string | null>;
 
 export interface KernelExecuteOptions {
 	id?: string;
+	/** Source filename for file-backed execution and tracebacks. */
+	filename?: string;
 	/** Runtime working directory applied immediately before this request executes. */
 	cwd?: string;
 	/** Managed runtime environment variables applied immediately before this request executes. */
 	env?: Record<string, string | undefined> | Record<string, string | null>;
 	signal?: AbortSignal;
 	onChunk?: (text: string) => Promise<void> | void;
-	onDisplay?: (output: KernelDisplayOutput) => Promise<void> | void;
+	onDisplay?: (output: EvalDisplayOutput) => Promise<void> | void;
 	timeoutMs?: number;
 	silent?: boolean;
 	storeHistory?: boolean;
@@ -26,6 +44,10 @@ export interface KernelExecuteResult {
 	cancelled: boolean;
 	timedOut: boolean;
 	stdinRequested: boolean;
+	/** True when an atomic retained-runtime admission check rejected this execution before user code ran. */
+	admissionRejected?: boolean;
+	/** Tool-bridge envelope the runner sent in a `reply` frame (tool requests only). */
+	reply?: unknown;
 	/**
 	 * True when the kernel subprocess was killed as part of settling this
 	 * execution (e.g. SIGINT was ignored and we escalated to shutdown, or the
@@ -69,19 +91,43 @@ export interface BaseKernelOptions<TExecuteOptions extends KernelExecuteOptions 
 	buildPayload: (code: string, msgId: string, options?: TExecuteOptions) => string;
 }
 
-export type FrameType = "started" | "stdout" | "stderr" | "display" | "result" | "error" | "done";
+export type FrameType =
+	| "started"
+	| "stdout"
+	| "stderr"
+	| "view"
+	| "image"
+	| "status"
+	| "reply"
+	| "error"
+	| "done"
+	| "shadow_snapshot"
+	| "shadow_plan";
 
 export interface Frame {
 	type: FrameType;
 	id?: string;
 	data?: string;
-	bundle?: Record<string, unknown>;
+	text?: string;
+	view?: EvalView;
+	image?: Record<string, unknown>;
+	event?: EvalStatusEvent;
+	value?: unknown;
 	ename?: string;
 	evalue?: string;
 	traceback?: string[];
 	status?: "ok" | "error";
+	operations?: ShadowOperation[];
+	controls?: ShadowControlNode[];
+	barrier?: ShadowBarrier | null;
 	executionCount?: number;
 	cancelled?: boolean;
+	eligible?: boolean;
+	reason?: string;
+	revision?: number;
+	digest?: string;
+	admissionRejected?: boolean;
+	values?: Record<string, unknown>;
 }
 
 interface PendingExecution {
@@ -92,6 +138,8 @@ interface PendingExecution {
 	error?: { name: string; value: string; traceback: string[] };
 	cancelled: boolean;
 	timedOut: boolean;
+	admissionRejected?: boolean;
+	reply?: unknown;
 	stdinRequested: boolean;
 	kernelKilled: boolean;
 	settled: boolean;
@@ -178,11 +226,13 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#proc: Subprocess | null = null;
 	#stdin: Bun.FileSink | null = null;
 	#alive = true;
+	readonly #died = Promise.withResolvers<void>();
 	#disposed = false;
 	#shutdownConfirmed = false;
+	#shutdownInFlight: Promise<KernelShutdownResult> | null = null;
 	#exitedPromise: Promise<number> | null = null;
 	#pending = new Map<string, PendingExecution>();
-	#readBuffer = "";
+	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
 
 	constructor(id: string, options: BaseKernelOptions<TExecuteOptions>) {
@@ -195,7 +245,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
 		void this.#exitedPromise.then(code => {
-			this.#alive = false;
+			this.#markDead();
 			this.#abortPendingExecutions(`${this.#options.languageName} kernel exited with code ${code}`, {
 				kernelKilled: true,
 			});
@@ -207,6 +257,19 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 	isAlive(): boolean {
 		return this.#alive && !this.#disposed;
+	}
+
+	/**
+	 * Settles once the kernel stops accepting work: subprocess exit or the start
+	 * of a shutdown. Retained-state reporting uses it to mark the kernel dead.
+	 */
+	whenDead(): Promise<void> {
+		return this.#died.promise;
+	}
+
+	#markDead(): void {
+		this.#alive = false;
+		this.#died.resolve();
 	}
 
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
@@ -254,6 +317,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				cancelled: pending.cancelled,
 				timedOut: pending.timedOut,
 				stdinRequested: pending.stdinRequested,
+				admissionRejected: pending.admissionRejected,
+				reply: pending.reply,
 				kernelKilled: pending.kernelKilled,
 			});
 		};
@@ -318,19 +383,53 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 
 		requestWritten = true;
+		const transportFailed = (err: unknown) => {
+			if (!pending.settled) {
+				pending.status = "error";
+				pending.cancelled = true;
+				// The kernel is retired below and a partial write may have run code: completion is uncertain.
+				pending.kernelKilled = true;
+				pending.error = {
+					name: "TransportError",
+					value: err instanceof Error ? err.message : String(err),
+					traceback: [],
+				};
+				finalize();
+			}
+			// A broken stdin pipe is terminal even if this request already settled (e.g. aborted first):
+			// retire the kernel so the session starts a fresh one.
+			void this.shutdown();
+		};
 		try {
-			await this.#writeLine(payload);
+			await this.#writeLine(payload, transportFailed);
 		} catch (err) {
-			pending.cancelled = true;
-			pending.error = {
-				name: "TransportError",
-				value: err instanceof Error ? err.message : String(err),
-				traceback: [],
-			};
-			finalize();
+			transportFailed(err);
 		}
 
 		return promise;
+	}
+	async requestControl(
+		payload: string,
+		id = Snowflake.next(),
+		timeoutMs = STARTUP_CONTROL_TIMEOUT_MS,
+	): Promise<Frame> {
+		if (!this.isAlive()) throw new Error(`${this.#options.languageName} kernel is not running`);
+		const deferred = Promise.withResolvers<Frame>();
+		this.#pendingControls.set(id, deferred);
+		try {
+			// A broken stdin pipe is terminal: fail this control request and retire the kernel.
+			await this.#writeLine(payload, err => {
+				deferred.reject(err);
+				void this.shutdown();
+			});
+			return await raceControlTimeout(
+				deferred.promise,
+				timeoutMs,
+				`${this.#options.languageName} control request timed out`,
+			);
+		} finally {
+			this.#pendingControls.delete(id);
+		}
 	}
 
 	async interrupt(): Promise<void> {
@@ -344,10 +443,20 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 	}
 
-	async shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
-		if (this.#shutdownConfirmed) return { confirmed: true };
+	/**
+	 * Concurrent calls (e.g. several in-flight requests hitting the same broken pipe) share one
+	 * shutdown sequence. An unconfirmed shutdown clears the slot so a later call can retry.
+	 */
+	shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
+		if (this.#shutdownConfirmed) return Promise.resolve({ confirmed: true });
+		this.#shutdownInFlight ??= this.#shutdown(options).finally(() => {
+			this.#shutdownInFlight = null;
+		});
+		return this.#shutdownInFlight;
+	}
 
-		this.#alive = false;
+	async #shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
+		this.#markDead();
 		this.#abortPendingExecutions(`${this.#options.languageName} kernel shutdown`, { kernelKilled: true });
 
 		const timeoutMs = options?.timeoutMs ?? this.#options.shutdownGraceMs;
@@ -372,7 +481,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const exited = this.#waitForExitWithTimeout(timeoutMs);
 		let result = await exited;
-		if (!result) {
+		if (result === null) {
 			try {
 				proc.kill("SIGTERM");
 			} catch {
@@ -382,20 +491,20 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			// signal above never reaches anything it spawned. Sweep the group too.
 			killProcessGroup(proc.pid, "SIGTERM");
 			result = await this.#waitForExitWithTimeout(timeoutMs);
-			if (!result) {
+			if (result === null) {
 				try {
 					proc.kill("SIGKILL");
 				} catch {
 					/* ignore */
 				}
 			}
-			// The leader exiting after SIGTERM does not prove its descendants did.
-			// Always finish an attempted group shutdown with a SIGKILL sweep.
-			killProcessGroup(proc.pid, "SIGKILL");
-			if (!result) result = await this.#waitForExitWithTimeout(timeoutMs);
 		}
+		// A confirmed leader exit does not prove its descendants exited, even
+		// when the runner honored the shutdown request without any signals.
+		killProcessGroup(proc.pid, "SIGKILL");
+		if (result === null) result = await this.#waitForExitWithTimeout(timeoutMs);
 
-		const confirmed = !!result;
+		const confirmed = result !== null;
 		if (!confirmed) {
 			// Nothing acknowledged the exit. Record the pid so an operator can find
 			// the survivor; the group SIGKILL above is our last automatic recourse.
@@ -410,6 +519,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	#abortPendingExecutions(reason: string, options?: { kernelKilled?: boolean }): void {
+		for (const pending of this.#pendingControls.values()) {
+			pending.reject(new Error(reason));
+		}
+		this.#pendingControls.clear();
 		if (this.#pending.size === 0) return;
 		const pending = Array.from(this.#pending.values());
 		this.#pending.clear();
@@ -430,40 +543,51 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 	}
 
-	async #writeLine(line: string): Promise<void> {
+	async #writeLine(line: string, onWriteFailed?: (err: unknown) => void): Promise<void> {
 		if (!this.#stdin) {
 			throw new Error(`${this.#options.languageName} kernel stdin is not open`);
 		}
 		if (this.#options.traceIpc) {
 			logger.debug(`${this.#options.languageName}Kernel send`, { preview: line.slice(0, 120) });
 		}
-		this.#stdin.write(`${line}\n`);
-		this.#stdin.flush();
+		// Not awaited: callers' timeouts start after this returns, so a wedged pipe must not block here.
+		// A failed write (sync throw or rejection) is reported through onWriteFailed; the kernel may stay
+		// alive without an exit event.
+		const stdin = this.#stdin;
+		const write = Promise.try(() => stdin.write(`${line}\n`));
+		void write.catch(() => {});
+		void Promise.all([write, Promise.try(() => stdin.flush())]).catch(err => {
+			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: String(err) });
+			onWriteFailed?.(err);
+		});
 	}
 
 	#startReader(stream: ReadableStream<Uint8Array>): void {
-		const reader = stream.getReader();
 		const decoder = new TextDecoder();
 		const loop = async () => {
 			try {
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					this.#readBuffer += decoder.decode(value, { stream: true });
-					await this.#flushFrames();
+				for await (const bytes of readLines(stream)) {
+					const line = decoder.decode(bytes);
+					if (!line.trim()) continue;
+					let frame: Frame;
+					try {
+						frame = JSON.parse(line) as Frame;
+					} catch (err) {
+						logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
+							line: line.slice(0, 200),
+							error: err instanceof Error ? err.message : String(err),
+						});
+						continue;
+					}
+					if (this.#options.traceIpc) {
+						logger.debug(`${this.#options.languageName}Kernel recv`, { type: frame.type, id: frame.id });
+					}
+					await this.#handleFrame(frame);
 				}
-				this.#readBuffer += decoder.decode();
-				await this.#flushFrames();
 			} catch (err) {
 				logger.warn(`${this.#options.languageName} kernel reader failed`, {
 					error: err instanceof Error ? err.message : String(err),
 				});
-			} finally {
-				try {
-					reader.releaseLock();
-				} catch {
-					/* ignore */
-				}
 			}
 		};
 		void loop();
@@ -495,33 +619,14 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		void loop();
 	}
 
-	async #flushFrames(): Promise<void> {
-		while (true) {
-			const nl = this.#readBuffer.indexOf("\n");
-			if (nl < 0) return;
-			const line = this.#readBuffer.slice(0, nl);
-			this.#readBuffer = this.#readBuffer.slice(nl + 1);
-			if (!line.trim()) continue;
-			let frame: Frame;
-			try {
-				frame = JSON.parse(line) as Frame;
-			} catch (err) {
-				logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
-					line: line.slice(0, 200),
-					error: err instanceof Error ? err.message : String(err),
-				});
-				continue;
-			}
-			if (this.#options.traceIpc) {
-				logger.debug(`${this.#options.languageName}Kernel recv`, { type: frame.type, id: frame.id });
-			}
-			await this.#handleFrame(frame);
-		}
-	}
-
 	async #handleFrame(frame: Frame): Promise<void> {
 		const rid = frame.id;
 		if (!rid) return;
+		const control = this.#pendingControls.get(rid);
+		if (control) {
+			control.resolve(frame);
+			return;
+		}
 		const pending = this.#pending.get(rid);
 		if (!pending) return;
 
@@ -536,18 +641,38 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 				return;
 			}
-			case "display":
-			case "result": {
-				const bundle = frame.bundle ?? {};
-				const { text, outputs } = await renderKernelDisplay(bundle);
-				if (text && pending.options?.onChunk) {
-					await pending.options.onChunk(text);
+			case "view": {
+				// The view's text already arrived through stdout; only the pretty view travels here.
+				if (typeof frame.text === "string" && isRecord(frame.view) && pending.options?.onDisplay) {
+					await pending.options.onDisplay({ type: "view", text: frame.text, view: frame.view });
 				}
-				if (outputs.length > 0 && pending.options?.onDisplay) {
-					for (const output of outputs) {
-						await pending.options.onDisplay(output);
-					}
+				return;
+			}
+			case "image": {
+				const image = frame.image;
+				if (
+					isRecord(image) &&
+					typeof image.data === "string" &&
+					typeof image.mimeType === "string" &&
+					pending.options?.onDisplay
+				) {
+					await pending.options.onDisplay({
+						type: "image",
+						data: image.data,
+						mimeType: image.mimeType,
+						...evalImageMetadata(image),
+					});
 				}
+				return;
+			}
+			case "status": {
+				if (isRecord(frame.event) && typeof frame.event.op === "string" && pending.options?.onDisplay) {
+					await pending.options.onDisplay({ type: "status", event: frame.event });
+				}
+				return;
+			}
+			case "reply": {
+				pending.reply = frame.value;
 				return;
 			}
 			case "error": {
@@ -574,6 +699,9 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 				if (frame.cancelled) {
 					pending.cancelled = true;
+				}
+				if (frame.admissionRejected) {
+					pending.admissionRejected = true;
 				}
 				pending.finalize?.();
 				return;

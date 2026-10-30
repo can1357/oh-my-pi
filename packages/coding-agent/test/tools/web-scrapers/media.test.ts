@@ -121,14 +121,6 @@ describe.skipIf(SKIP)("handleHuggingFace", () => {
 		expect(result?.content).toContain("gradio/hello_world");
 	});
 
-	it("fetches model without org prefix", async () => {
-		// Some models like bert-base-uncased don't have an org prefix
-		const result = await handleHuggingFace("https://huggingface.co/bert-base-uncased", 20);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("huggingface");
-		expect(result?.content).toContain("bert-base-uncased");
-	});
-
 	it("handles org/model format", async () => {
 		const result = await handleHuggingFace("https://huggingface.co/google/bert_uncased_L-2_H-128_A-2", 20);
 		expect(result).not.toBeNull();

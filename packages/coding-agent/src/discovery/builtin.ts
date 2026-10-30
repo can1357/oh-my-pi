@@ -4,7 +4,7 @@
  * Primary provider for OMP native configs. Supports all capabilities.
  */
 import * as path from "node:path";
-import { getAgentDir, logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
@@ -30,6 +30,9 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	getProjectDiscoveryCeilings,
+	isForeignUserConfigRoot,
+	isUserConfigRoot,
 	loadFilesFromDir,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
@@ -58,13 +61,15 @@ async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; level: "user" | "project" }>> {
 	const result: Array<{ dir: string; level: "user" | "project" }> = [];
 
-	const projectDir = await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
-	if (projectDir) {
-		result.push({ dir: projectDir, level: "project" });
-	}
+	const projectDir =
+		normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home)
+			? null
+			: await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
+	if (projectDir) result.push({ dir: projectDir, level: "project" });
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
-	const userDir = await ifNonEmptyDir(getAgentDir());
+	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
+	const userDir = await ifNonEmptyDir(ctx.agentDir ?? getAgentDir());
 	if (userDir) {
 		result.push({ dir: userDir, level: "user" });
 	}
@@ -72,13 +77,18 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
-function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
+/** Project ancestors through an inclusive stop directory, but never home or temporary-root ceilings. */
+export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
-	let current = cwd;
+	const ceilings = getProjectDiscoveryCeilings();
+	let current = path.resolve(cwd);
+	const stop = stopAt ? normalizePathForComparison(stopAt) : null;
 	let depth = 0;
 	while (true) {
+		const normalized = normalizePathForComparison(current);
+		if (ceilings.has(normalized)) break;
 		ancestors.push({ dir: current, depth });
-		if (stopAt && current === stopAt) break;
+		if (stop && normalized === stop) break;
 		const parent = path.dirname(current);
 		if (parent === current) break;
 		current = parent;
@@ -87,11 +97,24 @@ function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: stri
 	return ancestors;
 }
 
-async function findNearestProjectConfigDir(
-	cwd: string,
-	repoRoot?: string | null,
-): Promise<{ dir: string; depth: number } | null> {
-	for (const ancestor of getAncestorDirs(cwd, repoRoot)) {
+/** Skip user config roots without stopping the project walk at those directories. */
+export async function* getProjectAncestorDirs(ctx: LoadContext): AsyncGenerator<{ dir: string; depth: number }> {
+	const home = normalizePathForComparison(ctx.home);
+	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
+		if (normalizePathForComparison(ancestor.dir) === home || isUserConfigRoot(ancestor.dir)) continue;
+		if (!ctx.repoRoot && (await isForeignUserConfigRoot(ancestor.dir, PATHS.projectDir))) continue;
+		yield ancestor;
+	}
+}
+
+/**
+ * Nearest `.omp/` between cwd and the repo root. The home directory is never a
+ * project: `~/.omp` is the user config root, so a cwd under home (temp dirs on
+ * Windows, scratch folders) must not load its SYSTEM.md/RULES.md/AGENTS.md as
+ * project config — that also bypasses an overridden agent dir or profile.
+ */
+async function findNearestProjectConfigDir(ctx: LoadContext): Promise<{ dir: string; depth: number } | null> {
+	for await (const ancestor of getProjectAncestorDirs(ctx)) {
 		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
 		if (configDir) return { dir: configDir, depth: ancestor.depth };
 	}
@@ -163,11 +186,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
+			const instructions = typeof serverConfig.instructions === "boolean" ? serverConfig.instructions : undefined;
+			if (instructions === undefined && serverConfig.instructions != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid instructions ${JSON.stringify(serverConfig.instructions)}, ignoring`,
+				);
+			}
+
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
+				instructions,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
@@ -238,58 +269,57 @@ registerProvider<MCPServer>(mcpCapability.id, {
 	load: loadMCPServers,
 });
 
-// System Prompt (SYSTEM.md)
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const items: SystemPrompt[] = [];
+	const warnings: string[] = [];
 
-	const userPath = path.join(getAgentDir(), "SYSTEM.md");
-	const userContent = await readFile(userPath);
-	if (userContent) {
-		items.push({
-			path: userPath,
-			content: userContent,
-			level: "user",
-			_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
-		});
-	}
-
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
-		const projectContent = await readFile(projectPath);
-		if (projectContent) {
-			items.push({
-				path: projectPath,
-				content: projectContent,
-				level: "project",
-				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
-			});
+	const load = async (filePath: string, level: "user" | "project", kind: "text" | "template"): Promise<void> => {
+		const content = await readFile(filePath);
+		if (!content) return;
+		if (kind === "template" && !content.trim()) {
+			warnings.push(`Ignoring empty system prompt template at ${filePath}`);
+			return;
 		}
-	}
+		items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
+	};
 
-	return { items, warnings: [] };
+	// Project entries first: dedupe is first-wins, so a project literal or
+	// template claims its key before a same-scope user file can survive.
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
+	if (nearestProjectConfigDir) {
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
+	}
+	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
+	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
+
+	return { items, warnings };
 }
 
 registerProvider<SystemPrompt>(systemPromptCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Custom system prompt from SYSTEM.md",
+	description: "Custom system prompt from SYSTEM.md and SYSTEM_TEMPLATE.md",
 	priority: PRIORITY,
 	load: loadSystemPrompt,
 });
 
 // Skills
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	// Walk up from cwd finding .omp/skills/ in ancestors (closest first)
-	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home);
-	const projectScans = ancestors.map(({ dir }) =>
-		scanSkillsFromDir(ctx, {
-			dir: path.join(dir, PATHS.projectDir, "skills"),
-			providerId: PROVIDER_ID,
-			level: "project",
-			requireDescription: true,
-		}),
-	);
+	// Walk up from cwd finding .omp/skills/ in ancestors (closest first). Home is
+	// the user config root, never a project (see findNearestProjectConfigDir).
+	const projectScans: Promise<LoadResult<Skill>>[] = [];
+	for await (const { dir } of getProjectAncestorDirs(ctx)) {
+		projectScans.push(
+			scanSkillsFromDir(ctx, {
+				dir: path.join(dir, PATHS.projectDir, "skills"),
+				providerId: PROVIDER_ID,
+				level: "project",
+				requireDescription: true,
+			}),
+		);
+	}
 
 	// User-level scan from ~/.omp/agent/skills/
 	const userScan = scanSkillsFromDir(ctx, {
@@ -385,15 +415,16 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	}
 
 	// Top-level RULES.md is a sticky always-apply rule. Documented in
-	// https://omp.sh/docs/context-files as the file that gets "re-injected near
-	// the current turn so they keep hold across long conversations".
-	// User scope:    ~/.omp/agent/RULES.md
+	// https://omp.sh/docs/context-files: its full body is carried on every
+	// request (system-prompt text, or image frames under snapcompact
+	// system-prompt imaging) so it keeps its hold across long sessions.
+	// User scope:    <agentDir>/RULES.md (~/.omp/agent/RULES.md by default)
 	// Project scope: nearest .omp/RULES.md walking up from cwd to repoRoot
-	const userRulesFile = path.join(getAgentDir(), "RULES.md");
+	const userRulesFile = path.join(ctx.agentDir ?? getAgentDir(), "RULES.md");
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
 	if (nearestProjectConfigDir) {
 		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
 		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
@@ -415,7 +446,8 @@ async function loadStickyRulesFile(filePath: string, level: "user" | "project"):
 	const rule = discoverRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
 	if (!rule) return null;
 	// Force alwaysApply regardless of frontmatter — the whole point of RULES.md
-	// is to be reattached every turn.
+	// is that its body is carried on every request instead of degrading to an
+	// on-demand rulebook entry.
 	return { ...rule, alwaysApply: true };
 }
 
@@ -700,7 +732,10 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 
 		for (const entry of typeEntries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isFile()) continue;
+			// `readDirEntries` is a plain `readdir(withFileTypes)` and reports a symlink as
+			// a link, not a file, so linking a shared hook into the hooks dir would drop it
+			// silently. Match the extension loader and accept links here.
+			if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
 			const hookPath = path.join(typeDir, entry.name);
 			const baseName = entry.name.includes(".") ? entry.name.slice(0, entry.name.lastIndexOf(".")) : entry.name;
@@ -919,7 +954,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
 		const projectContent = await readFile(projectPath);

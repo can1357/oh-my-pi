@@ -13,7 +13,7 @@ import { createInitExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch
 import { createLogExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/log-experiment";
 import { createRunExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/run-experiment";
 import { createUpdateNotesTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/update-notes";
-import type { ASIData, LogDetails, NumericMetricMap, RunDetails } from "@oh-my-pi/pi-coding-agent/autoresearch/types";
+import type { ASIData, LogDetails, NumericMetricMap, RunDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -83,7 +83,9 @@ let templateBaselineCommit: string;
 beforeAll(async () => {
 	templateRepo = makeTempDir("@pi-autoresearch-template-");
 	await Bun.write(path.join(templateRepo.path(), "README.md"), "# baseline\n");
-	await $`git init --initial-branch=main && git config core.autocrlf false && git config core.fsmonitor false && git config user.email tester@example.com && git config user.name Tester && git add -A && git commit -m baseline`
+	// maintenance.auto/gc.auto off: every template below is copied with cpSync,
+	// and a background `git maintenance run --auto` lock would race the copy.
+	await $`git init --initial-branch=main && git config core.autocrlf false && git config core.fsmonitor false && git config maintenance.auto false && git config gc.auto 0 && git config user.email tester@example.com && git config user.name Tester && git add -A && git commit -m baseline`
 		.cwd(templateRepo.path())
 		.quiet();
 	templateBaselineCommit = (await $`git rev-parse HEAD`.cwd(templateRepo.path()).text()).trim();

@@ -1,10 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { splitReaction } from "@oh-my-pi/pi-coding-agent/modes/components/reaction";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { splitReaction } from "@oh-my-pi/pi-tui/chat/reaction";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 
 const W = 60;
@@ -137,6 +137,19 @@ describe("agent reactions in the transcript", () => {
 		reply.pickReactionTarget(transcript.children);
 		expect(bubbleTopRow(user)).toEndWith("✅ ");
 		expect(plain(reply)).toBe("Done.");
+	});
+
+	it("shares the badge row with the live-steering marker on the opposite side", () => {
+		const transcript = new Container();
+		const user = new UserMessageComponent("use tabs", { liveSteered: true });
+		transcript.addChild(user);
+		expect(bubbleTopRow(user)).toStartWith(" *");
+
+		const reply = new AssistantMessageComponent(msg("👍 On it."));
+		reply.pickReactionTarget(transcript.children);
+		expect(bubbleTopRow(user)).toStartWith(" *");
+		expect(bubbleTopRow(user)).toEndWith("👍 ");
+		expect(Bun.stringWidth(bubbleTopRow(user))).toBe(W);
 	});
 
 	it("never reacts past an earlier reply: a post-tool continuation keeps its emoji verbatim", () => {

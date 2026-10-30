@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,7 +14,9 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildBudgetNotice, resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgTaskAgentSoftRequestBudget } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -30,13 +33,17 @@ import { createSessionDefaults } from "../helpers/session-defaults";
  * 2. If the agent still refuses to yield (grace exhausted → hard abort), a
  *    kept-alive agent stays adopted (`idle`), so `irc` can message/resume it
  *    with the same RPC lifecycle/progress frames as the original run.
- * 3. Caller-signal aborts remain terminal, and the irc bus names the aborted
- *    agent precisely instead of claiming it is unknown.
+ * 3. Caller-signal aborts only stop the run: the agent stays resumable via
+ *    `irc`.
  */
 
 interface MockSessionHandle {
 	session: AgentSession;
 	prompts: Array<{ text: string; options?: PromptOptions }>;
+	sentUserMessages: Array<{
+		content: string | unknown[];
+		options?: { deliverAs?: "steer" | "followUp" | "aside"; attribution?: "user" | "agent" };
+	}>;
 	abortCalls: () => number;
 	disposeCalls: () => number;
 }
@@ -56,6 +63,7 @@ function createMockSession(
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: unknown[] = [];
 	const prompts: Array<{ text: string; options?: PromptOptions }> = [];
+	const sentUserMessages: MockSessionHandle["sentUserMessages"] = [];
 	let abortCount = 0;
 	let disposeCount = 0;
 	let promptIndex = 0;
@@ -91,11 +99,14 @@ function createMockSession(
 			return true;
 		},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
-		sendUserMessage: async () => {},
+		sendUserMessage: async (content, options) => {
+			sentUserMessages.push({ content, options });
+		},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
 		},
 		trackIrcReply: () => {},
+		isParentIrcSteer: () => false,
 		deliverIrcMessage: async msg => {
 			const record: CustomMessage = {
 				role: "custom",
@@ -148,6 +159,7 @@ function createMockSession(
 	return {
 		session: session as AgentSession,
 		prompts,
+		sentUserMessages,
 		abortCalls: () => abortCount,
 		disposeCalls: () => disposeCount,
 	};
@@ -254,10 +266,11 @@ describe("runSubprocess soft request budget", () => {
 				isError: false,
 			} as AgentSessionEvent);
 		});
-		mockCreateAgentSession(handle.session);
+		const createAgentSessionSpy = mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
+		const parentSessionFile = `${tempDir.path()}/parent.jsonl`;
 
-		const result = await runSubprocess(baseOptions(id));
+		const result = await runSubprocess({ ...baseOptions(id), sessionFile: parentSessionFile });
 
 		// The budget stop aborted the free-running turn exactly once before the
 		// wrap-up reminder; the second abort (after the terminal yield) is the
@@ -267,6 +280,12 @@ describe("runSubprocess soft request budget", () => {
 		expect(handle.prompts).toHaveLength(2);
 		expect(handle.prompts[1]?.options?.synthetic).toBe(true);
 		expect(handle.prompts[1]?.options?.toolChoice).toEqual({ type: "tool", name: "yield" });
+		expect(handle.sentUserMessages).toContainEqual({
+			content: buildBudgetNotice(2, 2),
+			options: { deliverAs: "steer", attribution: "agent" },
+		});
+		const createOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(createOptions?.sessionManager?.getHeader()?.parentSession).toBe(parentSessionFile);
 		// The forced yield finalizes as a normal completion, not an abort.
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
@@ -364,6 +383,14 @@ describe("runSubprocess soft request budget", () => {
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+		const parked = await SessionManager.open(`${tempDir.path()}/${id}.jsonl`);
+		parked.appendMessage({
+			role: "user",
+			content: "inventory the api surface",
+			timestamp: Date.now(),
+		});
+		await parked.flush();
+		await parked.close();
 		frames.length = 0;
 		// Parking can rebuild an unadvised session; don't retain the prior turn's marker.
 		advisorActive.mockReturnValue(false);
@@ -373,6 +400,32 @@ describe("runSubprocess soft request budget", () => {
 		await revivedTerminal;
 		expectRpcTurn(false);
 		rpcRegistry.dispose();
+	});
+
+	it("fails an irc wake when the parked transcript has no message history", async () => {
+		const id = "BlankScout";
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			// Never yields: budget 2 → stop at 3, grace exhausted at 8.
+			for (let i = 1; i <= 8; i++) {
+				const message = assistantText(`burning request ${i}`);
+				pushMessage(message);
+				emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+			}
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(baseOptions(id));
+		expect(result.aborted).toBe(true);
+		await AgentLifecycleManager.global().park(id);
+		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+
+		const receipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toContain(`Cannot revive subagent "${id}"`);
+		expect(receipt.error).toContain("no message history");
+		expect(AgentRegistry.global().get(id)?.session ?? null).toBeNull();
 	});
 
 	it("a shutdown racing a budget hard-abort follows the shutdown release path", async () => {
@@ -587,7 +640,7 @@ describe("runSubprocess soft request budget", () => {
 		expect(settled).toEqual(["completed"]);
 	});
 
-	it("a caller-signal abort stays terminal and irc names the aborted agent precisely", async () => {
+	it("a caller-signal abort keeps the kept-alive agent resumable via irc", async () => {
 		const id = "CancelledScout";
 		const controller = new AbortController();
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
@@ -603,13 +656,12 @@ describe("runSubprocess soft request budget", () => {
 		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
 
 		expect(result.aborted).toBe(true);
-		expect(AgentRegistry.global().get(id)?.status).toBe("aborted");
-		expect(handle.disposeCalls()).toBeGreaterThanOrEqual(1);
+		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
+		expect(AgentLifecycleManager.global().has(id)).toBe(true);
+		expect(handle.disposeCalls()).toBe(0);
 
 		const receipt = await new IrcBus().send({ from: "Main", to: id, body: "resume" });
-		expect(receipt.outcome).toBe("failed");
-		expect(receipt.error).toMatch(/hard-aborted/);
-		expect(receipt.error).toMatch(new RegExp(`history://${id}`));
+		expect(receipt.outcome).toBe("woken");
 	});
 });
 
@@ -632,5 +684,65 @@ describe("resolveSoftRequestBudget", () => {
 		expect(resolveSoftRequestBudget("scout", 0)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", -5)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
+	});
+
+	it("lets an agent's own entry replace the configured budget and the bundled ceiling", () => {
+		expect(resolveSoftRequestBudget("lead", 200, { lead: 400 })).toBe(400);
+		expect(resolveSoftRequestBudget("scout", 200, { scout: 150 })).toBe(150);
+		expect(resolveSoftRequestBudget("task", 200, { task: 50 })).toBe(50);
+	});
+
+	it("keeps agents without an entry on the configured budget and bundled ceilings", () => {
+		const agentBudgets = { lead: 400 };
+		expect(resolveSoftRequestBudget("task", 200, agentBudgets)).toBe(200);
+		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+		expect(resolveSoftRequestBudget("sonic", 200, agentBudgets)).toBe(100);
+	});
+
+	it("disables only the named agent's guard with an entry of 0", () => {
+		expect(resolveSoftRequestBudget("lead", 200, { lead: 0 })).toBe(0);
+		expect(resolveSoftRequestBudget("task", 200, { lead: 0 })).toBe(200);
+	});
+
+	it("applies an agent's entry when the configured budget disables the guard", () => {
+		expect(resolveSoftRequestBudget("lead", 0, { lead: 400 })).toBe(400);
+		expect(resolveSoftRequestBudget("task", 0, { lead: 400 })).toBe(0);
+	});
+});
+
+describe("task.agentSoftRequestBudget", () => {
+	it("rejects entries that are not non-negative integer request counts", () => {
+		for (const budget of [-1, 1.5, "400", [400]]) {
+			expect(() => Settings.isolated({ "task.agentSoftRequestBudget": { lead: budget } })).toThrow(
+				"Invalid task.agentSoftRequestBudget.lead",
+			);
+		}
+		expect(() => Settings.isolated({ "task.agentSoftRequestBudget": [400] })).toThrow(
+			"Invalid task.agentSoftRequestBudget:",
+		);
+	});
+
+	it("lets a higher settings layer clear a lower layer's entry with null", async () => {
+		using tempDir = TempDir.createSync("@pi-agent-budget-");
+		const agentDir = path.join(tempDir.path(), "agent");
+		const overlay = path.join(tempDir.path(), "overlay.yml");
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			JSON.stringify({ task: { agentSoftRequestBudget: { scout: 150, lead: 400 } } }),
+		);
+		await Bun.write(overlay, JSON.stringify({ task: { agentSoftRequestBudget: { scout: null } } }));
+
+		// Ambient overlays would join the layers under test.
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		delete process.env.PI_CONFIG_FILES;
+		try {
+			const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
+			const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
+			expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+			expect(resolveSoftRequestBudget("lead", 200, agentBudgets)).toBe(400);
+		} finally {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		}
 	});
 });

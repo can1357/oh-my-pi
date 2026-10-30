@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
 	runEvalCompletion,
@@ -21,7 +22,11 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
-import { ToolError } from "../../src/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { CostGate } from "../../src/session/cost-gate";
+import { rejectionOf } from "../helpers/rejection";
+
+import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 async function runEvalCompletionAndWait(
 	args: unknown,
@@ -64,9 +69,20 @@ const REASONING_SLOW = makeModel("p", "slow", {
 	reasoning: true,
 	thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
 });
+const MAX_EFFORTS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] as const;
+const XHIGH_EFFORTS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
+
+function makeReasoningModel(id: string, efforts: readonly Effort[] = MAX_EFFORTS): Model<Api> {
+	return makeModel("p", id, {
+		api: "anthropic-messages",
+		reasoning: true,
+		thinking: { efforts: [...efforts], mode: "anthropic-adaptive" },
+	});
+}
 
 interface SessionOptions {
 	available?: Model<Api>[];
+	cwd?: string;
 	apiKey?: string | null;
 	activeModel?: string;
 	roles?: Partial<Record<"smol" | "default" | "slow", string>>;
@@ -79,12 +95,15 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 		const value = roles[role as keyof typeof roles];
 		if (value) settings.setModelRole(role, value);
 	}
+	const available = opts.available ?? [SMOL, DEFAULT, SLOW];
 	const modelRegistry = {
-		getAvailable: () => opts.available ?? [SMOL, DEFAULT, SLOW],
+		getAvailable: () => available,
+		find: (provider: string, id: string) => available.find(model => model.provider === provider && model.id === id),
 		getApiKey: async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 	} as unknown as ModelRegistry;
 	return {
+		cwd: opts.cwd ?? process.cwd(),
 		settings,
 		modelRegistry,
 		getActiveModelString: () => opts.activeModel ?? "p/default",
@@ -132,7 +151,8 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const code = [
 		"import json",
 		'plain = completion("hi", model="smol").wait()',
-		'structured = completion("hi", schema={"type": "object"}).wait()',
+		// `await` resolves on a worker thread; it must keep the cell's run context.
+		'structured = await completion("hi", schema={"type": "object"})',
 		'print(json.dumps({"plain": plain, "structured": structured}))',
 	].join("\n");
 	await Bun.write(
@@ -159,6 +179,7 @@ const settings = Settings.isolated({ "async.enabled": false, "task.isolation.ena
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
 const session = {
+	cwd: ${JSON.stringify(tempDir.path())},
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
@@ -224,6 +245,20 @@ describe("runEvalCompletion", () => {
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
 	});
 
+	it("counts each completion against the session's cost cap and refuses at it", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.cost.total = 1.2;
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const session = { ...makeSession(), costGate } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		expect(costGate.spent).toBe(1.2);
+		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
+		expect(String(refused)).toContain("Cost cap reached");
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
 	it("prefers the session active model for the default tier, falling back to @default", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
 		const session = makeSession({ available: [SMOL, DEFAULT, SLOW], activeModel: "p/slow" });
@@ -232,6 +267,271 @@ describe("runEvalCompletion", () => {
 
 		const model = spy.mock.calls[0]?.[0] as Model<Api>;
 		expect(`${model.provider}/${model.id}`).toBe("p/slow");
+	});
+
+	it("uses the tier fallback chain after the primary model fails", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+		expect(result).toEqual({
+			text: "fallback answer",
+			details: { model: "p/fallback", tier: "smol", structured: false },
+		});
+	});
+
+	it("retries the same model at a lower effort when the fallback chain suffixes it", async () => {
+		const session = makeSession({ available: [SMOL, DEFAULT, REASONING_SLOW], roles: { slow: "p/slow" } });
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/slow:low"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "low-effort answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["slow", "slow"]);
+		const primaryOpts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		const fallbackOpts = spy.mock.calls[1]?.[2] as { reasoning?: unknown };
+		expect(primaryOpts.reasoning).toBe(Effort.High);
+		expect(fallbackOpts.reasoning).toBe(Effort.Low);
+		expect(result.text).toBe("low-effort answer");
+	});
+
+	it("applies the tier chain when the role assignment is too unqualified to parse", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback], roles: { smol: "smol" } });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+		expect(result.text).toBe("fallback answer");
+	});
+
+	it("walks into a failed fallback's own model chain", async () => {
+		const b = makeModel("p", "b");
+		const c = makeModel("p", "c");
+		const session = makeSession({ available: [SMOL, b, c] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "c"]);
+		expect(result.text).toBe("c answer");
+	});
+
+	it("terminates on cyclic fallback chains instead of looping", async () => {
+		const b = makeModel("p", "b");
+		const session = makeSession({ available: [SMOL, b] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b"], "p/b": ["p/smol"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "always down" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"always down",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b"]);
+	});
+
+	it("resolves nested fallbacks without the root tier hint", async () => {
+		const [b, c, d, e] = ["b", "c", "d", "e"].map(id => makeModel("p", id));
+		const session = makeSession({ available: [SMOL, b, c, d, e] });
+		session.settings.setModelRole("vision", "p/b");
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b", "p/c"], vision: ["p/d", "p/e"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "d down" }))
+			.mockResolvedValueOnce(assistant({ text: "e answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "d", "e"]);
+		expect(result.text).toBe("e answer");
+	});
+
+	it("inherits the failed candidate's effort for bare nested entries", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const b = makeModel("p", "b", { ...thinking });
+		const c = makeModel("p", "c", { ...thinking });
+		const session = makeSession({ available: [REASONING_SLOW, b, c], roles: { slow: "p/slow" } });
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/b:low"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "slow down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const efforts = spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning);
+		expect(efforts).toEqual([Effort.High, Effort.Low, Effort.Low]);
+	});
+
+	it("keeps reasoning disabled for bare nested entries after an :off fallback", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const b = makeModel("p", "b", { ...thinking });
+		const c = makeModel("p", "c", { ...thinking });
+		const session = makeSession({ available: [REASONING_SLOW, b, c], roles: { slow: "p/slow" } });
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/b:off"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "slow down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const nested = spy.mock.calls[2]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(nested.reasoning).toBeUndefined();
+		expect(nested.disableReasoning).toBe(true);
+	});
+
+	it("inherits disabled reasoning for a bare fallback after an explicit :off primary", async () => {
+		const primary = makeReasoningModel("a-primary");
+		const fallback = makeReasoningModel("a-fallback");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/a-primary:off" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/a-fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const fallbackOpts = spy.mock.calls[1]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(fallbackOpts.reasoning).toBeUndefined();
+		expect(fallbackOpts.disableReasoning).toBe(true);
+	});
+
+	it("skips keyless fallbacks without spending retry budget", async () => {
+		const b = makeModel("p", "b");
+		const c = makeModel("p", "c");
+		const session = makeSession({ available: [SMOL, b, c] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b", "p/c"] });
+		cfgRetryMaxRetries.set(session.settings, 1);
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async model => (model.id === "b" ? undefined : "test-key");
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		// b never reaches completeSimple: the keyless preflight skips it.
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "c"]);
+		expect(result.text).toBe("c answer");
+	});
+
+	it("walks shared descendants once per inherited effort", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const models = Object.fromEntries(["b", "d", "c", "e"].map(id => [id, makeModel("p", id, { ...thinking })]));
+		const session = makeSession({
+			available: [REASONING_SLOW, models.b, models.d, models.c, models.e],
+			roles: { slow: "p/slow" },
+		});
+		cfgRetryFallbackChains.set(session.settings, {
+			slow: ["p/b:low", "p/d:high"],
+			"p/b": ["p/c"],
+			"p/d": ["p/c"],
+			"p/c": ["p/e"],
+		});
+		const failures = ["slow", "b", "c:low", "e:low", "d", "c:high"].map(
+			name => () => assistant({ stopReason: "error", errorMessage: `${name} down` }),
+		);
+		const spy = vi.spyOn(ai, "completeSimple");
+		for (const respond of failures) spy.mockResolvedValueOnce(respond());
+		spy.mockResolvedValue(assistant({ text: "e:high answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["slow", "b", "c", "e", "d", "c", "e"]);
+		const efforts = spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning);
+		expect(efforts).toEqual([Effort.High, Effort.Low, Effort.Low, Effort.Low, Effort.High, Effort.High, Effort.High]);
+		expect(result.text).toBe("e:high answer");
+	});
+
+	it("stops the candidate walk once retry.maxRetries is spent", async () => {
+		const models = ["b1", "b2", "b3"].map(id => makeModel("p", id));
+		const session = makeSession({ available: [SMOL, ...models] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/b1", "p/b2", "p/b3"] });
+		cfgRetryMaxRetries.set(session.settings, 1);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "quota exhausted" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"quota exhausted",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b1"]);
+	});
+
+	it("attempts only the primary when retry.maxRetries is zero", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		cfgRetryMaxRetries.set(session.settings, 0);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "quota exhausted" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"quota exhausted",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol"]);
+	});
+
+	it("forwards the session id to the API key lookup", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession();
+		session.getSessionId = () => "sess-1";
+		const seen: unknown[][] = [];
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async (model, sessionId, options) => {
+			seen.push([model, sessionId, options]);
+			return "test-key";
+		};
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(seen.length).toBe(1);
+		expect(seen[0]?.[1]).toBe("sess-1");
 	});
 
 	it("returns the completion text in plain mode", async () => {
@@ -286,6 +586,288 @@ describe("runEvalCompletion", () => {
 			{ session: makeSession() },
 		);
 		expect(JSON.parse(result.text)).toEqual({ answer: 7 });
+	});
+	it("honors an explicit :max selector on a slow primary", async () => {
+		const model = makeReasoningModel("slow-max");
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow-max:max" } });
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(opts.reasoning).toBe(Effort.Max);
+		expect(opts.disableReasoning).toBe(false);
+	});
+
+	it("clamps an explicit :max selector to the model's highest supported effort", async () => {
+		const model = makeReasoningModel("slow-clamp", XHIGH_EFFORTS);
+		const session = makeSession({
+			available: [SMOL, DEFAULT, model],
+			roles: { slow: "p/slow-clamp:max" },
+		});
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		expect(opts.reasoning).toBe(Effort.XHigh);
+	});
+
+	it("maps an explicit :off selector to disabled reasoning", async () => {
+		const model = makeReasoningModel("slow-off");
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow-off:off" } });
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(opts.reasoning).toBeUndefined();
+		expect(opts.disableReasoning).toBe(true);
+	});
+
+	it("treats :auto and a bare slow selector as the tier's default effort", async () => {
+		const model = makeReasoningModel("slow-auto");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow-auto:auto" } }) },
+		);
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow-auto" } }) },
+		);
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			Effort.High,
+			Effort.High,
+		]);
+	});
+
+	it("does not parse :max from a literal model id as an effort selector", async () => {
+		const model = makeReasoningModel("slow:max");
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/slow:max" } });
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const resolved = spy.mock.calls[0]?.[0] as Model<Api>;
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		expect(`${resolved.provider}/${resolved.id}`).toBe("p/slow:max");
+		expect(opts.reasoning).toBe(Effort.High);
+	});
+
+	it.each(["p/slow:max", "P/Slow:max", "P/slow:max"])(
+		"preserves the tier effort for the case-insensitive literal selector %s",
+		async selector => {
+			const model = makeReasoningModel("Slow:max");
+			const session = makeSession({ available: [model], roles: { slow: selector } });
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "literal answer" }));
+
+			const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+			expect(result.text).toBe("literal answer");
+			expect(spy.mock.calls[0]?.[0]).toMatchObject({ id: "Slow:max" });
+			expect(spy.mock.calls[0]?.[2]).toMatchObject({ reasoning: Effort.High });
+		},
+	);
+
+	it("honors a valid short qualified p/a:max selector on a slow primary", async () => {
+		const model = makeReasoningModel("a");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/a:max" } });
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		expect(opts.reasoning).toBe(Effort.Max);
+	});
+
+	it("honors a valid short qualified p/a:off selector on a slow primary", async () => {
+		const model = makeReasoningModel("a");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "p/a:off" } });
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(opts.reasoning).toBeUndefined();
+		expect(opts.disableReasoning).toBe(true);
+	});
+
+	it("keeps unqualified literal :max and :auto ids at the tier default effort", async () => {
+		const literalMax = makeReasoningModel("a:max");
+		const literalAuto = makeReasoningModel("a:auto");
+		const available = [SMOL, DEFAULT, literalMax, literalAuto];
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available, roles: { slow: "A:max" } }) },
+		);
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available, roles: { slow: "a:auto" } }) },
+		);
+
+		const resolved = spy.mock.calls.map(call => (call[0] as Model<Api>).id);
+		const efforts = spy.mock.calls.map(call => {
+			const opts = call[2] as { reasoning?: unknown };
+			return opts.reasoning;
+		});
+		expect(resolved).toEqual(["a:max", "a:auto"]);
+		expect(efforts).toEqual([Effort.High, Effort.High]);
+	});
+
+	it("applies explicit :max to an unqualified selector when no literal id exists", async () => {
+		const model = makeReasoningModel("a");
+		const session = makeSession({ available: [SMOL, DEFAULT, model], roles: { slow: "a:max" } });
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const resolved = spy.mock.calls[0]?.[0] as Model<Api>;
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		expect(resolved.id).toBe("a");
+		expect(opts.reasoning).toBe(Effort.Max);
+	});
+
+	it("keeps smol and default selectors from changing their provider options", async () => {
+		const smol = makeReasoningModel("smol");
+		const activeDefault = makeReasoningModel("default");
+		const session = makeSession({
+			available: [smol, activeDefault],
+			roles: { smol: "p/smol:max" },
+			activeModel: "p/default:max",
+		});
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		await runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			undefined,
+			undefined,
+		]);
+		expect(spy.mock.calls.map(call => (call[2] as { disableReasoning?: unknown }).disableReasoning)).toEqual([
+			false,
+			false,
+		]);
+	});
+
+	it.each([
+		{ name: "bare low-only primary", selector: "p/limited", primary: makeReasoningModel("limited", [Effort.Low]) },
+		{
+			name: "auto low-only primary",
+			selector: "p/limited:auto",
+			primary: makeReasoningModel("limited", [Effort.Low]),
+		},
+		{
+			name: "inherit low-only primary",
+			selector: "p/limited:inherit",
+			primary: makeReasoningModel("limited", [Effort.Low]),
+		},
+		{ name: "bare non-reasoning primary", selector: "p/limited", primary: makeModel("p", "limited") },
+	])("preserves fallback tier defaults after $name", async ({ selector, primary }) => {
+		const fallback = makeReasoningModel("fallback-default");
+		const session = makeSession({
+			available: [primary, fallback],
+			roles: { slow: selector },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/fallback-default"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls[1]?.[0].id).toBe("fallback-default");
+		expect(spy.mock.calls[1]?.[2]?.reasoning).toBe(Effort.High);
+	});
+
+	it("inherits an explicit primary effort for a bare fallback", async () => {
+		const primary = makeReasoningModel("slow-inherit");
+		const fallback = makeReasoningModel("fallback-inherit");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/slow-inherit:max" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/fallback-inherit"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			Effort.Max,
+			Effort.Max,
+		]);
+	});
+
+	it("lets an explicit fallback effort override the inherited primary effort", async () => {
+		const primary = makeReasoningModel("slow-override");
+		const fallback = makeReasoningModel("fallback-override");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/slow-override:max" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/fallback-override:low"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning)).toEqual([
+			Effort.Max,
+			Effort.Low,
+		]);
+	});
+
+	it("treats :auto on a fallback as inherited effort, not a concrete override", async () => {
+		const primary = makeReasoningModel("a-auto-primary");
+		const fallback = makeReasoningModel("a-auto-fallback");
+		const session = makeSession({
+			available: [SMOL, DEFAULT, primary, fallback],
+			roles: { slow: "p/a-auto-primary:max" },
+		});
+		cfgRetryFallbackChains.set(session.settings, { slow: ["p/a-auto-fallback:auto"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "primary down" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const efforts = spy.mock.calls.map(call => {
+			const opts = call[2] as { reasoning?: unknown };
+			return opts.reasoning;
+		});
+		expect(efforts).toEqual([Effort.Max, Effort.Max]);
+	});
+
+	it("does not request reasoning for explicit :max on non-reasoning or empty-effort models", async () => {
+		const nonReasoning = makeModel("p", "a-no-reasoning");
+		const emptyEfforts = makeReasoningModel("a-empty-efforts", []);
+		const available = [SMOL, DEFAULT, nonReasoning, emptyEfforts];
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available, roles: { slow: "p/a-no-reasoning:max" } }) },
+		);
+		await runEvalCompletionAndWait(
+			{ prompt: "q", model: "slow" },
+			{ session: makeSession({ available, roles: { slow: "p/a-empty-efforts:max" } }) },
+		);
+
+		const nonReasoningOpts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		const emptyEffortsOpts = spy.mock.calls[1]?.[2] as { reasoning?: unknown };
+		expect(nonReasoningOpts.reasoning).toBeUndefined();
+		expect(emptyEffortsOpts.reasoning).toBeUndefined();
 	});
 
 	it("requests reasoning only for the slow tier on a reasoning-capable model", async () => {
@@ -352,6 +934,37 @@ describe("runEvalCompletion", () => {
 		).rejects.toBeInstanceOf(ToolError);
 	});
 
+	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
+		const total = EVAL_HANDLE_CONCURRENCY + 8;
+		const gate = Promise.withResolvers<void>();
+		let inFlight = 0;
+		let peak = 0;
+		const admitted = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			if (inFlight === EVAL_HANDLE_CONCURRENCY) admitted.resolve();
+			await gate.promise;
+			inFlight--;
+			return assistant({ text: "ok" });
+		});
+		const session = makeSession();
+
+		const handles = await Promise.all(
+			Array.from({ length: total }, () => runEvalCompletion({ prompt: "q", model: "smol" }, { session })),
+		);
+		await admitted.promise;
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+		gate.resolve();
+		const waited = await runEvalWait(
+			{ items: handles.map(handle => ({ kind: "completion", id: handle.id })) },
+			{ session },
+		);
+
+		expect(waited.items.map(item => item.status)).toEqual(Array(total).fill("completed"));
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+	});
+
 	it("pauses the idle watchdog while a slow completion() request is in flight", async () => {
 		vi.useFakeTimers();
 		try {
@@ -416,7 +1029,7 @@ describe("completion() through eval runtimes", () => {
 				"const [plain, structured] = await wait(handles);",
 				"return JSON.stringify({ plain, structured });",
 			].join("\n"),
-			{ cwd: tempDir.path(), sessionId, session: makeSession(), sessionFile },
+			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
 		);
 
 		expect(result.exitCode).toBe(0);
@@ -424,6 +1037,55 @@ describe("completion() through eval runtimes", () => {
 			plain: "hello from smol",
 			structured: { ok: true, n: 3 },
 		});
+	});
+
+	it("waits for a completion started in an earlier JavaScript cell", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-cells-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-completion-cells:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "hello from the next cell" }));
+
+		const started = await executeJs(
+			'var handles = [completion("hi", { model: "smol" })]; print("started");',
+			options,
+		);
+		expect(started.exitCode).toBe(0);
+		expect(started.output.trim()).toBe("started");
+
+		const result = await executeJs("print((await wait(handles))[0]);", options);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("hello from the next cell");
+	});
+
+	it("times out waiting on a running completion started in an earlier JavaScript cell", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-cells-timeout-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-completion-cells-timeout:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		// The model call stays running until afterEach releases (aborts) the handle.
+		vi.spyOn(ai, "completeSimple").mockImplementation((_model, _context, opts) => {
+			const { promise, reject } = Promise.withResolvers<AssistantMessage>();
+			opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+			return promise;
+		});
+
+		const started = await executeJs('var handles = [completion("hi", { model: "smol" })];', options);
+		expect(started.exitCode).toBe(0);
+
+		// Real clock: the timeout is enforced by the host `__wait__` bridge across the worker boundary.
+		const result = await executeJs(
+			"try { await wait(handles, { timeout: 0.05 }); } catch (error) { print(error.name); }",
+			options,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("TimeoutError");
 	});
 
 	it("exposes plain and structured completion() in the Python runtime", async () => {

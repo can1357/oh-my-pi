@@ -13,9 +13,10 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -102,13 +103,17 @@ beforeEach(() => {
 		linkedWorktree: () => null,
 	} as unknown as VcsGitRepo;
 	vi.spyOn(vcs, "git").mockReturnValue(gitRepository);
-	vi.spyOn(vcs, "repo").mockReturnValue({
+	const repository = {
 		kind: () => "git",
 		asGit: () => gitRepository,
 		asJj: () => null,
 		root: () => fakeRepoInfo.repoRoot,
 		watchTarget: () => fakeRepoInfo.headPath,
-	} as unknown as VcsRepo);
+	} as unknown as VcsRepo;
+	vi.spyOn(vcs, "repo").mockReturnValue(repository);
+	// The render path resolves the branch through the display detector first;
+	// left unstubbed it finds the real checkout and caches its branch.
+	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repository);
 	// Bypass the delayed default-branch resolver used by `#isDefaultBranch`;
 	// synchronous seed of "main" is enough to make the check return false.
 });
@@ -131,7 +136,7 @@ describe("StatusLineComponent PR lookup timeout guard", () => {
 			return { exitCode: 1, stdout: "", stderr: "" };
 		});
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegmentSettings);
 		try {
 			// Render triggers `#lookupPr` → github.run.
@@ -161,7 +166,7 @@ describe("StatusLineComponent PR lookup timeout guard", () => {
 		// throws.
 		vi.spyOn(github, "run").mockRejectedValue(new Error("simulated timeout"));
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegmentSettings);
 		try {
 			// First render fires the (rejecting) lookup.

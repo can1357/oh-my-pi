@@ -12,13 +12,61 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import artifactDoc from "../prompts/internal-urls/artifact.md" with { type: "text" };
 import { artifactsDirsFromRegistry } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+import type {
+	InternalResource,
+	InternalUrl,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeSpec,
+	UrlCompletion,
+} from "./types";
 
 const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Sorted artifact ids for `complete()`, keyed by the scanned dir set.
+ * Completion runs per keystroke; a short reuse window avoids re-reading every
+ * artifacts dir on each key.
+ */
+const completionIds = new LRUCache<string, Promise<string[]>>({ max: 8, ttl: 2000 });
+
+async function scanArtifactIds(dirs: string[]): Promise<string[]> {
+	const listings = await Promise.all(
+		dirs.map(async dir => {
+			try {
+				return await fs.readdir(dir);
+			} catch (err) {
+				if (isEnoent(err)) return [];
+				throw err;
+			}
+		}),
+	);
+	const ids = new Set<string>();
+	for (const files of listings) {
+		for (const f of files) {
+			const m = f.match(/^(\d+)\./);
+			if (m) ids.add(m[1]!);
+		}
+	}
+	return [...ids].sort((a, b) => Number(a) - Number(b));
+}
+
+function artifactIdsForCompletion(): Promise<string[]> {
+	const dirs = artifactsDirsFromRegistry();
+	const key = dirs.join("\0");
+	const cached = completionIds.get(key);
+	if (cached) return cached;
+	const ids = scanArtifactIds(dirs);
+	completionIds.set(key, ids);
+	ids.catch(() => completionIds.delete(key));
+	return ids;
+}
+
 /** Filesystem location for a session artifact, resolved without materializing its content. */
-export interface ResolvedArtifactFile {
+interface ResolvedArtifactFile {
 	id: string;
 	path: string;
 	size: number;
@@ -35,23 +83,41 @@ function parseArtifactId(url: InternalUrl): string {
 	return id;
 }
 
+/** An artifact id no session artifacts dir backs; `locate` maps it to null, `resolve` surfaces it. */
+class MissingArtifactError extends Error {}
+
+/**
+ * The caller's own in-memory spill for `id`, when the caller has no artifacts
+ * dir (`--no-session`, SDK). It wins over registry-backed files: ids are
+ * per-session counters, so another session's `<id>.*` file is not this one.
+ */
+function callerInMemoryArtifact(id: string, context?: ResolveContext): string | null {
+	if (context?.localProtocolOptions?.getArtifactsDir?.()) return null;
+	if (context?.session?.seanceSourceArtifactsDir) return null;
+	return context?.session?.sessionManager?.getArtifactContent?.(id) ?? null;
+}
+
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
-export async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
+async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
 
 	// Artifact ids are per-session counters; in multi-session hosts the same
 	// id exists in several dirs. Pin resolution to the calling session's
 	// artifacts dir first so `artifact://3` means *this* session's #3.
-	const dirs = artifactsDirsFromRegistry();
 	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
-	if (pinnedDir) {
+	// A seance reads only its own artifacts plus the consulted source's, in
+	// place; its own ids are allocated past the source's, so neither shadows.
+	const seanceDir = context?.session?.seanceSourceArtifactsDir;
+	const dirs = seanceDir ? [] : artifactsDirsFromRegistry();
+	if (seanceDir) dirs.push(...(pinnedDir ? [pinnedDir] : []), seanceDir);
+	else if (pinnedDir) {
 		const pinnedIndex = dirs.indexOf(pinnedDir);
 		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
 		dirs.unshift(pinnedDir);
 	}
 
 	if (dirs.length === 0) {
-		throw new Error("No session - artifacts unavailable");
+		throw new MissingArtifactError("No session - artifacts unavailable");
 	}
 
 	let foundPath: string | undefined;
@@ -79,13 +145,13 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 	}
 
 	if (!anyDirExists) {
-		throw new Error("No artifacts directory found");
+		throw new MissingArtifactError("No artifacts directory found");
 	}
 
 	if (!foundPath) {
 		const sorted = [...availableIds].sort((a, b) => Number(a) - Number(b));
 		const availableStr = sorted.length > 0 ? sorted.join(", ") : "none";
-		throw new Error(`Artifact ${id} not found. Available: ${availableStr}`);
+		throw new MissingArtifactError(`Artifact ${id} not found. Available: ${availableStr}`);
 	}
 
 	const stat = await Bun.file(foundPath).stat();
@@ -97,24 +163,49 @@ export async function resolveArtifactFile(url: InternalUrl, context?: ResolveCon
 
 export class ArtifactProtocolHandler implements ProtocolHandler {
 	readonly scheme = "artifact";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: true,
+		artifactStore: true,
+		linkable: true,
+	};
+
+	promptDoc(): string {
+		return artifactDoc.trim();
+	}
+
+	/** Backing artifact file; null for unknown ids, throws the resolve errors for malformed ones. */
+	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
+		// No backing file: the read tool falls through to `resolve` and applies selectors in memory.
+		if (callerInMemoryArtifact(parseArtifactId(url), context) !== null) return null;
+		try {
+			return (await resolveArtifactFile(url, context)).path;
+		} catch (error) {
+			if (error instanceof MissingArtifactError) return null;
+			throw error;
+		}
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const artifact = await resolveArtifactFile(url, context);
-
-		// Path-only callers (search/grep, bash URL expansion) never touch the
-		// artifact bytes. Return the resource shape so those flows keep working
-		// on artifacts of any size — only content materialization is gated.
-		if (context?.pathOnly) {
+		// A non-persistent session (`--no-session`, SDK) spills into memory
+		// instead of an artifacts dir; the `artifact://` link the truncation
+		// footer advertises must read that copy. The bytes are already resident,
+		// so the size gate below (which avoids loading a large file) does not
+		// apply; the read tool pages and limits the content it returns.
+		const inMemory = callerInMemoryArtifact(parseArtifactId(url), context);
+		if (inMemory !== null) {
 			return {
 				url: url.href,
-				content: "",
+				content: inMemory,
 				contentType: "text/plain",
-				size: artifact.size,
-				sourcePath: artifact.path,
+				size: Buffer.byteLength(inMemory, "utf8"),
 			};
 		}
+		const artifact = await resolveArtifactFile(url, context);
 
+		// Path consumers (search, the shell filesystem) use `locate`, which never
+		// reads the bytes; only content materialization is size-gated.
 		if (artifact.size > MAX_INLINE_ARTIFACT_BYTES) {
 			throw new Error(
 				`Artifact ${artifact.id} is ${artifact.size} bytes; full internal resolution is blocked. Use read selectors such as artifact://${artifact.id}:1-3000 or artifact://${artifact.id}:raw:1-3000, and use the artifact file path for search/copy workflows: ${artifact.path}`,
@@ -132,20 +223,6 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
-		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
-			let files: string[];
-			try {
-				files = await fs.readdir(dir);
-			} catch (err) {
-				if (isEnoent(err)) continue;
-				throw err;
-			}
-			for (const f of files) {
-				const m = f.match(/^(\d+)\./);
-				if (m) ids.add(m[1]!);
-			}
-		}
-		return [...ids].sort((a, b) => Number(a) - Number(b)).map(value => ({ value }));
+		return (await artifactIdsForCompletion()).map(value => ({ value }));
 	}
 }

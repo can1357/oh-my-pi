@@ -4,10 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
-	type ActiveRepoContext,
 	resolveActiveRepoContext,
 	resolveActiveRepoContextSync,
 } from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 
 const itWithSymlinkPrivilege = process.platform === "win32" ? it.skip : it;
 
@@ -58,6 +58,63 @@ describe("resolveActiveRepoContext", () => {
 		fs.writeFileSync(path.join(cwd, "plain-file.txt"), "ignored\n", "utf8");
 
 		await expectResolvers(cwd, null);
+	});
+
+	it("ignores a leftover child .git directory without HEAD", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		fs.mkdirSync(path.join(cwd, "leftover", ".git", "objects"), { recursive: true });
+
+		await expectResolvers(cwd, null);
+	});
+
+	it("does not accept a directory named HEAD as repository metadata", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		fs.mkdirSync(path.join(cwd, "leftover", ".git", "HEAD"), { recursive: true });
+
+		await expectResolvers(cwd, null);
+	});
+
+	it("ignores malformed child .git files", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		const repoRoot = path.join(cwd, "leftover");
+		fs.mkdirSync(repoRoot, { recursive: true });
+		fs.writeFileSync(path.join(repoRoot, ".git"), "not a gitdir pointer\n", "utf8");
+
+		await expectResolvers(cwd, null);
+	});
+
+	it("ignores a child gitfile whose target has been removed", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		const repoRoot = path.join(cwd, "leftover");
+		fs.mkdirSync(repoRoot, { recursive: true });
+		fs.writeFileSync(path.join(repoRoot, ".git"), "gitdir: ../../removed-admin\n", "utf8");
+
+		await expectResolvers(cwd, null);
+	});
+
+	it("ignores a child gitfile whose target has no HEAD", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		const repoRoot = path.join(cwd, "leftover");
+		const gitDir = path.join(tempRoot, "admin");
+		fs.mkdirSync(repoRoot, { recursive: true });
+		fs.mkdirSync(gitDir, { recursive: true });
+		fs.writeFileSync(path.join(repoRoot, ".git"), `gitdir: ${path.relative(repoRoot, gitDir)}\n`, "utf8");
+
+		await expectResolvers(cwd, null);
+	});
+
+	it("selects a valid child when a leftover sibling also has a .git marker", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		const repoRoot = path.join(cwd, "repo");
+		fs.mkdirSync(path.join(cwd, "leftover", ".git"), { recursive: true });
+		createGitDirectory(repoRoot);
+
+		await expectResolvers(cwd, {
+			cwd,
+			repoRoot,
+			relativeRepoRoot: "repo",
+			source: "single-direct-child-repo",
+		});
 	});
 
 	it("returns the sole direct child repository context", async () => {

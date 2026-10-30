@@ -10,6 +10,8 @@
  */
 
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
+import { isUsageLimitExhausted } from "../auth/usage-report";
 import {
 	buildXAICliBillingUrl,
 	extractXAIAccessTokenSubject,
@@ -17,6 +19,7 @@ import {
 	getXAICliBillingHeaders,
 } from "../registry/oauth/xai-oauth";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -26,7 +29,7 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER_ID = "xai-oauth";
 const BILLING_SOURCE = "cli-chat-proxy.grok.com/v1/billing";
@@ -91,14 +94,6 @@ function buildPercentAmount(usagePercent: number): UsageAmount {
 		remainingFraction: 1 - usedFraction,
 		unit: "percent",
 	};
-}
-
-function slugifyProduct(product: string): string {
-	return product
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
 }
 
 function buildPeriodWindow(period: XaiBillingPeriod): UsageWindow {
@@ -260,7 +255,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 
 		for (const item of config.productUsage) {
 			const amount = buildPercentAmount(item.usagePercent);
-			const slug = slugifyProduct(item.product);
+			const slug = slugify(item.product);
 			if (!slug) continue;
 			limits.push({
 				id: `${PROVIDER_ID}:product:${slug}:1w`,
@@ -380,13 +375,12 @@ export const xaiOauthUsageProvider: UsageProvider = {
 					: null;
 		}
 
-		// When an account is marked unified billing and weekly credits were only inferred
-		// from an omitted percentage field:
-		// - If a positive monthly quota is returned, use the monthly quota alone.
-		// - If the monthly endpoint returned a valid config without positive monthly quota,
-		//   confirm that this account relies on the weekly reset cycle and use weekly.
-		// - If the monthly fetch failed (transient network error), reject inferred weekly
-		//   so AuthStorage's retain-last-good cache preserves the previous valid snapshot.
+		// A positive monthly quota normally wins over an inferred weekly percentage.
+		// If that monthly counter is already over its limit while weekly credits
+		// have an active period, the two shapes cannot establish which one gates
+		// requests. Keep the counter visible but do not use it for dispatch.
+		// A failed monthly fetch still rejects inferred weekly usage so
+		// AuthStorage can retain its last good snapshot.
 		let effectiveWeekly = weekly;
 		if (weekly?.inferredPercent && creditsLooksUnified) {
 			if (monthly) {
@@ -401,11 +395,22 @@ export const xaiOauthUsageProvider: UsageProvider = {
 				}
 			}
 		}
+		const monthlyQuotaAdvisory =
+			weekly?.inferredPercent === true && creditsLooksUnified && monthly !== null && monthly.used >= monthly.limit;
 		if (!effectiveWeekly && !monthly) return null;
 
 		const limits: UsageLimit[] = [];
 		if (effectiveWeekly) limits.push(...buildLimits(effectiveWeekly, accountId));
-		if (monthly) limits.push(...buildLimits(monthly, accountId));
+		if (monthly) {
+			const monthlyLimits = buildLimits(monthly, accountId);
+			if (monthlyQuotaAdvisory && monthlyLimits[0]) {
+				monthlyLimits[0].status = "unknown";
+				monthlyLimits[0].notes = [
+					"Monthly counter exceeds its limit, but active weekly credits leave enforcement uncertain.",
+				];
+			}
+			limits.push(...monthlyLimits);
+		}
 		// Deduplicate on-demand if both shapes carried the same cap (keep first).
 		const seen = new Set<string>();
 		const deduped = limits.filter(limit => {
@@ -433,10 +438,41 @@ export const xaiOauthUsageProvider: UsageProvider = {
 				endpoint,
 				source: BILLING_SOURCE,
 				billingKind,
+				...(monthlyQuotaAdvisory ? { monthlyQuotaAdvisory: true } : {}),
 				...(accountId ? { accountId } : {}),
 				...(email ? { email } : {}),
 			},
 			raw,
 		};
+	},
+};
+
+/**
+ * Ranks SuperGrok accounts by weekly credits (or unified monthly included quota).
+ * xAI reports no short window, so the meter maps to `secondary`, which drives drain ranking.
+ */
+export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
+	scopeLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return [];
+		// Spent credits/included quota keeps serving on the on-demand cap; only hard-block
+		// the credential once no on-demand headroom remains.
+		const onDemand = report.limits.find(limit => limit.id === `${PROVIDER_ID}:on-demand`);
+		if (onDemand && !isUsageLimitExhausted(onDemand)) return [];
+		return report.limits.filter(
+			limit => limit.id === `${PROVIDER_ID}:credits:1w` || limit.id === `${PROVIDER_ID}:included:1mo`,
+		);
+	},
+	findWindowLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return {};
+		const credits = report.limits.find(limit => limit.id === `${PROVIDER_ID}:credits:1w`);
+		const included = report.limits.find(limit => limit.id === `${PROVIDER_ID}:included:1mo`);
+		return {
+			secondary: credits ?? included,
+		};
+	},
+	windowDefaults: {
+		// Inert: findWindowLimits never reports a primary window.
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: WEEK_MS,
 	},
 };

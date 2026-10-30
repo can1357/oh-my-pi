@@ -1,0 +1,11 @@
+{
+	"name": {
+		"instructions": "Is the file tagged {{key}} (\"{{name}}\") likely to contain what this search is looking for: \"{{query}}\"? Judge by its name, size, and place in `tree`; apply `criteria.file`."
+	},
+	"sketch": {
+		"instructions": "Could passage {{key}} implement a requested step of search? Apply criteria."
+	},
+	"passage": {
+		"instructions": "Does `passages.{{key}}` substantively implement, define, or explain part of \"{{query}}\"? Apply `criteria`."
+	}
+}

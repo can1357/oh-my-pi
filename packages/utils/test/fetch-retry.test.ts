@@ -1,6 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 
+/** Await a rejection and narrow it to `Error` without asserting a shape. */
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+	const value = await promise.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	if (!(value instanceof Error)) throw new Error(`Expected a rejected Error, got ${String(value)}`);
+	return value;
+}
+
 describe("isUnexpectedSocketCloseMessage", () => {
 	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
 		"recognizes %s",
@@ -121,6 +131,38 @@ describe("fetchWithRetry", () => {
 			message: "Request was aborted",
 		});
 	});
+
+	it("keeps the rejected fetch error reachable as the wrapped error's cause", async () => {
+		const errno = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" });
+		const fetchFailed = new TypeError("fetch failed", { cause: new AggregateError([errno]) });
+
+		const error = await rejectionOf(
+			fetchWithRetry("http://127.0.0.1:8080/v1/chat/completions", {
+				fetch: async () => {
+					throw fetchFailed;
+				},
+				maxAttempts: 1,
+			}),
+		);
+
+		// The AggregateError carries no message, so the flattened text alone names
+		// no failure; downstream classifiers reach ECONNREFUSED only through `cause`.
+		expect(error.cause).toBe(fetchFailed);
+	});
+
+	it("keeps the flattened `Network error:` wording for a direct cause", async () => {
+		const dns = Object.assign(new Error("getaddrinfo ENOTFOUND api.openai.com"), { code: "ENOTFOUND" });
+		const error = await rejectionOf(
+			fetchWithRetry("https://api.openai.com/v1/chat/completions", {
+				fetch: async () => {
+					throw new TypeError("fetch failed", { cause: dns });
+				},
+				maxAttempts: 1,
+			}),
+		);
+
+		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
+	});
 });
 
 describe("extractRetryHint", () => {
@@ -132,12 +174,36 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, "Your limit will reset in 13 minutes")).toBe(13 * 60_000);
 	});
 
-	it("parses bare 'reset in 13 minutes' phrasing", () => {
-		expect(extractRetryHint(undefined, "reset in 13 minutes")).toBe(13 * 60_000);
-	});
-
 	it("parses 'will reset in 2h' phrasing", () => {
 		expect(extractRetryHint(undefined, "will reset in 2h")).toBe(2 * 60 * 60_000);
+	});
+	// OpenCode Go quota errors use "Resets in …" with day units and compound
+	// remainders (upstream `formatRetryTime`: "2hr 15min", "3 days", "45min").
+	// Without these the exhausted credential falls back to the 60s heuristic
+	// and is reselected while the cap is still active.
+	it("parses OpenCode Go 'Resets in 45min' as 45 minutes", () => {
+		expect(
+			extractRetryHint(
+				undefined,
+				"429 5-hour usage limit reached. Resets in 45min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go",
+			),
+		).toBe(45 * 60_000);
+	});
+
+	it("parses OpenCode Go compound 'Resets in 2hr 15min' as 2h15m", () => {
+		expect(
+			extractRetryHint(
+				undefined,
+				"429 5-hour usage limit reached. Resets in 2hr 15min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go",
+			),
+		).toBe((2 * 60 + 15) * 60_000);
+	});
+
+	it("parses OpenCode Go day-unit resets", () => {
+		expect(extractRetryHint(undefined, "429 Weekly usage limit reached. Resets in 3 days.")).toBe(
+			3 * 24 * 60 * 60_000,
+		);
+		expect(extractRetryHint(undefined, "429 Monthly usage limit reached. Resets in 1 day.")).toBe(24 * 60 * 60_000);
 	});
 
 	// A quota body can carry both a generic retry hint and the account reset
@@ -205,9 +271,38 @@ describe("extractRetryHint", () => {
 		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});
 
-	it("parses Chinese '将在 YYYY-MM-DD HH:MM:SS 重置' reset timestamp in error body", () => {
-		const future = new Date(Date.now() + 3_600_000).toISOString().replace("T", " ").slice(0, 19);
-		const hint = extractRetryHint(undefined, `已达到使用上限。您的限额将在 ${future} 重置。`);
+	it("yields to the relative retry hint over a longer naive reset-at stamp", () => {
+		// A naive stamp is the provider's wall clock in an unknown zone: it
+		// cannot disambiguate against a conflicting relative signal without
+		// guessing the zone, so the unambiguous signal wins regardless of
+		// which is longer.
+		const naiveWall = new Date(Date.now() + 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
+	});
+
+	it("reads a naive Chinese reset stamp as UTC without a provider offset", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51Z");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。");
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("applies naiveResetTimezoneOffset to a naive Chinese reset stamp", () => {
+		const targetMs = Date.parse("2099-09-01T09:44:51+08:00");
+		const expected = targetMs - Date.now();
+		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。", {
+			naiveResetTimezoneOffset: "+08:00",
+		});
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("keeps a configured reset over a shorter retry-after-ms", () => {
+		const future = new Date(Date.now() + 3_600_000 + 8 * 60 * 60_000).toISOString().slice(0, 19).replace("T", " ");
+		const hint = extractRetryHint(undefined, `Your limit will reset at ${future} retry-after-ms=5000`, {
+			naiveResetTimezoneOffset: "+08:00",
+		});
 		expect(hint).toBeGreaterThan(3_500_000);
 		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});

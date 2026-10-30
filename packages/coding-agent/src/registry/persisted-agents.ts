@@ -5,7 +5,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
@@ -13,10 +13,11 @@ import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
+	type AgentRef,
 	type AgentRegistry,
-	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
+import { getAgentTombstonePath } from "./agent-tombstone";
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
@@ -42,6 +43,20 @@ interface PersistedTranscript {
 	sessionFile: string;
 	createdAt?: number;
 	lastActivity?: number;
+}
+
+/** Size and mtime of a transcript when a ref's history was last read from it; an unchanged transcript is not read again. */
+const historyStamps = new WeakMap<AgentRef, string>();
+
+async function transcriptStamp(sessionFile: string): Promise<string | undefined> {
+	try {
+		const stat = await fs.promises.stat(sessionFile);
+		return `${stat.size}:${stat.mtimeMs}`;
+	} catch (error) {
+		// A vanished transcript reads as empty history, as before.
+		if (isFilesystemError(error)) throw error;
+		return undefined;
+	}
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -151,8 +166,12 @@ async function readPersistedAgentHistory(
 	const parents = new Map<string, string | undefined>();
 	const assistantById = new Map<string, AssistantMetrics>();
 	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
+	// Raw-record copy of `sessionEntryLeafId`/`resolveSessionLeafId` (session-entries.ts); keep them in sync.
 	let leafId: string | undefined;
+	let selfSelectedLeafId: string | undefined;
 	let leafTimestamp: number | undefined;
+	let directCost = 0;
+	// Direct cost mirrors lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
 	try {
 		await visitEntriesFromFileStream(
 			transcript.sessionFile,
@@ -163,9 +182,25 @@ async function readPersistedAgentHistory(
 				if (!id) return;
 				const parentId = typeof record.parentId === "string" ? record.parentId : undefined;
 				parents.set(id, parentId);
-				leafId = id;
+				// Same replay rule as `sessionEntryLeafId`: an entry written off the active
+				// branch (late usage, a routed bash result) restores the leaf it captured
+				// instead of becoming the leaf itself.
+				if (typeof record.activeLeafId === "string") {
+					leafId = record.activeLeafId;
+				} else if (record.activeLeafId === null) {
+					leafId = undefined;
+				} else {
+					leafId = id;
+					selfSelectedLeafId = id;
+				}
 				const parsedTimestamp = timestampOf(record.timestamp);
 				if (parsedTimestamp !== undefined) leafTimestamp = parsedTimestamp;
+				if (record.type === "model_usage") {
+					const usage = recordOf(record.usage);
+					const cost = recordOf(usage?.cost);
+					directCost += finiteNumber(cost?.total);
+					return;
+				}
 				if (record.type === "model_change" && typeof record.model === "string") {
 					modelChangeById.set(id, {
 						model: record.model,
@@ -176,7 +211,11 @@ async function readPersistedAgentHistory(
 				}
 				if (record.type !== "message") return;
 				const message = recordOf(record.message);
-				if (message?.role === "assistant") assistantById.set(id, assistantMetrics(message));
+				if (message?.role === "assistant") {
+					const assistant = assistantMetrics(message);
+					assistantById.set(id, assistant);
+					directCost += assistant.cost;
+				}
 			},
 			// Advisor transcripts are the one file that can grow pathologically large
 			// (issue #9553); cap their scan so one bad transcript can't stall the Hub
@@ -199,6 +238,7 @@ async function readPersistedAgentHistory(
 		return {};
 	}
 
+	if (leafId !== undefined && !parents.has(leafId)) leafId = selfSelectedLeafId;
 	const metrics: AgentMetricsSummary = {
 		tokens: 0,
 		requests: 0,
@@ -227,7 +267,11 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (modelChange.role && modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+			if (
+				modelChange.role &&
+				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+				modelChange.role !== PREWALK_MODEL_CHANGE_ROLE
+			) {
 				modelRole ??= modelChange.role;
 			}
 			// The transition that installed the serving model: it carries the
@@ -264,6 +308,7 @@ async function readPersistedAgentHistory(
 	}
 	if (contextTokens !== undefined) metrics.contextTokens = contextTokens;
 	return {
+		directCost,
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),
@@ -271,11 +316,28 @@ async function readPersistedAgentHistory(
 }
 
 /**
+ * Nested-repo patch files the isolation runner wrote beside a transcript,
+ * picked out of the directory listing the scan already holds:
+ * `<id>.nested-<n>-<path>.patch`, in capture order.
+ */
+function nestedPatchFilesFor(dir: string, transcriptName: string, entries: readonly fs.Dirent[]): string[] {
+	const prefix = `${transcriptName.slice(0, -".jsonl".length)}.nested-`;
+	return entries
+		.filter(entry => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".patch"))
+		.map(entry => entry.name)
+		.sort((a, b) => Number.parseInt(a.slice(prefix.length), 10) - Number.parseInt(b.slice(prefix.length), 10))
+		.map(name => path.join(dir, name));
+}
+
+/**
  * Read only the small session prefix needed by the Hub. A subagent's first
  * `session_init` is written before its conversation, so this never walks a
  * multi-megabyte historical transcript just to populate one roster row.
  */
-async function readPersistedAgentMetadata(sessionFile: string): Promise<PersistedAgentMetadata> {
+async function readPersistedAgentMetadata(
+	sessionFile: string,
+	nestedPatchPaths: readonly string[] = [],
+): Promise<PersistedAgentMetadata> {
 	// Settle immediately instead of leaving a rejecting promise pending while
 	// the transcript stream runs: a stat fault (EACCES/EMFILE/EIO) must not
 	// surface as an unhandled rejection if the stream errors first or takes
@@ -308,7 +370,11 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				}
 				if (record.type === "model_change") {
 					if (typeof record.model === "string") history.resolvedModel = record.model;
-					if (typeof record.role === "string" && record.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+					if (
+						typeof record.role === "string" &&
+						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+						record.role !== PREWALK_MODEL_CHANGE_ROLE
+					) {
 						history.modelRole = record.role;
 					}
 					if (typeof record.resolvedModelIsFallback === "boolean") {
@@ -324,7 +390,10 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				hasSessionInit = true;
 				createdAt ??= timestampOf(record.timestamp);
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
-				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
+				const systemPrompt = Array.isArray(record.systemPrompt)
+					? record.systemPrompt.join("\n\n")
+					: record.systemPrompt;
+				const inferred = typeof systemPrompt === "string" ? inferBundledAgent(systemPrompt) : {};
 				history = {
 					...history,
 					...inferred,
@@ -361,6 +430,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 			...history,
 			...(hasOutput ? { outputPath } : {}),
 			...(hasPatch ? { patchPath } : {}),
+			...(nestedPatchPaths.length > 0 ? { nestedPatchPaths: [...nestedPatchPaths] } : {}),
 		},
 	};
 }
@@ -466,7 +536,8 @@ function rosterScanError(error: unknown): string {
 	return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 
-function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
+/** Whether `sessionFile` is the root transcript or lives in its artifacts tree. */
+export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
 	const file = path.resolve(sessionFile);
 	const root = path.resolve(rootSessionFile);
 	const artifactRoot = root.slice(0, -".jsonl".length);
@@ -611,15 +682,16 @@ export async function registerPersistedSubagents(
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
-	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
-	if (!shouldContinue()) return;
+	// The main transcript can be large: read it once, and only for a transcript the registry does not hold yet.
+	let vibeOwnedIds: Promise<Set<string>> | undefined;
+	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue));
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
 	await registerPersistedSubagentsFromDir(
 		registry,
 		root,
 		undefined,
-		vibeOwnedIds,
+		vibeOwned,
 		transcripts,
 		shouldContinue,
 		sessionFile,
@@ -633,9 +705,15 @@ export async function registerPersistedSubagents(
 			const index = nextTranscript++;
 			const transcript = transcripts[index];
 			if (!transcript) return;
+			const ref = registry.get(transcript.id);
+			if (!ref || ref.sessionFile !== transcript.sessionFile) continue;
+			const stamp = await transcriptStamp(transcript.sessionFile);
+			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
-			registry.setHistory(transcript.id, history, transcript.sessionFile);
+			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
+				historyStamps.set(ref, stamp);
+			}
 		}
 	});
 	await Promise.all(workers);
@@ -645,7 +723,7 @@ async function registerPersistedSubagentsFromDir(
 	registry: AgentRegistry,
 	dir: string,
 	parentId: string | undefined,
-	vibeOwnedIds: ReadonlySet<string>,
+	vibeOwned: () => Promise<ReadonlySet<string>>,
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
@@ -661,6 +739,10 @@ async function registerPersistedSubagentsFromDir(
 		throw error;
 	}
 	if (!shouldContinue()) return;
+	const childDirectories = new Set<string>();
+	for (const entry of entries) {
+		if (entry.isDirectory()) childDirectories.add(entry.name);
+	}
 	let entriesSinceYield = 0;
 	for (const entry of entries) {
 		if (!shouldContinue()) return;
@@ -724,7 +806,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		const id = entry.name.slice(0, -6);
 		const existing = registry.get(id);
-		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;
+		if (existing?.sessionFile !== sessionFile && (await vibeOwned()).has(id)) continue;
 		let tombstoned = false;
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
@@ -755,7 +837,7 @@ async function registerPersistedSubagentsFromDir(
 			}
 		} else {
 			const expected = existing ?? null;
-			const metadata = await readPersistedAgentMetadata(sessionFile);
+			const metadata = await readPersistedAgentMetadata(sessionFile, nestedPatchFilesFor(dir, entry.name, entries));
 			if (!shouldContinue()) return;
 			// Metadata reads yield. A spawn may claim the id while this scan is
 			// inspecting the file; never replace that live generation with a
@@ -794,15 +876,19 @@ async function registerPersistedSubagentsFromDir(
 				}
 			}
 		}
-		await registerPersistedSubagentsFromDir(
-			registry,
-			path.join(dir, id),
-			id,
-			vibeOwnedIds,
-			transcripts,
-			shouldContinue,
-			rootSessionFile,
-			owned,
-		);
+		// A transcript stem is not proof of a child directory: "." and ".."
+		// revisit ancestors, and symlinks can point back into the same tree.
+		if (childDirectories.has(id)) {
+			await registerPersistedSubagentsFromDir(
+				registry,
+				path.join(dir, id),
+				id,
+				vibeOwned,
+				transcripts,
+				shouldContinue,
+				rootSessionFile,
+				owned,
+			);
+		}
 	}
 }

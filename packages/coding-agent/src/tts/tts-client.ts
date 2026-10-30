@@ -1,19 +1,20 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import {
-	createUnavailableWorker,
-	createWorkerHandle,
+	type ModelWorkerMessage,
+	ModelWorkerHost,
+	spawnRefCountedWorker,
+	wrapRefCountedSubprocess,
+} from "../subprocess/model-worker-host";
+import {
 	createWorkerSubprocess,
-	logWorkerMessage,
 	type RefCountedWorkerHandle,
 	resolveWorkerSpawnCmd,
 	SMOKE_TEST_TIMEOUT_MS,
 	type SpawnedSubprocess,
 	smokeTestWorker,
-	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
 import { tinyWorkerEnv } from "../tiny/title-client";
-import { safeSend } from "../utils/ipc";
-import { isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
+import { getTtsLocalModelSpec, isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
 import type { TtsProgressEvent, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
 
 /** Decoded PCM returned by a local synthesis request. */
@@ -22,13 +23,14 @@ export interface TtsAudio {
 	sampleRate: number;
 }
 
-type PendingRequest =
+type TtsRequest =
 	| { kind: "synthesize"; modelKey: TtsLocalModelKey; resolve: (audio: TtsAudio | null) => void }
-	| { kind: "download"; modelKey: TtsLocalModelKey; resolve: (ok: boolean) => void }
 	| { kind: "stream"; modelKey: TtsLocalModelKey; channel: AudioChunkChannel };
 
 export interface TtsSynthesizeOptions {
 	voice?: string;
+	/** Speaking rate (1 = normal); clamped by the worker. Omitted means normal speed. */
+	speed?: number;
 	signal?: AbortSignal;
 }
 
@@ -39,6 +41,8 @@ export interface TtsDownloadOptions {
 
 export interface TtsStreamOptions {
 	voice?: string;
+	/** Speaking rate (1 = normal); clamped by the worker. Omitted means normal speed. */
+	speed?: number;
 	signal?: AbortSignal;
 }
 
@@ -145,62 +149,29 @@ export function createTtsSubprocess(): SpawnedSubprocess<TtsWorkerOutbound> {
 	});
 }
 
-function wrapSubprocess(
-	spawned: SpawnedSubprocess<TtsWorkerOutbound>,
-): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-	const { proc } = spawned;
-	return {
-		...createWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>(spawned, message => safeSend(proc, message, "tts")),
-		ref() {
-			try {
-				proc.ref();
-			} catch {
-				// Already gone.
-			}
-		},
-		unref() {
-			try {
-				proc.unref();
-			} catch {
-				// Already gone.
-			}
-		},
-	};
-}
-
-function spawnInlineUnavailableWorker(error: unknown): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-	return {
-		...createUnavailableWorker<TtsWorkerInbound, TtsWorkerOutbound>(error),
-		ref() {},
-		unref() {},
-	};
-}
-
 function spawnTtsWorker(): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-	return spawnWorkerOrUnavailable(
-		() => wrapSubprocess(createTtsSubprocess()),
-		spawnInlineUnavailableWorker,
-		"TTS worker spawn failed; local TTS disabled",
-	);
+	return spawnRefCountedWorker(createTtsSubprocess, "tts", "TTS worker spawn failed; local TTS disabled");
 }
 
 export class TtsClient {
-	#worker: RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> | null = null;
-	#unsubscribeMessage: (() => void) | null = null;
-	#unsubscribeError: (() => void) | null = null;
-	#pending = new Map<string, PendingRequest>();
-	#progressListeners = new Set<(event: TtsProgressEvent) => void>();
-	#nextRequestId = 0;
-	#refed = false;
-	#spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>;
+	#host: ModelWorkerHost<TtsLocalModelKey, TtsWorkerInbound, TtsWorkerOutbound, TtsRequest, TtsProgressEvent>;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> = spawnTtsWorker) {
-		this.#spawnWorker = spawnWorker;
+		this.#host = new ModelWorkerHost({
+			name: "tts",
+			spawnWorker,
+			modelLabel: modelKey => getTtsLocalModelSpec(modelKey)?.label ?? modelKey,
+			handleMessage: message => this.#handleMessage(message),
+			failRequest: (request, error, terminated) => {
+				if (request.kind === "synthesize") request.resolve(null);
+				else if (terminated) request.channel.close();
+				else request.channel.fail(error);
+			},
+		});
 	}
 
 	onProgress(listener: (event: TtsProgressEvent) => void): () => void {
-		this.#progressListeners.add(listener);
-		return () => this.#progressListeners.delete(listener);
+		return this.#host.onProgress(listener);
 	}
 
 	async synthesize(modelKey: string, text: string, options: TtsSynthesizeOptions = {}): Promise<TtsAudio | null> {
@@ -208,27 +179,19 @@ export class TtsClient {
 		if (options.signal?.aborted) return null;
 
 		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<TtsAudio | null>();
-			this.#addPending(id, { kind: "synthesize", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "synthesize") return;
-				this.#deletePending(id);
-				pending.resolve(null);
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				const request: TtsWorkerInbound = options.voice
-					? { type: "synthesize", id, modelKey, text, voice: options.voice }
-					: { type: "synthesize", id, modelKey, text };
-				worker.send(request);
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
+			return await this.#host.request<TtsAudio | null>(
+				options.signal,
+				(id): TtsWorkerInbound => ({
+					type: "synthesize",
+					id,
+					modelKey,
+					text,
+					...(options.voice ? { voice: options.voice } : {}),
+					...(options.speed !== undefined ? { speed: options.speed } : {}),
+				}),
+				resolve => ({ kind: "synthesize", modelKey, resolve }),
+				resolve => resolve(null),
+			);
 		} catch (error) {
 			logger.debug("tts: local synthesis failed", {
 				modelKey,
@@ -255,7 +218,7 @@ export class TtsClient {
 
 		let worker: RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>;
 		try {
-			worker = this.#ensureWorker();
+			worker = this.#host.ensureWorker();
 		} catch (error) {
 			logger.debug("tts: stream synthesis failed to start", {
 				modelKey,
@@ -266,7 +229,7 @@ export class TtsClient {
 			return { push: () => {}, end: () => {}, chunks: channel.iterator() };
 		}
 
-		const id = String(++this.#nextRequestId);
+		const id = this.#host.nextId();
 		const signal = options.signal;
 		let closed = false;
 		let ended = false;
@@ -274,18 +237,22 @@ export class TtsClient {
 			if (closed) return;
 			closed = true;
 			ended = true;
-			if (!this.#pending.has(id)) return;
-			this.#deletePending(id);
+			if (!this.#host.pending.has(id)) return;
+			this.#host.deletePending(id);
 			worker.send({ type: "stream-cancel", id });
 			channel.close();
 		};
 		const channel = new AudioChunkChannel(() => signal?.removeEventListener("abort", abort));
-		this.#addPending(id, { kind: "stream", modelKey, channel });
+		this.#host.addPending(id, { kind: "stream", modelKey, channel });
 		signal?.addEventListener("abort", abort, { once: true });
 
-		const start: TtsWorkerInbound = options.voice
-			? { type: "stream-start", id, modelKey, voice: options.voice }
-			: { type: "stream-start", id, modelKey };
+		const start: TtsWorkerInbound = {
+			type: "stream-start",
+			id,
+			modelKey,
+			...(options.voice ? { voice: options.voice } : {}),
+			...(options.speed !== undefined ? { speed: options.speed } : {}),
+		};
 		worker.send(start);
 
 		return {
@@ -303,109 +270,15 @@ export class TtsClient {
 
 	async downloadModel(modelKey: string, options: TtsDownloadOptions = {}): Promise<boolean> {
 		if (!isTtsLocalModelKey(modelKey)) return false;
-		if (options.signal?.aborted) return false;
-
-		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
-		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<boolean>();
-			this.#addPending(id, { kind: "download", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "download") return;
-				this.#deletePending(id);
-				pending.resolve(false);
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				worker.send({ type: "download", id, modelKey });
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
-		} catch (error) {
-			logger.debug("tts: local model download failed", {
-				modelKey,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return false;
-		} finally {
-			unsubscribe?.();
-		}
+		return (await this.#host.downloadModel(modelKey, options)).ok;
 	}
 
-	async terminate(): Promise<void> {
-		const worker = this.#worker;
-		this.#worker = null;
-		this.#unsubscribeMessage?.();
-		this.#unsubscribeMessage = null;
-		this.#unsubscribeError?.();
-		this.#unsubscribeError = null;
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "synthesize") pending.resolve(null);
-			else if (pending.kind === "download") pending.resolve(false);
-			else pending.channel.close();
-		}
-		this.#pending.clear();
-		this.#refed = false;
-		try {
-			await worker?.terminate();
-		} catch {
-			// Already gone.
-		}
+	terminate(): Promise<void> {
+		return this.#host.terminate();
 	}
 
-	#ensureWorker(): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-		if (this.#worker) return this.#worker;
-		const worker = this.#spawnWorker();
-		this.#worker = worker;
-		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
-		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
-		return worker;
-	}
-
-	/** Register a pending request and keep the worker referenced while work is in flight. */
-	#addPending(id: string, request: PendingRequest): void {
-		this.#pending.set(id, request);
-		this.#syncWorkerRef();
-	}
-
-	/** Drop a pending request and unref the worker once nothing is in flight. */
-	#deletePending(id: string): void {
-		if (this.#pending.delete(id)) this.#syncWorkerRef();
-	}
-
-	/**
-	 * The TTS subprocess is spawned `unref`'d so an idle worker never blocks
-	 * process exit. A short-lived CLI command (`omp say`) awaiting a request would
-	 * otherwise let the event loop drain and exit before the audio arrives, so we
-	 * `ref` the worker exactly while at least one request is pending.
-	 */
-	#syncWorkerRef(): void {
-		const worker = this.#worker;
-		if (!worker) return;
-		const shouldRef = this.#pending.size > 0;
-		if (shouldRef === this.#refed) return;
-		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
-	}
-
-	#handleMessage(message: TtsWorkerOutbound): void {
-		if (message.type === "log") {
-			logWorkerMessage(message);
-			return;
-		}
-		if (message.type === "progress") {
-			this.#emitProgress(message.event);
-			return;
-		}
-		if (message.type === "pong") return;
-
-		const pending = this.#pending.get(message.id);
+	#handleMessage(message: ModelWorkerMessage<TtsWorkerOutbound>): void {
+		const pending = this.#host.pending.get(message.id);
 		if (!pending) return;
 
 		// Streaming chunks are non-terminal: keep the session registered until
@@ -422,7 +295,7 @@ export class TtsClient {
 			return;
 		}
 
-		this.#deletePending(message.id);
+		this.#host.deletePending(message.id);
 		if (message.type === "stream-done") {
 			if (pending.kind === "stream") pending.channel.close();
 			return;
@@ -431,31 +304,11 @@ export class TtsClient {
 			if (pending.kind === "synthesize") pending.resolve({ pcm: message.pcm, sampleRate: message.sampleRate });
 			return;
 		}
-		if (message.type === "downloaded") {
-			if (pending.kind === "download") pending.resolve(true);
-			return;
-		}
 		logger.debug("tts: worker returned error", { error: message.error });
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#host.emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "synthesize") pending.resolve(null);
-		else if (pending.kind === "download") pending.resolve(false);
+		else if (pending.kind === "download") pending.resolve({ ok: false, error: message.error });
 		else pending.channel.fail(new Error(message.error));
-		void this.terminate();
-	}
-
-	#emitProgress(event: TtsProgressEvent): void {
-		for (const listener of this.#progressListeners) listener(event);
-	}
-
-	#handleWorkerError(error: Error): void {
-		logger.warn("tts: worker error", { error: error.message });
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "synthesize") pending.resolve(null);
-			else if (pending.kind === "download") pending.resolve(false);
-			else pending.channel.fail(error);
-		}
-		this.#pending.clear();
 		void this.terminate();
 	}
 }
@@ -471,5 +324,9 @@ export async function smokeTestTtsWorker({
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await smokeTestWorker(wrapSubprocess(createTtsSubprocess()), "tts worker", timeoutMs);
+	await smokeTestWorker(
+		wrapRefCountedSubprocess<TtsWorkerInbound, TtsWorkerOutbound>(createTtsSubprocess(), "tts"),
+		"tts worker",
+		timeoutMs,
+	);
 }

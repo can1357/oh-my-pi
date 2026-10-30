@@ -1,24 +1,88 @@
 import * as fs from "node:fs";
-import { isEnoent, logger, once, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
-import { FileChangeType, notifyWorkspaceWatchedFiles } from "./client";
+import {
+	beginPendingDiskWrite,
+	endPendingDiskWrite,
+	FileChangeType,
+	getActiveOrPendingClient,
+	getOrCreateClient,
+	notifyWorkspaceWatchedFiles,
+	reconcileOpenFilesFromDisk,
+	sendRequest,
+} from "./client";
 import { getConfig, getServersForFile } from "./config";
 import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
-	DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
-	type FileDiagnosticsResult,
-	FileFormatResult,
+	DIAGNOSTICS_PIPELINE_GRACE_MS,
+	deferredDiagnosticsWaitMs,
 	formatContent,
 	getDiagnosticsForFile,
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	limitDiagnosticMessages,
 	type ServerVersionMap,
+	unreportedSummary,
 } from "./diagnostics";
+import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
-import type { ServerConfig } from "./types";
+import type { LspClient, ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";
+
+const TSSERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
+
+function supportsTsserverRequest(capabilities: unknown): boolean {
+	if (!isRecord(capabilities)) return false;
+	const executeCommandProvider = capabilities.executeCommandProvider;
+	if (!isRecord(executeCommandProvider)) return false;
+	const commands = executeCommandProvider.commands;
+	return Array.isArray(commands) && commands.includes(TSSERVER_REQUEST_COMMAND);
+}
+
+/**
+ * Force tsserver to observe a created path before `didOpen` can pin a cached
+ * missing-module resolution. The advertised command is specific to
+ * typescript-language-server; every other server proceeds without a barrier.
+ */
+async function reloadTypeScriptProjectsAfterCreate(
+	cwd: string,
+	servers: Array<[string, ServerConfig]>,
+	signal?: AbortSignal,
+	{ createMissing = true }: { createMissing?: boolean } = {},
+): Promise<void> {
+	await Promise.all(
+		servers.map(async ([, serverConfig]) => {
+			let client: LspClient | undefined;
+			try {
+				client = createMissing
+					? await getOrCreateClient(serverConfig, cwd, undefined, signal)
+					: await getActiveOrPendingClient(serverConfig, cwd, signal);
+			} catch {
+				signal?.throwIfAborted();
+				return;
+			}
+			if (!client) return;
+			if (!supportsTsserverRequest(client.serverCapabilities)) return;
+			const response = await sendRequest(
+				client,
+				"workspace/executeCommand",
+				{
+					command: TSSERVER_REQUEST_COMMAND,
+					arguments: [
+						"reloadProjects",
+						{},
+						{ executionTarget: 0, expectsResult: true, isAsync: false, lowPriority: false },
+					],
+				},
+				signal,
+			);
+			if (isRecord(response) && response.success === false) {
+				throw new Error("typescript-language-server rejected reloadProjects after a file create");
+			}
+		}),
+	);
+}
 
 /** Options for creating the LSP writethrough callback */
 export interface WritethroughOptions {
@@ -32,6 +96,8 @@ export interface WritethroughOptions {
 	deferredSignal?: AbortSignal;
 	/** Transform diagnostics before surfacing them after a successful fetch. */
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
+	/** `lsp.requestTimeout` in seconds; raises the late-diagnostics wait for slow (cold-starting) servers. */
+	requestTimeoutSec?: number;
 }
 
 /** Internal resolved form of {@link WritethroughOptions} that the writethrough machinery operates on. */
@@ -39,6 +105,8 @@ type ResolvedWritethroughOptions = {
 	enableFormat: boolean;
 	enableDiagnostics: boolean;
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
+	/** Per-server wait budget (ms) for diagnostics delivered late through the deferred channel. */
+	deferredWaitMs: number;
 };
 
 /** Per-file deferred LSP diagnostics wiring for {@link WritethroughCallback}. */
@@ -110,6 +178,7 @@ function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughO
 		existing.options.enableFormat ||= options.enableFormat;
 		existing.options.enableDiagnostics ||= options.enableDiagnostics;
 		existing.options.transformDiagnostics ??= options.transformDiagnostics;
+		existing.options.deferredWaitMs = Math.max(existing.options.deferredWaitMs, options.deferredWaitMs);
 		return existing;
 	}
 	const batch: LspWritethroughBatchState = {
@@ -145,6 +214,7 @@ function mergeDiagnostics(
 	let formatted = false;
 	let hasFailed = false;
 	let hasUnsupported = false;
+	const unreported = new Set<string>();
 
 	for (const result of results) {
 		if (!result) continue;
@@ -160,6 +230,7 @@ function mergeDiagnostics(
 		if (result.messages.length > 0) {
 			messages.push(...result.messages);
 		}
+		for (const server of result.unreported ?? []) unreported.add(server);
 		if (result.formatter !== undefined) {
 			hasFormatter = true;
 			if (result.formatter === FileFormatResult.FORMATTED) {
@@ -185,6 +256,9 @@ function mergeDiagnostics(
 		errored = summaryInfo.errored;
 		limitedMessages = limitDiagnosticMessages(messages);
 	}
+	if (unreported.size > 0) {
+		summary = unreportedSummary(Array.from(unreported), messages.length > 0 ? summary : undefined);
+	}
 	// Priority: FAILED > FORMATTED > UNCHANGED > UNSUPPORTED
 	const formatter = hasFormatter
 		? hasFailed
@@ -201,8 +275,14 @@ function mergeDiagnostics(
 		messages: limitedMessages,
 		summary,
 		errored,
+		unreported: unreported.size > 0 ? Array.from(unreported) : undefined,
 		formatter,
 	};
+}
+
+/** A late result that adds nothing: no diagnostics, and some server still unanswered. */
+function isUnverifiedOnly(diagnostics: FileDiagnosticsResult): boolean {
+	return diagnostics.messages.length === 0 && diagnostics.unreported !== undefined;
 }
 
 async function scheduleDeferredDiagnosticsFetch(args: {
@@ -211,19 +291,20 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 	servers: Array<[string, ServerConfig]>;
 	minVersions: ServerVersionMap | undefined;
 	expectedDocumentVersions: ServerVersionMap | undefined;
+	waitMs: number;
 	signal: AbortSignal;
 	callback: (diagnostics: FileDiagnosticsResult) => void;
 }): Promise<void> {
 	try {
-		const deferredTimeout = AbortSignal.timeout(25_000);
+		const deferredTimeout = AbortSignal.timeout(Math.max(25_000, args.waitMs + DIAGNOSTICS_PIPELINE_GRACE_MS));
 		const combined = AbortSignal.any([args.signal, deferredTimeout]);
 		const diagnostics = await getDiagnosticsForFile(args.dst, args.cwd, args.servers, {
 			signal: combined,
 			minVersions: args.minVersions,
 			expectedDocumentVersions: args.expectedDocumentVersions,
-			timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+			timeoutMs: args.waitMs,
 		});
-		if (args.signal.aborted || diagnostics === undefined) return;
+		if (args.signal.aborted || diagnostics === undefined || isUnverifiedOnly(diagnostics)) return;
 		args.callback(diagnostics);
 	} catch {
 		// Cancelled or LSP gave up; silently discard.
@@ -251,10 +332,21 @@ async function fetchDiagnosticsWithDeferral(args: {
 	minVersions: ServerVersionMap | undefined;
 	expectedDocumentVersions: ServerVersionMap | undefined;
 	transformDiagnostics?: ResolvedWritethroughOptions["transformDiagnostics"];
+	deferredWaitMs: number;
 	deferred?: { onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void; signal: AbortSignal };
 	signal?: AbortSignal;
 }): Promise<FileDiagnosticsResult | undefined> {
-	const { dst, cwd, servers, minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal } = args;
+	const {
+		dst,
+		cwd,
+		servers,
+		minVersions,
+		expectedDocumentVersions,
+		transformDiagnostics,
+		deferredWaitMs,
+		deferred,
+		signal,
+	} = args;
 	const apply = (d: FileDiagnosticsResult | undefined) =>
 		d && transformDiagnostics ? transformDiagnostics(dst, d) : d;
 
@@ -274,7 +366,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 		signal: deferred.signal,
 		minVersions,
 		expectedDocumentVersions,
-		timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+		timeoutMs: deferredWaitMs,
 	});
 	const INLINE_TIMEOUT = Symbol("inline-diagnostics-timeout");
 	const raced = await Promise.race([
@@ -288,7 +380,9 @@ async function fetchDiagnosticsWithDeferral(args: {
 	// deferred sink (edit tool) applies its own dedup, so pass the raw result.
 	void fetchPromise
 		.then(diagnostics => {
-			if (diagnostics && !deferred.signal.aborted) deferred.onDeferredDiagnostics(diagnostics);
+			if (diagnostics && !isUnverifiedOnly(diagnostics) && !deferred.signal.aborted) {
+				deferred.onDeferredDiagnostics(diagnostics);
+			}
 		})
 		.catch(() => {});
 	return undefined;
@@ -312,10 +406,17 @@ async function runLspWritethrough(
 	const contentAlreadyWritten = runOptions?.contentAlreadyWritten ?? false;
 
 	let finalContent = content;
-	const writeContent = async (value: string) => writeFileWithFallback(dst, value, file);
-	const getWritePromise = once(() =>
-		contentAlreadyWritten && finalContent === content ? Promise.resolve() : writeContent(finalContent),
-	);
+	// Bytes this operation has committed to disk; `undefined` until they land
+	// there (the caller already wrote `content` when `contentAlreadyWritten`).
+	let diskContent = contentAlreadyWritten ? content : undefined;
+	const writeContent = async (value: string) => {
+		await writeFileWithFallback(dst, value, file);
+		diskContent = value;
+	};
+	/** Commit {@link finalContent} unless those exact bytes are already on disk. */
+	const commitWrite = async () => {
+		if (diskContent !== finalContent) await writeContent(finalContent);
+	};
 	let writeNotified = false;
 	const notifyWriteCommitted = async (notifySignal: AbortSignal | undefined = signal) => {
 		if (writeNotified) return;
@@ -334,7 +435,7 @@ async function runLspWritethrough(
 		}
 	};
 	if (!enableFormat && !enableDiagnostics) {
-		await getWritePromise();
+		await commitWrite();
 		await notifyWriteCommitted();
 		return { finalContent, diagnostics: undefined };
 	}
@@ -343,7 +444,7 @@ async function runLspWritethrough(
 	const servers = getServersForFile(config, dst);
 
 	if (servers.length === 0) {
-		await getWritePromise();
+		await commitWrite();
 		await notifyWriteCommitted();
 		return { finalContent, diagnostics: undefined };
 	}
@@ -362,6 +463,10 @@ async function runLspWritethrough(
 	let timedOut = false;
 	let synced = false;
 	let operationSignal: AbortSignal | undefined;
+	// The overlay leads disk from the first sync below until the write commits;
+	// bar disk-reconciliation for the file so a concurrent semantic query cannot
+	// revert the server to pre-write content.
+	beginPendingDiskWrite(dst);
 	try {
 		const timeoutSignal = AbortSignal.timeout(5_000);
 		timeoutSignal.addEventListener(
@@ -373,10 +478,20 @@ async function runLspWritethrough(
 		);
 		operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		await untilAborted(operationSignal, async () => {
+			if (enableDiagnostics) {
+				// The target overlay leads disk until commit; reconcile only other
+				// open documents before computing diagnostics for the new content.
+				await Promise.all(
+					lspServers.map(async ([, serverConfig]) => {
+						const client = await getActiveOrPendingClient(serverConfig, cwd, operationSignal);
+						if (client) await reconcileOpenFilesFromDisk(client, operationSignal);
+					}),
+				);
+			}
 			if (useCustomFormatter) {
 				// Custom linters operate on on-disk input; the shared pre-write also
 				// supports implementations that inspect the file before formatting.
-				if (!contentAlreadyWritten) await writeContent(content);
+				if (diskContent !== content) await writeContent(content);
 				const [formattedContent, capturedVersions] = await Promise.all([
 					formatContent(dst, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
@@ -390,10 +505,25 @@ async function runLspWritethrough(
 				} else {
 					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				}
-				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
+				await commitWrite();
 				await notifyWriteCommitted(operationSignal);
+				if (changeType === FileChangeType.Created) {
+					await reloadTypeScriptProjectsAfterCreate(cwd, lspServers, operationSignal, {
+						createMissing: enableDiagnostics,
+					});
+				}
 				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
 			} else {
+				// Created paths must exist before their first `didOpen`. tsserver also
+				// needs an acknowledged project reload: on delayed filesystem watchers
+				// (notably macOS FSEvents), opening immediately after the write pins the
+				// dependent's cached missing-module resolution indefinitely.
+				if (changeType === FileChangeType.Created) {
+					await commitWrite();
+					await notifyWriteCommitted(operationSignal);
+					await reloadTypeScriptProjectsAfterCreate(cwd, lspServers, operationSignal);
+				}
+
 				// 1. Sync original content to LSP servers
 				await syncFileContent(dst, content, cwd, lspServers, operationSignal);
 
@@ -415,8 +545,9 @@ async function runLspWritethrough(
 					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal);
 				}
 
-				// 4. Write to disk
-				await getWritePromise();
+				// 4. Write to disk. A formatter-altered body is the only thing left to
+				// commit when the create already landed above.
+				await commitWrite();
 				await notifyWriteCommitted(operationSignal);
 			}
 
@@ -440,16 +571,19 @@ async function runLspWritethrough(
 					servers,
 					minVersions,
 					expectedDocumentVersions,
+					waitMs: options.deferredWaitMs,
 					signal: deferred.signal,
 					callback: deferred.onDeferredDiagnostics,
 				});
 			}
 		}
-		await getWritePromise();
+		await commitWrite();
 		// The write above committed even though the operation budget elapsed:
 		// announce it on the caller's signal — the dead `operationSignal` would
 		// abort the notify before it ever reaches the server.
 		await notifyWriteCommitted();
+	} finally {
+		endPendingDiskWrite(dst);
 	}
 
 	if (synced && enableDiagnostics) {
@@ -460,17 +594,22 @@ async function runLspWritethrough(
 			minVersions,
 			expectedDocumentVersions,
 			transformDiagnostics: options.transformDiagnostics,
+			deferredWaitMs: options.deferredWaitMs,
 			deferred,
 			signal,
 		});
 	}
 
 	if (formatter !== undefined) {
+		// Carries the formatter result. With diagnostics requested, none arrived in time
+		// (or they come later through the deferred channel): do not vouch for the file.
+		const unreported = enableDiagnostics ? servers.map(([name]) => name) : undefined;
 		diagnostics ??= {
 			server: servers.map(([name]) => name).join(", "),
 			messages: [],
-			summary: "OK",
+			summary: unreported ? unreportedSummary(unreported) : "OK",
 			errored: false,
+			unreported,
 		};
 		diagnostics.formatter = formatter;
 	}
@@ -542,6 +681,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
 		transformDiagnostics: options?.transformDiagnostics,
+		deferredWaitMs: deferredDiagnosticsWaitMs(options?.requestTimeoutSec),
 	};
 	return async (
 		dst: string,

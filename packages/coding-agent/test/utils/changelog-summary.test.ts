@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ChangelogEntry } from "../../src/utils/changelog";
-import { formatStartupChangelogSummary, parseChangelog, selectStartupChangelog } from "../../src/utils/changelog";
-
-const shippedChangelogPath = `${import.meta.dir}/../../CHANGELOG.md`;
+import { formatStartupChangelogSummary, selectStartupChangelog } from "../../src/utils/changelog";
 
 function summarize(content: string) {
 	const entries: ChangelogEntry[] = [{ major: 1, minor: 1, patch: 0, content: `## [1.1.0] - 2026-01-01\n${content}` }];
@@ -191,16 +189,28 @@ An intervening paragraph closes the list.
 		);
 	});
 
-	test("keeps the uncategorized bullet of the released 18.1.12 notes in the count", async () => {
-		const entries = await parseChangelog(shippedChangelogPath);
-		const release = entries.find(entry => entry.major === 18 && entry.minor === 1 && entry.patch === 12);
-		expect(release).toBeDefined();
+	test("counts a bullet written above the first heading as Other, as the released 18.1.12 notes did", () => {
+		// Shape of the shipped 18.1.12 section: one bullet precedes `### Added`. Released
+		// sections are immutable, so that bullet must stay counted rather than be lost.
+		const selection = summarize(`
+- Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
-		const selection = selectStartupChangelog([release as ChangelogEntry], "18.1.11", "18.1.12");
+### Added
+
+- Added \`/prewalk restart\`.
+
+### Changed
+
+- Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
+
+### Fixed
+
+- Fixed frame skips while streaming long markdown Write previews.
+`);
+
 		const breakdown = Object.values(selection.categoryCounts).reduce((total, count) => total + count, 0);
 		expect(selection.changeCount).toBe(breakdown);
-		// The released section is immutable, so its bullet above `### Changed` stays uncategorized rather than lost.
-		expect(selection.categoryCounts.Other).toBe(1);
+		expect(selection.categoryCounts).toEqual({ Other: 1, Added: 1, Changed: 1, Fixed: 1 });
 	});
 
 	test("does not count a thematic break as a change", () => {
@@ -428,21 +438,5 @@ An intervening paragraph closes the list.
 
 		expect(selection.changeCount).toBe(2);
 		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
-	});
-
-	test("announces unreleased-shaped notes truthfully", () => {
-		const selection = summarize(`
-- Uncategorized note.
-
-### Fixed
-
-   - Indented fix.
-- Ordinary fix.
-`);
-
-		const breakdown = Object.values(selection.categoryCounts).reduce((total, count) => total + count, 0);
-		expect(selection.changeCount).toBe(breakdown);
-		expect(selection.changeCount).toBe(3);
-		expect(selection.categoryCounts).toEqual({ Other: 1, Fixed: 2 });
 	});
 });

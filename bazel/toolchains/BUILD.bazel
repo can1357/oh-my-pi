@@ -8,6 +8,13 @@
 #
 # //bazel/toolchains/msvc: hermetic clang-cl + lld-link + xwin CRT/SDK
 # cc toolchain for x86_64-pc-windows-msvc cross builds from linux.
+#
+# //bazel/toolchains/darwin: hermetic clang + ld64.lld + Command Line Tools SDK
+# cc toolchain for {arm64,x86_64}-apple-darwin cross builds from linux (mac
+# hosts keep the host Xcode toolchain).
+#
+# //bazel/toolchains/swift: the Swift toolchain for the Apple Foundation Models
+# bridge, host-detected on mac exec hosts, pinned swift.org on linux ones.
 
 package(default_visibility = ["//visibility:public"])
 
@@ -81,3 +88,68 @@ _MSVC_EXEC_HOSTS = {
     )
     for name, exec_cv in _MSVC_EXEC_HOSTS.items()
 ]
+
+# aarch64-pc-windows-msvc variant (@msvc_cc_arm64, xwin aarch64 splat).
+[
+    toolchain(
+        name = "msvc-arm64-cc-from-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:windows",
+            "@platforms//cpu:aarch64",
+        ],
+        toolchain = "@msvc_cc_arm64//:cc_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for name, exec_cv in _MSVC_EXEC_HOSTS.items()
+]
+
+# darwin cross cc toolchains: exec-gated on linux, so mac hosts never resolve
+# them and keep the host Xcode toolchain for darwin targets.
+_LINUX_EXEC_HOSTS = {
+    "linux-x64": ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    "linux-arm64": ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+}
+
+_DARWIN_TARGETS = {
+    "arm64": "@platforms//cpu:aarch64",
+    "x64": "@platforms//cpu:x86_64",
+}
+
+[
+    toolchain(
+        name = "darwin-{}-cc-from-{}".format(arch, host),
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:macos",
+            cpu,
+        ],
+        toolchain = "@darwin_cc_{}//:cc_toolchain".format(arch),
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for host, exec_cv in _LINUX_EXEC_HOSTS.items()
+    for arch, cpu in _DARWIN_TARGETS.items()
+]
+
+# Apple Foundation Models bridge (arm64 only: the framework needs Apple silicon).
+toolchain(
+    name = "applefm-from-macos",
+    exec_compatible_with = ["@platforms//os:macos"],
+    target_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = "//bazel/toolchains/swift:host",
+    toolchain_type = "//bazel/toolchains/swift:toolchain_type",
+)
+
+toolchain(
+    name = "applefm-from-linux",
+    exec_compatible_with = ["@platforms//os:linux"],
+    target_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = "//bazel/toolchains/swift:linux",
+    toolchain_type = "//bazel/toolchains/swift:toolchain_type",
+)

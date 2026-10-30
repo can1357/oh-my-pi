@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
-import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -48,7 +51,7 @@ function createSession(tools: AgentTool[]): ToolSession {
 }
 
 describe("callSessionTool", () => {
-	it("injects js intent and summarizes text results", async () => {
+	it("summarizes text results into the bridge value and status event", async () => {
 		const execute = vi.fn().mockResolvedValue({
 			content: [{ type: "text", text: "hello" }],
 		});
@@ -67,33 +70,44 @@ describe("callSessionTool", () => {
 		);
 
 		expect(result).toBe("hello");
-		expect(execute).toHaveBeenCalledWith(
-			expect.stringMatching(/^js-read-/),
-			{ path: "/tmp/demo.txt", [INTENT_FIELD]: "js prelude" },
-			undefined,
-			undefined,
-			undefined,
-		);
 		expect(statuses).toEqual([expect.objectContaining({ op: "read", path: "/tmp/demo.txt", chars: 5 })]);
 	});
 
-	it("passes the session tool context to bridged executions", async () => {
-		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const context = { settings: Settings.isolated() } as AgentToolContext;
-		const session = {
-			...createSession([createTool("bash", execute)]),
-			getToolContext: () => context,
-		};
-
-		await callSessionTool("bash", { command: "true" }, { session });
-
-		expect(execute).toHaveBeenCalledWith(
-			expect.stringMatching(/^js-bash-/),
-			{ command: "true", [INTENT_FIELD]: "js prelude" },
-			undefined,
-			undefined,
-			context,
+	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {
+		const started = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		const lateClaim = Promise.withResolvers<undefined>();
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ordinary" }] });
+		const shadowCell = {
+			async claim(
+				_name: string,
+				_args: unknown,
+				_identity: { siteId: string; occurrence: number },
+				_remainingTimeoutMs: number,
+				_signal?: AbortSignal,
+			) {
+				started.resolve();
+				return await lateClaim.promise;
+			},
+		} as unknown as EvalShadowCellSession;
+		const call = callSessionTool(
+			"read",
+			{ path: "/tmp/waiting.txt" },
+			{
+				session: createSession([createTool("read", execute)]),
+				signal: controller.signal,
+				identity: { siteId: "site-1", occurrence: 0 },
+				shadowCell,
+			},
 		);
+
+		await started.promise;
+		controller.abort();
+
+		await expect(call).rejects.toThrow();
+		expect(execute).not.toHaveBeenCalled();
+		lateClaim.reject(new Error("late speculative failure"));
+		await Promise.resolve();
 	});
 
 	it("validates optional nulls before executing a real todo tool", async () => {
@@ -146,23 +160,27 @@ describe("callSessionTool", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
-	it("preserves caller intent through closed-schema validation", async () => {
+	it("executes a closed-schema tool with schema-shaped args whether or not the caller supplies harness intent", async () => {
+		const received: unknown[] = [];
 		const tool: AgentTool = {
-			name: "intent",
-			label: "intent",
-			description: "intent tool",
-			parameters: type({ "value?": "string" }).onUndeclaredKey("reject"),
-			concurrency: "shared",
-			execute: async (_id: string, args: unknown) => ({
-				content: [{ type: "text", text: String((args as Record<string, unknown>)[INTENT_FIELD]) }],
-			}),
+			name: "strict-extension",
+			label: "strict extension",
+			description: "rejects undeclared keys like a strict backing server",
+			parameters: { type: "object", properties: { value: { type: "string" } }, additionalProperties: false },
+			concurrency: "parallel",
+			execute: async (_id: string, args: unknown) => {
+				const extra = Object.keys(args as Record<string, unknown>).filter(key => key !== "value");
+				if (extra.length > 0) throw new Error(`Invalid params: unexpected parameters: ${JSON.stringify(extra)}`);
+				received.push(args);
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
 		} as unknown as AgentTool;
-		const result = await callSessionTool(
-			"intent",
-			{ value: "x", [INTENT_FIELD]: "caller intent" },
-			{ session: createSession([tool]) },
-		);
-		expect(result).toBe("caller intent");
+		const session = createSession([tool]);
+		expect(await callSessionTool("strict-extension", { value: "x" }, { session })).toBe("ok");
+		expect(
+			await callSessionTool("strict-extension", { value: "x", [INTENT_FIELD]: "caller intent" }, { session }),
+		).toBe("ok");
+		expect(received).toEqual([{ value: "x" }, { value: "x" }]);
 	});
 
 	it("validates and preserves a schema-declared intent field", async () => {
@@ -241,7 +259,7 @@ describe("callSessionTool", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
-	it("preserves harness intent when propertyNames does not open a closed schema", async () => {
+	it("drops harness intent when propertyNames does not open a closed schema", async () => {
 		const tool = createSchemaTool("closed-property-names", {
 			type: "object",
 			properties: { value: {} },
@@ -254,7 +272,7 @@ describe("callSessionTool", () => {
 				{ value: "x", i: "caller intent" },
 				{ session: createSession([tool]) },
 			),
-		).toBe("string:caller intent");
+		).toBe("undefined:undefined");
 	});
 
 	it.each(["const", "enum"] as const)("preserves intent in object-valued %s", async keyword => {
@@ -312,7 +330,7 @@ describe("callSessionTool", () => {
 				{ [INTENT_FIELD]: "caller intent" },
 				{ session: createSession([tool]) },
 			),
-		).toBe("string:caller intent");
+		).toBe("undefined:undefined");
 	});
 
 	it("rejects invalid intent matched by patternProperties", async () => {
@@ -503,14 +521,14 @@ describe("callSessionTool", () => {
 			});
 			expect(
 				await callSessionTool("forbidden-presence", { i: "caller intent" }, { session: createSession([tool]) }),
-			).toBe("string:caller intent");
+			).toBe("undefined:undefined");
 		},
 	);
 
 	it("keeps harness intent out of a false property schema", async () => {
 		const tool = createSchemaTool("false-intent", { type: "object", properties: { i: false } });
 		expect(await callSessionTool("false-intent", { i: "caller intent" }, { session: createSession([tool]) })).toBe(
-			"string:caller intent",
+			"undefined:undefined",
 		);
 	});
 
@@ -521,7 +539,7 @@ describe("callSessionTool", () => {
 		});
 		expect(
 			await callSessionTool("false-pattern-intent", { i: "caller intent" }, { session: createSession([tool]) }),
-		).toBe("string:caller intent");
+		).toBe("undefined:undefined");
 	});
 
 	it("preserves intent constrained by unevaluatedProperties", async () => {
@@ -613,7 +631,7 @@ describe("callSessionTool", () => {
 				{ [INTENT_FIELD]: "caller intent" },
 				{ session: createSession([tool]) },
 			),
-		).toBe("string:caller intent");
+		).toBe("undefined:undefined");
 	});
 
 	it("does not treat a nested intent property as a root tool parameter", async () => {
@@ -634,7 +652,7 @@ describe("callSessionTool", () => {
 				{ wrapper: {}, [INTENT_FIELD]: "caller intent" },
 				{ session: createSession([tool]) },
 			),
-		).toBe("string:caller intent");
+		).toBe("undefined:undefined");
 	});
 
 	it("validates constrained tool-owned intent without supplying a missing optional value", async () => {
@@ -683,6 +701,117 @@ describe("callSessionTool", () => {
 		expect(phases).toEqual([
 			{ name: "Recovered", tasks: [{ content: "From malformed JSON", status: "in_progress" }] },
 		]);
+	});
+
+	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
+		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
+		const persisted: TodoPhase[][] = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases: next => persisted.push(next),
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool("todo", { op: "done", task: "Persist" }, { session });
+		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist", status: "completed" }] }]]);
+
+		// Reads and rejected batches leave the branch untouched.
+		await callSessionTool("todo", { op: "view" }, { session });
+		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
+		expect(persisted).toHaveLength(1);
+	});
+
+	it("persists and summarizes a todo wire alias using the resolved canonical identity", async () => {
+		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist alias", status: "in_progress" }] }];
+		const persisted: TodoPhase[][] = [];
+		const statuses: Array<Record<string, unknown>> = [];
+		const lookup = vi.fn((name: string) => (name === "checklist" ? (todoTool as unknown as AgentTool) : undefined));
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases: next => persisted.push(next),
+			getToolForEvalBridge: lookup,
+		};
+		const todoTool = Object.assign(new TodoTool(session), { customWireName: "checklist" });
+
+		await callSessionTool(
+			"checklist",
+			{ op: "done", task: "Persist alias" },
+			{ session, emitStatus: event => statuses.push(event) },
+		);
+
+		expect(lookup).toHaveBeenCalledTimes(1);
+		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist alias", status: "completed" }] }]]);
+		expect(statuses).toEqual([expect.objectContaining({ op: "todo", committed: true })]);
+		await callSessionTool("checklist", { op: "view" }, { session });
+		await callSessionTool("checklist", { op: "done", task: "No such task" }, { session });
+		expect(persisted).toHaveLength(1);
+	});
+
+	it("pauses the watchdog for wire aliases of delegated work tools", async () => {
+		for (const [name, alias] of [
+			["wait", "join_jobs"],
+			["task", "delegate"],
+		]) {
+			const statuses: string[] = [];
+			const tool = {
+				...createTool(name, async () => {
+					expect(statuses).toEqual([EVAL_TIMEOUT_PAUSE_OP]);
+					return { content: [{ type: "text" as const, text: "done" }] };
+				}),
+				customWireName: alias,
+			};
+			const session = {
+				...createSession([tool]),
+				getToolForEvalBridge: (requested: string) => (requested === alias ? tool : undefined),
+			};
+
+			expect(await callSessionTool(alias, {}, { session, emitStatus: event => statuses.push(event.op) })).toBe(
+				"done",
+			);
+			expect(statuses).toEqual([EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, name]);
+		}
+	});
+
+	it("keeps persisted nested Todo status bounded for large checklists", async () => {
+		let phases: TodoPhase[] = [
+			{
+				name: "Ship",
+				tasks: Array.from({ length: 100 }, (_, index) => ({
+					content: `Task ${index}`,
+					status: index === 0 ? ("in_progress" as const) : ("pending" as const),
+				})),
+			},
+		];
+		const statuses: Array<Record<string, unknown>> = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool(
+			"todo",
+			{ op: "done", task: "Task 0" },
+			{ session, emitStatus: event => statuses.push(event) },
+		);
+		await callSessionTool("todo", { op: "view" }, { session, emitStatus: event => statuses.push(event) });
+
+		expect(phases[0]?.tasks[0]?.status).toBe("completed");
+		expect(statuses.map(event => event.committed)).toEqual([true, false]);
+		expect(JSON.stringify(statuses).length).toBeLessThan(500);
 	});
 
 	it("returns structured tool results when details or images are present", async () => {
@@ -799,6 +928,25 @@ describe("callSessionTool", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
+	it("rejects wire aliases of tools that require direct tool results", async () => {
+		for (const [name, alias] of [
+			["checkpoint", "savepoint"],
+			["rewind", "restorepoint"],
+		]) {
+			const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "not committed" }] });
+			const tool = { ...createTool(name, execute), customWireName: alias };
+			const session = {
+				...createSession([tool]),
+				getToolForEvalBridge: (requested: string) => (requested === alias ? tool : undefined),
+			};
+
+			await expect(callSessionTool(alias, {}, { session })).rejects.toThrow(
+				`\`${name}\` cannot run through the eval bridge`,
+			);
+			expect(execute).not.toHaveBeenCalled();
+		}
+	});
+
 	it("rejects a registry tool excluded from the eval bridge", async () => {
 		const rawExecute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "raw" }] });
 		const session = {
@@ -807,7 +955,7 @@ describe("callSessionTool", () => {
 		};
 
 		await expect(callSessionTool("write", { path: "out.txt", content: "data" }, { session })).rejects.toThrow(
-			"Unknown tool from js runtime",
+			"registered but not available in this session",
 		);
 		expect(rawExecute).not.toHaveBeenCalled();
 	});

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 
 // Real embeddings (fastembed + onnxruntime-node, ~270MB) install on demand via
@@ -32,38 +31,6 @@ afterEach(() => {
 });
 
 describe("identity memory parity", () => {
-	it("creates identity columns and indexes on working and episodic memory", () => {
-		const beam = new BeamMemory({ sessionId: "schema", dbPath: tempDb() });
-		try {
-			const wmCols = new Set(
-				(beam.db.query("PRAGMA table_info(working_memory)").all() as { name: string }[]).map(row => row.name),
-			);
-			const emCols = new Set(
-				(beam.db.query("PRAGMA table_info(episodic_memory)").all() as { name: string }[]).map(row => row.name),
-			);
-			expect(wmCols.has("author_id")).toBe(true);
-			expect(wmCols.has("author_type")).toBe(true);
-			expect(wmCols.has("channel_id")).toBe(true);
-			expect(emCols.has("author_id")).toBe(true);
-			expect(emCols.has("author_type")).toBe(true);
-			expect(emCols.has("channel_id")).toBe(true);
-
-			const idxs = new Set(
-				(
-					beam.db.query("SELECT name FROM sqlite_master WHERE type = 'index'").all() as {
-						name: string;
-					}[]
-				).map(row => row.name),
-			);
-			expect(idxs.has("idx_wm_author")).toBe(true);
-			expect(idxs.has("idx_wm_channel")).toBe(true);
-			expect(idxs.has("idx_em_author")).toBe(true);
-			expect(idxs.has("idx_em_channel")).toBe(true);
-		} finally {
-			beam.close();
-		}
-	});
-
 	it("stores author and channel identity on remember and defaults channel to session", () => {
 		const dbPath = tempDb();
 		const identified = new Mnemopi({

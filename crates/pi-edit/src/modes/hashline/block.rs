@@ -2,6 +2,7 @@
 //! `block-resolver.ts`).
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, VecDeque},
 	sync::{LazyLock, Mutex},
 };
@@ -54,12 +55,7 @@ const fn block_mode(mode: Option<BlockMode>) -> (BlockOp, BlockOpKind) {
 	}
 }
 
-fn find_next_block(
-	anchor_line: u32,
-	lines: &[String],
-	path: &str,
-	text: &str,
-) -> Option<BlockSpan> {
+fn find_next_block(anchor_line: u32, lines: &[&str], path: &str, text: &str) -> Option<BlockSpan> {
 	let last = (lines.len() as u32).min(anchor_line.saturating_add(BLOCK_SUGGESTION_SCAN_LIMIT));
 	for line in anchor_line.saturating_add(1)..=last {
 		if lines
@@ -80,7 +76,7 @@ fn find_next_block(
 
 fn find_enclosing_block(
 	anchor_line: u32,
-	lines: &[String],
+	lines: &[&str],
 	path: &str,
 	text: &str,
 ) -> Option<BlockSpan> {
@@ -106,18 +102,18 @@ fn find_enclosing_block(
 }
 
 /// Resolve deferred block operations to ordinary edits.
-pub fn resolve_block_edits(
-	edits: &[Edit],
+pub fn resolve_block_edits<'e>(
+	edits: &'e [Edit],
 	text: &str,
 	path: &str,
 	on_unresolved: Unresolved,
 	on_resolved: &mut dyn FnMut(BlockResolution),
 	on_warning: &mut dyn FnMut(String),
-) -> Result<Vec<Edit>, EditError> {
+) -> Result<Cow<'e, [Edit]>, EditError> {
 	if !has_block_edit(edits) {
-		return Ok(edits.to_vec());
+		return Ok(Cow::Borrowed(edits));
 	}
-	let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+	let lines: Vec<&str> = text.split('\n').collect();
 	let mut resolved = Vec::new();
 	let mut synth_index = 0;
 	for edit in edits {
@@ -179,7 +175,6 @@ pub fn resolve_block_edits(
 				.flatten();
 			let suggestions =
 				BlockDiagnosticSuggestions { next_block: next, enclosing_block: enclosing };
-			let line_refs: Vec<_> = lines.iter().map(String::as_str).collect();
 			let range_op = if message_op == BlockOp::Cut {
 				AbsoluteRangeOp::Cut
 			} else {
@@ -190,7 +185,7 @@ pub fn resolve_block_edits(
 				block_unresolved_message(
 					anchor.line,
 					range_op,
-					Some(&line_refs),
+					Some(&lines),
 					&suggestions,
 					register.as_deref()
 				)
@@ -298,7 +293,7 @@ pub fn resolve_block_edits(
 			},
 		}
 	}
-	Ok(resolved)
+	Ok(Cow::Owned(resolved))
 }
 
 /// Resolve the enclosing syntax block at a 1-indexed line, memoized by content

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
 import type {
 	ToolSearchServerToolUseBlockParam,
@@ -6,8 +7,16 @@ import type {
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Model,
+	ToolCall,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
+import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function emptyUsage(): AssistantMessage["usage"] {
@@ -490,6 +499,71 @@ describe("anthropic-messages parseRequest", () => {
 		expect(assistant?.content.every(block => block.type === "text")).toBe(true);
 		expect(assistant?.content.some(block => block.type === "anthropicServerTool")).toBe(false);
 	});
+
+	it("stamps replayed assistant turns with the dispatched model id, not the wire alias", () => {
+		const assistantTurn = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "answer" }],
+		};
+		const base = { max_tokens: 64, messages: [{ role: "user" as const, content: "hi" }, assistantTurn] };
+
+		const prefixed = parseRequest({ ...base, model: "anthropic/claude-fable-5-1" });
+		expect(prefixed.context.messages.find(m => m.role === "assistant")?.model).toBe("claude-fable-5-1");
+		expect(prefixed.modelId).toBe("anthropic/claude-fable-5-1");
+
+		const bare = parseRequest({ ...base, model: "claude-fable-5-1" });
+		expect(bare.context.messages.find(m => m.role === "assistant")?.model).toBe("claude-fable-5-1");
+
+		// Another provider's prefix does not describe this route, so it stays put.
+		const foreign = parseRequest({ ...base, model: "zenmux/claude-opus-4-8" });
+		expect(foreign.context.messages.find(m => m.role === "assistant")?.model).toBe("zenmux/claude-opus-4-8");
+	});
+
+	it("stamps a tool-calling replayed turn as toolUse", () => {
+		const parsed = parseRequest({
+			model: "anthropic/claude-fable-5-1",
+			max_tokens: 64,
+			messages: [
+				{ role: "user", content: "check the shards" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "prior reasoning", signature: "sig-1" },
+						{ type: "text", text: "checking" },
+						{ type: "tool_use", id: "toolu_01", name: "bash", input: { cmd: "check" } },
+					],
+				},
+				{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01", content: "runs=63" }] },
+				{ role: "assistant", content: [{ type: "text", text: "every ticker is one run" }] },
+				{ role: "user", content: "so is it sorted?" },
+			],
+		});
+		const assistants = parsed.context.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(2);
+		expect(assistants[0].stopReason).toBe("toolUse");
+		expect(assistants[1].stopReason).toBe("stop");
+
+		const model: Model<"anthropic-messages"> = buildModel({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+			name: "Claude Fable 5.1",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		});
+		const wire = convertAnthropicMessages(parsed.context.messages, model, false);
+		const replayed = wire.find(message => message.role === "assistant");
+		expect(replayed?.content).toContainEqual({
+			type: "thinking",
+			thinking: "prior reasoning",
+			signature: "sig-1",
+		});
+		expect(JSON.stringify(replayed?.content)).not.toContain('"text":"prior reasoning"');
+	});
 });
 
 describe("anthropic-messages encodeResponse", () => {
@@ -549,6 +623,154 @@ describe("anthropic-messages encodeResponse", () => {
 		expect(() => encodeResponse({ ...base, stopReason: "aborted", errorMessage: "request aborted" }, "m")).toThrow(
 			/request aborted/,
 		);
+	});
+
+	it("reports tool_use when a client-executed tool call ends the turn on `stop`", () => {
+		// Cursor's exec protocol has no tool-use stop: it hands a tool the
+		// caller declared back for the caller to run and then ends the turn,
+		// leaving `stopReason: "stop"` with the call unpaired. An Anthropic
+		// client runs tools while `stop_reason === "tool_use"`, so `end_turn`
+		// here strands the call it was asked to execute.
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Checking the weather." },
+				{ type: "toolCall", id: "toolu_handoff", name: "get_weather", arguments: { city: "Paris" } },
+			],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("tool_use");
+		expect(encoded.content).toContainEqual({
+			type: "tool_use",
+			id: "toolu_handoff",
+			name: "get_weather",
+			input: { city: "Paris" },
+		});
+	});
+
+	it("keeps a Cursor-resolved native call out of the turn and off the wire", () => {
+		// Cursor runs `todo` / `web_fetch` / `connect_scm` (and any native the
+		// gateway declined) on its own exec channel and stamps the block
+		// resolved. The client never declared those tools and the operation is
+		// already committed, so reporting `tool_use` would make the canonical
+		// loop repeat a side effect and post a result for a tool it does not
+		// have.
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [resolved, { type: "text", text: "Plan updated." }],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("end_turn");
+		expect(encoded.content).toEqual([{ type: "text", text: "Plan updated." }]);
+	});
+
+	it("still hands back an unresolved call when a resolved one precedes it", () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				resolved,
+				{ type: "toolCall", id: "toolu_handoff", name: "get_weather", arguments: { city: "Paris" } },
+			],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("tool_use");
+		expect(encoded.content).toEqual([
+			{ type: "tool_use", id: "toolu_handoff", name: "get_weather", input: { city: "Paris" } },
+		]);
+	});
+
+	it("drops the fallback marker and keeps only the first segment's reasoning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "primary thoughts", thinkingSignature: "SIG_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+				{ type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "toolUse",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-primary");
+		expect(encoded.content).toEqual([
+			{ type: "thinking", thinking: "primary thoughts", signature: "SIG_PRIMARY" },
+			{ type: "text", text: "answer" },
+			{ type: "tool_use", id: "toolu_1", name: "go", input: { x: 1 } },
+		]);
+	});
+
+	it("keeps reasoning that only appears after the fallback boundary", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "fallback", from: { model: "claude-fallback" }, to: { model: "claude-third" } },
+				{ type: "thinking", thinking: "third thoughts", thinkingSignature: "SIG_THIRD" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-fallback",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-fallback");
+		expect(encoded.content).toEqual([
+			{ type: "thinking", thinking: "fallback thoughts", signature: "SIG_FALLBACK" },
+			{ type: "text", text: "answer" },
+		]);
+	});
+
+	it("keeps a redacted first segment and drops later visible reasoning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "redactedThinking", data: "REDACTED_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-primary");
+		expect(encoded.content).toEqual([
+			{ type: "redacted_thinking", data: "REDACTED_PRIMARY" },
+			{ type: "text", text: "answer" },
+		]);
 	});
 });
 
@@ -813,10 +1035,281 @@ describe("anthropic-messages encodeStream", () => {
 		expect(last.data).toEqual({ type: "error", error: { type: "api_error", message: "boom" } });
 	});
 
+	it("reports tool_use in message_delta when a client-executed tool call ends the turn on `stop`", async () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "toolu_handoff",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		const delta = sse.find(event => event.event === "message_delta")!.data as {
+			delta: { stop_reason: string };
+		};
+		expect(delta.delta.stop_reason).toBe("tool_use");
+	});
+
+	it("drops a Cursor-resolved call from the stream and renumbers the blocks after it", async () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const handoff: ToolCall = {
+			type: "toolCall",
+			id: "toolu_handoff",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [resolved, { type: "text", text: "Plan updated." }, handoff],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_delta", contentIndex: 0, delta: '{"todos":[]}', partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: resolved, partial: finalMessage },
+			{ type: "text_start", contentIndex: 1, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 1, delta: "Plan updated.", partial: finalMessage },
+			{ type: "text_end", contentIndex: 1, content: "Plan updated.", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 2, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 2, toolCall: handoff, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		// The resolved `todo` never reaches the client, and every block after it
+		// shifts down so the client's index-addressed snapshot stays aligned.
+		const blocks = sse.filter(event => event.event === "content_block_start").map(event => event.data);
+		expect(blocks).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: { type: "tool_use", id: "toolu_handoff", name: "get_weather", input: {} },
+			},
+		]);
+		expect(sse.filter(event => event.event === "content_block_delta").map(event => event.data)).toEqual([
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Plan updated." } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
+		expect(sse.find(event => event.event === "message_delta")?.data.delta).toEqual({
+			stop_reason: "tool_use",
+			stop_sequence: null,
+		});
+	});
+
+	it("ends the turn when every call in it was resolved by Cursor's exec channel", async () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [resolved],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: resolved, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		expect(sse.map(event => event.event)).toEqual(["message_start", "message_delta", "message_stop"]);
+		expect(sse.find(event => event.event === "message_delta")?.data.delta).toEqual({
+			stop_reason: "end_turn",
+			stop_sequence: null,
+		});
+	});
+
 	it("emits a complete envelope when the stream ends without an explicit done", async () => {
 		const sse = await collectSse(encodeStream(makeStream([]), "m"));
 		expect(sse.map(e => e.event)).toEqual(["message_start", "message_delta", "message_stop"]);
 		const delta = sse[1]!.data as { delta: { stop_reason: string } };
 		expect(delta.delta.stop_reason).toBe("end_turn");
+	});
+
+	it("collapses a mid-turn fallback to the first reasoning segment with dense indices", async () => {
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "primary thoughts", thinkingSignature: "SIG_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+				{ type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "toolUse",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 0, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 0, delta: "primary thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 0, content: "primary thoughts", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 2, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 2, delta: "fallback thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 2, content: "fallback thoughts", partial: finalMessage },
+			{ type: "text_start", contentIndex: 3, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 3, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 3, content: "answer", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 4, partial: finalMessage },
+			{ type: "toolcall_delta", contentIndex: 4, delta: '{"x":1}', partial: finalMessage },
+			{
+				type: "toolcall_end",
+				contentIndex: 4,
+				toolCall: { type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+				partial: finalMessage,
+			},
+			{ type: "done", reason: "toolUse", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-primary"));
+
+		// The marker never reaches the wire.
+		expect(JSON.stringify(sse.map(event => event.data))).not.toContain('"fallback"');
+
+		// Indices are contiguous from 0 and every delta/stop addresses an
+		// already-opened block.
+		const openedIndices: unknown[] = [];
+		for (const event of sse) {
+			if (event.event === "content_block_start") openedIndices.push(event.data.index);
+			if (event.event === "content_block_delta" || event.event === "content_block_stop") {
+				expect(openedIndices).toContain(event.data.index);
+			}
+		}
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+			{
+				type: "content_block_start",
+				index: 2,
+				content_block: { type: "tool_use", id: "toolu_1", name: "go", input: {} },
+			},
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([
+			0, 1, 2,
+		]);
+
+		// Only the pre-boundary model's thinking survives, with its signature.
+		type WireDelta = { type: string; thinking?: string; signature?: string; text?: string };
+		const deltas: WireDelta[] = sse
+			.filter(event => event.event === "content_block_delta")
+			.map(event => event.data.delta as WireDelta);
+		expect(deltas.filter(delta => delta.type === "thinking_delta").map(delta => delta.thinking)).toEqual([
+			"primary thoughts",
+		]);
+		expect(deltas.filter(delta => delta.type === "signature_delta").map(delta => delta.signature)).toEqual([
+			"SIG_PRIMARY",
+		]);
+		expect(deltas.filter(delta => delta.type === "text_delta").map(delta => delta.text)).toEqual(["answer"]);
+	});
+
+	it("keeps fallback-model reasoning when the boundary precedes all reasoning", async () => {
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-fallback",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 1, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 1, delta: "fallback thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 1, content: "fallback thoughts", partial: finalMessage },
+			{ type: "text_start", contentIndex: 2, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 2, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 2, content: "answer", partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-fallback"));
+		expect(JSON.stringify(sse.map(event => event.data))).not.toContain('"fallback"');
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
+		type WireDelta = { type: string; thinking?: string; signature?: string };
+		const deltas: WireDelta[] = sse
+			.filter(event => event.event === "content_block_delta")
+			.map(event => event.data.delta as WireDelta);
+		expect(deltas.filter(delta => delta.type === "thinking_delta").map(delta => delta.thinking)).toEqual([
+			"fallback thoughts",
+		]);
+		expect(deltas.filter(delta => delta.type === "signature_delta").map(delta => delta.signature)).toEqual([
+			"SIG_FALLBACK",
+		]);
+	});
+
+	it("renumbers around a redacted reasoning block this encoder cannot emit", async () => {
+		// `redactedThinking` occupies a content index but has no stream event, so
+		// a client that addresses deltas by index must not be left with a hole.
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "visible", thinkingSignature: "SIG" },
+				{ type: "redactedThinking", data: "REDACTED" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 0, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 0, delta: "visible", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 0, content: "visible", partial: finalMessage },
+			{ type: "text_start", contentIndex: 2, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 2, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 2, content: "answer", partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-primary"));
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_delta").map(event => event.data.index)).toEqual([
+			0, 0, 1,
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
 	});
 });

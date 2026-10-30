@@ -1,8 +1,14 @@
+import {
+	type DaemonState,
+	type DaemonRestartPolicy,
+	type DaemonReadySpec,
+	type DaemonSpec,
+	type DaemonSnapshot,
+} from "@oh-my-pi/pi-tui/tools/daemon";
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
  */
-/** Hidden CLI selector used to re-enter the daemon broker worker. */
-export const DAEMON_BROKER_WORKER_ARG = "__omp_worker_daemon_broker";
+export { DAEMON_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 
 /** Fixed dimensions negotiated with every supervised PTY. */
 export const DAEMON_PTY_COLUMNS = 120;
@@ -17,63 +23,20 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 /** Optional environment key overriding last-client shutdown grace. */
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
 
-/** Stable lifecycle states exposed by the launch tool. */
-export type DaemonState = "starting" | "running" | "ready" | "restarting" | "stopping" | "exited" | "failed";
-
-/** Restart behavior applied after an unexpected daemon exit. */
-export type DaemonRestartPolicy = "no" | "on-failure" | "always";
-
-/** Readiness conditions; every configured condition must pass. */
-export interface DaemonReadySpec {
-	log?: string;
-	port?: number;
-	host?: string;
-	timeoutMs: number;
-}
-
-/** Immutable launch specification retained for restart and inspection. */
-export interface DaemonSpec {
-	name: string;
-	application: string;
-	args: string[];
-	env: Record<string, string>;
-	cwd: string;
-	pty: boolean;
-	ready?: DaemonReadySpec;
-	restart: DaemonRestartPolicy;
-	persist: boolean;
-	detached: boolean;
-}
-
-/** Serializable daemon state visible to every client in one broker scope. */
-export interface DaemonSnapshot {
-	name: string;
-	id: string;
-	state: DaemonState;
-	pid?: number;
-	createdAt: number;
-	startedAt: number;
-	readyAt?: number;
-	exitedAt?: number;
-	exitCode?: number;
-	exitReason?: string;
-	restartCount: number;
-	outputBytes: number;
-	owner?: string;
-	readyMatch?: string;
-	/** Readiness conditions still unmet while `state` is `starting`; absent once ready or without a ready spec. */
-	readyPending?: ("log" | "port")[];
-	persist: boolean;
-	detached: boolean;
-}
-
 /** Signals accepted by daemon input operations. */
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 
 /** Typed broker operation sent over the authenticated socket. */
 export type DaemonOperation =
 	| { op: "ping" }
-	| { op: "start"; spec: DaemonSpec; owner?: string }
+	| {
+			op: "start";
+			spec: DaemonSpec;
+			owner?: string;
+			replace?: boolean;
+			/** `false` answers once the process launches; follow with a `wait` for readiness. Legacy brokers ignore it and wait. */
+			awaitReady?: boolean;
+	  }
 	| { op: "list" }
 	| {
 			op: "logs";
@@ -89,9 +52,18 @@ export type DaemonOperation =
 	  }
 	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
-	| { op: "stop"; name: string; timeoutMs: number }
+	| {
+			op: "stop";
+			name: string;
+			timeoutMs: number;
+			/** Stop only this generation (`DaemonSnapshot.id`); another one is left running. Legacy brokers ignore it. */
+			id?: string;
+	  }
 	| { op: "restart"; name: string }
+	| { op: "mode"; name: string; mode: "persist" | "session" | "detached" }
 	| { op: "describe"; name: string }
+	/** Abort this connection's in-flight `wait`/follow-`logs` request `requestId`. Legacy brokers reject it. */
+	| { op: "cancel"; requestId: string }
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
@@ -115,7 +87,9 @@ export type DaemonRpcResult =
 	| { op: "send"; daemon: DaemonSnapshot }
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
+	| { op: "mode"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "cancel"; cancelled: boolean }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -351,6 +325,9 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				spec: parseDaemonSpec(source.spec),
 				owner: optionalString(source.owner, "operation.owner"),
+				replace: source.replace === undefined ? undefined : booleanValue(source.replace, "operation.replace"),
+				awaitReady:
+					source.awaitReady === undefined ? undefined : booleanValue(source.awaitReady, "operation.awaitReady"),
 			};
 		case "logs":
 			return {
@@ -390,10 +367,19 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				name: stringValue(source.name, "operation.name"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				id: optionalString(source.id, "operation.id"),
 			};
 		case "restart":
 		case "describe":
 			return { op, name: stringValue(source.name, "operation.name") };
+		case "cancel":
+			return { op, requestId: stringValue(source.requestId, "operation.requestId") };
+		case "mode": {
+			const mode = stringValue(source.mode, "operation.mode");
+			if (mode !== "persist" && mode !== "session" && mode !== "detached")
+				throw new Error("operation.mode must be persist, session, or detached");
+			return { op, name: stringValue(source.name, "operation.name"), mode };
+		}
 		default:
 			throw new Error(`Unknown daemon operation: ${op}`);
 	}
@@ -441,12 +427,16 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			return { op: "stop", daemon: parseDaemonSnapshot(source.daemon) };
 		case "restart":
 			return { op: "restart", daemon: parseDaemonSnapshot(source.daemon) };
+		case "mode":
+			return { op: "mode", daemon: parseDaemonSnapshot(source.daemon) };
 		case "describe":
 			return {
 				op: "describe",
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
 			};
+		case "cancel":
+			return { op: "cancel", cancelled: booleanValue(source.cancelled, "result.cancelled") };
 		case "shutdown":
 			return { op: "shutdown" };
 	}
