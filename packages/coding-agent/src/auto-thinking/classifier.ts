@@ -158,6 +158,8 @@ export async function classifyDifficulty(
 		onUsage: deps.onUsage,
 		telemetry: deps.telemetry,
 		cache: sharedJudgmentCache(),
+		// The session's disposal signal among others; bound here so no call on this judge outlives it.
+		signal: deps.signal,
 	});
 	const solutionSpace = input.solutionSpace?.trim();
 	const state: Record<string, string> = solutionSpace

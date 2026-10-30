@@ -182,7 +182,14 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
-import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import {
+	type ChainJudge,
+	hasNativeJudge,
+	type JudgeDeps,
+	journalJudgmentUsage,
+	resolveJudge,
+	sharedJudgmentCache,
+} from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -3644,17 +3651,7 @@ export class AgentSession implements SettingsScope {
 	ruleJudge(): Judge | undefined {
 		const mode = cfgTtsrJudge.get(this.settings);
 		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry))) return undefined;
-		return resolveJudge({
-			settings: this.settings,
-			registry: this.#modelRegistry,
-			sessionModel: this.model,
-			sessionId: this.sessionId,
-			metadataResolver: provider => this.agent.metadataForProvider(provider),
-			purpose: "ttsr",
-			onUsage: journalJudgmentUsage(this.sessionManager),
-			telemetry: this.agent.telemetry,
-			cache: sharedJudgmentCache(),
-		});
+		return this.createJudge("ttsr");
 	}
 
 	/**
@@ -3663,16 +3660,29 @@ export class AgentSession implements SettingsScope {
 	 * switches apply.
 	 */
 	tableChartJudge(): ChainJudge {
+		return this.createJudge("auto-graph");
+	}
+
+	/**
+	 * A judge over this session's role chain, ledger and telemetry, labelled `purpose`. It
+	 * carries the session's disposal signal from construction ({@link JudgeDeps.signal}), so
+	 * no judgment it starts outlives {@link beginDispose}, whether or not its caller passes a
+	 * signal of its own, and once disposal has begun it starts nothing. Every judge the
+	 * session hands out comes from here; `overrides` adjusts the other dependencies only.
+	 */
+	createJudge(purpose: string, overrides: Omit<Partial<JudgeDeps>, "purpose" | "signal"> = {}): ChainJudge {
 		return resolveJudge({
 			settings: this.settings,
 			registry: this.#modelRegistry,
 			sessionModel: this.model,
 			sessionId: this.sessionId,
 			metadataResolver: provider => this.agent.metadataForProvider(provider),
-			purpose: "auto-graph",
 			onUsage: journalJudgmentUsage(this.sessionManager),
 			telemetry: this.agent.telemetry,
 			cache: sharedJudgmentCache(),
+			...overrides,
+			purpose,
+			signal: this.#disposeAbortController.signal,
 		});
 	}
 
@@ -11223,18 +11233,7 @@ export class AgentSession implements SettingsScope {
 	async #titleDrifted(): Promise<boolean | undefined> {
 		const title = this.sessionName;
 		if (!title) return undefined;
-		const judge = resolveJudge({
-			settings: this.settings,
-			registry: this.#modelRegistry,
-			sessionModel: this.model,
-			sessionId: this.sessionId,
-			metadataResolver: provider => this.agent.metadataForProvider(provider),
-			purpose: "title-drift",
-			onUsage: journalJudgmentUsage(this.sessionManager),
-			telemetry: this.agent.telemetry,
-			cache: sharedJudgmentCache(),
-			costGate: this.#costGate,
-		});
+		const judge = this.createJudge("title-drift", { costGate: this.#costGate });
 		const recent = buildTitleDriftTurns(this.agent.state.messages);
 		const signal = AbortSignal.any([
 			this.#titleGenerationAbortController.signal,
@@ -13872,6 +13871,10 @@ export class AgentSession implements SettingsScope {
 		// A branch summary is a provider request and a history change; a disposing session makes
 		// neither. A plain leaf move reaches no provider and is left alone.
 		if (options.summarize && this.#isDisposed) throw this.#disposingRefusal("branch summary");
+		// This navigation's own cancellation, reachable by `abortBranchSummary()` and disposal from
+		// before its first await until it ends, however many others run meanwhile.
+		const branchSummaryAbort = new AbortController();
+		using _branchSummary = this.#trackBranchSummary(branchSummaryAbort);
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
@@ -13957,10 +13960,6 @@ export class AgentSession implements SettingsScope {
 			userWantsSummary: options.summarize ?? false,
 		};
 
-		// This navigation's own cancellation, reachable by `abortBranchSummary()` and disposal until
-		// the navigation ends, however many others run meanwhile.
-		const branchSummaryAbort = new AbortController();
-		using _branchSummary = this.#trackBranchSummary(branchSummaryAbort);
 		let hookSummary: { summary: string; details?: unknown } | undefined;
 		let fromExtension = false;
 
@@ -13981,9 +13980,11 @@ export class AgentSession implements SettingsScope {
 				fromExtension = true;
 			}
 		}
-		// Disposal that began during an await here (the hook above, the key below) leaves the tree
-		// as it was and sends no summary request; `beginDispose()` aborts a summary already streaming.
-		if (options.summarize && this.#isDisposed) return { cancelled: true, aborted: true };
+		// This navigation's own signal decides whether a summarized navigation may still commit:
+		// `abortBranchSummary()` and disposal (which calls it) abort it, and whatever a hook or the
+		// summarizer returned afterwards is discarded regardless of what it says about itself.
+		const summaryCancelled = () => options.summarize === true && branchSummaryAbort.signal.aborted;
+		if (summaryCancelled()) return { cancelled: true, aborted: true };
 
 		// Run default summarizer if needed
 		let summaryText: string | undefined;
@@ -13994,7 +13995,7 @@ export class AgentSession implements SettingsScope {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
-			if (this.#isDisposed) return { cancelled: true, aborted: true };
+			if (summaryCancelled()) return { cancelled: true, aborted: true };
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
@@ -14011,8 +14012,7 @@ export class AgentSession implements SettingsScope {
 					return stream.result();
 				},
 			});
-			// A summary that settled as disposal began still leaves the tree as it was.
-			if (result.aborted || this.#isDisposed) {
+			if (result.aborted || summaryCancelled()) {
 				return { cancelled: true, aborted: true };
 			}
 			if (result.error) {

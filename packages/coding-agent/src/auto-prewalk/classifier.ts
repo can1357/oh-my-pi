@@ -135,6 +135,8 @@ export async function classifyAutoPrewalk(
 		onUsage: deps.onUsage,
 		telemetry: deps.telemetry,
 		cache: sharedJudgmentCache(),
+		// The session's disposal signal among others; bound here so no call on this judge outlives it.
+		signal: deps.signal,
 	});
 	const timeout = AbortSignal.timeout(AUTO_PREWALK_TIMEOUT_MS);
 	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };

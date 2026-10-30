@@ -95,6 +95,8 @@ export async function classifyUnexpectedStop(
 			onUsage: deps.onUsage,
 			telemetry: deps.telemetry,
 			cache: sharedJudgmentCache(),
+			// The post-prompt signal, which disposal aborts; bound here so no call on this judge outlives it.
+			signal: deps.signal,
 		});
 		const request = stop.request?.trim().slice(0, REQUEST_CHARS);
 		const state: JudgmentState = request ? { request, message: stop.message } : { message: stop.message };

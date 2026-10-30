@@ -12,16 +12,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as compaction from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { ApiKeyResolveContext, ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { pickTableChart } from "@oh-my-pi/pi-coding-agent/auto-graph/planner";
 import type { ApiKeyResolverModel } from "@oh-my-pi/pi-coding-agent/config/api-key-resolver";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { planChart } from "@oh-my-pi/pi-tui/charts/chart-plan";
+import { analyzeTable } from "@oh-my-pi/pi-tui/charts/table-data";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /** A 1×1 PNG. */
@@ -80,6 +85,7 @@ interface SessionOptions {
 	settings?: Parameters<typeof Settings.isolated>[0];
 	extensionRunner?: ExtensionRunner;
 	agentKind?: "main" | "sub";
+	ttsrManager?: TtsrManager;
 }
 
 describe("AgentSession provider requests at disposal", () => {
@@ -125,6 +131,7 @@ describe("AgentSession provider requests at disposal", () => {
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, ...options.settings }),
 			extensionRunner: options.extensionRunner,
 			agentKind: options.agentKind,
+			ttsrManager: options.ttsrManager,
 		});
 	}
 
@@ -170,6 +177,93 @@ describe("AgentSession provider requests at disposal", () => {
 		const run = session.prompt("first");
 		await firstRequest.promise;
 		return { run };
+	}
+
+	/** A native judge endpoint and the session's judge role routed to it. */
+	interface JudgeEndpoint {
+		/** For each request the endpoint received, whether the session was disposing. */
+		requests: boolean[];
+		/** Resolved when the judge's credential is first asked for, if `holdCredential`. */
+		credentialReached: Promise<void>;
+		releaseCredential: () => void;
+		port: number;
+		stop: () => void;
+	}
+
+	/**
+	 * Route the judge role to a local native endpoint. It answers every question: a `noul`
+	 * question with 0, a choice with `direct` when offered, else its first option. With
+	 * `holdCredential`, the judge's credential lookup waits until `releaseCredential`.
+	 * Call before the session the case uses is created, since that session reads the role.
+	 */
+	function routeJudge(options: { holdCredential?: boolean } = {}): JudgeEndpoint {
+		const requests: boolean[] = [];
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const judgeServer = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				const body = (await request.json()) as {
+					questions: Record<string, { type: string; criteria?: Record<string, unknown> }>;
+				};
+				requests.push(session.isDisposed);
+				const answers: Record<string, unknown> = {};
+				for (const [id, question] of Object.entries(body.questions)) {
+					if (question.type === "noul") {
+						answers[id] = { type: "noul", noul: 0 };
+						continue;
+					}
+					const labels = Object.keys(question.criteria ?? {});
+					const choice = labels.includes("direct") ? "direct" : labels[0];
+					answers[id] = { type: "choice", choice, probabilities: { [choice]: 1 }, confidence: 1 };
+				}
+				return Response.json({ model: "jev-preview", answers, usage: { input_tokens: 8, output_tokens: 2 } });
+			},
+		});
+		const judge = {
+			id: "jev-preview",
+			name: "JEV Preview",
+			api: "typesafe",
+			provider: "typesafe",
+			baseUrl: judgeServer.url.origin,
+			kind: "judge",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		} as Model<Api>;
+		authStorage.keys.setRuntime("typesafe", "ts-test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([judge, model]);
+		if (options.holdCredential) {
+			const resolve = modelRegistry.resolver.bind(modelRegistry) as (
+				target: ApiKeyResolverModel,
+				sessionId?: string,
+			) => ApiKeyResolver;
+			vi.spyOn(modelRegistry, "resolver").mockImplementation(((
+				target: ApiKeyResolverModel,
+				sessionId?: string,
+			): ApiKeyResolver => {
+				const real = resolve(target, sessionId);
+				if (target.provider !== "typesafe") return real;
+				return async (context: ApiKeyResolveContext) => {
+					reached.resolve();
+					await release.promise;
+					return real(context);
+				};
+			}) as typeof modelRegistry.resolver);
+		}
+		return {
+			requests,
+			credentialReached: reached.promise,
+			releaseCredential: () => release.resolve(),
+			port: judgeServer.port ?? 0,
+			stop: () => {
+				release.resolve();
+				judgeServer.stop(true);
+			},
+		};
 	}
 
 	describe("queued steering and follow-ups", () => {
@@ -479,6 +573,68 @@ describe("AgentSession provider requests at disposal", () => {
 			expect(session.sessionManager.getLeafId()).toBe(leafBefore);
 			expect(session.sessionManager.getEntries()).toHaveLength(entriesBefore);
 		});
+
+		// The navigation's own aborted signal decides, not what a hook or the summarizer says.
+		describe("abortBranchSummary()", () => {
+			it("commits none of three hook-supplied summaries whose hooks return after the abort", async () => {
+				const entered = Promise.withResolvers<void>();
+				const releaseHooks = Promise.withResolvers<void>();
+				const hookSignals: AbortSignal[] = [];
+				// The hand-rolled runner implements only what this path and disposal call.
+				const extensionRunner = {
+					hasHandlers: (event: string) => event === "session_before_tree",
+					emit: async (event: { signal: AbortSignal }) => {
+						hookSignals.push(event.signal);
+						if (hookSignals.length === 3) entered.resolve();
+						await releaseHooks.promise;
+						return { summary: { summary: "hook summary" } };
+					},
+					clearManagedTimers: () => {},
+					disposeFileFallbacks: () => {},
+				} as unknown as ExtensionRunner;
+				await seedConversation();
+				await replaceSession({ settings: COMPACTION_SETTINGS, extensionRunner });
+				const now = Date.now();
+				session.sessionManager.appendMessage({ role: "user", content: "first", timestamp: now });
+				session.sessionManager.appendMessage({ role: "user", content: "second", timestamp: now + 1 });
+				const leafBefore = session.sessionManager.getLeafId();
+				const entriesBefore = session.sessionManager.getEntries().length;
+
+				const navigations = Array.from({ length: 3 }, () =>
+					session.navigateTree(firstMessageId(), { summarize: true }),
+				);
+				await entered.promise;
+				session.abortBranchSummary();
+				releaseHooks.resolve();
+
+				expect(await Promise.all(navigations)).toEqual(Array(3).fill({ cancelled: true, aborted: true }));
+				expect(hookSignals.map(signal => signal.aborted)).toEqual([true, true, true]);
+				expect(session.sessionManager.getLeafId()).toBe(leafBefore);
+				expect(session.sessionManager.getEntries()).toHaveLength(entriesBefore);
+			});
+
+			it("commits no summary the summarizer finished just as the abort came", async () => {
+				await seedConversation();
+				const summarize = compaction.generateBranchSummary;
+				let finished: Awaited<ReturnType<typeof summarize>> | undefined;
+				vi.spyOn(compaction, "generateBranchSummary").mockImplementation(async (...args) => {
+					finished = await summarize(...args);
+					session.abortBranchSummary();
+					return finished;
+				});
+				const leafBefore = session.sessionManager.getLeafId();
+				const entriesBefore = session.sessionManager.getEntries().length;
+
+				const result = await session.navigateTree(firstMessageId(), { summarize: true });
+
+				expect(finished?.aborted).toBeFalsy();
+				expect(finished?.summary).toBeTruthy();
+				expect(result).toEqual({ cancelled: true, aborted: true });
+				expect(requests.map(request => request.disposed)).toEqual([false]);
+				expect(session.sessionManager.getLeafId()).toBe(leafBefore);
+				expect(session.sessionManager.getEntries()).toHaveLength(entriesBefore);
+			});
+		});
 	});
 
 	describe("image descriptions for queued messages", () => {
@@ -532,62 +688,8 @@ describe("AgentSession provider requests at disposal", () => {
 			["sends the judge request while the session is live", false],
 			["sends no judge request once disposal begins during its credential wait", true],
 		] as const)("%s", async (_name, dispose) => {
-			const judgeRequests: boolean[] = [];
-			const judgeServer = Bun.serve({
-				hostname: "127.0.0.1",
-				port: 0,
-				fetch: async request => {
-					await request.json();
-					judgeRequests.push(session.isDisposed);
-					return Response.json({
-						model: "jev-preview",
-						answers: {
-							route: {
-								type: "choice",
-								choice: "direct",
-								probabilities: { prewalk: 0.05, primary: 0.05, direct: 0.9 },
-								confidence: 0.9,
-							},
-						},
-						usage: { input_tokens: 8, output_tokens: 2 },
-					});
-				},
-			});
-			const keyReached = Promise.withResolvers<void>();
-			const releaseKey = Promise.withResolvers<void>();
+			const judge = routeJudge({ holdCredential: true });
 			try {
-				const judge = {
-					id: "jev-preview",
-					name: "JEV Preview",
-					api: "typesafe",
-					provider: "typesafe",
-					baseUrl: judgeServer.url.origin,
-					kind: "judge",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 128_000,
-					maxTokens: 4096,
-				} as Model<Api>;
-				authStorage.keys.setRuntime("typesafe", "ts-test-key");
-				vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([judge, model]);
-				// Hold the judge's credential, the wait the classifier sits in before its request.
-				const resolve = modelRegistry.resolver.bind(modelRegistry) as (
-					target: ApiKeyResolverModel,
-					sessionId?: string,
-				) => ApiKeyResolver;
-				vi.spyOn(modelRegistry, "resolver").mockImplementation(((
-					target: ApiKeyResolverModel,
-					sessionId?: string,
-				): ApiKeyResolver => {
-					const real = resolve(target, sessionId);
-					if (target.provider !== "typesafe") return real;
-					return async (context: ApiKeyResolveContext) => {
-						keyReached.resolve();
-						await releaseKey.promise;
-						return real(context);
-					};
-				}) as typeof modelRegistry.resolver);
 				await replaceSession({
 					settings: { "prewalk.auto": "on", "modelRoles.judge": "typesafe/jev-preview" },
 					agentKind: "main",
@@ -597,24 +699,212 @@ describe("AgentSession provider requests at disposal", () => {
 				const run = session.prompt("first synthetic seed", { synthetic: true });
 				await firstRequest.promise;
 				// The judge caches by request, so each case asks about a task of its own.
-				await session.followUp(`Trace the synchronization engine and fix the stale cursor ${judgeServer.port}`);
+				await session.followUp(`Trace the synchronization engine and fix the stale cursor ${judge.port}`);
 				releaseFirst.resolve();
 				await Promise.race([
-					keyReached.promise,
+					judge.credentialReached,
 					run.then(() => {
 						throw new Error("the classifier never reached its credential");
 					}),
 				]);
 				if (dispose) session.beginDispose();
-				releaseKey.resolve();
+				judge.releaseCredential();
 				await run;
 				await session.waitForIdle();
 
-				expect(judgeRequests).toEqual(dispose ? [] : [false]);
+				expect(judge.requests).toEqual(dispose ? [] : [false]);
 			} finally {
-				releaseKey.resolve();
-				judgeServer.stop(true);
+				judge.stop();
 			}
+		});
+	});
+
+	// Every judge the session hands out carries its disposal signal from construction, so no
+	// call site has to pass one for its judgment to stop at disposal.
+	describe("judges the session hands out", () => {
+		const JUDGE_SETTINGS: SessionOptions["settings"] = { "modelRoles.judge": "typesafe/jev-preview" };
+		const REQUEST = { state: { text: "probe" }, questions: { q: { type: "noul", instructions: "Is it?" } } } as const;
+
+		it("sends a judgment from a live session's judge, though the call passes no signal", async () => {
+			const judge = routeJudge();
+			try {
+				await replaceSession({ settings: JUDGE_SETTINGS });
+				await session.createJudge("probe").judge(REQUEST);
+
+				expect(judge.requests).toEqual([false]);
+			} finally {
+				judge.stop();
+			}
+		});
+
+		it.each([
+			["judge()", (j: ReturnType<AgentSession["createJudge"]>) => j.judge(REQUEST)],
+			[
+				"a withCandidate candidate",
+				(j: ReturnType<AgentSession["createJudge"]>) => j.withCandidate(c => c.judge(REQUEST)),
+			],
+		] as const)(
+			"sends nothing through %s called with no signal once disposal begins during its credential wait",
+			async (_route, call) => {
+				const judge = routeJudge({ holdCredential: true });
+				try {
+					await replaceSession({ settings: JUDGE_SETTINGS });
+					const judgment = call(session.createJudge("probe"));
+					await judge.credentialReached;
+					session.beginDispose();
+					judge.releaseCredential();
+
+					await expect(judgment).rejects.toThrow();
+					expect(judge.requests).toEqual([]);
+				} finally {
+					judge.stop();
+				}
+			},
+		);
+
+		it("starts nothing from a judge obtained after disposal began", async () => {
+			const judge = routeJudge();
+			try {
+				await replaceSession({ settings: JUDGE_SETTINGS });
+				session.beginDispose();
+
+				await expect(session.createJudge("probe").judge(REQUEST)).rejects.toThrow();
+				expect(judge.requests).toEqual([]);
+			} finally {
+				judge.stop();
+			}
+		});
+
+		describe("rule judge (TTSR questions on completed output)", () => {
+			/** A session with one TTSR rule whose question the judge answers about each reply. */
+			async function sessionWithJudgedRule(port: number): Promise<void> {
+				const ttsrManager = new TtsrManager({
+					enabled: true,
+					contextMode: "discard",
+					interruptMode: "always",
+					repeatMode: "once",
+					repeatGap: 0,
+				});
+				const added = ttsrManager.addRule({
+					name: `claim-check-${port}`,
+					path: "/rules/claim-check.md",
+					content: "Rule guidance",
+					// The judge caches by request, so each case asks a question of its own.
+					question: `Does this reply make a claim? (${port})`,
+					scope: ["text"],
+					_source: { provider: "test", providerName: "test", path: "/rules/claim-check.md", level: "project" },
+				});
+				expect(added).toBe(true);
+				await replaceSession({
+					settings: { ...JUDGE_SETTINGS, "ttsr.judge": "on" },
+					ttsrManager,
+					agentKind: "main",
+				});
+			}
+
+			it("judges the reply of a live session", async () => {
+				const judge = routeJudge();
+				try {
+					await sessionWithJudgedRule(judge.port);
+					holdFirst = false;
+					await session.prompt("Say done.");
+					await session.waitForIdle();
+
+					expect(judge.requests).toEqual([false]);
+				} finally {
+					judge.stop();
+				}
+			});
+
+			it("sends no judgment once disposal begins during the judge's credential wait", async () => {
+				const judge = routeJudge({ holdCredential: true });
+				try {
+					await sessionWithJudgedRule(judge.port);
+					holdFirst = false;
+					const run = session.prompt("Say done.");
+					await judge.credentialReached;
+					session.beginDispose();
+					judge.releaseCredential();
+					await run;
+					await session.waitForIdle();
+
+					expect(judge.requests).toEqual([]);
+				} finally {
+					judge.stop();
+				}
+			});
+
+			it("sends no judgment for a reply that completes after disposal began", async () => {
+				const judge = routeJudge();
+				try {
+					await sessionWithJudgedRule(judge.port);
+					const run = session.prompt("Say done.");
+					await firstRequest.promise;
+					session.beginDispose();
+					releaseFirst.resolve();
+					await run;
+					await session.waitForIdle();
+
+					expect(judge.requests).toEqual([]);
+				} finally {
+					judge.stop();
+				}
+			});
+		});
+
+		describe("table chart judge", () => {
+			function chartRequest(port: number) {
+				// The judge caches by request, so each case draws a table of its own.
+				const table = analyzeTable(
+					["name", "before", "after"],
+					[
+						[`a-${port}`, "12", "14"],
+						["b", "13", "16"],
+						["c", "16", "18"],
+					],
+				);
+				const guess = planChart(table);
+				if (!guess) throw new Error("expected a local chart guess");
+				return { markdown: `chart-${port}`, table, guess };
+			}
+
+			it("picks a chart for a live session", async () => {
+				const judge = routeJudge();
+				try {
+					await replaceSession({ settings: JUDGE_SETTINGS });
+					await pickTableChart(chartRequest(judge.port), session.tableChartJudge());
+
+					expect(judge.requests).toEqual([false]);
+				} finally {
+					judge.stop();
+				}
+			});
+
+			// The planner throws on a judgment it could not get, and the renderer then draws the local guess.
+			it.each([
+				["sends nothing for a pick asked for after disposal began", false],
+				["sends nothing once disposal begins during the pick's credential wait", true],
+			] as const)(
+				"%s, and the planner throws so the renderer draws the local guess",
+				async (_name, duringCredentialWait) => {
+					const judge = routeJudge({ holdCredential: duringCredentialWait });
+					try {
+						await replaceSession({ settings: JUDGE_SETTINGS });
+						if (!duringCredentialWait) session.beginDispose();
+						const pick = pickTableChart(chartRequest(judge.port), session.tableChartJudge());
+						if (duringCredentialWait) {
+							await judge.credentialReached;
+							session.beginDispose();
+							judge.releaseCredential();
+						}
+
+						await expect(pick).rejects.toThrow();
+						expect(judge.requests).toEqual([]);
+					} finally {
+						judge.stop();
+					}
+				},
+			);
 		});
 	});
 });

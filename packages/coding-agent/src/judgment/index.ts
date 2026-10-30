@@ -100,6 +100,13 @@ export interface JudgeDeps {
 	cache?: JudgmentCache;
 	/** The session tree's cost gate: refuses each candidate attempt at the cap and adds billed attempts' cost. */
 	costGate?: CostGate;
+	/**
+	 * Cancellation of the judge's owner, joined to every judgment through this judge, the
+	 * candidates `withCandidate` hands out included. A call that passes no signal of its own
+	 * still stops when it aborts, and once it has aborted the judge starts nothing. A session
+	 * passes its disposal signal here, so no judgment it hands out outlives its disposal.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
@@ -377,8 +384,9 @@ export class ChainJudge implements Judge {
 
 	async judge<Q extends Questions>(
 		request: JudgmentRequest<Q>,
-		options: JudgeOptions = {},
+		callOptions: JudgeOptions = {},
 	): Promise<JudgmentResult<Q>> {
+		const options = this.#bind(callOptions);
 		const requestImages = request.images ?? [];
 		// Malformed input is the caller's error, not a candidate failure: reject it before trying any candidate.
 		for (const [index, image] of requestImages.entries()) {
@@ -419,7 +427,24 @@ export class ChainJudge implements Judge {
 	}
 
 	async withCandidate<T>(run: (judge: Judge, kind: JudgeKind) => Promise<T>, options: JudgeOptions = {}): Promise<T> {
-		return this.#withCandidate((judge, kind) => run(judge, kind), options);
+		return this.#withCandidate((judge, kind) => run(judge, kind), this.#bind(options));
+	}
+
+	/** `options` with the owner's cancellation ({@link JudgeDeps.signal}) joined to the call's own. */
+	#bind(options: JudgeOptions): JudgeOptions {
+		const owner = this.#deps.signal;
+		if (!owner) return options;
+		return { ...options, signal: options.signal ? AbortSignal.any([owner, options.signal]) : owner };
+	}
+
+	/** `judge` with the owner's cancellation joined to each call, for candidates handed to caller code. */
+	#bound(judge: Judge): Judge {
+		if (!this.#deps.signal) return judge;
+		return {
+			label: judge.label,
+			...(judge.supportsImages === undefined ? {} : { supportsImages: judge.supportsImages }),
+			judge: (request, options) => judge.judge(request, this.#bind(options ?? {})),
+		};
 	}
 
 	/** Run `run` against each candidate able to answer `request` (any candidate when omitted) until one succeeds. */
@@ -463,7 +488,7 @@ export class ChainJudge implements Judge {
 					continue;
 				}
 				compatibleCandidate = true;
-				return await run(judge, kindOf(candidate), candidate.model);
+				return await run(this.#bound(judge), kindOf(candidate), candidate.model);
 			} catch (error) {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
