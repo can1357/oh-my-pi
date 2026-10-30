@@ -49,7 +49,15 @@ describe("orchestrate notice", () => {
 });
 
 describe("workflow notice", () => {
-	const base = { taskBatch: true, scoutAvailable: true, evalTools: true, py: true, js: true, freshAgents: false };
+	const base = {
+		taskBatch: true,
+		scoutAvailable: true,
+		evalTools: true,
+		py: true,
+		js: true,
+		freshAgents: false,
+		perCallModel: false,
+	};
 
 	it("defaults to workpools and hides eval-defined tools when disabled", () => {
 		const enabled = renderWorkflowNotice(base);
@@ -92,5 +100,20 @@ describe("workflow notice", () => {
 		expect(both).toContain("JS: `await workpool(");
 		expect(both).toContain("raise_errors");
 		expect(both).toContain("raiseErrors");
+	});
+
+	it("lists the per-call model option only when task.perCallModel admits it for eval", () => {
+		const off = renderWorkflowNotice(base);
+		const on = renderWorkflowNotice({ ...base, perCallModel: true });
+		const jsOnly = renderWorkflowNotice({ ...base, perCallModel: true, py: false });
+
+		expect(off).not.toContain("model=None");
+		expect(off).not.toContain("model?");
+		expect(on).toContain("merge=None, tools=None, model=None)");
+		expect(on).toContain("context=None, tools=None, model=None)");
+		expect(on).toContain("merge, tools, model })");
+		expect(on).toContain("context, tools, model })");
+		expect(jsOnly).toContain("merge?, tools?, model? })");
+		expect(jsOnly).toContain("context?, tools?, model? })");
 	});
 });

@@ -1,2 +1,2 @@
-Historical consults: use `agent: "seance"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
-If the saved model is absent/unavailable, set `model` explicitly.
+Historical consults: use `agent: "seance"` with `sourceSession` (id/path).{{#if perCallModelEnabled}} Optional `model` follows the `model` rules below: only Approved roles and the other models listed there.{{/if}} The source stays unchanged.
+{{#if perCallModelEnabled}}Without `model`, saved{{else}}Omit `model`: per-call models are off for task calls. Saved{{/if}} source selectors are tried in order and unapproved ones are skipped. If none is approved, the call stops and reports; do not switch to another model after a failure.

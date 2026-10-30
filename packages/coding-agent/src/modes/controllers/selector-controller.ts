@@ -1734,7 +1734,7 @@ export class SelectorController {
 			getPlanModeState: () => this.ctx.session.getPlanModeState(),
 		};
 		const askTool = new AskTool(toolSession);
-		const context = this.ctx.session.buildAskReanswerContext(uiContext);
+		const context = this.ctx.session.buildToolContext(uiContext);
 		let result: AgentToolResult<AskToolDetails>;
 		try {
 			result = await askTool.execute("tree-reanswer", { questions }, undefined, undefined, context);

@@ -8,6 +8,7 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -304,6 +305,67 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "eval", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether a subagent call may pick its model with an exact provider/model-id[@upstream][:level], a configured @role[:level], or an ordered list of them. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted.",
+		options: [
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
+		],
+	},
+});
+
+/** Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+	const mode = cfgTaskPerCallModel.get(settings);
+	return mode === "on" || (mode === "eval" && invocationKind === "eval");
+}
+
+/**
+ * Validates `task.perCallModelAllow`: exact identities, configured `@role` selectors or scoped globs.
+ * A non-string entry fails load and writes rather than silently matching nothing.
+ */
+function validatePerCallModelAllow(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`Invalid task.perCallModelAllow: expected a list of exact model, @role or glob strings, got ${Bun.inspect(value)}.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		if (typeof entry === "string") continue;
+		throw new Error(
+			`Invalid task.perCallModelAllow[${index}]: expected an exact model, @role or glob string, got ${Bun.inspect(entry)}.`,
+		);
+	}
+}
+
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	validate: validatePerCallModelAllow,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		editor: "json",
+		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
+		condition: "perCallModelAllowNotProject",
+		description:
+			'Exact provider/model-id entries, configured @role entries or scoped globs, e.g. ["anthropic/claude-sonnet-4-5", "@review", "openai/*"]. Include `@upstream` for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). Exact entries compare literally. When set, a per-call model must also match an entry here; the list only narrows what the configuration grants. Empty: every model the configuration grants.',
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],
@@ -476,7 +538,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });

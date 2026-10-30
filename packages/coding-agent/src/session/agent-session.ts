@@ -559,7 +559,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
-import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
+import { cfgTaskBatch, cfgTaskDisabledAgents, perCallModelEnabled } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
 	cfgCompactionModelThresholds,
@@ -1154,6 +1154,7 @@ export class AgentSession implements SettingsScope {
 	#modelRegistry: ModelRegistry;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
+	readonly #disableModelFallback: boolean;
 	/** Creation-time: false when the extension UI context cannot reach a human (ACP without form elicitation). */
 	readonly #interactivePrompts: boolean;
 	/** Newest usage reports, cached by fetchUsageReports. */
@@ -1954,6 +1955,7 @@ export class AgentSession implements SettingsScope {
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
+		this.#disableModelFallback = config.disableModelFallback === true;
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -2146,6 +2148,7 @@ export class AgentSession implements SettingsScope {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			setThinkingLevel: level => this.#models.setThinkingLevel(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
+			modelFallbackDisabled: () => this.#disableModelFallback,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
@@ -2685,6 +2688,7 @@ export class AgentSession implements SettingsScope {
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
+			modelFallbackDisabled: () => this.#disableModelFallback,
 			isStreaming: () => this.isStreaming,
 			isGeneratingHandoff: () => this.isGeneratingHandoff,
 			promptGeneration: () => this.#promptGeneration,
@@ -8061,6 +8065,7 @@ export class AgentSession implements SettingsScope {
 				py: cfgEvalPy.get(this.settings),
 				js: cfgEvalJs.get(this.settings),
 				freshAgents: cfgEvalWorkpoolFreshAgents.get(this.settings),
+				perCallModel: perCallModelEnabled(this.settings, "eval"),
 			};
 			// A notice whose contract needs an inactive tool would demand an
 			// unavailable capability; skip it rather than mislead the model.
@@ -14144,18 +14149,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Build a standalone `AgentToolContext` for running `AskTool.execute()`
-	 * outside a normal agent turn, for `/tree` `ask` re-answer (issue #5642).
-	 * `SelectorController` has no reachable `ToolContextStore` (that store is
-	 * built inside `sdk.ts` and never threaded through to mode controllers),
-	 * so this mirrors `refreshMCPTools()`'s `getCustomToolContext` factory
-	 * with real session state instead of a `{ ... } as unknown as
-	 * AgentToolContext` cast that could silently compile with an incomplete
-	 * context (roboomp review on #5895) — every `CustomToolContext` field is
-	 * backed by live session state, so a future required field fails to
-	 * compile here instead of surfacing as `undefined` at runtime.
+	 * Build a standalone context for host tool calls outside a normal agent turn,
+	 * including `/tree` ask re-answer and `/seance`. Mode controllers cannot reach
+	 * the SDK's ToolContextStore, so every required field is backed by live session state.
 	 */
-	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
+	buildToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -14167,7 +14165,7 @@ export class AgentSession implements SettingsScope {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: true,
+			hasUI: uiContext !== undefined,
 		};
 	}
 

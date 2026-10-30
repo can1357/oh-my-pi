@@ -20,6 +20,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
 	AgentTool,
+	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolSpeculationPolicy,
@@ -28,6 +29,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
@@ -59,12 +61,15 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
+	invalidExactModelSelectorReason,
+	invalidModelSelectorReason,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -91,8 +96,38 @@ import {
 	cfgTaskMaxRuntimeMs,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
+	perCallModelEnabled,
 } from "./settings";
 
+const TASK_HOST_MODEL = Symbol("taskHostModel");
+
+type HostTaskContext = AgentToolContext & {
+	/** The tool call id the host vouches for; its `model` is a host selection, not a model-facing one. */
+	[TASK_HOST_MODEL]?: string;
+};
+
+type HostTaskParams = TaskParams & { [TASK_HOST_MODEL]?: string | string[] };
+
+/**
+ * Execute a host-selected task model through a channel unavailable to serialized tool arguments.
+ * `params.model` stays in the invocation, so extension approval and `tool_call` handlers see
+ * (and may revise) the selection; only the trust marker rides on the context. Omit `model` to
+ * use the bundled seance's saved source model.
+ */
+export function executeTaskFromHost(
+	tool: AgentTool,
+	toolCallId: string,
+	params: TaskParams,
+	context: AgentToolContext,
+	signal?: AbortSignal,
+	onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+): Promise<AgentToolResult<TaskToolDetails>> {
+	if ((tool as AgentTool & { [TASK_HOST_MODEL]?: boolean })[TASK_HOST_MODEL] !== true) {
+		throw new Error("The registered task tool does not support host model selection.");
+	}
+	const hostContext: HostTaskContext = { ...context, [TASK_HOST_MODEL]: toolCallId };
+	return tool.execute(toolCallId, params, signal, onUpdate, hostContext);
+}
 function createUsageTotals(): Usage {
 	return {
 		input: 0,
@@ -156,6 +191,8 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	perCallModelEnabled: boolean;
+	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	file: boolean;
@@ -207,6 +244,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		perCallModelEnabled: options.perCallModelEnabled,
+		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		file: options.file,
@@ -214,7 +253,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
-		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
+		seanceGuidance:
+			seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance(options.perCallModelEnabled) : "",
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
 	});
@@ -291,7 +331,13 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	return undefined;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnabled: boolean): string | undefined {
+function validateSpawnParams(
+	params: TaskParams,
+	batchEnabled: boolean,
+	fileEnabled: boolean,
+	settings: Settings,
+	hostModel: boolean,
+): string | undefined {
 	const tasks = params.tasks;
 	if (
 		!fileEnabled &&
@@ -308,14 +354,13 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const inputError = validateTaskInput(
-				item,
-				`Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`,
-				fileEnabled,
-			);
+			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
+			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const modelError = validateModel(item, label, settings, hostModel);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -336,7 +381,38 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnab
 	if (batchEnabled && params.task === undefined && params.taskFile === undefined) {
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
-	return validateTaskInput(params, "The call", fileEnabled) ?? validateEffort(params.effort, "The call");
+	return (
+		validateTaskInput(params, "The call", fileEnabled) ??
+		validateEffort(params.effort, "The call") ??
+		validateModel(params, "The call", settings, hostModel)
+	);
+}
+
+/**
+ * A model-facing `model` is a per-call model for every agent, the bundled seance included: the
+ * `task.perCallModel` gate first, then the selector or ordered-list grammar. A host selection
+ * (`/seance`) arrives through {@link executeTaskFromHost}; it must be exact, but is ungated.
+ */
+function validateModel(
+	item: TaskItem | TaskParams,
+	label: string,
+	settings: Settings,
+	hostModel: boolean,
+): string | undefined {
+	return hostModel
+		? invalidExactModelSelectorReason(item.model, label, settings)
+		: invalidModelSelectorReason(item.model, label, { settings, invocationKind: "task" });
+}
+
+function spawnModelFields(
+	params: TaskParams,
+): Pick<StructuredSubagentRequest, "model" | "perCallModel" | "seanceModel"> {
+	const hostModel = (params as HostTaskParams)[TASK_HOST_MODEL];
+	if (hostModel !== undefined) return { model: hostModel };
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
+	// `validateModel` rejected anything but one selector or a list of them before dispatch.
+	return { perCallModel: params.model };
 }
 
 /**
@@ -418,6 +494,8 @@ async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<Re
  */
 function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent: string): SpawnParams {
 	const spawn: SpawnParams = { agent: item.agent?.trim() || defaultAgent };
+	const hostModel = (params as HostTaskParams)[TASK_HOST_MODEL];
+	if (hostModel !== undefined) (spawn as HostTaskParams)[TASK_HOST_MODEL] = hostModel;
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
 	if (item.taskFile !== undefined) spawn.taskFile = item.taskFile;
@@ -456,11 +534,13 @@ function planSpawns(
 	fileEnabled: boolean,
 	defaultAgent: string,
 	seanceAdvertised: boolean,
+	settings: Settings,
+	hostModel = false,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled, fileEnabled) ??
+		validateSpawnParams(params, batchEnabled, fileEnabled, settings, hostModel) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -692,6 +772,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
+		if (typeof params.model === "string" || Array.isArray(params.model)) {
+			const model = typeof params.model === "string" ? params.model : JSON.stringify(params.model);
+			lines.push(`Model: ${truncateForPrompt(model)}`);
+		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
@@ -730,6 +814,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
+				if (isRecord(item) && (typeof item.model === "string" || Array.isArray(item.model))) {
+					const model = typeof item.model === "string" ? item.model : JSON.stringify(item.model);
+					lines.push(`Task ${index + 1} model: ${truncateForPrompt(model)}`);
+				}
 				if (isRecord(item) && typeof item.taskFile === "string") {
 					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
 				}
@@ -744,6 +832,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly summary = "Spawn subagents to complete delegated tasks";
 	readonly strict = false;
 	readonly loadMode = "essential";
+	readonly [TASK_HOST_MODEL] = true;
 	// Arktype validates model calls against the active wire schema, but the flat
 	// single-spawn schema carries `"+": "delete"`: a batch `{ context, tasks[] }`
 	// payload has those keys stripped, then can fail on a missing flat-form field.
@@ -783,6 +872,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
+				this.session.settings,
 			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
@@ -825,6 +915,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			file: cfgTaskFile.get(this.session.settings),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 		});
 	}
 
@@ -850,6 +941,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+		const perCallModel = perCallModelEnabled(this.session.settings, "task");
 		return renderDescription({
 			agents,
 			sessionAgents,
@@ -858,6 +950,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			perCallModelEnabled: perCallModel,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(
+						this.session.settings,
+						this.session.getActiveModel?.(),
+						this.session.modelRegistry,
+					)
+				: undefined,
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
@@ -1028,7 +1128,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
 			sourceSession: params.sourceSession,
-			model: params.model,
+			...spawnModelFields(params),
 			...this.#resultParams(params),
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -1052,11 +1152,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		rawParams: unknown,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const hostCall = (context as HostTaskContext | undefined)?.[TASK_HOST_MODEL] === toolCallId;
+		// Read the host selection from the params this call runs with, after any extension revision.
+		const hostModel = hostCall ? ((rawParams as TaskParams | undefined)?.model ?? []) : undefined;
 		const launchSession = this.#launchSessions.get(toolCallId);
 		this.#launchSessions.delete(toolCallId);
 		try {
-			return await this.#dispatch(toolCallId, rawParams, launchSession, signal, onUpdate);
+			return await this.#dispatch(
+				toolCallId,
+				rawParams,
+				hostModel === undefined ? launchSession : undefined,
+				signal,
+				onUpdate,
+				hostModel,
+			);
 		} finally {
 			// No-op once dispatch adopted; otherwise nothing launched early may outlive the call.
 			launchSession?.discard("task call settled without adopting speculative launches");
@@ -1069,6 +1180,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchSession: TaskLaunchSession | undefined,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		hostModel?: string | string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -1081,6 +1193,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskFile.get(this.session.settings),
 			defaultAgent,
 			this.#seanceSchemaFields() !== undefined,
+			this.session.settings,
+			hostModel !== undefined,
 		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
@@ -1093,6 +1207,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
+		if (hostModel !== undefined) {
+			(params as HostTaskParams)[TASK_HOST_MODEL] = hostModel;
+			for (const spawn of normalizedSpawnParams) (spawn as HostTaskParams)[TASK_HOST_MODEL] = hostModel;
+		}
 		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
@@ -1871,7 +1989,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
-				model: params.model,
+				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
