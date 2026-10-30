@@ -204,10 +204,11 @@ describe("initTelemetryExport signals export path", () => {
 describe("initTelemetryExport with an inherited loopback collector", () => {
 	/**
 	 * Run the inherited-collector probe with `OTEL_EXPORTER_OTLP_ENDPOINT` naming a
-	 * loopback collector this test serves, a stand-in for a developer's own collector.
-	 * Reports what the probe observed and the path of every request the collector got.
+	 * loopback collector this test serves, a stand-in for a developer's own collector,
+	 * at `collectorPath` under its origin. Reports what the probe observed and the path
+	 * of every request the collector got.
 	 */
-	async function runInheritedCollectorProbe(testChild: boolean, ...args: string[]) {
+	async function runInheritedCollectorProbe(options: { testChild: boolean; mode?: string; collectorPath?: string }) {
 		const collected = new Set<string>();
 		const collector = Bun.serve({
 			hostname: "127.0.0.1",
@@ -224,12 +225,12 @@ describe("initTelemetryExport with an inherited loopback collector", () => {
 		using home = TempDir.createSync("@omp-otel-probe-home-");
 		try {
 			const probe = fileURLToPath(new URL("./otel-inherited-probe.ts", import.meta.url));
-			const proc = Bun.spawn([process.execPath, probe, ...args], {
+			const proc = Bun.spawn([process.execPath, probe, ...(options.mode ? [options.mode] : [])], {
 				env: {
 					...probeEnv(home),
 					// The probe is no test entrypoint, so without the marker it runs as production.
-					PI_TEST_RUNTIME: testChild ? "1" : undefined,
-					OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}`,
+					PI_TEST_RUNTIME: options.testChild ? "1" : undefined,
+					OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}${options.collectorPath ?? ""}`,
 				},
 				stdin: "ignore",
 				stdout: "pipe",
@@ -248,7 +249,7 @@ describe("initTelemetryExport with an inherited loopback collector", () => {
 	}
 
 	it("exports nothing to it from a test process that declared no receiver", async () => {
-		expect(await runInheritedCollectorProbe(true)).toEqual({
+		expect(await runInheritedCollectorProbe({ testChild: true })).toEqual({
 			exitCode: 0,
 			observed: { testRuntime: true, enabled: false, ownReceived: [] },
 			collected: [],
@@ -256,18 +257,48 @@ describe("initTelemetryExport with an inherited loopback collector", () => {
 	}, 20_000);
 
 	it("exports every signal to it from a production process", async () => {
-		expect(await runInheritedCollectorProbe(false)).toEqual({
+		expect(await runInheritedCollectorProbe({ testChild: false })).toEqual({
 			exitCode: 0,
 			observed: { testRuntime: false, enabled: true, ownReceived: [] },
 			collected: ["/v1/logs", "/v1/metrics", "/v1/traces"],
 		});
 	}, 20_000);
 
+	it("exports each signal under the path of a generic endpoint, as the OTLP exporter resolves it", async () => {
+		// The bootstrap hands each exporter its URL instead of letting it read the
+		// environment, so the bootstrap must append `v1/<signal>` beneath the endpoint's
+		// own path the way the OTLP exporter does.
+		expect(await runInheritedCollectorProbe({ testChild: false, collectorPath: "/otlp" })).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: false, enabled: true, ownReceived: [] },
+			collected: ["/otlp/v1/logs", "/otlp/v1/metrics", "/otlp/v1/traces"],
+		});
+	}, 20_000);
+
 	it("exports from a test process only to the receiver it declared", async () => {
 		// Traces go to the probe's own receiver; logs and metrics still name the collector.
-		expect(await runInheritedCollectorProbe(true, "own-receiver")).toEqual({
+		expect(await runInheritedCollectorProbe({ testChild: true, mode: "own-receiver" })).toEqual({
 			exitCode: 0,
 			observed: { testRuntime: true, enabled: true, ownReceived: ["/v1/traces"] },
+			collected: [],
+		});
+	}, 20_000);
+
+	it("exports to the receiver it validated when the endpoint changes during initialization", async () => {
+		// The environment names the inherited collector for traces by the time the
+		// exporter is built; the declared receiver was the one validated.
+		expect(await runInheritedCollectorProbe({ testChild: true, mode: "endpoint-changed-mid-init" })).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: true, enabled: true, ownReceived: ["/v1/traces"] },
+			collected: [],
+		});
+	}, 20_000);
+
+	it("exports nothing anywhere when the declaration is withdrawn during initialization", async () => {
+		// The probe's receiver stays up, so an export to it would show here too.
+		expect(await runInheritedCollectorProbe({ testChild: true, mode: "declaration-withdrawn-mid-init" })).toEqual({
+			exitCode: 0,
+			observed: { testRuntime: true, enabled: false, ownReceived: [] },
 			collected: [],
 		});
 	}, 20_000);
