@@ -8,8 +8,10 @@
 import { afterEach, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { getCodexProviderSessionState } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
+import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
@@ -196,3 +198,173 @@ it("counts an Anthropic replay that preceded the attempt that streamed", async (
 	expect(result.providerReplays).toBe(1);
 	tempDir.removeSync();
 });
+
+function anthropicModel(): Model<"anthropic-messages"> {
+	return buildModel({
+		id: "claude-sonnet-4-5",
+		name: "Claude Sonnet 4.5",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+}
+
+const ANTHROPIC_EMPTY_STOP = [
+	{
+		type: "message_start",
+		message: {
+			id: "msg_probe",
+			type: "message",
+			role: "assistant",
+			model: "claude-sonnet-4-5",
+			content: [],
+			stop_reason: null,
+			stop_sequence: null,
+			usage: { input_tokens: 10, output_tokens: 0 },
+		},
+	},
+	{ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } },
+	{ type: "message_stop" },
+]
+	.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+	.join("");
+
+it("counts a caller-owned Anthropic client's attempts instead of claiming zero", async () => {
+	// A caller that brings its own client leaves this module no `fetch` to wrap,
+	// and the client's own budget is spent inside one call. Counting only this
+	// module's calls reported `0` after two requests, which recovery above reads
+	// as "nothing below replayed" and acts on.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	const client = new AnthropicMessagesClient({
+		apiKey: "test-key",
+		baseURL: "https://api.anthropic.com",
+		fetch: (async () => {
+			requests += 1;
+			return requests === 1 ? overloaded() : sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+		}) as FetchImpl,
+	});
+
+	const result = await streamAnthropic(anthropicModel(), context, {
+		client,
+		providerRetryWait: async () => {},
+	}).result();
+
+	expect(requests).toBe(2);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("reports nothing when a caller-owned client never answers the attempt hook", async () => {
+	// A client that ignores the hook knows how often it replayed and this module
+	// does not. `undefined` says that; a `0` would be a claim it cannot support.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	const silentClient = {
+		messages: {
+			create: async () => {
+				requests += 1;
+				return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+			},
+		},
+	} as unknown as AnthropicMessagesClientLike;
+
+	const result = await streamAnthropic(anthropicModel(), context, {
+		client: silentClient,
+		providerRetryWait: async () => {},
+	}).result();
+
+	expect(requests).toBeGreaterThan(0);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBeUndefined();
+	tempDir.removeSync();
+});
+
+it("carries the count on a successful Anthropic response the caller may discard", async () => {
+	// An empty completion is retried above this provider, so the attempts the
+	// discarded response already spent have to travel with it.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	const fetchMock = vi.fn(async () => {
+		requests += 1;
+		return requests === 1 ? overloaded() : sseResponse(ANTHROPIC_EMPTY_STOP);
+	});
+
+	const result = await streamAnthropic(anthropicModel(), context, {
+		apiKey: "test-key",
+		acceptEmptyResponse: true,
+		providerRetryWait: async () => {},
+		fetch: fetchMock as FetchImpl,
+	}).result();
+
+	expect(requests).toBe(2);
+	expect(result.stopReason).toBe("stop");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("does not count a websocket request a busy socket sent the call away from", async () => {
+	// One socket carries one request at a time, so a call that finds it busy is
+	// routed to SSE without ever attempting a websocket request. Counting that
+	// routing step told the concurrent call a replay had happened and suppressed
+	// the hold its single request had earned.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let websocketRequests = 0;
+	let sseRequests = 0;
+	const firstStreaming = Promise.withResolvers<void>();
+	const wire = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async (request, server) => {
+			if (server.upgrade(request)) return;
+			await request.arrayBuffer();
+			sseRequests += 1;
+			return sseResponse(CODEX_THINKING_THEN_CUT);
+		},
+		websocket: {
+			message(ws) {
+				websocketRequests += 1;
+				ws.send(JSON.stringify({ type: "response.created", response: { id: "busy" } }));
+				firstStreaming.resolve();
+			},
+		},
+	});
+	const providerSessionState = new Map<string, ProviderSessionState>();
+	const abort = new AbortController();
+	const model = { ...codexModel(), baseUrl: `http://127.0.0.1:${wire.port}`, preferWebsockets: true };
+	const shared = {
+		apiKey: codexToken(),
+		sessionId: crypto.randomUUID(),
+		providerSessionState,
+		preferWebsockets: true,
+	};
+	const first = streamOpenAICodexResponses(model, context, { ...shared, signal: abort.signal });
+	try {
+		await firstStreaming.promise;
+		const second = await streamOpenAICodexResponses(model, context, shared).result();
+
+		expect([websocketRequests, sseRequests]).toEqual([1, 1]);
+		expect(second.stopReason).toBe("error");
+		expect(second.providerReplays).toBe(0);
+	} finally {
+		abort.abort();
+		await first.result();
+		getCodexProviderSessionState(providerSessionState)?.close();
+		wire.stop(true);
+		tempDir.removeSync();
+	}
+}, 20_000);

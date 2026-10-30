@@ -161,48 +161,23 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				);
 
-			let delayMs: number | undefined;
-			if (retryEmpty) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
-				emptyRetries++;
-			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
-				providerErrorRetries++;
-			}
-			if (delayMs !== undefined) {
-				// The attempt about to be thrown away may itself have replayed the
-				// request several times; those requests happened, so they stay in the
-				// total this wrapper finally reports.
-				const discarded = failedMessage?.providerReplays ?? completedMessage?.providerReplays;
-				if (discarded !== undefined) {
-					discardedReplays += discarded;
-					sawInnerReplays = true;
-				}
-			}
+			// Computed, not yet charged: an abort can still end the turn here, and
+			// a retry that never runs neither discards an attempt nor spends one
+			// of this wrapper's own.
+			const delayMs = retryEmpty
+				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
+				: retryProviderError
+					? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries
+					: undefined;
 
-			if (delayMs !== undefined && !signal?.aborted) {
-				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, signal);
-				} catch (waitError) {
-					flush();
-					if (signal?.aborted) {
-						if (terminal) outer.push(terminal);
-					} else {
-						outer.fail(waitError);
-					}
-					return;
-				}
-				continue;
-			}
-
-			flush();
-			if (terminal) {
+			/** Pushes the terminal event, carrying whatever replay count is known. */
+			const pushTerminal = (event: AssistantMessageEvent): void => {
 				const wrapperReplays = emptyRetries + providerErrorRetries;
 				const innerReplays =
-					terminal.type === "error"
-						? terminal.error.providerReplays
-						: terminal.type === "done"
-							? terminal.message.providerReplays
+					event.type === "error"
+						? event.error.providerReplays
+						: event.type === "done"
+							? event.message.providerReplays
 							: undefined;
 				// Every request this wrapper is responsible for: the replays the
 				// attempts it threw away had already spent, the ones this attempt
@@ -212,14 +187,45 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// (`anthropic.ts` runs under this wrapper), and recovery above reads
 				// a reported `0` as exactly that claim.
 				const total = discardedReplays + (innerReplays ?? 0) + wrapperReplays;
-				if (terminal.type === "error" && (innerReplays !== undefined || sawInnerReplays || wrapperReplays > 0)) {
+				if (event.type === "error" && (innerReplays !== undefined || sawInnerReplays || wrapperReplays > 0)) {
 					// A copy, not a write: the message belongs to the layer below and
 					// may be the same object on the next call, where adding to a count
 					// this wrapper already wrote would compound it.
-					outer.push({ ...terminal, error: { ...terminal.error, providerReplays: total } });
+					outer.push({ ...event, error: { ...event.error, providerReplays: total } });
 				} else {
-					outer.push(terminal);
+					outer.push(event);
 				}
+			};
+
+			if (delayMs !== undefined && !signal?.aborted) {
+				try {
+					await waitForRetry(options?.providerRetryWait, delayMs, signal);
+				} catch (waitError) {
+					flush();
+					if (signal?.aborted) {
+						if (terminal) pushTerminal(terminal);
+					} else {
+						outer.fail(waitError);
+					}
+					return;
+				}
+				// The retry is going to run, so charge it: this wrapper spends one
+				// replay, and the attempt it throws away may itself have replayed
+				// the request several times. Those requests happened, so they stay
+				// in the total this wrapper finally reports.
+				if (retryEmpty) emptyRetries++;
+				else providerErrorRetries++;
+				const discarded = failedMessage?.providerReplays ?? completedMessage?.providerReplays;
+				if (discarded !== undefined) {
+					discardedReplays += discarded;
+					sawInnerReplays = true;
+				}
+				continue;
+			}
+
+			flush();
+			if (terminal) {
+				pushTerminal(terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());

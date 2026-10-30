@@ -433,6 +433,68 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(shared.providerReplays).toBe(0);
 	});
 
+	it("charges a retry only once it is going to run, and keeps what earlier attempts spent", async () => {
+		// The budget and the discarded attempt are both charged on the way into a
+		// retry. Charging them when the delay is merely computed invents a replay
+		// the turn never made if an abort ends it there, and charging them only
+		// at the end loses the ones it did make.
+		const failing = (replays: number, onAttempt: () => void) => () => {
+			onAttempt();
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			message.providerReplays = replays;
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "error", reason: "error", error: message },
+			]);
+		};
+
+		// Aborted during the attempt, before any retry wait: one attempt, and only
+		// the five replays that attempt reported.
+		const beforeWait = new AbortController();
+		let attemptsBeforeWait = 0;
+		const abortedEarly = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ signal: beforeWait.signal, providerRetryWait: async () => {} },
+			failing(5, () => {
+				attemptsBeforeWait++;
+				beforeWait.abort();
+			}),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+		await drain(abortedEarly);
+		expect(attemptsBeforeWait).toBe(1);
+		expect((await abortedEarly.result()).providerReplays).toBe(5);
+
+		// Aborted during the second retry wait: two attempts of five, plus the one
+		// retry that actually ran.
+		const duringWait = new AbortController();
+		let attemptsDuringWait = 0;
+		let waits = 0;
+		const abortedLate = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{
+				signal: duringWait.signal,
+				providerRetryWait: async () => {
+					if (++waits === 2) {
+						duringWait.abort();
+						throw new Error("cancelled");
+					}
+				},
+			},
+			failing(5, () => {
+				attemptsDuringWait++;
+			}),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+		await drain(abortedLate);
+		expect(attemptsDuringWait).toBe(2);
+		expect((await abortedLate.result()).providerReplays).toBe(11);
+	});
+
 	it("leaves the replay count absent when neither it nor the loop below replayed", async () => {
 		const message = assistant();
 		message.stopReason = "error";

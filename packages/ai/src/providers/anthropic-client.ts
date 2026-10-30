@@ -53,6 +53,14 @@ export interface AnthropicRequestOptions {
 	maxRetryDelayMs?: number;
 	/** Per-request headers merged after client defaults. */
 	headers?: Record<string, string>;
+	/**
+	 * Called once per request attempt this client makes, before the request
+	 * goes out. The client's retry budget is spent inside one `request` call,
+	 * so a caller that only counts its own calls cannot see those replays —
+	 * and a caller that supplies its own client cannot install a counting
+	 * `fetch` either. This is the attempt boundary both can observe.
+	 */
+	onRequestAttempt?: () => void;
 }
 
 /**
@@ -267,6 +275,7 @@ export class AnthropicHttpClient {
 
 		for (let attempt = 0; ; attempt++) {
 			if (callerSignal?.aborted) throw createAbortError();
+			options?.onRequestAttempt?.();
 
 			let response: Response;
 			try {

@@ -852,6 +852,20 @@ describe("AgentSession retry recovery", () => {
 		expect(fallbackEvents).toEqual([]);
 	});
 
+	it("holds the chain on a reported zero whose wording a provider loop would retry", async () => {
+		// The wording stand-in exists to guess what the count states outright.
+		// Nothing streamed and the wording is one the loops below do replay, so
+		// the guess says "already replayed" — but the layer that would have done
+		// it reports that this request went out exactly once.
+		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM, providerReplays: 0 },
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+	});
+
 	it("holds the chain when the stream opened a block and died before its first delta", async () => {
 		// `content_block_start` is where the Anthropic loop sets `firstTokenTime`
 		// and pushes the still-empty block, so a cut right after that frame is

@@ -1330,25 +1330,37 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
-	 * Wire requests a layer below the caller sent beyond the first, before this
-	 * failure surfaced; `0` when the failing request went out exactly once.
-	 * `undefined` means "nothing here reports", never "none".
+	 * Request attempts a layer below the caller made beyond the first, before
+	 * this message was produced; `0` when the request went out exactly once.
+	 * `undefined` means "nothing here reports", never "none" — a caller-owned
+	 * client or transport that does not answer the provider's attempt hook
+	 * knows how often it replayed and this message does not.
 	 *
-	 * Counted at the request boundary — before the request goes out, so an
-	 * attempt that never opens counts too — by one counter that lives for the
-	 * whole provider call. That is what makes it whole rather than a sum of
-	 * rungs: it covers the provider's own replays (a transport reopen, a
-	 * transport fallback, a checkpoint resume, rebuilt parameters) and the
-	 * replays `fetchWithRetry` makes underneath them on its own budget, which
-	 * no layer above it can otherwise see.
+	 * Counted at the boundary the provider owns, before each request goes out,
+	 * so an attempt that never opens counts too. One counter runs for the whole
+	 * provider call, which is what makes it whole rather than a sum of rungs:
+	 * it covers the provider's own replays (a transport reopen, a transport
+	 * fallback, a checkpoint resume, rebuilt parameters, a client's own retry
+	 * budget) and the replays `fetchWithRetry` makes underneath them, which no
+	 * layer above that function can otherwise see.
 	 *
-	 * Recovery above the provider has to know whether a request was already
-	 * replayed — replaying it again multiplies the work below. Streamed content
-	 * cannot stand in for the count: each loop stops at its own commitment
-	 * boundary and those boundaries differ (the Codex loop replays an *empty*
-	 * reasoning block, while the Anthropic loop counts the same opened block as
-	 * committed), and a loop that replayed a 503 before the attempt that
-	 * finally streamed leaves content the first attempt never produced.
+	 * **Attempts, not HTTP requests.** Below that boundary one attempt may be
+	 * several HTTP requests — a redirect hop `fetch` follows, a caller-supplied
+	 * `fetch` that retries inside itself, a transport whose logical turn is
+	 * several RPCs (Cursor's `RunSSE` plus `BidiAppend`) — and those stay one
+	 * attempt. The question the count answers is whether a layer below already
+	 * replayed the request, and every rung that replays takes one attempt.
+	 *
+	 * Recovery above the provider has to know that — replaying again multiplies
+	 * the work below. Streamed content cannot stand in for it: each loop stops
+	 * at its own commitment boundary and those boundaries differ (the Codex
+	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
+	 * the same opened block as committed), and a loop that replayed a 503
+	 * before the attempt that finally streamed leaves content the first attempt
+	 * never produced.
+	 *
+	 * Set on a successful message too: the layer above may discard it (an empty
+	 * completion it retries), and the attempts already spent still happened.
 	 */
 	providerReplays?: number;
 	/**

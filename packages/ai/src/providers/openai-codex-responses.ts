@@ -1784,9 +1784,6 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
-	// The websocket lane carries no fetch, so its request boundary is here: one
-	// call to this opener is one request sent, whether or not the socket answers.
-	requestContext.wireAttempts.count += 1;
 	const canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
@@ -1815,6 +1812,11 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
+	// Past local routing: the busy-socket rejection above sends this call to SSE
+	// without ever attempting a websocket request, and counting it would report
+	// a replay to a concurrent call that made one request. From here the attempt
+	// is genuine, so a connection that fails to open still counts.
+	requestContext.wireAttempts.count += 1;
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,

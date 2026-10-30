@@ -1845,11 +1845,14 @@ export class TurnRecovery {
 		if (AIError.is(id, AIError.Flag.Timeout)) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return false;
 		if (!AIError.is(id, AIError.Flag.Connection)) return false;
-		// A layer that replays reports the count, and a non-zero one settles it:
-		// the request was already made again, so a held attempt would be the
-		// second replay of a request that is still failing.
+		// A layer that replays reports the count, and the count settles it in
+		// both directions. Above zero: the request was already made again, so a
+		// held attempt would be the second replay of a request that is still
+		// failing. At zero: the request went out exactly once, which is the fact
+		// the two stand-ins below only guess at — reading them anyway would let
+		// a guess overrule the evidence it exists to substitute for.
 		const providerReplays = message.providerReplays;
-		if (providerReplays !== undefined && providerReplays > 0) return false;
+		if (providerReplays !== undefined) return providerReplays === 0;
 		if (
 			message.content.some(
 				block =>
@@ -1861,19 +1864,16 @@ export class TurnRecovery {
 		) {
 			return true;
 		}
-		// Nothing streamed, so the hold rests on the wording naming a failure no
-		// provider loop would have replayed.
+		// Nothing streamed and nothing reported, so the hold rests on the
+		// wording naming a failure no provider loop would have replayed.
 		//
 		// A provider that emits a structured failure event decides its own
 		// replay from that event rather than from the prose around it, and
 		// leaves a `(code=…)` marker on the message it persists. The marker
 		// alone proves only which event it was: `AIError` owns the codes and
 		// wording that such a loop replays, and only those mean a loop has
-		// already run. A loop that reported its count above has already given a
-		// better answer than the marker can, so the marker is read only for the
-		// providers that report nothing.
-		if (providerReplays === undefined && AIError.isReplayedProviderFailureEventText(message.errorMessage ?? ""))
-			return false;
+		// already run.
+		if (AIError.isReplayedProviderFailureEventText(message.errorMessage ?? "")) return false;
 		// Otherwise the text is all there is, and every loop that reads text
 		// gates on `AIError.isProviderRetryableError`: a diagnostic it rejects
 		// (an in-band `TransferEncodingError`, `premature close`, `read
