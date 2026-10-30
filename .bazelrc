@@ -89,17 +89,17 @@ build:ci --keep_going=false
 build:ci --reuse_sandbox_directories
 
 # --- Remote cache ------------------------------------------------------------
-# .github/actions/bazel-cache composes the bazel-remote endpoint + credentials
-# (repository secrets) into an rc fragment on vmon `omp-ci` runners, or
-# without them the vmon node's local Bazel cache ($VMON_CACHE_URL/bazel;
-# cache-rw on non-PR events, cache-ro on PRs, which the node refuses writes).
-# GitHub-hosted runners never use the remote cache and run no Bazel builds.
-# These configs carry only the policy bits.
+# .github/actions/bazel-cache points vmon `omp-ci` runners at their node's
+# Bazel HTTP cache ($VMON_CACHE_URL/bazel) and picks one of these policies.
+# GitHub-hosted runners never use a remote cache and run no Bazel builds.
+# These configs carry only the policy bits; the endpoint comes from the
+# consumer.
 #
-# cache-rw: trusted writers (non-PR jobs on vmon runners).
+# cache-rw: branch and tag jobs on vmon runners.
 build:cache-rw --remote_upload_local_results=true
 build:cache-rw --remote_local_fallback
-# cache-ro: read-only consumers (e.g. local dev via .bazelrc.user + VPN/tailnet).
+# cache-ro: read-only consumers (pull request jobs, which the node refuses
+# writes; local dev pointing .bazelrc.user at a cache of its own).
 build:cache-ro --remote_upload_local_results=false
 build:cache-ro --remote_local_fallback
 # Don't let a cache outage fail the build.

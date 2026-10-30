@@ -273,10 +273,20 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
-/** Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a reasoning field name. */
+/** `thinkingSignature` marking thinking decoded from Mistral typed content parts. */
+const MISTRAL_CONTENT_PARTS_SIGNATURE = "mistral-content-parts";
+
+/**
+ * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
+ * reasoning field name or the Mistral content-parts marker.
+ */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
 	return (
-		!!signature && signature !== "reasoning_content" && signature !== "reasoning" && signature !== "reasoning_text"
+		!!signature &&
+		signature !== "reasoning_content" &&
+		signature !== "reasoning" &&
+		signature !== "reasoning_text" &&
+		signature !== MISTRAL_CONTENT_PARTS_SIGNATURE
 	);
 }
 
@@ -1508,7 +1518,7 @@ const streamOpenAICompletionsOnce = (
 							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
 								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
 									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
-										appendThinkingDelta(inner.text, "mistral-content-parts");
+										appendThinkingDelta(inner.text, MISTRAL_CONTENT_PARTS_SIGNATURE);
 										suppressHealedThinking = true;
 									}
 								}

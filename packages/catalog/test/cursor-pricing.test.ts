@@ -127,6 +127,23 @@ describe("cursor API-equivalent pricing", () => {
 			cacheRead: 0.2,
 			cacheWrite: 5,
 		});
+		// DeepSeek V4.1 Flash 1017 bills one card for its bare id and every
+		// reasoning-effort wire id.
+		for (const id of [
+			"deepseek-v41-flash-1017",
+			"deepseek-v41-flash-1017-none",
+			"deepseek-v41-flash-1017-low",
+			"deepseek-v41-flash-1017-medium",
+			"deepseek-v41-flash-1017-high",
+			"deepseek-v41-flash-1017-max",
+		]) {
+			expect(buildModel(spec(id)).cost, id).toMatchObject({
+				input: 0.3,
+				output: 1.2,
+				cacheRead: 0.006,
+				cacheWrite: 0,
+			});
+		}
 	});
 
 	it("models the GPT-5.6 272K 2x-input long tier", () => {
@@ -156,9 +173,9 @@ describe("cursor API-equivalent pricing", () => {
 	});
 
 	it("prices every served catalog id; only docs-absent ids stay zero", () => {
-		// Snapshot of the Cursor roster on 2026-09-22. A newly served id
-		// without a cost-patch rule fails here instead of silently billing
-		// at zero.
+		// Snapshot of the Cursor roster on 2026-09-22, plus DeepSeek V4.1
+		// Flash 1017 (served from 2026-10-27). A newly served id without a
+		// cost-patch rule fails here instead of silently billing at zero.
 		const servedIds = [
 			"claude-4-sonnet",
 			"claude-4.5-opus-high",
@@ -221,6 +238,11 @@ describe("cursor API-equivalent pricing", () => {
 			"cursor-grok-4.5-fast",
 			"cursor-grok-4.6",
 			"cursor-grok-4.6-fast",
+			"deepseek-v41-flash-1017-high",
+			"deepseek-v41-flash-1017-low",
+			"deepseek-v41-flash-1017-max",
+			"deepseek-v41-flash-1017-medium",
+			"deepseek-v41-flash-1017-none",
 			"default",
 			"gemini-3-flash",
 			"gemini-3-pro",

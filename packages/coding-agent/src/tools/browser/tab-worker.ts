@@ -2267,8 +2267,7 @@ export class WorkerCore {
 							? `selector matches ${probe.count} element(s)`
 							: `could not count matches: ${probe.failure}`;
 				let hint = "";
-				if (interrupted)
-					hint = `; typing stopped after ${interrupted.typed} of ${interrupted.total} characters (the field keeps what was typed)`;
+				if (interrupted) hint = `; ${interrupted.progress}`;
 				else if (refusal)
 					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
