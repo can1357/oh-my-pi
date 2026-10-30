@@ -511,7 +511,7 @@
           "FILE:@@//crates/pi-iso/Cargo.toml 954110d059e804ce541f66129b63e856a7a51cf9af530390ae7542a03c5b955c",
           "FILE:@@//crates/pi-diff/Cargo.toml a05b49c8bed9c7950f87c021918b74a3b7a234410c6150ddf73eb691daf98358",
           "FILE:@@//crates/pi-edit/Cargo.toml 3caa2e47075702d088618290592c45e8bd473fda90e0db2162259e2179bd72a9",
-          "FILE:@@//crates/pi-natives/Cargo.toml 715b312978435f8b195a22877d493ac428ce844cedaf6006bea18ac58203ce6a",
+          "FILE:@@//crates/pi-natives/Cargo.toml 6657506e5b4fde783eb23808175698edafdcbd6236a16275742aa2d6b56367d4",
           "FILE:@@//crates/pi-predict/Cargo.toml ebca66557be234e2188466035691181e7479b00033bf1e03f0baa48ed6295820",
           "FILE:@@//crates/pi-shell/Cargo.toml 810229cdfc7c5fd5a6772c2875ce04e9f9ea6aaec91c5a9736cb90abd7e38beb",
           "FILE:@@//crates/vendor/brush-core/Cargo.toml f941ad0e115ab014d04e6cbb6256d1eef7cf49bc12b8dc4e8a3d43dfefe28499",
