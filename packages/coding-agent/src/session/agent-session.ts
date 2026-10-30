@@ -2033,7 +2033,10 @@ export class AgentSession implements SettingsScope {
 						settings: this.settings,
 						registry: this.#modelRegistry,
 						sessionId: this.sessionId,
-						signal,
+						// Disposal stops the judge request, one still waiting for its credential
+						// included: a queued task is classified alongside its preparation, and the
+						// policy's refusal of that preparation does not stop the classifier.
+						signal: AbortSignal.any([signal, this.#disposeAbortController.signal]),
 						onUsage: journalJudgmentUsage(this.sessionManager),
 						telemetry: this.agent.telemetry,
 					},
@@ -3557,6 +3560,14 @@ export class AgentSession implements SettingsScope {
 		throw new Error(
 			"This session has begun disposing, so this prompt was refused: a disposing session starts no new turn. A prompt sent before disposal began still runs to the end of its turn.",
 		);
+	}
+
+	/**
+	 * The refusal for other work that would reach the provider from a disposing session: a side
+	 * request, a manual compaction or handoff, a branch summary. `work` names it in the message.
+	 */
+	#disposingRefusal(work: string): Error {
+		return new Error(`This session has begun disposing, so this ${work} was refused.`);
 	}
 
 	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
@@ -6226,9 +6237,11 @@ export class AgentSession implements SettingsScope {
 		// Work that would otherwise run on into the teardown below, and through every
 		// wrapper's awaits before `dispose()`, each of which reached the provider or the
 		// transcript from a disposing session: extension timers (their callbacks can prompt),
-		// a speculative or retrying compaction, the unexpected-stop judge and other post-prompt
-		// work, the auto-thinking classifier, and side requests (`runEphemeralTurn`). `dispose()`
-		// repeats the first three for anything its own teardown starts.
+		// a speculative or retrying compaction, a manual compaction, handoff or branch summary,
+		// the unexpected-stop judge and other post-prompt work, and what listens to the disposal
+		// signal: the auto-thinking and auto-prewalk classifiers, image descriptions and side
+		// requests (`runEphemeralTurn`). `dispose()` repeats the timer, compaction and post-prompt
+		// cancellation for anything its own teardown starts.
 		this.#disposeAbortController.abort();
 		// Optional only for hand-rolled `ExtensionRunner` doubles in tests, which implement just the
 		// methods their path calls; the production `ExtensionRunner` always has `clearManagedTimers`.
@@ -6236,6 +6249,7 @@ export class AgentSession implements SettingsScope {
 		this.#fallbackExtensionTimers?.clearAll();
 		this.#maintenance.cancelSpeculation();
 		this.abortCompaction();
+		this.abortBranchSummary();
 		this.#postPromptTasksAbortController.abort();
 		// Stopped here rather than in the teardown that follows: a wrapper that awaits
 		// other work first (the draft write, the SDK's lifecycle teardown) would leave an
@@ -7343,8 +7357,11 @@ export class AgentSession implements SettingsScope {
 		return this.#inLogContext(() => this.#maintenance.shake(mode, opts));
 	}
 
-	/** Compact the active session history. */
+	/** Compact the active session history; refused once the session has begun disposing. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
+		// `beginDispose()` aborts a compaction already running; one asked for later would open a
+		// fresh controller nothing aborts, summarize, and rewrite the closing session's history.
+		if (this.#isDisposed) return Promise.reject(this.#disposingRefusal("compaction"));
 		return this.#inLogContext(() => this.#maintenance.compact(customInstructions, options));
 	}
 
@@ -8047,11 +8064,16 @@ export class AgentSession implements SettingsScope {
 	 * provider cannot hold admission past the bundled clients' 30 s request timeout, and
 	 * let abort() cancel it. Either way the image stays saved and the notice says the
 	 * description is unavailable.
+	 *
+	 * A caller whose `signal` has already aborted starts no vision request. Callers that queue
+	 * a message pass the disposal signal: the vision request would otherwise run before the
+	 * message reaches the queued-message policy that refuses it on a disposing session.
 	 */
 	async #buildImageDescriptionNotice(
 		normalizedImages: ImageContent[],
 		signal?: AbortSignal,
 	): Promise<CustomMessage | undefined> {
+		if (signal?.aborted) return undefined;
 		const controller = new AbortController();
 		this.#imageDescriptionAbortControllers.add(controller);
 		try {
@@ -8616,10 +8638,13 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Describe normalized images in a user-invoked skill prompt before delivery. */
-	async #buildSkillImageDescriptionNotice(message: CustomMessage): Promise<CustomMessage | undefined> {
+	async #buildSkillImageDescriptionNotice(
+		message: CustomMessage,
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
 		if (!isUserInvokedSkillPrompt(message) || !Array.isArray(message.content)) return undefined;
 		const images = message.content.filter((part): part is ImageContent => part.type === "image");
-		return images.length > 0 ? this.#buildImageDescriptionNotice(images) : undefined;
+		return images.length > 0 ? this.#buildImageDescriptionNotice(images, signal) : undefined;
 	}
 
 	/** Queue ownership belongs to Agent; only actual user deliveries refresh submission policy. */
@@ -9318,7 +9343,7 @@ export class AgentSession implements SettingsScope {
 			content.push(...normalizedImages);
 		}
 		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
+			? await this.#buildImageDescriptionNotice(normalizedImages, this.#disposeAbortController.signal)
 			: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
@@ -9537,7 +9562,7 @@ export class AgentSession implements SettingsScope {
 		const imageDescriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: normalizedImages?.length
-				? await this.#buildImageDescriptionNotice(normalizedImages)
+				? await this.#buildImageDescriptionNotice(normalizedImages, this.#disposeAbortController.signal)
 				: undefined;
 		if (options?.promptGeneration !== undefined && this.#promptGeneration !== options.promptGeneration) {
 			return false;
@@ -10033,7 +10058,7 @@ export class AgentSession implements SettingsScope {
 			: await this.#normalizeAgentMessageImages(appMessage);
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
-			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
+			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage, this.#disposeAbortController.signal);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
@@ -12053,8 +12078,11 @@ export class AgentSession implements SettingsScope {
 	 * @param customInstructions Optional focus for the handoff document
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
+	 * @throws once the session has begun disposing: a handoff is a provider request and a history
+	 *   rewrite, and `beginDispose()` aborts only one already running.
 	 */
 	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		if (this.#isDisposed) return Promise.reject(this.#disposingRefusal("handoff"));
 		return this.#inLogContext(() => this.#maintenance.handoff(customInstructions, options));
 	}
 
@@ -12756,9 +12784,7 @@ export class AgentSession implements SettingsScope {
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		// A side request reaches the provider like a prompt, so a disposing session refuses one
 		// asked for after disposal began, and disposal cancels one still being prepared or streamed.
-		if (this.#isDisposed) {
-			throw new Error("This session has begun disposing, so this side request was refused.");
-		}
+		if (this.#isDisposed) throw this.#disposingRefusal("side request");
 		const signal = args.signal
 			? AbortSignal.any([args.signal, this.#disposeAbortController.signal])
 			: this.#disposeAbortController.signal;
@@ -13835,6 +13861,9 @@ export class AgentSession implements SettingsScope {
 			requireIdle?: boolean;
 		} = {},
 	): Promise<NavigateTreeResult> {
+		// A branch summary is a provider request and a history change; a disposing session makes
+		// neither. A plain leaf move reaches no provider and is left alone.
+		if (options.summarize && this.#isDisposed) throw this.#disposingRefusal("branch summary");
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
@@ -13942,6 +13971,9 @@ export class AgentSession implements SettingsScope {
 				fromExtension = true;
 			}
 		}
+		// Disposal that began during an await here (the hook above, the key below) leaves the tree
+		// as it was and sends no summary request; `beginDispose()` aborts a summary already streaming.
+		if (options.summarize && this.#isDisposed) return { cancelled: true, aborted: true };
 
 		// Run default summarizer if needed
 		let summaryText: string | undefined;
@@ -13952,6 +13984,7 @@ export class AgentSession implements SettingsScope {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
+			if (this.#isDisposed) return { cancelled: true, aborted: true };
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
