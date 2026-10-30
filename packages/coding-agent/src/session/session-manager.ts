@@ -793,36 +793,6 @@ async function mountsUnder(root: string): Promise<string[] | undefined> {
 	return found;
 }
 
-/** Whether `staging` is still the directory that was created, and holds nothing mounted. */
-async function stagingIsStillOurs(staging: ArtifactStaging, what: string): Promise<boolean> {
-	let identity: fs.BigIntStats;
-	try {
-		identity = await fs.promises.lstat(staging.path, { bigint: true });
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
-	}
-	if (identity.dev !== staging.device || identity.ino !== staging.inode || !identity.isDirectory()) {
-		logger.warn(`Session artifact staging is no longer the directory that was created; ${what}`, {
-			staging: staging.path,
-		});
-		return false;
-	}
-	const mounts = await mountsUnder(staging.path);
-	if (mounts === undefined) {
-		logger.warn(`Could not read the mount table; ${what}`, { staging: staging.path });
-		return false;
-	}
-	if (mounts.length > 0) {
-		logger.warn(`Session artifact staging holds a mount; ${what}`, {
-			staging: staging.path,
-			mounts: mounts.slice(0, ARTIFACT_COPY_LARGEST),
-		});
-		return false;
-	}
-	return true;
-}
-
 /**
  * Remove a staging tree, and only the objects that were created in it.
  *
@@ -874,7 +844,6 @@ async function emptyPinnedDirectory(
 		return;
 	}
 	for (const entry of entries) {
-		const at = `${dir.at}/${entry.name}`;
 		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
 		const record = created?.get(staged);
 		// The marker stays until the tree it marks is gone. It is what a
