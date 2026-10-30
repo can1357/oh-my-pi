@@ -435,6 +435,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import {
 	isPrewalkPlanNudge,
@@ -9183,10 +9184,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						.join("");
 
 		let keywordNotices: CustomMessage[] = [];
-		// Queued deliveries bypass the idle-turn notice injection, so a queued user
-		// skill prompt carries the session-agent notice itself, like a queued typed
-		// prompt (#14093).
+		// Queued user skill and Collab prompts carry their keyword notices into the queue.
+		// These notices stay ahead of the visible custom message.
 		let queuedNotices: CustomMessage[] = keywordNotices;
+		const isUserCollabPrompt = message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user";
 		if (message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user") {
 			const details = message.details;
 			let skillArgs = "";
@@ -9196,6 +9197,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			keywordNotices = this.#createMagicKeywordNotices(skillArgs);
 			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
 			queuedNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
+		} else if (isUserCollabPrompt) {
+			keywordNotices = this.#createMagicKeywordNotices(textContent);
+			queuedNotices = keywordNotices;
 		}
 
 		if (options?.queueOnly || this.isStreaming) {
@@ -9651,13 +9655,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
 			// Auto thinking: classify this real user turn and set the effective level
-			// before the model request. A user-invoked `/skill:<name>` arrives as a
-			// user-attributed skill custom message whose expanded body is the task
-			// prompt, so it counts as a user turn. Synthetic/tool-continuation turns
-			// (developer roles), agent-originated or autoloaded skill injections, and
-			// non-auto sessions are skipped. Never blocks the turn — failures fall
-			// back to a concrete level inside the helper.
-			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+			// before the model request. User-invoked skills and Collab guest prompts
+			// arrive as user-attributed custom messages, so both count as user turns.
+			// Synthetic/tool-continuation turns, agent-originated or autoloaded skill
+			// injections, and non-auto sessions are skipped. Failures fall back to a
+			// concrete level inside the helper.
+			const isUserTurn =
+				message.role === "user" ||
+				(message.role === "custom" &&
+					(isUserInvokedSkillPrompt(message) ||
+						(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")));
 			// `chillax` settles the turn's effort itself, so classification is skipped.
 			const relaxed = isUserTurn && this.#models.applyChillax(expandedText);
 			if (this.isAutoThinking && isUserTurn && !relaxed) {
