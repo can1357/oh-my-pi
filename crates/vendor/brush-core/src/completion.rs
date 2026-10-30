@@ -666,8 +666,12 @@ impl Spec {
 		// Move to a subshell so we can start filling out variables.
 		let mut shell = shell.clone();
 
+		// `COMP_LINE` is the line being completed and has no bound, so the
+		// copy of it is divided as well as the assignment: dividing only the
+		// write leaves the `to_owned` holding the worker.
+		let params = shell.default_exec_params();
 		let vars_and_values: Vec<(&str, String)> = vec![
-			("COMP_LINE", context.input_line.to_owned()),
+			("COMP_LINE", crate::interp::clone_in_strides(&params, context.input_line).await?),
 			("COMP_POINT", context.cursor_index.to_string()),
 			("COMP_KEY", context.trigger.comp_key().to_string()),
 			("COMP_TYPE", context.trigger.comp_type().to_string()),
@@ -675,16 +679,20 @@ impl Spec {
 
 		// Fill out variables.
 		for (var, value) in vars_and_values {
-			shell.env_mut().update_or_add_scalar(
-				var,
-				value,
-				|v| {
-					v.export();
-					Ok(())
-				},
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					var,
+					variables::ShellValueLiteral::Scalar(value),
+					|v| {
+						v.export();
+						Ok(())
+					},
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&params,
+				)
+				.await?;
 		}
 
 		// Compute args.

@@ -60,6 +60,9 @@ pub use extensions::ShellExtensions;
 pub use interp::{
 	ExecutionParameters, ExternalCommandInfo, ExternalCommandOutputMarker,
 	ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
+	// A builtin assigning a value the caller sized needs the same divided
+	// copy the interpreter uses: `read`'s line, `getopts`' positionals.
+	clone_in_strides,
 };
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use pipetap::{PipeMirror, PipeTap};

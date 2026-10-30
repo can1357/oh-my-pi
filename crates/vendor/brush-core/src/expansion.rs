@@ -1738,23 +1738,34 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 		};
 
+		// Both of these assign a value the caller sized, and this is an
+		// `async` caller with execution parameters: it takes the divided
+		// route.
 		if let Some(index) = index {
-			self.shell.env_mut().update_or_add_array_element(
-				variable_name,
-				index,
-				value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)
+			self.shell
+				.env_mut()
+				.update_or_add_array_element_divided(
+					variable_name,
+					index,
+					value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					self.params,
+				)
+				.await
 		} else {
-			self.shell.env_mut().update_or_add_scalar(
-				variable_name,
-				value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)
+			self.shell
+				.env_mut()
+				.update_or_add(
+					variable_name,
+					crate::variables::ShellValueLiteral::Scalar(value),
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					self.params,
+				)
+				.await
 		}
 	}
 

@@ -212,14 +212,21 @@ impl MapFileCommand {
 				}
 			}
 
-			context.shell.env_mut().update_or_add_array_element(
-				&self.array_var_name,
-				array_index.to_string(),
-				line_str,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			// A line has no bound, and this is an `async` caller with the
+			// execution parameters: the element assignment is divided.
+			context
+				.shell
+				.env_mut()
+				.update_or_add_array_element_divided(
+					&self.array_var_name,
+					array_index.to_string(),
+					line_str,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&context.params,
+				)
+				.await?;
 
 			entry_count += 1;
 		}

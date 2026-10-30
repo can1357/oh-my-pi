@@ -457,14 +457,63 @@ pub(crate) async fn on_preexecute(
 ) -> Result<(), error::Error> {
 	// Set BASH_COMMAND before invoking the DEBUG trap (and generally before
 	// executing commands).
-	let full_cmd = cmd.args.iter().map(|arg| arg.to_string()).join(" ");
-	cmd.shell.env_mut().update_or_add_scalar(
-		"BASH_COMMAND",
-		full_cmd,
-		|_| Ok(()),
-		env::EnvironmentLookup::Anywhere,
-		env::EnvironmentScope::Global,
-	)?;
+	//
+	// This runs before **every** command, so an ordinary command line takes
+	// the plain path and pays nothing. A generated one can be any size, and
+	// the same threshold the rest of this change uses decides which it is.
+	//
+	// The threshold is measured **before** the value is built, from the
+	// lengths of the arguments: testing it after the join divides the
+	// assignment and leaves the construction, which is where the time was —
+	// `noop "${huge[@]}"` with a 64 MiB argument spent 23.8 ms in this join.
+	let joined_len = cmd
+		.args
+		.iter()
+		.map(|arg| match arg {
+			CommandArg::String(text) => text.len(),
+			// An assignment is rendered rather than copied, and its text is
+			// bounded by the assignment itself; this is an estimate only for
+			// deciding which path to take.
+			CommandArg::Assignment(_) => 0,
+		})
+		.sum::<usize>() + cmd.args.len().saturating_sub(1);
+
+	if joined_len > interp::DIVIDE_COPY_ABOVE_BYTES {
+		let mut full_cmd = String::with_capacity(joined_len);
+		for (index, arg) in cmd.args.iter().enumerate() {
+			if index > 0 {
+				full_cmd.push(' ');
+			}
+			match arg {
+				CommandArg::String(text) => {
+					interp::push_str_in_strides(&cmd.params, &mut full_cmd, text).await?;
+				},
+				CommandArg::Assignment(assignment) => {
+					interp::loop_checkpoint(&cmd.params).await?;
+					full_cmd.push_str(assignment.to_string().as_str());
+				},
+			}
+		}
+		cmd.shell
+			.env_mut()
+			.update_or_add(
+				"BASH_COMMAND",
+				crate::variables::ShellValueLiteral::Scalar(full_cmd),
+				|_| Ok(()),
+				env::EnvironmentLookup::Anywhere,
+				env::EnvironmentScope::Global,
+				&cmd.params,
+			)
+			.await?;
+	} else {
+		cmd.shell.env_mut().update_or_add_scalar(
+			"BASH_COMMAND",
+			cmd.args.iter().map(|arg| arg.to_string()).join(" "),
+			|_| Ok(()),
+			env::EnvironmentLookup::Anywhere,
+			env::EnvironmentScope::Global,
+		)?;
+	}
 
 	// Fire the DEBUG trap if one is registered.
 	if cmd.shell.traps().handles(traps::TrapSignal::Debug) {
@@ -610,7 +659,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			} else {
 				// Bash updates $_ even when the command is not found, so mirror
 				// that here before reporting the error.
-				let last_arg = Self::take_last_arg(&self.args);
+				let last_arg = Self::take_last_arg(&self.args, &self.params).await?;
 				self.shell.update_last_arg_variable(last_arg);
 
 				if let Some(post_execute) = self.post_execute {
@@ -636,8 +685,28 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 	/// Extracts the owned string representation of the last argument of a
 	/// command, suitable for recording into `$_`.
-	fn take_last_arg(args: &[CommandArg]) -> Option<String> {
-		args.last().map(ToString::to_string)
+	///
+	/// The copy is divided, because the last argument is whatever the command
+	/// line expanded to: `noop "${huge[@]}"` with a 64 MiB argument spent
+	/// **47.0 ms** of a 70.8 ms hold in this one `to_string`. An assignment
+	/// argument is rendered rather than copied and is bounded by the
+	/// assignment's own text.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way; `$_` is then left as it was.
+	async fn take_last_arg(
+		args: &[CommandArg],
+		params: &ExecutionParameters,
+	) -> Result<Option<String>, error::Error> {
+		match args.last() {
+			None => Ok(None),
+			Some(CommandArg::String(text)) => {
+				Ok(Some(interp::clone_in_strides(params, text).await?))
+			},
+			Some(argument) => Ok(Some(argument.to_string())),
+		}
 	}
 
 	async fn execute_via_builtin(
@@ -648,13 +717,14 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		match self.shell {
 			ShellForCommand::OwnedShell { target, .. } => {
-				Ok(Self::execute_via_builtin_in_owned_shell(
+				Self::execute_via_builtin_in_owned_shell(
 					*target,
 					self.params,
 					builtin,
 					self.command_name,
 					self.args,
-				))
+				)
+				.await
 			},
 			ShellForCommand::ParentShell(..) => {
 				self.execute_via_builtin_in_parent_shell(builtin).await
@@ -662,14 +732,14 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		}
 	}
 
-	fn execute_via_builtin_in_owned_shell(
+	async fn execute_via_builtin_in_owned_shell(
 		mut shell: Shell<SE>,
 		params: ExecutionParameters,
 		builtin: builtins::Registration<SE>,
 		command_name: String,
 		args: Vec<CommandArg>,
-	) -> ExecutionSpawnResult {
-		let last_arg = Self::take_last_arg(&args);
+	) -> Result<ExecutionSpawnResult, error::Error> {
+		let last_arg = Self::take_last_arg(&args, &params).await?;
 
 		// An `async_io` builtin never blocks a worker, so it runs as a plain task.
 		// Every other builtin does synchronous descriptor I/O: it runs on a
@@ -699,7 +769,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			})
 		};
 
-		ExecutionSpawnResult::StartedTask(join_handle)
+		Ok(ExecutionSpawnResult::StartedTask(join_handle))
 	}
 
 	async fn execute_via_builtin_in_parent_shell(
@@ -708,7 +778,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		let sees_virtual_files = self.sees_virtual_files();
 		let mut shell = self.shell;
-		let last_arg = Self::take_last_arg(&self.args);
+		let last_arg = Self::take_last_arg(&self.args, &self.params).await?;
 
 		let result = if sees_virtual_files && !builtin.async_io {
 			// Synchronous builtins do blocking I/O on their descriptors. A virtual file's
@@ -772,7 +842,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		let mut params = self.params;
 		params.disable_command_output_marking();
 
-		let last_arg = Self::take_last_arg(&self.args);
+		let last_arg = Self::take_last_arg(&self.args, &params).await?;
 
 		match self.shell {
 			// The function runs in an owned subshell (a pipeline stage or
@@ -827,7 +897,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 	async fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
 		let mut shell = self.shell;
-		let last_arg = Self::take_last_arg(&self.args);
+		let last_arg = Self::take_last_arg(&self.args, &self.params).await?;
 
 		let cmd_context = ExecutionContext {
 			shell:        &mut shell,

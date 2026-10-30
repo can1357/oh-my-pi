@@ -588,6 +588,39 @@ impl ShellEnvironment {
 		}
 	}
 
+	/// [`Self::update_or_add_array_element`] for a caller that has a run to
+	/// cancel.
+	///
+	/// One element can be any size, so its assignment is divided: see
+	/// [`ShellVariable::assign_at_index_divided`].
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the variable as it was.
+	pub async fn update_or_add_array_element_divided<N: Into<String>>(
+		&mut self,
+		name: N,
+		index: String,
+		value: String,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign_at_index_divided(index, value, false, params).await?;
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value));
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
 	/// Adds a variable to the environment.
 	///
 	/// # Arguments

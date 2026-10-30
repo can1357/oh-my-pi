@@ -141,17 +141,31 @@ impl builtins::Command for GetOptsCommand {
 		// default to using the shell's current positional parameters.
 		// Clone positional params to avoid borrowing context immutably while we
 		// also need it mutably in parse_next_option.
+		// The copy is divided: a positional parameter is whatever the caller
+		// passed, and copying the whole vector is the construction side of
+		// the same write this builtin already divides.
 		let owned_args;
-		let args_to_parse = if !self.args.is_empty() {
-			&self.args
-		} else {
-			owned_args = context.shell.current_shell_args().to_vec();
+		let args_to_parse = if self.args.is_empty() {
+			let count = context.shell.current_shell_args().len();
+			let mut copied = Vec::with_capacity(count);
+			for index in 0..count {
+				copied.push(
+					brush_core::clone_in_strides(
+						&context.params,
+						&context.shell.current_shell_args()[index],
+					)
+					.await?,
+				);
+			}
+			owned_args = copied;
 			&owned_args
+		} else {
+			&self.args
 		};
 
 		let result = parse_next_option(&mut context, &spec, args_to_parse, next_index)?;
 
-		update_variables(&mut context, &self.variable_name, result)
+		update_variables(&mut context, &self.variable_name, result).await
 	}
 }
 
@@ -327,7 +341,11 @@ fn report_unknown_option<SE: brush_core::ShellExtensions>(
 
 /// Writes the parsing result back into shell variables: the target variable,
 /// OPTARG, OPTIND, and the internal `__GETOPTS_LAST_OPTIND` tracker.
-fn update_variables<SE: brush_core::ShellExtensions>(
+///
+/// Only `OPTARG` takes the divided route. The option character, the indices
+/// and the tracker are a character and two decimal integers; an option
+/// *argument* is whatever was on the command line and can be any size.
+async fn update_variables<SE: brush_core::ShellExtensions>(
 	context: &mut brush_core::ExecutionContext<'_, SE>,
 	variable_name: &str,
 	result: GetOptsResult,
@@ -343,13 +361,18 @@ fn update_variables<SE: brush_core::ShellExtensions>(
 
 	// Update OPTARG
 	if let Some(optarg) = result.optarg {
-		context.shell.env_mut().update_or_add_scalar(
-			"OPTARG",
-			optarg,
-			|_| Ok(()),
-			brush_core::env::EnvironmentLookup::Anywhere,
-			brush_core::env::EnvironmentScope::Global,
-		)?;
+		context
+			.shell
+			.env_mut()
+			.update_or_add(
+				"OPTARG",
+				brush_core::variables::ShellValueLiteral::Scalar(optarg),
+				|_| Ok(()),
+				brush_core::env::EnvironmentLookup::Anywhere,
+				brush_core::env::EnvironmentScope::Global,
+				&context.params,
+			)
+			.await?;
 	} else {
 		context.shell.env_mut().unset("OPTARG")?;
 	}

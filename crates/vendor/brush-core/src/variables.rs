@@ -200,7 +200,7 @@ impl ShellVariable {
 			},
 			_ => {
 				let mut new_values = BTreeMap::new();
-				new_values.insert(0, self.value.to_cow_str_without_dynamic_support().to_string());
+				new_values.insert(0, self.take_scalar());
 				self.value = ShellValue::IndexedArray(new_values);
 				Ok(())
 			},
@@ -216,12 +216,32 @@ impl ShellVariable {
 			},
 			_ => {
 				let mut new_values: BTreeMap<String, String> = BTreeMap::new();
-				new_values.insert(
-					String::from("0"),
-					self.value.to_cow_str_without_dynamic_support().to_string(),
-				);
+				// Moved rather than copied, for the reason given on
+				// [`Self::convert_to_indexed_array`]: `declare -A` on an
+				// existing scalar is the same caller-sized copy.
+				new_values.insert(String::from("0"), self.take_scalar());
 				self.value = ShellValue::AssociativeArray(new_values);
 				Ok(())
+			},
+		}
+	}
+
+	/// Takes this variable's value out as a string, leaving it unset.
+	///
+	/// Moved rather than copied where there is something to move: a scalar
+	/// can be any size, and promoting a 64 MiB one to an array held the
+	/// worker 25.8 ms in that copy, before the divided path it leads to had
+	/// begun. A copy of a caller-sized value needs a checkpoint wherever it
+	/// sits — and this one needs no copy at all.
+	fn take_scalar(&mut self) -> String {
+		match std::mem::replace(&mut self.value, ShellValue::Unset(ShellValueUnsetType::Untyped)) {
+			ShellValue::String(text) => text,
+			// Nothing else owns a `String` to hand over, and a dynamic value
+			// has to be asked for one.
+			other => {
+				let text = other.to_cow_str_without_dynamic_support().to_string();
+				self.value = other;
+				text
 			},
 		}
 	}
@@ -235,6 +255,23 @@ impl ShellVariable {
 	/// so its conversion is divided too: `copy="${huge[@]}$open"` held the
 	/// worker 94.8 ms at 64 MiB and 734.9 ms at 512 MiB through the
 	/// synchronous [`Self::assign_scalar`].
+	///
+	/// **Every route into a variable converts its value exactly once, and
+	/// where that one conversion goes depends on the operation**:
+	///
+	/// - a **replacement** converts the value;
+	/// - a **scalar append** converts the concatenation, because that is the
+	///   value the variable ends up holding;
+	/// - an **element** is appended to, so its conversion belongs to the
+	///   value arriving.
+	///
+	/// "Convert once" without "where" is not enough to go on, and saying only
+	/// that is what let `declare -c x; x+=ßeta` answer `Sseta` where the
+	/// whole string gives `SSeta`: [`ShellVariableUpdateTransform::Capitalize`]
+	/// is not idempotent for a character whose uppercase form is longer than
+	/// it, so converting the value and then the result lowercases everything
+	/// after the first expansion. An exhaustive scan of the 103 such
+	/// characters found 478 wrong answers in 45,360 comparisons.
 	///
 	/// # Arguments
 	///
@@ -252,7 +289,9 @@ impl ShellVariable {
 				if self.is_readonly() {
 					return Err(error::ErrorKind::ReadonlyVariable.into());
 				}
-				let value = self.value_converter().apply_divided(value, params).await?;
+				// Not converted here: every route below converts once, and
+				// where it converts matters — an append converts the
+				// concatenation, not the value and then the result.
 				self.place_scalar_divided(value, append, params).await
 			},
 			ShellValueLiteral::Array(literal) => self.assign_array(literal, append, params).await,
@@ -275,25 +314,34 @@ impl ShellVariable {
 			return Err(error::ErrorKind::ReadonlyVariable.into());
 		}
 
-		let value = self.convert_value_str_for_assignment(value);
 		self.place_scalar(value, append)
 	}
 
-	/// Stores an already-converted scalar, conditionally appending.
+	/// Stores a scalar, conditionally appending, converting it **once**.
 	///
-	/// Appending to a variable that converts its values runs the conversion
-	/// over the **whole** result, so this is proportional to the value that is
-	/// already there. [`Self::place_scalar_divided`] is the form with
-	/// checkpoints in it; this one is for callers with no run to cancel.
+	/// `value` arrives as it was written. Where the conversion goes depends
+	/// on the operation: a replacement converts the value, and an append
+	/// converts the concatenation, because `Capitalize` is not idempotent for
+	/// a character whose uppercase form is longer than it — converting
+	/// `ßeta` and then converting `SSeta` again gives `Sseta`.
+	///
+	/// Appending to a variable that converts its values is therefore
+	/// proportional to the value already there. [`Self::place_scalar_divided`]
+	/// is the form with checkpoints in it; this one is for callers with no run
+	/// to cancel.
 	fn place_scalar(&mut self, value: String, append: bool) -> Result<(), error::Error> {
 		if !append {
+			let value = self.convert_value_str_for_assignment(value);
 			return match &self.value {
 				// Updating an array with a string updates its "0" element.
 				ShellValue::IndexedArray(_)
 				| ShellValue::AssociativeArray(_)
 				| ShellValue::Unset(
 					ShellValueUnsetType::AssociativeArray | ShellValueUnsetType::IndexedArray,
-				) => self.assign_at_index(String::from("0"), value, false),
+				) => {
+					self.make_indexable()?;
+					self.place_at_index(String::from("0"), value, false)
+				},
 				// Handle updates to dynamic values; for now we just drop them.
 				// TODO(dynamic): Allow updates to dynamic values
 				ShellValue::Dynamic { .. } => Ok(()),
@@ -316,13 +364,18 @@ impl ShellVariable {
 					base.clear();
 					base.push_str(int_value.to_string().as_str());
 				} else {
+					// The one conversion for this operation, over the whole
+					// result.
 					base.push_str(value.as_str());
 					ValueConverter::apply_value_transforms(base, treat_as_int, update_transform);
 				}
 				Ok(())
 			},
 			ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_) => {
-				self.assign_at_index(String::from("0"), value, true)
+				// An element is appended to rather than rewritten, so the
+				// conversion belongs to the incoming value.
+				let value = self.convert_value_str_for_assignment(value);
+				self.place_at_index(String::from("0"), value, true)
 			},
 			// TODO(dynamic): implement appending to dynamic vars
 			ShellValue::Dynamic { .. } => Ok(()),
@@ -373,14 +426,83 @@ impl ShellVariable {
 		append: bool,
 		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
-		if !append || self.is_treated_as_integer() || self.value_converter().is_identity() {
-			return self.place_scalar(value, append);
+		// A scalar assigned to a variable that holds an array is the same
+		// operation on element zero, so it takes the same divided route. The
+		// explicit `arr[0]+=x` was not the only way to reach an element: this
+		// spelling held 25.7 ms on a 64 MiB one.
+		if matches!(
+			self.value,
+			ShellValue::IndexedArray(_)
+				| ShellValue::AssociativeArray(_)
+				| ShellValue::Unset(
+					ShellValueUnsetType::IndexedArray | ShellValueUnsetType::AssociativeArray
+				)
+		) {
+			return self.assign_at_index_divided(String::from("0"), value, append, params).await;
 		}
 
-		self.fill_unset_for_append();
 		let converter = self.value_converter();
-		let ShellValue::String(base) = &self.value else {
-			return self.place_scalar(value, append);
+		if !append {
+			if matches!(self.value, ShellValue::Dynamic { .. }) {
+				// TODO(dynamic): Allow updates to dynamic values
+				return Ok(());
+			}
+			// Stored rather than handed to `place_scalar`, which would convert
+			// it a second time.
+			self.value = ShellValue::String(converter.apply_divided(value, params).await?);
+			return Ok(());
+		}
+		if self.is_treated_as_integer() {
+			// The addition is the conversion, and an integer is as long as an
+			// integer.
+			return self.place_scalar(value, true);
+		}
+		if converter.is_identity() {
+			// Nothing to convert, so the buffer is kept and appended to in
+			// place — but **keeping the buffer and copying in one call are
+			// two different things**, and the fast path had skipped both
+			// checks: 64 MiB arriving into spare capacity held the worker
+			// 24.6 ms inside one `push_str`.
+			let ShellValue::String(base) = &mut self.value else {
+				// A declared-but-unset scalar becomes the value itself, which
+				// is already owned: no copy, and nothing written until here.
+				if matches!(self.value, ShellValue::Unset(ShellValueUnsetType::Untyped)) {
+					self.value = ShellValue::String(value);
+					return Ok(());
+				}
+				return self.place_scalar(value, true);
+			};
+
+			// A cancelled append puts the buffer back where it started, which
+			// keeps both the guarantee and the buffer: `truncate` frees no
+			// capacity.
+			//
+			// It has to survive the future being **dropped**, not only an
+			// `Err` returning: a run that is abandoned at a yield point never
+			// reaches the line after the await. So the rollback is a guard
+			// rather than an error branch.
+			let mut appending = AppendInPlace::of(base);
+			interp::push_str_in_strides(params, appending.text, &value).await?;
+			appending.done();
+			return Ok(());
+		}
+
+
+		// The conversion runs **once, over the concatenation**, from the value
+		// as it arrived. Converting the incoming value first and the result
+		// again is what gave `x+=ßeta` under `declare -c` the answer `Sseta`
+		// where the whole string gives `SSeta`: `Capitalize` is not
+		// idempotent for a character whose uppercase form is longer than it.
+		let base = match &self.value {
+			ShellValue::String(text) => text.as_str(),
+			// A declared-but-unset scalar appends to the empty string. It is
+			// not filled in first, because that would change the variable's
+			// kind before any of the work below could be interrupted.
+			ShellValue::Unset(ShellValueUnsetType::Untyped) => "",
+			ShellValue::Dynamic { .. } => return self.place_scalar(value, true),
+			ShellValue::IndexedArray(_)
+			| ShellValue::AssociativeArray(_)
+			| ShellValue::Unset(_) => unreachable!("answered above"),
 		};
 
 		let mut combined = String::with_capacity(base.len() + value.len());
@@ -437,20 +559,22 @@ impl ShellVariable {
 			return Ok(());
 		}
 
+		// Appending builds the new array **beside** the old value and commits
+		// it at the end, for the reason the single-element path already does:
+		// promoting before an await leaves a cancelled append having changed
+		// the variable's kind without assigning anything.
 		match &self.value {
-			// Appending to a declared-but-unset variable fills it out first.
-			ShellValue::Unset(_) => self.fill_unset_with_empty_array(),
-			// Appending to a string first makes it element `0` of an array.
-			ShellValue::String(_) => self.convert_to_indexed_array()?,
-			_ => (),
-		}
-
-		match &mut self.value {
-			ShellValue::IndexedArray(existing_values) => {
+			ShellValue::IndexedArray(_) => {
+				let ShellValue::IndexedArray(existing_values) = &mut self.value else {
+					unreachable!("matched above")
+				};
 				ShellValue::update_indexed_array_from_literals(existing_values, literal, convert, params)
 					.await
 			},
-			ShellValue::AssociativeArray(existing_values) => {
+			ShellValue::AssociativeArray(_) => {
+				let ShellValue::AssociativeArray(existing_values) = &mut self.value else {
+					unreachable!("matched above")
+				};
 				ShellValue::update_associative_array_from_literals(
 					existing_values,
 					literal,
@@ -459,9 +583,46 @@ impl ShellVariable {
 				)
 				.await
 			},
+			// Appending to a string makes it element `0` of an array. The
+			// element is held by an empty placeholder while the literal is
+			// read, so the indices come out as they would have, and the
+			// scalar itself is moved in only at the commit — an explicit
+			// `[0]=` in the literal replaces the placeholder and the scalar
+			// is then not put back.
+			ShellValue::String(_) => {
+				let mut values: BTreeMap<u64, String> =
+					std::iter::once((0, String::new())).collect();
+				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+					.await?;
+				if values.get(&0).is_some_and(String::is_empty) {
+					values.insert(0, self.take_scalar());
+				}
+				self.value = ShellValue::IndexedArray(values);
+				Ok(())
+			},
+			// Appending to a declared-but-unset variable starts from the
+			// empty array its declaration stands for.
+			ShellValue::Unset(ShellValueUnsetType::AssociativeArray) => {
+				let mut values = BTreeMap::new();
+				ShellValue::update_associative_array_from_literals(
+					&mut values,
+					literal,
+					convert,
+					params,
+				)
+				.await?;
+				self.value = ShellValue::AssociativeArray(values);
+				Ok(())
+			},
+			ShellValue::Unset(_) => {
+				let mut values = BTreeMap::new();
+				ShellValue::update_indexed_array_from_literals(&mut values, literal, convert, params)
+					.await?;
+				self.value = ShellValue::IndexedArray(values);
+				Ok(())
+			},
 			// TODO(dynamic): implement appending to dynamic vars
 			ShellValue::Dynamic { .. } => Ok(()),
-			ShellValue::Unset(_) | ShellValue::String(_) => unreachable!("converted above"),
 		}
 	}
 
@@ -494,21 +655,25 @@ impl ShellVariable {
 		value: String,
 		append: bool,
 	) -> Result<(), error::Error> {
-		match &self.value {
-			ShellValue::Unset(_) => {
-				if self.is_readonly() {
-					return Err(error::ErrorKind::ReadonlyVariable.into());
-				}
-				self.fill_unset_with_empty_array();
-			},
-			ShellValue::String(_) => {
-				self.convert_to_indexed_array()?;
-			},
-			_ => (),
-		}
-
-		let treat_as_int = self.is_treated_as_integer();
+		self.make_indexable()?;
 		let value = self.convert_value_str_for_assignment(value);
+		self.place_at_index(array_index, value, append)
+	}
+
+	/// Stores an **already-converted** value at an index.
+	///
+	/// Separate from [`Self::assign_at_index`] because converting twice is
+	/// not free and the second one cannot be divided: the divided form
+	/// converted the value and then called the synchronous assignment, which
+	/// converted it again, and a 64 MiB `ß` element into an uppercase array
+	/// held the worker 24.8 ms in that second pass alone.
+	fn place_at_index(
+		&mut self,
+		array_index: String,
+		value: String,
+		append: bool,
+	) -> Result<(), error::Error> {
+		let treat_as_int = self.is_treated_as_integer();
 
 		match &mut self.value {
 			ShellValue::IndexedArray(arr) => {
@@ -550,7 +715,7 @@ impl ShellVariable {
 						new_value.push_str(value.as_str());
 					}
 
-					arr.insert(array_index, new_value.clone());
+					arr.insert(array_index, new_value);
 				} else {
 					arr.insert(array_index, value);
 				}
@@ -559,6 +724,121 @@ impl ShellVariable {
 			ShellValue::Dynamic { .. } => Ok(()),
 			ShellValue::Unset(_) | ShellValue::String(_) => Err(error::ErrorKind::NotArray.into()),
 		}
+	}
+
+	/// Brings a variable to a form that can hold a value at an index.
+	fn make_indexable(&mut self) -> Result<(), error::Error> {
+		match &self.value {
+			ShellValue::Unset(_) => {
+				if self.is_readonly() {
+					return Err(error::ErrorKind::ReadonlyVariable.into());
+				}
+				self.fill_unset_with_empty_array();
+			},
+			ShellValue::String(_) => {
+				self.convert_to_indexed_array()?;
+			},
+			_ => (),
+		}
+
+		Ok(())
+	}
+
+	/// [`Self::assign_at_index`] with everything proportional to a value's
+	/// size divided.
+	///
+	/// Three things here were not. The incoming value was converted twice,
+	/// once divided and then again inside the synchronous assignment — 24.8 ms
+	/// of a 64 MiB `ß` element was that second pass. Appending copied the
+	/// element being appended to in one `to_owned`, and the associative branch
+	/// copied the result again through a `clone` that nothing read. And
+	/// promoting a scalar to an array copied the whole scalar, 25.8 ms of it,
+	/// before the divided path it leads to had begun.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, **leaving the variable as it was, in bytes and in kind**. Nothing
+	/// here touches `self` until every await has returned: the promotion of a
+	/// scalar happens at the commit rather than on the way in, so an
+	/// interrupted append cannot leave a string turned into an array.
+	pub(crate) async fn assign_at_index_divided(
+		&mut self,
+		array_index: String,
+		value: String,
+		append: bool,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let value = self.value_converter().apply_divided(value, params).await?;
+		self.place_at_index_divided(array_index, value, append, params).await
+	}
+
+	/// [`Self::place_at_index`] with the copy of the element being appended
+	/// to divided.
+	///
+	/// `value` has already been converted, which is why this is separate:
+	/// every route into a variable converts once, and the explicit
+	/// `arr[0]+=x` is not the only one that reaches an element. A scalar
+	/// append to a variable that holds an array is the same operation on
+	/// element zero, and it held 25.7 ms on a 64 MiB element by taking the
+	/// synchronous route.
+	async fn place_at_index_divided(
+		&mut self,
+		array_index: String,
+		value: String,
+		append: bool,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		if !append || self.is_treated_as_integer() {
+			self.make_indexable()?;
+			return self.place_at_index(array_index, value, append);
+		}
+
+		let existing = match &self.value {
+			ShellValue::IndexedArray(arr) => {
+				let key = get_key_for_indexed_array(arr, array_index.as_str())?;
+				arr.get(&key).map_or("", String::as_str)
+			},
+			ShellValue::AssociativeArray(arr) => {
+				arr.get(array_index.as_str()).map_or("", String::as_str)
+			},
+			// A scalar becomes element zero of the array it is promoted into,
+			// so an append at that index appends to it. The promotion itself
+			// waits until there is something to commit.
+			ShellValue::String(text) => {
+				let promoted: BTreeMap<u64, String> =
+					std::iter::once((0, String::new())).collect();
+				if get_key_for_indexed_array(&promoted, array_index.as_str())? == 0 {
+					text.as_str()
+				} else {
+					""
+				}
+			},
+			ShellValue::Dynamic { .. } | ShellValue::Unset(_) => {
+				self.make_indexable()?;
+				return self.place_at_index(array_index, value, append);
+			},
+		};
+
+		let mut appended = String::with_capacity(existing.len() + value.len());
+		interp::push_str_in_strides(params, &mut appended, existing).await?;
+		interp::push_str_in_strides(params, &mut appended, &value).await?;
+
+		// Everything that can fail has returned, so the promotion of a scalar
+		// and the element it holds are committed together.
+		self.make_indexable()?;
+		match &mut self.value {
+			ShellValue::IndexedArray(arr) => {
+				let key = get_key_for_indexed_array(arr, array_index.as_str())?;
+				arr.insert(key, appended);
+			},
+			ShellValue::AssociativeArray(arr) => {
+				arr.insert(array_index, appended);
+			},
+			_ => unreachable!("answered above"),
+		}
+
+		Ok(())
 	}
 
 	fn convert_value_str_for_assignment(&self, s: String) -> String {
@@ -598,10 +878,60 @@ pub(crate) struct ValueConverter {
 /// one step, because below that there is nothing worth dividing.
 const CONVERSION_STRIDE_BYTES: usize = 8 * 1024;
 
+/// An append made in place, which puts the buffer back if it does not finish.
+///
+/// The other divided assignments build the new value beside the old one, so
+/// an interruption leaves the variable untouched by construction. An append
+/// to a variable that converts nothing is the one that writes into the value
+/// it is changing — deliberately, because building a 64 MiB base aside to
+/// add a few bytes to it would be the trade this change exists to avoid.
+///
+/// The rollback is a guard rather than a branch after the await because a
+/// run can be **dropped** at a yield point as well as cancelled, and a
+/// dropped future never reaches the line after the await.
+///
+/// **`truncate` frees no capacity**, which is what makes the guard
+/// compatible with the optimisation it protects: the buffer the caller had
+/// is the buffer it keeps, so a rolled-back append costs the next one
+/// nothing and the in-place control — 256 appends into spare capacity moving
+/// the buffer zero times — stays green.
+struct AppendInPlace<'a> {
+	text:      &'a mut String,
+	held:      usize,
+	finished:  bool,
+}
+
+impl<'a> AppendInPlace<'a> {
+	fn of(text: &'a mut String) -> Self {
+		let held = text.len();
+		Self { text, held, finished: false }
+	}
+
+	const fn done(&mut self) {
+		self.finished = true;
+	}
+}
+
+impl Drop for AppendInPlace<'_> {
+	fn drop(&mut self) {
+		if !self.finished {
+			self.text.truncate(self.held);
+		}
+	}
+}
+
 impl ValueConverter {
 	/// A converter that leaves every value as it is.
 	pub(crate) const fn identity() -> Self {
 		Self { treat_as_int: false, update_transform: ShellVariableUpdateTransform::None }
+	}
+
+	/// The converter an attribute means, with no integer handling: what the
+	/// value a variable holds has to look like. The oracle every assignment
+	/// route is compared against.
+	#[cfg(test)]
+	pub(crate) const fn for_transform(update_transform: ShellVariableUpdateTransform) -> Self {
+		Self { treat_as_int: false, update_transform }
 	}
 
 	/// Whether this converter leaves every value exactly as it is.
@@ -610,7 +940,7 @@ impl ValueConverter {
 	}
 
 	/// Converts a value in one step.
-	fn apply(self, mut value: String) -> String {
+	pub(crate) fn apply(self, mut value: String) -> String {
 		Self::apply_value_transforms(&mut value, self.treat_as_int, self.update_transform);
 		value
 	}
@@ -1691,5 +2021,82 @@ mod conversion {
 				}
 			}
 		}
+	}
+
+	/// Inputs whose conversion is **not idempotent**, which is the class that
+	/// converting twice corrupts: a character whose uppercase form is more
+	/// than one character leaves everything after it to be lowercased by the
+	/// second pass. On the head that had two conversions, `ßeta` gave
+	/// `Sseta` for `SSeta` and `ﬃeld` gave `Ffield` for `FFIeld`, while
+	/// `İΣ` happened to agree — which is why the oracle is the whole-string
+	/// conversion and not a pinned pair of examples.
+	const NOT_IDEMPOTENT: [&str; 8] =
+		["ßeta", "ﬃeld", "İΣ", "ΣΣ", "aΣ", "AΣ!", "A\u{0301}Σ", "ǰ"];
+
+	/// Every path into a variable converts its value **once**. The scalar
+	/// assignment is the oracle: the same input at an index has to come out
+	/// the same way.
+	#[test]
+	fn a_value_is_converted_once_on_every_path() {
+		for transform in TRANSFORMS {
+			for input in NOT_IDEMPOTENT {
+				let mut scalar = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+				scalar.set_update_transform(transform);
+				scalar.assign_scalar(String::from(input), false).expect("assigned as a scalar");
+				let whole = scalar.value().to_cow_str_without_dynamic_support().into_owned();
+
+				for mut variable in [
+					ShellVariable::new(ShellValue::IndexedArray(BTreeMap::new())),
+					ShellVariable::new(ShellValue::AssociativeArray(BTreeMap::new())),
+					ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::IndexedArray)),
+					ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::AssociativeArray)),
+				] {
+					variable.set_update_transform(transform);
+					variable
+						.assign_at_index(String::from("0"), String::from(input), false)
+						.expect("assigned at index");
+					assert_eq!(
+						variable.value().to_cow_str_without_dynamic_support(),
+						whole,
+						"{transform:?} of {input:?} at an index"
+					);
+				}
+			}
+		}
+	}
+
+	/// Dividing an append must not turn an in-place one into a reallocation.
+	/// That would be the easy way to make every hold figure in this change go
+	/// away while making the shell slower, and nothing else here would catch
+	/// it: a variable that converts nothing keeps the old in-place append.
+	///
+	/// **This proves the identity scalar case and nothing else.** Keeping the
+	/// buffer is not a property of assignment in general: a reviewer measured
+	/// appending `WORLD` to `HELLO` in six shapes and **five of them moved**,
+	/// a transformed scalar and both array kinds replacing a 1 MiB allocation
+	/// with a ten-byte one, because those paths build the new value rather
+	/// than growing the old. Read as a general guarantee this test says
+	/// something false.
+	#[test]
+	fn an_ordinary_append_still_grows_in_place() {
+		let mut variable = ShellVariable::new(ShellValue::String(String::with_capacity(4096)));
+		let mut reference = String::with_capacity(4096);
+		let mut moves = 0;
+
+		for _ in 0..256 {
+			let ShellValue::String(before) = variable.value() else { unreachable!("a scalar") };
+			let before = before.as_ptr();
+			variable.assign_scalar(String::from("ab"), true).expect("appended");
+			reference.push_str("ab");
+			let ShellValue::String(after) = variable.value() else { unreachable!("a scalar") };
+			if before != after.as_ptr() {
+				moves += 1;
+			}
+		}
+
+		let ShellValue::String(text) = variable.value() else { unreachable!("a scalar") };
+		assert_eq!(text, &reference, "the same bytes as a plain `String`");
+		assert_eq!(text.capacity(), reference.capacity(), "the same growth as a plain `String`");
+		assert_eq!(moves, 0, "512 bytes into 4096 of capacity moved the buffer {moves} times");
 	}
 }

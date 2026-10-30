@@ -189,15 +189,29 @@ async fn assign_input_to_variables(
 			)
 			.await?;
 	} else if !variable_names.is_empty() {
-		assign_to_named_variables(shell, input_line, ifs, skip_ifs_splitting, variable_names)?;
+		assign_to_named_variables(shell, input_line, ifs, skip_ifs_splitting, variable_names, params)
+			.await?;
 	} else {
-		shell.env_mut().update_or_add_scalar(
-			"REPLY",
-			input_line.unwrap_or_default().to_owned(),
-			|_| Ok(()),
-			env::EnvironmentLookup::Anywhere,
-			env::EnvironmentScope::Global,
-		)?;
+		// A line read from anywhere can be any size, and this caller has the
+		// execution parameters: both the copy of the borrowed line and the
+		// assignment it feeds are divided. Dividing only the write would
+		// leave the `to_owned` holding the worker for the whole line.
+		let reply = brush_core::clone_in_strides(
+			params,
+			input_line.unwrap_or_default(),
+		)
+		.await?;
+		shell
+			.env_mut()
+			.update_or_add(
+				"REPLY",
+				variables::ShellValueLiteral::Scalar(reply),
+				|_| Ok(()),
+				env::EnvironmentLookup::Anywhere,
+				env::EnvironmentScope::Global,
+				params,
+			)
+			.await?;
 	}
 	Ok(())
 }
@@ -207,12 +221,13 @@ async fn assign_input_to_variables(
 /// Fields are assigned one per variable, with any remaining fields joined by
 /// space and assigned to the last variable. If there are more variables than
 /// fields, the extra variables are set to empty strings.
-fn assign_to_named_variables(
+async fn assign_to_named_variables(
 	shell: &mut brush_core::Shell<impl brush_core::ShellExtensions>,
 	input_line: Option<&str>,
 	ifs: &str,
 	skip_ifs_splitting: bool,
 	variable_names: &[String],
+	params: &brush_core::ExecutionParameters,
 ) -> Result<(), brush_core::Error> {
 	let mut fields =
 		build_variable_fields(input_line, ifs, skip_ifs_splitting, variable_names.len());
@@ -229,13 +244,17 @@ fn assign_to_named_variables(
 			fields.pop_front().unwrap_or_default()
 		};
 
-		shell.env_mut().update_or_add_scalar(
-			name,
-			value,
-			|_| Ok(()),
-			env::EnvironmentLookup::Anywhere,
-			env::EnvironmentScope::Global,
-		)?;
+		shell
+			.env_mut()
+			.update_or_add(
+				name,
+				variables::ShellValueLiteral::Scalar(value),
+				|_| Ok(()),
+				env::EnvironmentLookup::Anywhere,
+				env::EnvironmentScope::Global,
+				params,
+			)
+			.await?;
 
 		if is_last {
 			break;

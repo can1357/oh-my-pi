@@ -784,7 +784,7 @@ pub(crate) async fn loop_checkpoints(
 ///
 /// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
 /// leaving the copy unfinished and discarded.
-pub(crate) async fn clone_in_strides(
+pub async fn clone_in_strides(
 	params: &ExecutionParameters,
 	text: &str,
 ) -> Result<String, error::Error> {
@@ -1781,8 +1781,17 @@ impl Execute for ast::ForClauseCommand {
 				expanded_values.append(&mut expanded);
 			}
 		} else {
-			// Otherwise, we use the current positional parameters.
-			expanded_values.extend_from_slice(shell.current_shell_args());
+			// Otherwise, we use the current positional parameters. One of
+			// them can be a whole array joined into a string, so the copy is
+			// divided: `for arr; do …` with a 64 MiB positional held the
+			// worker 25.4 ms in `extend_from_slice` alone, before the
+			// divided assignment it leads to had begun.
+			let count = shell.current_shell_args().len();
+			expanded_values.reserve(count);
+			for index in 0..count {
+				let argument = clone_in_strides(params, &shell.current_shell_args()[index]).await?;
+				expanded_values.push(argument);
+			}
 		}
 
 		for value in expanded_values {
@@ -1806,14 +1815,22 @@ impl Execute for ast::ForClauseCommand {
 				}
 			}
 
-			// Update the variable.
-			shell.env_mut().update_or_add_scalar(
-				&self.variable_name,
-				value,
-				|_| Ok(()),
-				EnvironmentLookup::Anywhere,
-				EnvironmentScope::Global,
-			)?;
+			// Update the variable. One value of a `for` is one element of an
+			// array and can be any size, and this caller has the execution
+			// parameters, so it takes the divided route: an uppercase
+			// attribute on the loop variable held the worker 85.0 ms on a
+			// 64 MiB element through the synchronous one.
+			shell
+				.env_mut()
+				.update_or_add(
+					&self.variable_name,
+					ShellValueLiteral::Scalar(value),
+					|_| Ok(()),
+					EnvironmentLookup::Anywhere,
+					EnvironmentScope::Global,
+					params,
+				)
+				.await?;
 
 			result = self.body.list.execute(shell, params).await?;
 			if result.is_return_or_exit() {
@@ -2542,7 +2559,9 @@ async fn apply_assignment(
 			if let Some(array_index) = array_index {
 				match new_value {
 					ShellValueLiteral::Scalar(s) => {
-						existing_value.assign_at_index(array_index, s, assignment.append)?;
+						existing_value
+							.assign_at_index_divided(array_index, s, assignment.append, params)
+							.await?;
 					},
 					ShellValueLiteral::Array(_) => {
 						return Err(error::ErrorKind::AssigningListToArrayMember.into());

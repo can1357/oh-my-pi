@@ -408,6 +408,223 @@ mod regression {
 		assert_eq!(outcome, (true, false), "(uncancelled assigned them all, cancelled stopped)");
 	}
 
+	/// Inputs where converting twice, or converting before concatenating,
+	/// gives a different answer from converting the value the variable ends
+	/// up holding.
+	///
+	/// **Enumerated rather than listed.** Every character whose uppercase
+	/// form is longer than it is — all 103 of them in this Unicode version —
+	/// is one of these, because `Capitalize` lowercases and then raises the
+	/// first character, so a second pass lowercases everything the first one
+	/// expanded: `Sseta` for `SSeta`, `Ffield` for `FFIeld`, `Fflow` for
+	/// `FFLow`, `Եւ` for `ԵՒ`, `ʼn` for `ʼN`, `Ἀιeta` for `ἈΙeta`. A test
+	/// built from the ones that were reported would have had six of them.
+	///
+	/// `Σ` is the other shape, and lowercase rather than capitalise:
+	/// appended to `a` it is a final sigma, `aς`, and only `aσ` if the value
+	/// was converted before it met the `a`.
+	///
+	/// **The inputs must include one that ends in `Σ`.** Every generated
+	/// string here used to end in `eta`, so even `Σeta` had a cased
+	/// character after its sigma and the final-sigma rule never applied: a
+	/// mutant that prematurely lowercased an incoming `"Σ"` passed this test
+	/// while an independent `a += Σ` assertion failed. Enumerating every
+	/// mapping does not cover a shape that depends on what **follows**.
+	fn premature_conversion_shows(ends: &str) -> Vec<String> {
+		let mut inputs: Vec<String> = ('\0'..=char::MAX)
+			.filter(|c| c.to_uppercase().count() > 1)
+			.map(|c| format!("{c}{ends}"))
+			.collect();
+		inputs.push(format!("Σ{ends}"));
+		inputs.push(format!("İΣ{ends}"));
+		inputs.push(String::from("Σ"));
+		inputs.push(String::from("İΣ"));
+		inputs.push(String::from("ßΣ"));
+		inputs
+	}
+
+	/// Every route converts a value **once**, and the oracle is the
+	/// conversion itself.
+	///
+	/// Two things this test has had to learn. It must drive the `async`
+	/// routes a script takes — an earlier version called the synchronous
+	/// assignment and passed 96 comparisons against a head that corrupted
+	/// four of six inputs. And the oracle must be **whole-string
+	/// conversion**, not another code path: comparing an element against a
+	/// scalar assignment cannot see a scalar assignment that is itself
+	/// wrong, which is how `x+=ßeta` kept giving `Sseta` for a round longer.
+	///
+	/// **An oracle that is another code path is not an oracle.** This branch
+	/// spent two rounds learning that, and both failures were in this test
+	/// rather than in the code it was meant to hold.
+	///
+	/// Where the single conversion belongs is on [`crate::ShellVariable::assign`];
+	/// this compares replacement and scalar append, where the answer is the
+	/// conversion of the whole value.
+	#[test]
+	fn every_route_converts_a_value_once() {
+		let compared = on_single_worker(Duration::from_secs(60), || async {
+			let shell = Shell::builder().build().await.expect("shell");
+			let params = shell.default_exec_params();
+			let mut compared = 0;
+
+			for transform in [
+				crate::variables::ShellVariableUpdateTransform::Lowercase,
+				crate::variables::ShellVariableUpdateTransform::Uppercase,
+				crate::variables::ShellVariableUpdateTransform::Capitalize,
+			] {
+				let converter = crate::variables::ValueConverter::for_transform(transform);
+				for input in premature_conversion_shows("eta") {
+					let input = input.as_str();
+					for base in ["", "a"] {
+						// What the attribute means: the conversion of the
+						// whole value the variable ends up holding.
+						let whole = converter.apply(format!("{base}{input}"));
+
+						let mut scalar = ShellVariable::new(ShellValue::Unset(
+							crate::variables::ShellValueUnsetType::Untyped,
+						));
+						scalar.set_update_transform(transform);
+						if !base.is_empty() {
+							scalar
+								.assign(
+									crate::variables::ShellValueLiteral::Scalar(String::from(base)),
+									false,
+									&params,
+								)
+								.await
+								.expect("the base");
+						}
+						scalar
+							.assign(
+								crate::variables::ShellValueLiteral::Scalar(String::from(input)),
+								!base.is_empty(),
+								&params,
+							)
+							.await
+							.expect("assigned through the divided scalar path");
+						assert_eq!(
+							scalar.value().to_cow_str(&shell),
+							whole,
+							"{transform:?} of {base:?} + {input:?} through `assign`"
+						);
+						compared += 1;
+
+						// `x+=…` on a declared-but-unset scalar: the shape
+						// that kept giving `Sseta` after the element paths
+						// were fixed, because it appends to nothing and so
+						// looks like a replacement until you convert twice.
+						if base.is_empty() {
+							let mut unset = ShellVariable::new(ShellValue::Unset(
+								crate::variables::ShellValueUnsetType::Untyped,
+							));
+							unset.set_update_transform(transform);
+							unset
+								.assign(
+									crate::variables::ShellValueLiteral::Scalar(String::from(input)),
+									true,
+									&params,
+								)
+								.await
+								.expect("appended to an unset scalar");
+							assert_eq!(
+								unset.value().to_cow_str(&shell),
+								whole,
+								"{transform:?} of {input:?} appended to an unset scalar"
+							);
+							compared += 1;
+						}
+
+						// An element is appended to, so its conversion belongs
+						// to the value arriving rather than to the result —
+						// which is why this compares replacement only, where
+						// the two readings agree and the double conversion
+						// lived.
+						if !base.is_empty() {
+							continue;
+						}
+
+						for mut variable in [
+							ShellVariable::new(ShellValue::IndexedArray(Default::default())),
+							ShellVariable::new(ShellValue::AssociativeArray(Default::default())),
+							ShellVariable::new(ShellValue::Unset(
+								crate::variables::ShellValueUnsetType::IndexedArray,
+							)),
+						] {
+							variable.set_update_transform(transform);
+							variable
+								.assign_at_index_divided(
+									String::from("0"),
+									String::from(input),
+									false,
+									&params,
+								)
+								.await
+								.expect("assigned through the divided index path");
+							assert_eq!(
+								variable.value().to_cow_str(&shell),
+								whole,
+								"{transform:?} of {base:?} + {input:?} at an index"
+							);
+							compared += 1;
+						}
+					}
+				}
+			}
+
+			compared
+		})
+		.expect("the comparison finished");
+
+		let inputs = premature_conversion_shows("eta").len();
+		assert!(inputs >= 100, "every expanding uppercase mapping, not a list: {inputs}");
+		assert_eq!(compared, 3 * inputs * 6, "every case ran");
+	}
+
+	/// A cancelled assignment leaves the variable as it was, **in kind as
+	/// well as in bytes**.
+	///
+	/// Dividing a mutation means it can be interrupted part way. The
+	/// promotion of a scalar to an array used to happen on the way in, so an
+	/// interrupted `arr[0]+=x` left the bytes intact and the variable turned
+	/// into an array — partial state from an operation that assigned nothing.
+	#[test]
+	fn a_cancelled_append_leaves_the_variable_as_it_was() {
+		const BASE_BYTES: usize = 8 * 1024 * 1024;
+
+		let (kind_kept, bytes_kept) = on_single_worker(Duration::from_secs(60), || async {
+			let shell = Shell::builder().build().await.expect("shell");
+			let mut params = shell.default_exec_params();
+			let cancel = CancellationToken::new();
+			params.set_cancel_token(cancel.clone());
+
+			// Cancels once the copy is under way rather than before it: the
+			// strided copy yields often enough for this task to run.
+			tokio::spawn(async move {
+				for _ in 0..4 {
+					tokio::task::yield_now().await;
+				}
+				cancel.cancel();
+			});
+
+			let mut variable =
+				ShellVariable::new(ShellValue::String("h".repeat(BASE_BYTES)));
+			let outcome = variable
+				.assign_at_index_divided(String::from("0"), String::from("x"), true, &params)
+				.await;
+			assert!(outcome.is_err(), "the append was cancelled");
+
+			match variable.value() {
+				ShellValue::String(text) => (true, text.len() == BASE_BYTES),
+				_ => (false, false),
+			}
+		})
+		.expect("the cancelled append finished");
+
+		assert!(kind_kept, "the variable is still a string, not an array");
+		assert!(bytes_kept, "the variable still holds its own bytes");
+	}
+
 	/// How long a run keeps its only worker between checkpoints, measured
 	/// inside a window the script marks. The measure reads a thread's CPU
 	/// clock, which these platforms have.
@@ -1023,7 +1240,7 @@ mod regression {
 		/// them.
 		#[test]
 		fn one_huge_element_yields_throughout() {
-			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 10] = [
+			let cases: [(String, fn(&mut Shell<DefaultShellExtensions>)); 18] = [
 				// Copying the element out of the variable into a field.
 				("words=(\"$open\" ${huge[@]}\"$close\"); (( ${#words[@]} == 2 ))".to_owned(), one_huge),
 				// Concatenating it into one quoted field.
@@ -1101,6 +1318,99 @@ mod regression {
 							ShellVariable::new(ShellValue::String("S".repeat(ONE_HUGE_ELEMENT_BYTES)));
 						variable.set_update_transform(ShellVariableUpdateTransform::Uppercase);
 						shell.env_mut().set_global("copy", variable).expect("converting variable");
+					},
+				),
+				// The same for an array element. Appending at an index does not
+				// re-convert the element, but it copies it, and one element can
+				// be any size: 27.9 ms for an indexed element of 64 MiB, and
+				// 60.0 ms for an associative one, which copied it a second time
+				// through a `clone` that nothing read.
+				(
+					"x=$open; huge[0]+=x; closed=$close; [[ ${huge[0]:0:1} == 'h' ]]".to_owned(),
+					one_huge,
+				),
+				(
+					"x=$open; assoc[k]+=x; closed=$close; [[ ${assoc[k]:0:1} == 'h' ]]".to_owned(),
+					|shell| {
+						let values: BTreeMap<String, String> =
+							std::iter::once((String::from("k"), "h".repeat(ONE_HUGE_ELEMENT_BYTES)))
+								.collect();
+						shell
+							.env_mut()
+							.set_global("assoc", ShellVariable::new(ShellValue::AssociativeArray(values)))
+							.expect("assoc");
+					},
+				),
+				// Replacing an element of a converting array, which converted
+				// the value twice: once through the divided converter and then
+				// again inside the synchronous assignment, 24.8 ms of it in the
+				// second pass.
+				(
+					"arr[0]=$open; arr[1]=\"${huge[@]}\"; closed=$close; \
+					 [[ ${arr[1]:0:2} == 'SS' ]]"
+						.to_owned(),
+					|shell| {
+						one_sharp(shell);
+						let mut variable = ShellVariable::new(ShellValue::IndexedArray(
+							BTreeMap::new(),
+						));
+						variable.set_update_transform(ShellVariableUpdateTransform::Uppercase);
+						shell.env_mut().set_global("arr", variable).expect("converting array");
+					},
+				),
+				// Promoting a scalar to an array on the way to an indexed
+				// append copied the whole scalar, before the divided path it
+				// leads to had begun: 25.8 ms on 64 MiB. The promotion now
+				// moves the string rather than copying it.
+				(
+					"x=$open; huge[0]+=x; closed=$close; [[ ${huge[0]:0:1} == 'h' ]]".to_owned(),
+					|shell| {
+						let scalar = ShellVariable::new(ShellValue::String(
+							"h".repeat(ONE_HUGE_ELEMENT_BYTES),
+						));
+						shell.env_mut().set_global("huge", scalar).expect("huge scalar");
+					},
+				),
+				// The same element reached by its other spelling: a scalar
+				// appended to a variable that holds an array is an append to
+				// element zero, and it took the synchronous route — 25.7 ms
+				// indexed, 25.9 ms associative.
+				(
+					"x=$open; huge+=x; closed=$close; [[ ${huge[0]:0:1} == 'h' ]]".to_owned(),
+					one_huge,
+				),
+				(
+					"x=$open; assoc+=x; closed=$close; [[ ${assoc[0]:0:1} == 'h' ]]".to_owned(),
+					|shell| {
+						let values: BTreeMap<String, String> =
+							std::iter::once((String::from("0"), "h".repeat(ONE_HUGE_ELEMENT_BYTES)))
+								.collect();
+						shell
+							.env_mut()
+							.set_global("assoc", ShellVariable::new(ShellValue::AssociativeArray(values)))
+							.expect("assoc");
+					},
+				),
+				// A variable that converts nothing keeps its buffer and appends
+				// in place, which is worth having — but keeping the buffer and
+				// copying into it in one call are two different things, and
+				// the fast path skipped both: 64 MiB arriving held the worker
+				// 24.6 ms inside one `push_str`.
+				(
+					"copy=$open; copy+=\"${huge[@]}\"; closed=$close; (( ${#copy} > 1000 ))"
+						.to_owned(),
+					one_huge,
+				),
+				// A `for` variable is assigned one element of an array per
+				// turn, and the loop had execution parameters in hand while
+				// taking the synchronous assignment: an uppercase attribute on
+				// it held the worker 85.0 ms on a 64 MiB element.
+				(
+					"x=$open; for arr in \"${huge[@]}\"; do [[ x == x ]]; done; closed=$close"
+						.to_owned(),
+					|shell| {
+						one_sharp(shell);
+						converting(shell, "arr", ShellVariableUpdateTransform::Uppercase);
 					},
 				),
 			];
