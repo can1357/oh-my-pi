@@ -520,26 +520,49 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
-		// Focus away: the record is parked, and the session arriving inherits none.
-		controller.resetTranscriptAnchors(mine);
-		controller.adoptApprovalRecords(other);
+		// Focus away: the record is parked against the run it describes, and the
+		// session arriving inherits none.
+		controller.resetTranscriptAnchors(mine, () => "run:1");
+		controller.adoptApprovalRecords(other, () => "run:1");
 		await controller.handleEvent(AGENT_START);
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 
-		// Focus back: the call is still owed an answer, and says so again.
-		controller.resetTranscriptAnchors(other);
-		controller.adoptApprovalRecords(mine, () => true);
+		// Focus back while that same run is still open: the call is still owed an
+		// answer, and says so again.
+		controller.resetTranscriptAnchors(other, () => undefined);
+		controller.adoptApprovalRecords(mine, () => "run:1");
 		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
 
 		await controller.handleEvent(toolEnd("bash-1", "bash"));
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
-	it("drops a parked record for a call that finished while the view was away", async () => {
-		// The view saw none of the events while it was elsewhere: the call it
-		// parked may have been answered, aborted or disposed with it. The
-		// session is the one that knows, and a call it has settled must not come
-		// back as an approval nobody can answer.
+	it("drops a parked record whose own run ended or was replaced while the view was away", async () => {
+		// The view saw none of the events while it was elsewhere: the run it
+		// parked may have been answered, aborted or disposed, and the id may be
+		// running again for something else. Only the same run, still open, brings
+		// the record back — the session is the one that knows which run that is.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const ctx = createInteractiveModeContext({ session: { getToolByName: () => bash } });
+
+		for (const markOnReturn of ["settled:1", "run:2", "disposed"]) {
+			const controller = new EventController(ctx);
+			const mine = {} as object;
+			await controller.handleEvent(AGENT_START);
+			await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
+			expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+
+			controller.resetTranscriptAnchors(mine, () => "run:1");
+			controller.adoptApprovalRecords(mine, () => markOnReturn);
+			expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		}
+	});
+
+	it("keeps a parked record for a call the session never ran, across repeated returns", async () => {
+		// A record the view holds for a call the session never announced is not
+		// the session's to retire: it has no mark either side, and survives.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt" });
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
@@ -548,13 +571,11 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "publish-release" }));
-		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
-
-		controller.resetTranscriptAnchors(mine);
-		// Answered and ended while away, so the session reports it settled: the
-		// run goes on, and nobody is owed an answer.
-		controller.adoptApprovalRecords(mine, toolCallId => toolCallId !== "bash-1");
-		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		for (let round = 0; round < 2; round++) {
+			controller.resetTranscriptAnchors(mine, () => undefined);
+			controller.adoptApprovalRecords(mine, () => undefined);
+			expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+		}
 	});
 
 	it("keeps the permission kind and names the approval still waiting when an overlapping one ends", async () => {

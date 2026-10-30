@@ -1100,35 +1100,34 @@ export class EventController {
 	 * What a session being left behind knows about calls waiting on a person, kept so returning to
 	 * it reports what it reported before. A host that drives its own approval UI raises no session
 	 * dialog, so these records are the only evidence those calls are owed an answer — and unlike a
-	 * dialog, nothing republishes them on attach.
+	 * dialog, nothing republishes them on attach. Each record is parked beside the mark of the run
+	 * it describes, because a call id is reused: the run that was waiting can end and another run
+	 * of that id can start while the view is elsewhere, and the record describes neither.
 	 */
 	#parkedApprovalRecords = new WeakMap<
 		object,
-		{ prompts: Map<string, RunStatus>; waiting: Set<string>; answered: Set<string> }
+		{ prompts: Map<string, RunStatus>; marks: Map<string, string | undefined>; answered: Set<string> }
 	>();
 
 	/**
 	 * Take back what {@link resetTranscriptAnchors} parked for `session`, if anything, and report
 	 * from it. Called by the focus controller once the transcript is pointed at that session.
 	 *
-	 * A parked record is a claim about a call that was running when the view looked away, and the
-	 * view saw nothing while it was gone: the call may have been answered, aborted, or the whole
-	 * session disposed. `stillOpen` answers that from the session itself, and a call it has since
-	 * settled is dropped rather than restored — keeping a session's own unresolved record is the
-	 * point, resurrecting a finished one is not.
+	 * A parked record describes one run of one call, and the view saw nothing while it was gone:
+	 * that run may have been answered, aborted or disposed, and the id may be running again for
+	 * something else entirely. `runMark` names the run the session is on now, and only a record
+	 * whose own run is still that one comes back — keeping a session's unresolved record is the
+	 * point, resurrecting a finished one or lending it to a later namesake is not.
 	 */
-	adoptApprovalRecords(session: object, stillOpen?: (toolCallId: string) => boolean): void {
+	adoptApprovalRecords(session: object, runMark?: (toolCallId: string) => string | undefined): void {
 		const parked = this.#parkedApprovalRecords.get(session);
 		if (!parked) return;
 		this.#parkedApprovalRecords.delete(session);
-		for (const toolCallId of [...parked.prompts.keys()]) {
-			if (stillOpen && !stillOpen(toolCallId)) parked.prompts.delete(toolCallId);
-		}
-		for (const toolCallId of [...parked.waiting]) {
-			if (!parked.prompts.has(toolCallId)) parked.waiting.delete(toolCallId);
+		for (const [toolCallId, mark] of parked.marks) {
+			if (runMark && runMark(toolCallId) !== mark) parked.prompts.delete(toolCallId);
 		}
 		this.#blockingPrompts = parked.prompts;
-		this.#waitingToolCalls = parked.waiting;
+		// Which calls have a dialog open comes from the frame the attach replays, not from here.
 		this.#answeredBeforeStart = parked.answered;
 		setRunStatus(this.#reportedStatus());
 	}
@@ -1139,13 +1138,16 @@ export class EventController {
 	 * components, timers, and stream-reveal state all reference the previous
 	 * session's transcript and must not bleed into the new one. `parkFor` is
 	 * the session being left: its approval records are kept aside for a return
-	 * rather than dropped, since nothing else can rebuild them.
+	 * rather than dropped, since nothing else can rebuild them, each against
+	 * the run `runMark` names for it now.
 	 */
-	resetTranscriptAnchors(parkFor?: object): void {
+	resetTranscriptAnchors(parkFor?: object, runMark?: (toolCallId: string) => string | undefined): void {
 		if (parkFor && (this.#blockingPrompts.size > 0 || this.#answeredBeforeStart.size > 0)) {
+			const marks = new Map<string, string | undefined>();
+			for (const toolCallId of this.#blockingPrompts.keys()) marks.set(toolCallId, runMark?.(toolCallId));
 			this.#parkedApprovalRecords.set(parkFor, {
 				prompts: this.#blockingPrompts,
-				waiting: this.#waitingToolCalls,
+				marks,
 				answered: this.#answeredBeforeStart,
 			});
 			this.#blockingPrompts = new Map();

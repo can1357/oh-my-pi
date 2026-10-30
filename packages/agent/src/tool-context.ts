@@ -66,9 +66,14 @@ export function createToolExecution(owner: object | undefined, toolCallId: strin
 	return { owner, toolCallId, finished: false, parent: undefined, onFinish: new Set() } as MutableToolExecution;
 }
 
-/** Run `execution`, which {@link createToolExecution} prepared, on the current async chain. */
+/**
+ * Run `execution`, which {@link createToolExecution} prepared, on the current async chain. A run
+ * is entered once: re-entering one that is over would count a finished run as live, so it is
+ * refused rather than silently counted.
+ */
 export async function runToolExecution<T>(execution: ToolExecution, run: () => Promise<T>): Promise<T> {
 	const scope = execution as MutableToolExecution;
+	if (scope.finished) throw new Error(`tool execution for ${scope.toolCallId} is over and cannot be entered again`);
 	scope.parent = executingToolCall.getStore();
 	scope.started = true;
 	const owner = scope.owner;
@@ -80,7 +85,14 @@ export async function runToolExecution<T>(execution: ToolExecution, run: () => P
 	try {
 		return await executingToolCall.run(scope, run);
 	} finally {
-		retireToolExecution(scope, live);
+		// This entry's own count, released whether or not the run was already
+		// over when it was entered: an entry that incremented must decrement.
+		if (live) {
+			const remaining = (live.get(scope.toolCallId) ?? 1) - 1;
+			if (remaining > 0) live.set(scope.toolCallId, remaining);
+			else live.delete(scope.toolCallId);
+		}
+		retireToolExecution(scope);
 	}
 }
 
@@ -93,30 +105,39 @@ export async function runToolExecution<T>(execution: ToolExecution, run: () => P
 export function abandonToolExecution(execution: ToolExecution): void {
 	const scope = execution as MutableToolExecution;
 	if (scope.started || scope.finished) return;
-	retireToolExecution(scope, undefined);
+	retireToolExecution(scope);
 }
 
 /**
- * Mark a run over and tell its holders, whatever they do with the news. The bookkeeping lands
- * before any listener runs and no listener can stop another: one holder throwing must not leave
- * the run counted as live, which would keep a stale claim answerable.
+ * Mark a run over and tell its holders, whatever they do with the news. The state lands before
+ * any listener runs and no listener can stop another — nor can reporting one: a failure while
+ * describing an error must not cost the holders behind it, and this never throws at all, because
+ * its caller is a `finally` with cleanup of its own still to do.
  */
-function retireToolExecution(scope: MutableToolExecution, live: Map<string, number> | undefined): void {
+function retireToolExecution(scope: MutableToolExecution): void {
 	if (scope.finished) return;
 	scope.finished = true;
-	if (live) {
-		const remaining = (live.get(scope.toolCallId) ?? 1) - 1;
-		if (remaining > 0) live.set(scope.toolCallId, remaining);
-		else live.delete(scope.toolCallId);
-	}
 	const listeners = [...scope.onFinish];
 	scope.onFinish.clear();
 	for (const listener of listeners) {
 		try {
 			listener();
 		} catch (error) {
-			// A holder that fails is its own problem; the run is over for everyone.
-			console.error("tool execution completion listener threw", error);
+			reportRetirementFailure(error);
+		}
+	}
+}
+
+/** Report a holder's failure without letting the report become one. */
+function reportRetirementFailure(error: unknown): void {
+	try {
+		console.error("tool execution completion listener threw", error);
+	} catch {
+		try {
+			// Describing the error threw too (a custom inspection can): say so without it.
+			console.error("tool execution completion listener threw, and reporting it threw as well");
+		} catch {
+			// Nothing left to report with.
 		}
 	}
 }

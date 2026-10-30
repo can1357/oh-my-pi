@@ -993,13 +993,14 @@ export class AgentSession implements SettingsScope {
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	/**
-	 * Calls this session has finished, from the events it publishes, and every call once it is
-	 * disposed. A surface that was looking elsewhere saw none of those ends: this is what it asks
-	 * on the way back, so a record it kept for a call answered, aborted or disposed while it was
-	 * gone is dropped instead of resurrected. One string per completed call, cleared with the rest
-	 * of the session-scoped tool state.
+	 * Each call this session has run, by id: which run of that id is the current one, and whether
+	 * it is over. A surface that was looking elsewhere saw none of these events, so on the way
+	 * back it compares the mark it kept ({@link toolCallRunMark}) with the mark now: the same run
+	 * still open is the only answer that lets a record it parked come back. A call the session
+	 * never ran has no mark at all and is nobody's to overrule. Cleared with the rest of the
+	 * session-scoped tool state.
 	 */
-	#settledToolCalls = new Set<string>();
+	#toolCallRuns = new Map<string, { generation: number; settled: boolean }>();
 	/** True once {@link dispose} begins: nothing this session was asking will ever be answered. */
 	#settledEverything = false;
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
@@ -4010,9 +4011,10 @@ export class AgentSession implements SettingsScope {
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
 		if (event.type === "tool_execution_start") {
-			// A call that runs again under the same id is a new run: what the last
-			// one did is no longer what this session has settled.
-			this.#settledToolCalls.delete(event.toolCallId);
+			// A call that runs again under the same id is a different run, and a
+			// record parked against the one before it does not describe this one.
+			const previous = this.#toolCallRuns.get(event.toolCallId);
+			this.#toolCallRuns.set(event.toolCallId, { generation: (previous?.generation ?? 0) + 1, settled: false });
 		} else if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
@@ -4020,7 +4022,9 @@ export class AgentSession implements SettingsScope {
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
-			this.#settledToolCalls.add(event.toolCallId);
+			const run = this.#toolCallRuns.get(event.toolCallId);
+			if (run) run.settled = true;
+			else this.#toolCallRuns.set(event.toolCallId, { generation: 1, settled: true });
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -6028,14 +6032,25 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Whether this session has finished `toolCallId`, or will never finish anything because it is
-	 * disposed. A surface that was looking elsewhere saw none of the ends in between: this is how
-	 * it tells a call still owed an answer from one answered, aborted or disposed while it was
-	 * away. A call this session never ran is not settled by it — nobody else's bookkeeping is its
-	 * to overrule.
+	 * Which run of `toolCallId` this session is on, and whether it is over — a mark a surface
+	 * keeps beside anything it records about that call and compares on the way back. The same
+	 * mark means the same run, still open, and nothing else does: a run that ended, a later run
+	 * of the same id, and a disposed session are all different marks. A call this session never
+	 * ran has no mark at all, because nobody else's bookkeeping is its to overrule.
+	 */
+	toolCallRunMark(toolCallId: string): string | undefined {
+		if (this.#settledEverything) return "disposed";
+		const run = this.#toolCallRuns.get(toolCallId);
+		return run === undefined ? undefined : `${run.settled ? "settled" : "run"}:${run.generation}`;
+	}
+
+	/**
+	 * Whether the current run of `toolCallId` is over, or the session is disposed and nothing it
+	 * was asking will be answered. {@link toolCallRunMark} is what a surface compares across a
+	 * gap; this is the plain question for a caller that only wants to know whether to wait.
 	 */
 	hasSettledToolCall(toolCallId: string): boolean {
-		return this.#settledEverything || this.#settledToolCalls.has(toolCallId);
+		return this.#settledEverything || this.#toolCallRuns.get(toolCallId)?.settled === true;
 	}
 
 	/**
@@ -7880,7 +7895,7 @@ export class AgentSession implements SettingsScope {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
-		this.#settledToolCalls.clear();
+		this.#toolCallRuns.clear();
 	}
 
 	/**
