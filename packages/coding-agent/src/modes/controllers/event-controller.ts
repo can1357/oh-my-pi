@@ -35,12 +35,7 @@ import {
 	toolRenderName,
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
-import {
-	createUsageRowBlock,
-	TurnUsageTally,
-	turnElapsedMs,
-	type UsageRowBlock,
-} from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -371,8 +366,8 @@ export class EventController {
 	 */
 	#stepSummarizer: StepSummarizer | undefined = undefined;
 	#stepSummaryOwner: AgentSession | undefined = undefined;
-	/** Usage rows awaiting their step's caption, by assistant-message timestamp; drained at `turn_end`. */
-	#uncaptionedUsageRows = new Map<number, UsageRowBlock>();
+	/** Callbacks that caption a step's usage row (standalone or nested in a read group), by assistant-message timestamp; drained at `turn_end`. */
+	#uncaptionedUsageRows = new Map<number, (summary: string) => void>();
 	/** Latest user message text and the session it was sent in: the request step captions are written against. */
 	#stepRequest: { owner: AgentSession; text: string } | undefined = undefined;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
@@ -1604,9 +1599,9 @@ export class EventController {
 	#captionStep(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
 		const message = event.message;
 		if (message.role !== "assistant") return;
-		const row = this.#uncaptionedUsageRows.get(message.timestamp);
+		const caption = this.#uncaptionedUsageRows.get(message.timestamp);
 		this.#uncaptionedUsageRows.clear();
-		if (!row || message.stopReason === "aborted" || message.stopReason === "error") return;
+		if (!caption || message.stopReason === "aborted" || message.stopReason === "error") return;
 		if (!cfgDisplayStepSummaries.get(settings)) return;
 		const owner = this.ctx.viewSession;
 		if (!owner?.modelRegistry || !owner.agent) return;
@@ -1629,8 +1624,7 @@ export class EventController {
 		void summarizer.summarize({ message, toolResults: event.toolResults, request }).then(summary => {
 			if (!summary) return;
 			if (this.ctx.viewSession !== owner || owner.sessionManager.getSessionFile() !== sessionFile) return;
-			row.setSummary(summary);
-			this.ctx.ui.requestComponentRender(row);
+			caption(summary);
 			const data: StepSummaryEntryData = { messageTimestamp: message.timestamp, summary };
 			sessionManager.appendCustomEntry(STEP_SUMMARY_CUSTOM_TYPE, data);
 		});
@@ -1990,27 +1984,39 @@ export class EventController {
 				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
+				const readGroup = readCallIds !== undefined ? this.#lastReadGroup : undefined;
 				const usageAttached =
-					readCallIds !== undefined &&
-					(this.#lastReadGroup?.attachUsage(
-						readCallIds,
+					readGroup?.attachUsage(
+						readCallIds ?? [],
 						event.message.usage,
 						event.message.duration,
 						event.message.ttft,
 						event.message.timestamp,
 						turnElapsed,
-					) ??
-						false);
-				if (!usageAttached) {
+					) ?? false;
+				const captionable = cfgDisplayStepSummaries.get(settings);
+				const timestamp = event.message.timestamp;
+				if (readGroup && usageAttached) {
+					if (captionable) {
+						this.#uncaptionedUsageRows.set(timestamp, summary => {
+							if (readGroup.setUsageSummary(timestamp, summary)) this.ctx.ui.requestComponentRender(readGroup);
+						});
+					}
+				} else {
 					this.#resetReadGroup();
 					const row = createUsageRowBlock(
 						event.message.usage,
 						event.message.duration,
 						event.message.ttft,
-						event.message.timestamp,
+						timestamp,
 						turnElapsed,
 					);
-					if (cfgDisplayStepSummaries.get(settings)) this.#uncaptionedUsageRows.set(event.message.timestamp, row);
+					if (captionable) {
+						this.#uncaptionedUsageRows.set(timestamp, summary => {
+							row.setSummary(summary);
+							this.ctx.ui.requestComponentRender(row);
+						});
+					}
 					this.ctx.chatContainer.addChild(row);
 				}
 			}

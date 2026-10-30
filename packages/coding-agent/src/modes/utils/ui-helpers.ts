@@ -546,7 +546,11 @@ export class UiHelpers {
 					pendingUsageTurnElapsed,
 				) ??
 					false);
-			if (!usageAttached) {
+			const summary = pendingUsageTimestamp !== undefined ? stepSummaries?.get(pendingUsageTimestamp) : undefined;
+			if (usageAttached) {
+				if (summary && pendingUsageTimestamp !== undefined)
+					readGroup?.setUsageSummary(pendingUsageTimestamp, summary);
+			} else {
 				readGroup?.seal();
 				readGroup = null;
 				const row = createUsageRowBlock(
@@ -556,7 +560,6 @@ export class UiHelpers {
 					pendingUsageTimestamp,
 					pendingUsageTurnElapsed,
 				);
-				const summary = pendingUsageTimestamp !== undefined ? stepSummaries?.get(pendingUsageTimestamp) : undefined;
 				if (summary) row.setSummary(summary);
 				this.ctx.chatContainer.addChild(row);
 			}

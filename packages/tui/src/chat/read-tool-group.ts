@@ -20,11 +20,11 @@ import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
-import { formatUsageRow } from "../overlays/usage-row";
+import { formatStepSummary, formatUsageRow, stepSummarySpans } from "../overlays/usage-row";
 import { formatCount, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
+import { card, code, col, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -147,6 +147,8 @@ type ReadUsageRow = {
 	ttftMs?: number;
 	timestamp?: number;
 	turnElapsedMs?: number;
+	/** Plain-English caption of the request, shown above its metrics (`display.stepSummaries`). */
+	summary?: string;
 };
 
 /** Number of preview rows to show per read while collapsed. */
@@ -555,6 +557,24 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return true;
 	}
 
+	/**
+	 * Caption the usage row of the request whose assistant message has
+	 * `timestamp`. Returns false when no row here belongs to that request.
+	 */
+	setUsageSummary(timestamp: number, summary: string): boolean {
+		const trimmed = summary.trim();
+		if (!trimmed) return false;
+		for (const usageRow of this.#usageRows.values()) {
+			if (usageRow.timestamp !== timestamp) continue;
+			if (usageRow.summary !== trimmed) {
+				usageRow.summary = trimmed;
+				this.#updateDisplay();
+			}
+			return true;
+		}
+		return false;
+	}
+
 	setArgsComplete(_toolCallId?: string): void {
 		this.#updateDisplay();
 	}
@@ -793,8 +813,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const summaryRows = this.#buildSummaryRows(summaryTargets);
 			const summaryUsage = this.#usageRowsBySummaryRow(summaryRows);
 			const items = summaryRows.map((row, index) => {
-				const usage = (summaryUsage.get(index) ?? []).map(usageRow =>
-					plainText(
+				const usage = (summaryUsage.get(index) ?? []).map(usageRow => ({
+					summary: usageRow.summary,
+					metrics: plainText(
 						formatUsageRow(
 							usageRow.usage,
 							usageRow.durationMs,
@@ -803,13 +824,19 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 							usageRow.turnElapsedMs,
 						),
 					),
-				);
+				}));
+				const detail: TspSpan[] = [];
+				for (const [i, { summary, metrics }] of usage.entries()) {
+					if (i > 0) detail.push(span(" · ", "dim"));
+					if (summary) detail.push(...stepSummarySpans(summary), span(" · ", "dim"));
+					detail.push(span(metrics, "dim"));
+				}
 				return node(
 					"item",
 					{
 						label: this.#nativePathSpans(row),
 						tone: READ_STATUS_TONE[this.#statusForTargets(row.targets)],
-						detail: usage.length > 0 ? [span(usage.join(" · "), "dim")] : undefined,
+						detail: detail.length > 0 ? detail : undefined,
 					},
 					[],
 					row.targetPath,
@@ -890,7 +917,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#nativeUsage(usage: ReadUsageRow, key: string): NativeNode {
 		const line = formatUsageRow(usage.usage, usage.durationMs, usage.ttftMs, usage.timestamp, usage.turnElapsedMs);
-		return text([span(plainText(line), "dim")], { wrap: "word", key, role: "omp.usage" });
+		if (!usage.summary) return text([span(plainText(line), "dim")], { wrap: "word", key, role: "omp.usage" });
+		return col(
+			[
+				text(stepSummarySpans(usage.summary), { wrap: "word" }),
+				text([span(plainText(line), "dim")], { wrap: "word", role: "omp.usage" }),
+			],
+			{ key, role: "omp.usage.step", gap: "none" },
+		);
 	}
 
 	#updateDisplay(): void {
@@ -1069,6 +1103,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#appendUsageRows(lines: string[], usageRows: ReadUsageRow[], prefix: string): void {
 		for (const usageRow of usageRows) {
+			if (usageRow.summary) lines.push(`${theme.fg("dim", prefix)}${formatStepSummary(usageRow.summary)}`);
 			lines.push(
 				theme.fg(
 					"dim",
@@ -1231,6 +1266,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#addPreviewUsage(entry: ReadEntry): void {
 		const usageRow = this.#usageRows.get(entry.toolCallId);
 		if (!usageRow) return;
+		if (usageRow.summary) this.addChild(new Text(formatStepSummary(usageRow.summary), 3, 0));
 		this.addChild(
 			new Text(
 				theme.fg(

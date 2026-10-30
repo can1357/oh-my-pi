@@ -150,6 +150,42 @@ describe("ReadToolGroupComponent", () => {
 		expect(lines[parallelUsageIndices[0]!]?.startsWith("      ")).toBe(true);
 	});
 
+	it("captions only the read-only turn whose timestamp matches, above its usage row", () => {
+		const component = new ReadToolGroupComponent();
+		const onePath = path.resolve("/tmp/one.ts");
+		const twoPath = path.resolve("/tmp/two.ts");
+		component.updateArgs({ path: onePath }, "read-one");
+		component.updateArgs({ path: twoPath }, "read-two");
+		component.updateResult({ content: [{ type: "text", text: "one" }] }, false, "read-one");
+		component.updateResult({ content: [{ type: "text", text: "two" }] }, false, "read-two");
+		const usage = {
+			input: 1111,
+			output: 11,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1122,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const firstAt = new Date(2026, 0, 2, 3, 4, 5).getTime();
+		const secondAt = new Date(2026, 0, 2, 3, 4, 6).getTime();
+		component.attachUsage(["read-one"], usage, 1000, 500, firstAt);
+		component.attachUsage(["read-two"], usage, 1000, 500, secondAt);
+
+		expect(component.setUsageSummary(secondAt + 1, "Nobody owns this")).toBe(false);
+		expect(component.setUsageSummary(secondAt, "  Read the second module  ")).toBe(true);
+
+		const lines = Bun.stripANSI(component.render(120).join("\n")).split("\n");
+		const captionIndex = lines.findIndex(line => line.includes("› Read the second module"));
+		const secondUsageIndex = lines.findIndex(line => line.includes("2026-01-02 03:04:06"));
+		expect(captionIndex).toBe(lines.findIndex(line => line.includes(twoPath)) + 1);
+		expect(secondUsageIndex).toBe(captionIndex + 1);
+		expect(lines.filter(line => line.includes("›"))).toHaveLength(1);
+
+		const native = JSON.stringify(component.describe?.());
+		expect(native).toContain('"t":"Read the second module","s":"muted em"');
+		expect(native).not.toContain("Nobody owns this");
+	});
+
 	it("splits a single selector-delimited read argument into child rows", () => {
 		const component = new ReadToolGroupComponent();
 		const onePath = path.resolve("/tmp/one.ts");

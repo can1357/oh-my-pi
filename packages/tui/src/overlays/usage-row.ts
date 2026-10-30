@@ -7,12 +7,23 @@ import { theme } from "../theme/theme";
 import { formatMetricRow, MetricRow, type MetricSpec } from "../components/metric";
 import { col, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;
 
 /** Leads a step summary in the accent color so the italic caption reads apart from transcript prose. */
 const STEP_SUMMARY_MARKER = "›";
+
+/** A step summary for the ANSI transcript: accent marker, then the caption in muted italics. */
+export function formatStepSummary(summary: string): string {
+	return `${theme.fg("accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", summary))}`;
+}
+
+/** A step summary as native spans, matching {@link formatStepSummary}. */
+export function stepSummarySpans(summary: string): TspSpan[] {
+	return [span(`${STEP_SUMMARY_MARKER} `, "accent"), span(summary, "muted em")];
+}
 
 /** Local ISO date with a wall-clock time; only the hour cycle follows the terminal. */
 function formatUsageTimestamp(ms: number, hour12 = false): string {
@@ -209,9 +220,7 @@ export class UsageRowBlock extends Container {
 		this.#nativeNode = undefined;
 		this.clear();
 		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(`${theme.fg("accent", STEP_SUMMARY_MARKER)} ${theme.italic(theme.fg("muted", trimmed))}`, 1, 0),
-		);
+		this.addChild(new Text(formatStepSummary(trimmed), 1, 0));
 		this.addChild(this.#metrics);
 		this.invalidate();
 	}
@@ -261,10 +270,7 @@ export class UsageRowBlock extends Container {
 			...(stamped ? { title: formatUsageTimestamp(timestamp, hour12) } : {}),
 		});
 		this.#nativeNode = this.#summary
-			? col([text([span(`${STEP_SUMMARY_MARKER} `, "accent"), span(this.#summary, "muted em")]), metrics], {
-					role: "omp.usage.step",
-					gap: "none",
-				})
+			? col([text(stepSummarySpans(this.#summary)), metrics], { role: "omp.usage.step", gap: "none" })
 			: metrics;
 		return this.#nativeNode;
 	}
