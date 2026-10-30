@@ -102,6 +102,14 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(observedTurns[1]).toContain("second");
 	});
 
+	it("expands model mentions in sent skill args as it does for typed skills", async () => {
+		await session.sendUserMessage("/skill:demo ask ^anthropic/claude-sonnet-4-5", { expandPromptTemplates: true });
+		await session.waitForIdle();
+
+		expect(observedTurns[0]).toContain('ask <model agent="m1"');
+		expect(observedTurns[0]).not.toContain("^anthropic/claude-sonnet-4-5");
+	});
+
 	it("keeps /skill: text literal when skill commands are disabled", async () => {
 		skillsSettings.enableSkillCommands = false;
 		await session.sendUserMessage("/skill:demo off", { expandPromptTemplates: true });
@@ -125,20 +133,40 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(session.queuedMessageCount).toBe(0);
 	});
 
-	it("drops a skill send when abort lands while SKILL.md is read", async () => {
-		const read = Promise.withResolvers<void>();
-		const build = skillsModule.buildSkillPromptMessage;
-		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockImplementation(async (...args) => {
-			await read.promise;
-			return build(...args);
-		});
-		const send = session.sendUserMessage("/skill:demo late", { expandPromptTemplates: true });
-		await session.abort();
-		read.resolve();
-		await send;
-		await session.waitForIdle();
+	for (const [label, interrupt] of [
+		["abort", (target: AgentSession) => target.abort()],
+		["a session switch", (target: AgentSession) => target.newSession()],
+		["disposal", (target: AgentSession) => target.beginDispose()],
+	] as const) {
+		it(`drops a skill send, and authorizes none of its model mentions, when ${label} lands while SKILL.md is read`, async () => {
+			const read = Promise.withResolvers<void>();
+			const load = skillsModule.loadSkillPrompt;
+			vi.spyOn(skillsModule, "loadSkillPrompt").mockImplementation(async (...args) => {
+				await read.promise;
+				return load(...args);
+			});
+			const send = session.sendUserMessage("/skill:demo ask ^anthropic/claude-sonnet-4-5", {
+				expandPromptTemplates: true,
+			});
+			await interrupt(session);
+			read.resolve();
+			await send;
+			await session.waitForIdle();
 
-		expect(observedTurns).toHaveLength(0);
+			expect(observedTurns).toHaveLength(0);
+			expect(session.modelMentions).toEqual([]);
+		});
+	}
+
+	it("carries sent images on a queued expanded skill", async () => {
+		const image = { type: "image" as const, data: "aW1n", mimeType: "image/png" };
+		await session.sendUserMessage([{ type: "text", text: "/skill:demo look" }, image], {
+			expandPromptTemplates: true,
+			deliverAs: "followUp",
+		});
+
+		const queued = session.agent.peekFollowUpQueue().find(message => message.role === "custom");
+		expect(queued?.content).toEqual([expect.objectContaining({ type: "text" }), image]);
 	});
 
 	for (const [label, interrupt] of [
