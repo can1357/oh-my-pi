@@ -13,6 +13,7 @@ import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { SharedWorkerControl, SharedWorkerPong } from "@oh-my-pi/pi-utils/shared-worker-protocol";
 import type { RefCountedWorkerHandle } from "./worker-client";
 
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -23,11 +24,7 @@ const READY_TIMEOUT_MS = 120_000;
 /** Time for a stale worker to honour `shutdown` and release its endpoint. */
 const SHUTDOWN_WAIT_MS = 5_000;
 
-/** Requests every shared worker answers inline: a tagged `ping`, and `shutdown` (a client found a stale tag). */
-export type SharedWorkerControl = { type: "ping"; id: string } | { type: "shutdown"; id: string };
-
-/** Reply to `ping`, carrying the worker's launch tag. */
-export type SharedWorkerPong = { type: "pong"; id: string; tag: string };
+export * from "@oh-my-pi/pi-utils/shared-worker-protocol";
 
 /** Error surfaced when a worker closes the connection (idle exit, replacement, crash); clients reconnect on demand. */
 export const WORKER_CONNECTION_CLOSED = "worker connection closed";

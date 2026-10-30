@@ -12,7 +12,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { mnemopiEmbedLaunch, mnemopiEmbedServerName } from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
+import { mnemopiEmbedLaunch } from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
+import { mnemopiEmbedServerName } from "@oh-my-pi/pi-coding-agent/mnemopi/embed-protocol";
 import {
 	MNEMOPI_EMBED_IDLE_MS_ENV,
 	type MnemopiEmbedServerRequest,

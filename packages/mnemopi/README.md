@@ -93,6 +93,21 @@ Common environment fallbacks:
 
 Local embeddings use the `fastembed` npm package. Its default `BGESmallENV15` model is 384-dimensional and uses the package's CLS pooling plus vector normalization path. Local GGUF LLMs are not available in this package.
 
+### Sharing one embedding model across processes
+
+Run `embed-serve` to share one local model with omp sessions and other mnemopi processes:
+
+```sh
+mnemopi embed-serve --model BAAI/bge-base-en-v1.5
+MNEMOPI_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5 mnemopi recall "production deploy target"
+```
+
+Clients discover the server automatically through the same native IPC endpoint as omp. The endpoint identifies the fastembed model and resolved cache directory, with owner-only access. A running server is reused; a stale socket from a crashed process is replaced on startup.
+
+`--model` defaults to `MNEMOPI_EMBEDDING_MODEL` (or `BAAI/bge-small-en-v1.5`). Use the same model as your memory store. `--cache-dir DIR` overrides the server's fastembed cache directory; clients must use that directory too. Without the flag, both use the cache directory from pi-utils. Run matching omp and mnemopi versions so the server's launch tag matches.
+
+When no server answers, mnemopi loads the model in-process. A connection lost during inference fails that call, and the next call retries discovery or loads locally. Hosts that install a local model initializer, including omp, keep their existing initialization path.
+
 ## Commands
 
 ```sh
