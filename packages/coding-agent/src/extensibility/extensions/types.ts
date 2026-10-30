@@ -273,6 +273,12 @@ export interface ExtensionCustomOptions {
 	onHandle?: (handle: OverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */
 	signal?: AbortSignal;
+	/**
+	 * How a surface that reports run state classifies the wait this dialog opens, as on
+	 * {@link ExtensionUIDialogOptions.waitKind}. A custom component carries no title and no method
+	 * that implies one, so a component asking to approve an operation says so here.
+	 */
+	waitKind?: BlockedKind;
 }
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */

@@ -278,13 +278,13 @@ describe("EventController run status while prompts wait on the user", () => {
 		for (let tick = 0; tick < 20; tick++) await Promise.resolve();
 	});
 
-	it("names a tool's own question for a dialog whose frame names nothing", async () => {
-		// A dialog that gave no words of its own is published under the generic
-		// label its wrapper's method explains. The prompt recorded for the call
-		// being asked about names the operation and its kind, so that is what the
-		// title and the OSC record report while the dialog stands — and once it
-		// settles nothing is being asked, even though the approved call runs on
-		// until its own end.
+	it("reports a dialog that named nothing as itself, never as an outstanding approval", async () => {
+		// A dialog with no words of its own is published under the generic label
+		// its wrapper's method explains, and an ordinary question is what it
+		// stays. Nothing correlates it with the approval record a tool call
+		// carries — that call may already be approved and merely running — so
+		// substituting the record's words would name the wrong operation and
+		// substituting its `permission` would contradict the open dialog.
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApproval.override(settings, { bash: "prompt" });
 		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
@@ -292,9 +292,23 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "rm -rf build" }));
-		await controller.handleEvent({ type: "user_wait_start", prompt: "an extension approve dialog" });
-		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+		await controller.handleEvent({ type: "user_wait_start", prompt: "an extension custom dialog" });
+		expect(report).toHaveBeenLastCalledWith({
+			state: "blocked",
+			kind: "question",
+			msg: "an extension custom dialog",
+		});
 
+		// An opener that stated its classification keeps it too.
+		await controller.handleEvent({ type: "user_wait_start", prompt: "a dialog waiting for you", kind: "question" });
+		expect(report).toHaveBeenLastCalledWith({
+			state: "blocked",
+			kind: "question",
+			msg: "a dialog waiting for you",
+		});
+
+		// Nothing is being asked once it settles, even though the approved call
+		// runs on until its own end.
 		await controller.handleEvent({ type: "user_wait_end" });
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 

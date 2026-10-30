@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { UNNAMED_USER_WAIT_PROMPT, type UserWaitFrame } from "../../session/agent-session-events";
+import type { UserWaitFrame } from "../../session/agent-session-events";
 import type { BlockedKind } from "../../utils/run-status";
 import type { ExtensionUIContext } from "./types";
 
@@ -24,17 +24,6 @@ const DIALOGS: Record<string, true> = {
 function genericDialogLabel(method: string): string {
 	return `an extension ${method} dialog`;
 }
-
-/**
- * Every prompt that stands in for a dialog which named nothing: the wrapper's method name, and the
- * session's own placeholder for a caller that passed no prompt. A surface holding a better name for
- * what waits — the approval record a tool call still being asked about carries — reports that
- * instead; any other prompt is the dialog's own words and outranks it.
- */
-export const UNNAMED_DIALOG_PROMPTS: ReadonlySet<string> = new Set([
-	UNNAMED_USER_WAIT_PROMPT,
-	...Object.keys(DIALOGS).map(genericDialogLabel),
-]);
 
 /**
  * The classification the caller declared on the dialog's options

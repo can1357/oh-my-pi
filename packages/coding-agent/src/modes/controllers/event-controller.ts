@@ -6,7 +6,6 @@ import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-uti
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
-import { UNNAMED_DIALOG_PROMPTS } from "../../extensibility/extensions/user-wait";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import {
@@ -1040,30 +1039,27 @@ export class EventController {
 	}
 
 	/**
-	 * What the run reports right now. An open session dialog is the only live
-	 * record of which dialog a person is being asked to answer, so it ranks
-	 * first: the approval record a tool call carries outlives the answer — it
-	 * is dropped at the call's `tool_execution_end`, not when the person
-	 * answered — and preferring it names an operation already approved.
+	 * What the run reports right now. While a session dialog is open it is the
+	 * whole report, words and classification alike: it is the only live record
+	 * of what a person is being asked, and nothing correlates a per-call
+	 * approval record with the dialog that is open. A record outlives its
+	 * answer — it is dropped at the call's `tool_execution_end`, not when the
+	 * person answered — so borrowing from it names an operation already
+	 * approved, and borrowing its `permission` would contradict the open
+	 * dialog's own classification, including one its opener stated. A dialog
+	 * that named nothing therefore reports its generic label rather than
+	 * another call's words.
 	 *
 	 * `local` is the record the caller holds for a call waiting on the user,
 	 * and defaults to the oldest one still waiting: a call that just raised its
 	 * own prompt passes that prompt, since it is the one now in front. It
-	 * reports when no dialog is open — a host that brackets no dialog has only
-	 * these records — and it also names a frame that names nothing itself
-	 * ({@link UNNAMED_DIALOG_PROMPTS}: an SDK caller that passed no prompt, a
-	 * dialog with no title). With neither, the report follows the run: a dialog
-	 * that opened outside any run leaves the session idle rather than claiming
-	 * work nobody started.
+	 * reports only where no dialog is bracketed — a host with no wait tracker
+	 * has nothing else. With neither, the report follows the run: a dialog that
+	 * opened outside any run leaves the session idle rather than claiming work
+	 * nobody started.
 	 */
 	#reportedStatus(local: RunStatus | undefined = this.#blockingPrompts.values().next().value): RunStatus {
-		const wait = this.#sessionUserWait;
-		if (wait) {
-			return wait.state === "blocked" && wait.msg !== undefined && UNNAMED_DIALOG_PROMPTS.has(wait.msg)
-				? (local ?? wait)
-				: wait;
-		}
-		return local ?? (this.#runActive ? { state: "working" } : { state: "idle" });
+		return this.#sessionUserWait ?? local ?? (this.#runActive ? { state: "working" } : { state: "idle" });
 	}
 
 	/**

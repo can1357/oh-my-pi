@@ -927,9 +927,12 @@ before and performs no extra syscalls.
 Every dialog that waits for an answer opens a run-state wait the session publishes
 (`user_wait_start`/`user_wait_end`), named by what the call asks. A dialog whose method does not say
 how to classify it — a `select` a host raises in place of an approval dialog, for one — declares it
-with `ExtensionUIDialogOptions.waitKind` (`"permission"` or `"question"`); without it the dialog
-reads as a question, and `approve` always reads as a permission. A dialog given a `timeout` opens no
-wait: it settles on its own, so its time stays the agent's.
+with `ExtensionUIDialogOptions.waitKind` (`"permission"` or `"question"`), or with
+`ExtensionCustomOptions.waitKind` on `custom`; without it the dialog reads as a question, and
+`approve` always reads as a permission. A dialog given a `timeout` opens no wait: it settles on its
+own, so its time stays the agent's. While a wait is open its frame is the whole run-state report, so
+a dialog that gives no words of its own is reported under a generic label rather than under some
+other operation's.
 
 ### Interactive mode (`extension-ui-controller.ts`)
 
