@@ -2,8 +2,10 @@ import type { Settings } from "../config/settings";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
+import { withSharpshooter } from "./with-sharpshooter";
 
 import { cfgMemoryBackend } from "./settings";
+import { cfgSharpshooterEnabled } from "../sharpshooter/settings";
 
 /**
  * Pick the active memory backend for a Settings instance.
@@ -18,8 +20,22 @@ import { cfgMemoryBackend } from "./settings";
  *
  * `memories.enabled` remains accepted only as a legacy migration input. Once
  * a config is loaded, `memory.backend` is the sole runtime selector.
+ *
+ * `sharpshooter.enabled` is the one exception, and it does not select a backend.
+ * Sharpshooter distills project decisions rather than storing memories, so it can
+ * run beside a store; when the flag is set and the store is not sharpshooter
+ * itself, the selected backend is wrapped to run both. The wrapper keeps the
+ * store's `id`, so tool gating that reads `memory.backend` is unaffected.
  */
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
+	const selected = await selectMemoryBackend(settings);
+	// Guard on the backend actually selected: a live settings reload between the
+	// selector read and here could otherwise wrap sharpshooter in itself.
+	if (selected.id === "sharpshooter" || !cfgSharpshooterEnabled.get(settings)) return selected;
+	return withSharpshooter(selected);
+}
+
+async function selectMemoryBackend(settings: Settings): Promise<MemoryBackend> {
 	const id = cfgMemoryBackend.get(settings);
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;

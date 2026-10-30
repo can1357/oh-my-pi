@@ -5494,6 +5494,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelRegistry,
 				agentDir,
 				taskDepth,
+				// This runs unqueued behind a lazy backend import. A /move that lands first makes
+				// this the move's rebind, so the reason is read now, after the await.
+				reason: session.memoryStartReason(),
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 			});
