@@ -313,6 +313,7 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
+	SessionDisposeReason,
 	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
@@ -982,6 +983,8 @@ export class AgentSession implements SettingsScope {
 	#cancelExitRecorder?: () => void;
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
+	/** The exit record marks a turn `/restart` cut off ({@link restartCutTurnOff}). */
+	#restartCutTurnOff = false;
 	/** Last observed `workspace.additionalDirectories`, diffed on change to add/remove only settings-seeded roots. */
 	#settingsWorkspaceDirectories: readonly string[] = [];
 	/** Last observed auto-QA gate; the system prompt advertises `xd://report_issue` only while it holds. */
@@ -3763,18 +3766,31 @@ export class AgentSession implements SettingsScope {
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
 	}
 
-	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
+	/**
+	 * Whether this session's exit record marks a turn `/restart` cut off, decided when
+	 * `dispose({ reason: "restart" })` records the exit: the relaunch `--restore`s the
+	 * session to go on with that turn.
+	 */
+	get restartCutTurnOff(): boolean {
+		return this.#restartCutTurnOff;
+	}
+
+	#recordSessionExit(reason: SessionDisposeReason | "dispose"): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
+		// Recorded before dispose aborts the turn: still streaming means `/restart` cuts it off,
+		// even a first turn with no reply yet.
+		const restartedMidTurn = reason === "restart" && this.isStreaming;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
+			!restartedMidTurn &&
 			pendingToolCalls.length === 0 &&
 			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
 		) {
 			return;
 		}
 		const kind: SessionExitData["kind"] =
-			reason === "dispose" || reason === postmortem.Reason.MANUAL
+			reason === "dispose" || reason === "restart" || reason === postmortem.Reason.MANUAL
 				? "normal"
 				: reason === postmortem.Reason.UNCAUGHT_EXCEPTION || reason === postmortem.Reason.UNHANDLED_REJECTION
 					? "fatal"
@@ -3787,9 +3803,11 @@ export class AgentSession implements SettingsScope {
 			recordedAt: new Date().toISOString(),
 		};
 		if (pendingToolCalls.length > 0) data.pendingToolCalls = pendingToolCalls;
+		if (restartedMidTurn) data.restartedMidTurn = true;
 		try {
 			this.sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, data);
 			this.sessionManager.flushSync();
+			this.#restartCutTurnOff = restartedMidTurn;
 			// Only pending tool calls or an abnormal teardown are noteworthy; a
 			// clean dispose logs at debug so routine exits don't read as problems.
 			const exitLog = pendingToolCalls.length > 0 || kind !== "normal" ? logger.warn : logger.debug;

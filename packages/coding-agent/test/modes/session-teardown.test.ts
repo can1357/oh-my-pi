@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { createSessionTeardown } from "../../src/modes/session-teardown";
+import type { SessionDisposeReason } from "../../src/session/agent-session-types";
 
 /**
  * Signal-safe session teardown contract (issue #4080). The callback body
@@ -135,7 +136,7 @@ describe("createSessionTeardown", () => {
 	});
 
 	it("forwards the postmortem reason into disposeSession so signal exits record the real trigger", async () => {
-		const received: Array<postmortem.Reason | undefined> = [];
+		const received: Array<SessionDisposeReason | undefined> = [];
 
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
@@ -152,7 +153,7 @@ describe("createSessionTeardown", () => {
 	});
 
 	it("keypress path passes no reason — dispose falls back to a normal exit record", async () => {
-		const received: Array<postmortem.Reason | undefined> = [];
+		const received: Array<SessionDisposeReason | undefined> = [];
 
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
@@ -169,7 +170,7 @@ describe("createSessionTeardown", () => {
 	});
 
 	it("first call's reason wins: a later caller with a different reason awaits the same promise", async () => {
-		const received: Array<postmortem.Reason | undefined> = [];
+		const received: Array<SessionDisposeReason | undefined> = [];
 		const release = Promise.withResolvers<void>();
 
 		const teardown = createSessionTeardown({

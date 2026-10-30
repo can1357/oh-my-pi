@@ -414,12 +414,21 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 };
 
 /**
+ * The session a relaunch picks up: a session ID or file path, `--restore`d to go
+ * on with the turn the relaunch cut off, else `--resume`d.
+ */
+export interface RelaunchSession {
+	source: string;
+	restore?: boolean;
+}
+
+/**
  * Rewrite the launch argv for a relaunch of this session (`/restart`, and
- * `/fork pane|window` with `resumeSessionSource` undefined).
+ * `/fork pane|window` with `session` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
  * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
- *   `--resume=<source>` forms) - the relaunch resumes `resumeSessionSource` instead;
+ *   `--resume=<source>` forms) - the relaunch picks up `session` instead;
  * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
@@ -427,12 +436,12 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
- * `resumeSessionSource` is a session ID or file path, omitted for a session that
- * never materialized on disk; the relaunch then starts fresh with the same configuration.
+ * `session` is omitted for a session that never materialized on disk; the
+ * relaunch then starts fresh with the same configuration.
  */
 export function restartArgv(
 	argv: string[],
-	resumeSessionSource: string | undefined,
+	session: RelaunchSession | undefined,
 	drop?: Readonly<Record<string, true>>,
 ): string[] {
 	const kept: string[] = [];
@@ -449,6 +458,6 @@ export function restartArgv(
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionSource !== undefined) kept.push("--resume", resumeSessionSource);
+	if (session !== undefined) kept.push(session.restore ? "--restore" : "--resume", session.source);
 	return kept;
 }

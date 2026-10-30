@@ -36,7 +36,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
 | `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
-| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh                                                                                            | None                                                                                |
+| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session (`--restore` when the restart cut a turn off), otherwise starts fresh                                               | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
@@ -490,7 +490,9 @@ understands the flag.
    background job of its parent, under the subagent's id. The lifecycle reviver
    rebuilds it from its transcript, the turn goes on as below, and the parent
    receives the result as the job's ordinary `async-result`, so a parent waiting on
-   that job finds it again.
+   that job finds it again. Skipped when the restore follows a `/restart` that cut
+   the turn off: reviving subagents is crash recovery, and transcripts an earlier
+   crash left mid-turn would re-run tasks the user already moved past.
 2. **Then the session's own turn** (`AgentSession.restoreInterruptedTurn`). A turn
    cut off without a `session_exit` record (a crash, SIGKILL or power loss records
    none) is first closed the way exit recovery closes one whose exit was recorded:
@@ -501,9 +503,12 @@ understands the flag.
 
 Nothing is continued when the last turn finished, failed, or the user interrupted
 it, or when a normal exit was recorded after it (the user quit with it
-interrupted). `--restore` is interactive only, takes no prompt, and cannot be
-combined with `--continue`, `--fork`, imports, `--goal` or `--no-session`.
-`/restart` drops it like the other one-shot selectors.
+interrupted). A `/restart` exit record that marks the turn cut off
+(`restartedMidTurn`) is the exception: that turn goes on, unless a prompt, a reply,
+or a second ended reply came after the record. `--restore` is interactive only,
+takes no prompt, and cannot be combined with `--continue`, `--fork`, imports,
+`--goal` or `--no-session`. `/restart` drops it like the other one-shot selectors
+and adds its own when it cuts a turn off (see [Restart](#restart)).
 
 ## CLI `--continue`
 
@@ -531,6 +536,14 @@ flags but strips original prompts/`@file` positionals and one-shot session
 selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
 It adds `--resume <current-id>` only when the session actually exists on disk;
 an in-memory or never-materialized session restarts fresh.
+
+A restart during a running turn goes on with that turn.
+`AgentSession.dispose({ reason: "restart" })` writes the `session_exit` record
+with `restartedMidTurn: true` before it aborts the turn, and the relaunch passes
+`--restore` instead of `--resume` exactly when that record was written, so the
+new process regenerates a reply the restart cut off, or re-runs a tool batch it
+cut off entirely (see [CLI `--restore`](#cli---restore)). A restart while idle
+resumes as before.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.

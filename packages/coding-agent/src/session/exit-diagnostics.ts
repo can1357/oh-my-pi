@@ -41,6 +41,11 @@ export interface SessionExitData {
 	kind: "normal" | "signal" | "fatal" | "process_exit";
 	recordedAt: string;
 	pendingToolCalls?: PendingToolCallDiagnostic[];
+	/**
+	 * `/restart` replaced the process while a turn ran; its relaunch (`omp --restore`)
+	 * goes on with that turn ({@link hasRestorableTurn}).
+	 */
+	restartedMidTurn?: true;
 }
 
 interface PendingToolCallRecord extends PendingToolCallDiagnostic {
@@ -90,12 +95,14 @@ function readSessionExit(entry: SessionEntry): SessionExitData | undefined {
 	) {
 		return undefined;
 	}
-	return {
+	const exit: SessionExitData = {
 		reason,
 		kind,
 		recordedAt,
 		pendingToolCalls: readPendingToolCalls(entry.data.pendingToolCalls),
 	};
+	if (entry.data.restartedMidTurn === true) exit.restartedMidTurn = true;
+	return exit;
 }
 
 /** Why an interrupted-turn abort record ends a turn its process never finished. */
@@ -121,8 +128,9 @@ interface UnfinishedTurn {
  * The turn a branch's last process left unfinished: a non-terminal message tail
  * (a prompt or tool results the model never answered, tool calls without results)
  * followed by a process exit, recorded or (with `assumeExit`) assumed. A recorded
- * normal exit with nothing pending, a terminal assistant tail, and tool results that
- * close an aborted or failed turn leave nothing unfinished.
+ * normal exit with nothing pending (unless `/restart` cut the turn off), a terminal
+ * assistant tail, and tool results that close an aborted or failed turn leave nothing
+ * unfinished.
  */
 function findUnfinishedTurn(
 	entries: readonly SessionEntry[],
@@ -151,7 +159,7 @@ function findUnfinishedTurn(
 	if (!exit || tailIndex > exitIndex) {
 		if (!options?.assumeExit) return undefined;
 		exit = { reason: "restore", kind: "process_exit", recordedAt: new Date().toISOString() };
-	} else if (exit.kind === "normal" && !exit.pendingToolCalls?.length) {
+	} else if (exit.kind === "normal" && !exit.restartedMidTurn && !exit.pendingToolCalls?.length) {
 		return undefined;
 	}
 	if (tail.role === "assistant" && !tail.content.some(isToolCallContent)) return undefined;
@@ -182,11 +190,13 @@ export function isInterruptedTurnAbort(message: AgentMessage): boolean {
 }
 
 /**
- * Whether `omp --restore` has a turn to go on with on this branch: one its last
- * process left unfinished ({@link findUnfinishedTurn}, the exit assumed), or one exit
- * recovery already closed that nothing followed, not even a normal exit.
+ * Whether `omp --restore` has a turn to go on with on this branch: one `/restart` cut
+ * off ({@link restartCutTurnOff}), one its last process left unfinished
+ * ({@link findUnfinishedTurn}, the exit assumed), or one exit recovery already closed
+ * that nothing followed, not even a normal exit.
  */
 export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
+	if (restartCutTurnOff(entries)) return true;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
 		const exit = readSessionExit(entry);
@@ -196,6 +206,30 @@ export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
 		break;
 	}
 	return findUnfinishedTurn(entries, { assumeExit: true }) !== undefined;
+}
+
+/**
+ * Whether the branch's last exit is a `/restart` that cut a running turn off, with
+ * nothing after it but what cutting the turn left: tool results and one aborted or
+ * failed assistant message. A prompt, a reply, or a second ended reply (a restored
+ * turn the user interrupted or that failed) means a later process went on without
+ * that turn.
+ */
+export function restartCutTurnOff(entries: readonly SessionEntry[]): boolean {
+	let endedReplies = 0;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		const exit = readSessionExit(entry);
+		if (exit) return exit.restartedMidTurn === true;
+		if (entry.type !== "message") continue;
+		const { message } = entry;
+		if (message.role === "toolResult") continue;
+		const ended =
+			message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
+		if (ended && ++endedReplies === 1) continue;
+		return false;
+	}
+	return false;
 }
 
 /**

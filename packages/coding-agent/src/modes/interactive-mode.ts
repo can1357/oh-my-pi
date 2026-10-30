@@ -7989,7 +7989,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), resuming this session when it exists on disk.
+	 * {@link restartArgv}), resuming this session when it exists on disk. A turn
+	 * the restart cuts off is recorded as such, and the relaunch `--restore`s the
+	 * session to go on with it.
 	 *
 	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
 	 * same terminal, no lingering parent. Postmortem cleanups and stdout are
@@ -8001,20 +8003,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#beginClose();
 		try {
-			await this.#teardown();
+			await this.#teardown("restart");
 		} catch (error) {
 			this.#handleTeardownError("restart", error);
 			return;
 		}
 
 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
+		// The exit record decides whether the restart cut a turn off, so the relaunch and
+		// the record agree even when the turn ends while teardown runs.
+		const restore = this.session.restartCutTurnOff;
 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
 		const activeProfile = getActiveProfile();
 		const cmd = [
 			...resolveCliEntryCmd(),
 			...restartArgv(
 				process.argv.slice(2),
-				sessionFile ? path.resolve(sessionFile) : undefined,
+				sessionFile ? { source: path.resolve(sessionFile), restore } : undefined,
 				activeProfile ? { "--profile": true } : undefined,
 			),
 		];
@@ -8064,8 +8069,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.showStatus("Closing session…");
 	}
 
-	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	/**
+	 * Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back.
+	 * `reason` is `"restart"` for {@link restart}, so the exit record marks a turn it cuts off.
+	 */
+	async #teardown(reason?: "restart"): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -8099,10 +8107,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			// The teardown is registered lazily in `init()` — a `/exit` reached
 			// before `init()` completed falls back to a direct dispose.
 			if (this.#signalTeardown) {
-				await this.#signalTeardown();
+				await this.#signalTeardown(reason);
 			} else {
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+					reason,
 				});
 			}
 		} finally {

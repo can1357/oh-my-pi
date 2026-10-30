@@ -54,6 +54,12 @@ import type { SessionManager } from "./session-manager";
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 
+/**
+ * What ended a session: a postmortem reason (signal/fatal teardown) or `"restart"`
+ * (`/restart` replacing the process).
+ */
+export type SessionDisposeReason = postmortem.Reason | "restart";
+
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
@@ -64,12 +70,13 @@ export interface AgentSessionDisposeOptions {
 	 */
 	drainTimeoutMs?: number;
 	/**
-	 * Postmortem reason that triggered this dispose (signal/fatal teardown
-	 * paths). When set, the persisted `session_exit` diagnostic records it
-	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion).
+	 * What triggered this dispose ({@link SessionDisposeReason}). When set, the
+	 * persisted `session_exit` diagnostic records it instead of the generic
+	 * `"dispose"` used for normal programmatic disposal (`/quit`, test teardown,
+	 * subagent completion); a `"restart"` that cuts a running turn off marks the
+	 * record so the relaunch goes on with that turn.
 	 */
-	reason?: postmortem.Reason;
+	reason?: SessionDisposeReason;
 }
 
 /** Listener notified when command metadata changes. */

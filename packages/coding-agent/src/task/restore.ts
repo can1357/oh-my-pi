@@ -18,7 +18,7 @@ import { AsyncJobError } from "../async";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
-import { hasRestorableTurn } from "../session/exit-diagnostics";
+import { hasRestorableTurn, restartCutTurnOff } from "../session/exit-diagnostics";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
@@ -45,9 +45,15 @@ export interface RestoreOutcome {
  * Has `session` go on with what its last process left unfinished: its subagents'
  * interrupted turns, each as a background job of its parent (registered first, so
  * a resumed turn waiting on such a job finds it), then its own interrupted turn.
+ *
+ * After `/restart` the session's own turn goes on alone. Reviving subagents is crash
+ * recovery: a restart's relaunch would also revive transcripts an earlier crash left
+ * mid-turn, re-running stale tasks the user already moved past.
  */
 export async function restoreSession(session: AgentSession, options: RestoreOptions = {}): Promise<RestoreOutcome> {
-	const subagents = await restoreSubagents(session, options);
+	const subagents = restartCutTurnOff(session.sessionManager.getBranch())
+		? []
+		: await restoreSubagents(session, options);
 	const turn = await session.restoreInterruptedTurn();
 	return { turn, subagents };
 }

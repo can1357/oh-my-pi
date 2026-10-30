@@ -9,7 +9,8 @@
  * Extracted (rather than inlined into `InteractiveMode`) so the callback body
  * is directly unit-testable without instantiating the full TUI stack.
  */
-import { logger, type postmortem } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
+import type { SessionDisposeReason } from "../session/agent-session-types";
 
 /** Dependencies the teardown captures at construction time. */
 export interface SessionTeardownDeps {
@@ -28,20 +29,21 @@ export interface SessionTeardownDeps {
 	saveDraft: (text: string) => Promise<void>;
 	/**
 	 * Dispose the session — emits `session_shutdown`, drains async jobs, closes
-	 * the manager. Receives the postmortem reason that triggered the teardown
-	 * (undefined on the keypress/`/exit` path) so `AgentSession.dispose()` can
-	 * persist the real exit reason instead of the generic `"dispose"`.
+	 * the manager. Receives the reason that triggered the teardown (a postmortem
+	 * signal/fatal reason, `"restart"` from `/restart`, or undefined on the
+	 * keypress/`/exit` path) so `AgentSession.dispose()` can persist the real exit
+	 * reason instead of the generic `"dispose"`.
 	 */
-	disposeSession: (reason?: postmortem.Reason) => Promise<void>;
+	disposeSession: (reason?: SessionDisposeReason) => Promise<void>;
 }
 
 /**
  * Idempotent teardown: concurrent/repeat invocations share one settled
- * promise. The optional `reason` is the postmortem reason that triggered the
- * teardown (`sigterm`, `sighup`, `uncaught_exception`, …); only the FIRST
- * call's reason is used — later callers await the same settled promise.
+ * promise. The optional `reason` is what triggered the teardown (`sigterm`,
+ * `sighup`, `uncaught_exception`, `restart`, …); only the FIRST call's reason
+ * is used — later callers await the same settled promise.
  */
-export type SessionTeardown = (reason?: postmortem.Reason) => Promise<void>;
+export type SessionTeardown = (reason?: SessionDisposeReason) => Promise<void>;
 
 /**
  * Build a promise-memoized teardown function. The first call snapshots the
@@ -65,7 +67,7 @@ export type SessionTeardown = (reason?: postmortem.Reason) => Promise<void>;
  */
 export function createSessionTeardown(deps: SessionTeardownDeps): SessionTeardown {
 	let pending: Promise<void> | undefined;
-	const run = async (reason?: postmortem.Reason): Promise<void> => {
+	const run = async (reason?: SessionDisposeReason): Promise<void> => {
 		const draftText = deps.getDraftText();
 		deps.beginDispose();
 		try {
@@ -75,7 +77,7 @@ export function createSessionTeardown(deps: SessionTeardownDeps): SessionTeardow
 		}
 		await deps.disposeSession(reason);
 	};
-	return (reason?: postmortem.Reason) => {
+	return (reason?: SessionDisposeReason) => {
 		if (!pending) pending = run(reason);
 		return pending;
 	};

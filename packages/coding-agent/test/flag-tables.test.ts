@@ -239,7 +239,7 @@ describe("foreign session import flags", () => {
 
 describe("restartArgv (/restart relaunch argv)", () => {
 	it("keeps configuration flags, drops positionals, and appends --resume", () => {
-		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
+		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], { source: "sid" })).toEqual([
 			"--model",
 			"gpt-5",
 			"--resume",
@@ -249,12 +249,14 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("drops every session-source flag, including inline = and value forms", () => {
 		expect(
-			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
+			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], {
+				source: "sid",
+			}),
 		).toEqual(["--resume", "sid"]);
 	});
 
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
-		expect(restartArgv(["--myext-flag", "val", "--no-tools"], "sid")).toEqual([
+		expect(restartArgv(["--myext-flag", "val", "--no-tools"], { source: "sid" })).toEqual([
 			"--myext-flag",
 			"val",
 			"--no-tools",
@@ -264,7 +266,7 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	});
 
 	it("treats everything after -- as prompt text and drops it", () => {
-		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], "sid")).toEqual([
+		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], { source: "sid" })).toEqual([
 			"--print-thoughts",
 			"--resume",
 			"sid",
@@ -272,7 +274,7 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	});
 
 	it("drops a fresh-session --goal so the resumed relaunch passes goal validation", () => {
-		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], "sid");
+		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], { source: "sid" });
 		expect(relaunch).toEqual(["--model", "gpt-5", "--resume", "sid"]);
 		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
 	});
@@ -298,12 +300,22 @@ describe("--restore", () => {
 		expect(args.restore).toBe(true);
 		expect(args.messages).toEqual([]);
 		expect(parseArgs(["--restore"]).resume).toBe(true);
-		expect(restartArgv(["--restore", "/s/a.jsonl", "--model", "x"], "sid")).toEqual([
+		expect(restartArgv(["--restore", "/s/a.jsonl", "--model", "x"], { source: "sid" })).toEqual([
 			"--model",
 			"x",
 			"--resume",
 			"sid",
 		]);
+	});
+
+	it("restores a relaunch that cut a turn off, with argv that passes restore validation", () => {
+		const relaunch = restartArgv(["--continue", "--model", "x", "fix the bug"], { source: "sid", restore: true });
+		expect(relaunch).toEqual(["--model", "x", "--restore", "sid"]);
+		const args = parseArgs(relaunch);
+		expect(args.restore).toBe(true);
+		expect(args.resume).toBe("sid");
+		expect(() => validateRestoreLaunch(args, true)).not.toThrow();
+		expect(() => validateRestorePrompt(args)).not.toThrow();
 	});
 
 	it("needs the interactive TUI, one existing session, and no prompt", () => {

@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getAgentTombstonePath } from "@oh-my-pi/pi-coding-agent/registry/agent-tombstone";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SESSION_EXIT_CUSTOM_TYPE, type SessionExitData } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
@@ -113,7 +114,7 @@ describe("restoreSession (omp --restore)", () => {
 		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockResolvedValue(result);
 		const restoreTurn = vi.fn(async () => true);
 		const session = {
-			sessionManager: { getSessionFile: () => mainFile },
+			sessionManager: { getSessionFile: () => mainFile, getBranch: () => [] },
 			asyncJobManager: manager,
 			settings: Settings.isolated(),
 			restoreInterruptedTurn: restoreTurn,
@@ -127,5 +128,37 @@ describe("restoreSession (omp --restore)", () => {
 		await manager.getJob("Cut")!.promise;
 		await manager.drainDeliveries({ filter: { ownerId: MAIN_AGENT_ID } });
 		expect(delivered).toEqual(["Cut"]);
+	});
+
+	it("goes on with the session's own turn alone after a /restart cut it off", async () => {
+		tempDir = TempDir.createSync("@pi-restore-subagents-");
+		const cwd = tempDir.path();
+		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
+		const exit: SessionExitData = {
+			reason: "restart",
+			kind: "normal",
+			recordedAt: new Date().toISOString(),
+			restartedMidTurn: true,
+		};
+		main.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, exit);
+		const branch = main.getBranch();
+		const mainFile = main.getSessionFile();
+		if (!mainFile) throw new Error("Expected a persisted session file");
+		await main.close();
+		// A subagent an earlier crash left mid-turn: the restart's relaunch must not re-run it.
+		await writeSubagent(mainFile, cwd, "Cut", cutOff);
+
+		manager = new AsyncJobManager({});
+		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockRejectedValue(new Error("revived"));
+		const session = {
+			sessionManager: { getSessionFile: () => mainFile, getBranch: () => branch },
+			asyncJobManager: manager,
+			settings: Settings.isolated(),
+			restoreInterruptedTurn: vi.fn(async () => true),
+		} as unknown as AgentSession;
+
+		expect(await restoreSession(session)).toEqual({ turn: true, subagents: [] });
+		expect(followUp).not.toHaveBeenCalled();
 	});
 });
