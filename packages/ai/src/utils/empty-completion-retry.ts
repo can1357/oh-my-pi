@@ -114,6 +114,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
 				inner = attempt(model, context, options);
+				// A watchdog on `outer` must see the attempt's local work — a request
+				// parked on a dispatch hold above all — or it reads that silence as a
+				// stalled provider and aborts a request that was never sent.
+				outer.forwardLocalWorkFrom(inner);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;

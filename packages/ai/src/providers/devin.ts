@@ -29,6 +29,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import type { CompatOf } from "@oh-my-pi/pi-catalog/types";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -40,6 +41,7 @@ import type {
 	AssistantMessage,
 	Context,
 	DeveloperMessage,
+	FetchImpl,
 	Message,
 	Model,
 	StreamFunction,
@@ -54,8 +56,10 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import {
 	CONNECT_COMPRESSED_FLAG,
 	CONNECT_END_STREAM_FLAG,
@@ -239,8 +243,33 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
+			// Every request below goes through the caller's transport, which can
+			// park it on a dispatch hold. Each arms the stream watchdog's own
+			// first-event budget as a pre-response guard, so the transport stops
+			// that clock — and `stream` reports the time to its watchdog as ours —
+			// until the request leaves.
+			// `devin-agent` compat carries no idle-timeout floor, so this reads
+			// the same budget `register-builtins` gives the stream watchdog.
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const heldFetch: FetchImpl = async (input, init) => {
+				const watchdog = armPreResponseTimeout(init?.signal ?? undefined, firstEventTimeoutMs, stream);
+				try {
+					return await fetchImpl(input, { ...init, signal: watchdog.signal });
+				} finally {
+					watchdog.clear();
+				}
+			};
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
-			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
+			// The session-token exchange is this request's prerequisite, not
+			// inference traffic: it goes out unheld, still under the stream
+			// watchdog's clock.
+			const auth = await fetchDevinAuthMetadata(
+				options?.apiKey,
+				baseUrl,
+				withoutDispatchHold(fetchImpl),
+				options?.signal,
+			);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
 				apiKey: options?.apiKey,
@@ -265,7 +294,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			// assignment JWT on the chat request that shares the cascade id.
 			let assignment: ModelAssignment | undefined;
 			if (model.compat.modelRouter) {
-				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
+				assignment = await assignDevinModel(model, turn, chatBaseUrl, heldFetch, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
 			let request = buildDevinChatRequest(model, context, options, turn, assignment);
@@ -285,7 +314,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			});
 			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
 
-			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
+			const response = await heldFetch(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",

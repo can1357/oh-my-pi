@@ -2,6 +2,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -32,11 +33,14 @@ function createSignedFetch(options: BedrockMantleOptions, region: string): Fetch
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.delete("authorization");
 		const body = await requestBody(input, init);
+		// A credential lookup is this request's prerequisite, not inference
+		// traffic: it goes out unheld under its own timeouts, and the signed
+		// request below still holds at the wire.
 		const credentials = await resolveAwsCredentials({
 			profile: options.providerOptions?.profile,
 			region,
 			signal: options.signal,
-			fetch: baseFetch,
+			fetch: withoutDispatchHold(baseFetch),
 		});
 		const signed = await signRequest({
 			method,

@@ -3,6 +3,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import { getVertexAccessToken } from "./google-auth";
 import {
 	buildGoogleGenerateContentParams,
@@ -86,7 +87,13 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 
 			const project = resolveProject(options);
 			const location = resolveLocation(options);
-			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
+			// Token minting is this request's prerequisite, not inference traffic:
+			// it goes out unheld under its own timeouts, and the request it
+			// authorizes still holds at the wire.
+			const accessToken = await getVertexAccessToken({
+				signal: options?.signal,
+				fetch: options?.fetch ? withoutDispatchHold(options.fetch) : undefined,
+			});
 			const host = resolveVertexEndpointHost(location);
 			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
 			return {

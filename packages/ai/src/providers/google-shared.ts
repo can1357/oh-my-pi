@@ -1073,7 +1073,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
-				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+				// `stream` rides along so the stream watchdog `register-builtins`
+				// installs skips the same held time the guard does instead of
+				// failing a request parked on a dispatch hold.
+				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs, stream);
 				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 				const init: RequestInit & { timeout: false } = {
 					method: "POST",

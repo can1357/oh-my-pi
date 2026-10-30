@@ -41,6 +41,7 @@ import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -939,13 +940,19 @@ const streamOpenAICompletionsOnce = (
 					headers: requestHeaders,
 					body: params,
 				};
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				// A guard rather than a plain timer: it rides on the request signal,
+				// so the transport stops its clock while the request is prepared and
+				// parked on a dispatch hold, and `stream` (which a stream watchdog
+				// may observe) reports that time as ours rather than the provider's.
+				const requestGuard = armPreResponseTimeout(requestSignal, requestTimeoutMs, stream);
+				const guardedRequestSignal = requestGuard.signal ?? requestSignal;
+				guardedRequestSignal.addEventListener(
+					"abort",
+					() => {
+						if (!requestSignal.aborted) abortTracker.abortLocally(firstEventTimeoutAbortError);
+					},
+					{ once: true },
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
@@ -955,7 +962,7 @@ const streamOpenAICompletionsOnce = (
 						url: completionsUrl,
 						headers: headersWithTimeout,
 						body: params,
-						signal: requestSignal,
+						signal: guardedRequestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
@@ -965,9 +972,8 @@ const streamOpenAICompletionsOnce = (
 							copilotCacheSnapshot,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
-						// The first-event watchdog above aborts `requestSignal`, which
-						// bounds every attempt and backoff sleep — retries cannot
-						// extend the deadline.
+						// The guard above covers every attempt and backoff sleep with one
+						// budget — retries cannot extend the deadline.
 						onSseEvent: rawSseObserver,
 						onDoneSentinel: () => {
 							sawDoneSentinel = true;
@@ -976,13 +982,13 @@ const streamOpenAICompletionsOnce = (
 					responseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestGuard.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					clearTimeout(requestTimeout);
+					requestGuard.clear();
 				}
 			};
 			// droid CLI parity: cache-read details can arrive on the

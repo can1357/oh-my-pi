@@ -74,7 +74,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
-import { withTransportFetch } from "./utils/transport-fetch";
+import { withoutDispatchHold, withTransportFetch } from "./utils/transport-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -734,8 +734,13 @@ function withProviderInFlightLimit<
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
+	// Token minting is this request's prerequisite, not inference traffic: it
+	// goes out unheld under its own timeouts. The provider's pre-response guard
+	// rides on `init.signal`, so a held token fetch would also have run that
+	// guard's clock through the hold.
+	const tokenFetch = withoutDispatchHold(baseFetch);
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);

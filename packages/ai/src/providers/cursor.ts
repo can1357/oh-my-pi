@@ -744,6 +744,12 @@ interface CursorHttp1RunTransportOptions {
 	 * CA bundle and `PI_REQ_DEBUG` ride along with it.
 	 */
 	fetch: FetchImpl;
+	/**
+	 * The stream this transport feeds. The run request's hold is reported to it
+	 * as local work, so its watchdog does not read a parked request as a
+	 * provider that never answered.
+	 */
+	heldWork?: AssistantMessageEventStream;
 }
 
 interface CursorPendingAppend {
@@ -808,8 +814,12 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		// The guard restarts when the request leaves the transport, so a caller's
 		// dispatch hold is not charged to Cursor's latency, and it is cleared as
 		// soon as the response arrives so a slow body is the idle watchdog's
-		// business (issue #2422).
-		const watchdog = armPreResponseTimeout(signal, timeoutMs);
+		// business (issue #2422). The first append carries the run request, which
+		// the server needs before it can send anything, so its held time is also
+		// kept off the stream watchdog. Later appends are not: every settled
+		// window restarts that watchdog's clock, and the 5 s heartbeats would keep
+		// a stalled stream alive forever.
+		const watchdog = armPreResponseTimeout(signal, timeoutMs, append.seqno === 0n ? options.heldWork : undefined);
 		let response: Response;
 		try {
 			response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
@@ -1356,7 +1366,8 @@ function streamCursorWithWireMode(
 				// runs here — after the payload build, the request-debug dump and the
 				// proxy tunnel, all of which can span a `/pause`. The HTTP/1 transport
 				// holds in the transport fetch it was given instead, once per request.
-				await holdBeforeDispatch(options?.beforeDispatch, options?.signal);
+				// The parked time is ours, not Cursor's: the stream watchdog skips it.
+				await stream.trackLocalWork(holdBeforeDispatch(options?.beforeDispatch, options?.signal));
 				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
 			} else {
 				runTransport = createHttp1RunTransport({
@@ -1365,6 +1376,7 @@ function streamCursorWithWireMode(
 					requestId,
 					signal: options?.signal,
 					fetch: transportFetch(model, options?.fetch, options?.beforeDispatch),
+					heldWork: stream,
 				});
 			}
 

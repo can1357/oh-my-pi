@@ -48,6 +48,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
@@ -193,7 +194,8 @@ function resolveBedrockRequestUrl(
 /**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
- * cannot hang the caller.
+ * cannot hang the caller. `heldWork` is the stream the caller returns, so the
+ * stream watchdog skips the time this request spends parked on a dispatch hold.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -203,6 +205,7 @@ async function sendBedrockRequest(
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined = options.signal,
+	heldWork?: AssistantMessageEventStream,
 ): Promise<{ response: Response; responseBody?: string }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
@@ -264,11 +267,14 @@ async function sendBedrockRequest(
 		if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
 			credentials = { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" };
 		} else {
+			// A credential lookup is this request's prerequisite, not inference
+			// traffic: it goes out unheld under its own timeouts, and the signed
+			// request below still holds at the wire.
 			credentials = await resolveAwsCredentials({
 				profile: options.profile,
 				region,
 				signal,
-				fetch: options.fetch,
+				fetch: options.fetch ? withoutDispatchHold(options.fetch) : undefined,
 			});
 		}
 		const signed = await signRequest({
@@ -298,7 +304,7 @@ async function sendBedrockRequest(
 			: getStreamFirstEventTimeoutMs(
 					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
 				));
-	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs, heldWork);
 	let response: Response;
 	let responseBody: string | undefined;
 	try {
@@ -899,7 +905,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
 					body: commandInput,
 				};
-				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
+				({ response } = await sendBedrockRequest(
+					model,
+					options,
+					region,
+					base,
+					commandInput,
+					"converse-stream",
+					options.signal,
+					stream,
+				));
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —

@@ -1,4 +1,5 @@
 import type { FetchImpl } from "../types";
+import { armPreResponseTimeout } from "../utils/idle-iterator";
 import { getNativeFinishReasonError } from "./native-finish-reason";
 
 /**
@@ -16,8 +17,11 @@ export async function readOpenRouterGenerationError(args: {
 	fetch?: FetchImpl;
 	signal: AbortSignal;
 }): Promise<string | undefined> {
-	const timeout = AbortSignal.timeout(2_000);
-	const signal = AbortSignal.any([args.signal, timeout]);
+	// A stop-the-clock budget rather than `AbortSignal.timeout`: the lookup goes
+	// through the caller's transport, which can park it on a dispatch hold and
+	// stops this clock until it leaves. It stays armed through the body read.
+	const watchdog = armPreResponseTimeout(args.signal, 2_000);
+	const signal = watchdog.signal ?? args.signal;
 	try {
 		const url = new URL(`${args.baseUrl.replace(/\/$/, "")}/generation`);
 		url.searchParams.set("id", args.responseId);
@@ -41,6 +45,8 @@ export async function readOpenRouterGenerationError(args: {
 		// Unavailable diagnostics do not establish a native generation failure.
 		// Cancellation is checked by the caller.
 		return undefined;
+	} finally {
+		watchdog.clear();
 	}
 }
 
