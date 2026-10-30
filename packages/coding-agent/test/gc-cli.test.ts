@@ -980,10 +980,15 @@ describe("runGcCommand cold-session archive", () => {
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
 		const archiveDir = path.join(root, "archive", "sessions", "project");
-		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
-			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
-			throw new Error("artifact move failed");
-		});
+		const realOpen = fs.open;
+		const cpSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (!String(target).endsWith(".tmp") || !String(target).includes("0.bash.log")) return handle;
+			handle.write = (async () => {
+				throw new Error("artifact move failed");
+			}) as typeof handle.write;
+			return handle;
+		}) as typeof fs.open);
 		let result: GcResult;
 		try {
 			result = await runGcCommand({
@@ -1108,10 +1113,15 @@ describe("runGcCommand cold-session archive", () => {
 		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "artifact");
-		const cpSpy = spyOn(fs, "copyFile").mockImplementation(async source => {
-			if (!String(source).startsWith(artifacts)) throw new Error(`unexpected copy of ${String(source)}`);
-			throw new Error("artifact move failed");
-		});
+		const realOpen = fs.open;
+		const cpSpy = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+			if (!String(target).endsWith(".tmp")) return handle;
+			handle.write = (async () => {
+				throw new Error("artifact move failed");
+			}) as typeof handle.write;
+			return handle;
+		}) as typeof fs.open);
 		try {
 			await runCli([
 				"gc",

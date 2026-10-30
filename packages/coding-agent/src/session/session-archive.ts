@@ -18,12 +18,12 @@
  * so both hold `<agentDir>/gc.lock` while they do it.
  */
 import * as fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
-import { statIfPresent, withGcLock } from "./gc-lock";
+import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderId, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
@@ -62,6 +62,41 @@ export function archivedSessionPathForLive(sessionFile: string, agentDir?: strin
 	const relative = path.relative(getSessionsDir(agentDir), sessionFile);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
 	return path.join(getArchivedSessionsDir(agentDir), `${relative}.gz`);
+}
+/**
+ * The agent directory an archived path belongs to, derived from the path
+ * itself: `<agentDir>/archive/sessions/<bucket>/<name>.jsonl.gz`.
+ *
+ * A command printed for the reader has to name the directory this work
+ * happened in, not the one this process happens to default to. Someone who
+ * passes an explicit archive path from another agent directory and is then
+ * handed a recovery command scoped to their own default runs it against the
+ * wrong storage, where it reports success for a session it never saw.
+ */
+export function agentDirOfArchivedPath(archiveFile: string): string | undefined {
+	const sessionsRoot = path.dirname(path.dirname(archiveFile));
+	if (path.basename(sessionsRoot) !== "sessions") return undefined;
+	const archiveRoot = path.dirname(sessionsRoot);
+	if (path.basename(archiveRoot) !== "archive") return undefined;
+	return path.dirname(archiveRoot);
+}
+
+/**
+ * The record a restore keeps while it is unfinished.
+ *
+ * Written before anything is published and removed only when every entry is
+ * home, so "did a restore finish?" is answered by the restore that ran
+ * rather than re-derived later from what the live tree looks like. Every
+ * attempt to infer it afterwards was wrong in both directions: a tool output
+ * a session emptied read as an unfinished restore, and an artifact a restore
+ * had refused to write over read as a finished one, so the refusal became a
+ * silent success on the next ordinary resume.
+ *
+ * It lives beside the archive rather than in the live tree, because the live
+ * tree is what a session writes to and what the archive phase copies.
+ */
+export function restoreRecordPath(archiveFile: string): string {
+	return `${archiveFile}.restoring`;
 }
 
 /**
@@ -130,7 +165,7 @@ function archiveReadError(file: string, cause: unknown): unknown {
 	const id = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	return new Error(
 		`Cannot read the archived session "${file}": ${cause instanceof Error ? cause.message : String(cause)}. ` +
-			`The archive is damaged; \`omp gc --restore ${shellQuote(id)}${agentDirFlag(getAgentDir())}\` reports the same without touching it.`,
+			`The archive is damaged; \`omp gc --restore ${shellQuote(id)}${agentDirFlag(agentDirOfArchivedPath(file) ?? getAgentDir())}\` reports the same without touching it.`,
 		{ cause },
 	);
 }
@@ -400,6 +435,75 @@ async function* bytesOfHandle(handle: fs.FileHandle): AsyncGenerator<Uint8Array>
 		offset += bytesRead;
 		yield Uint8Array.prototype.slice.call(window, 0, bytesRead);
 	}
+}
+/** What a copy wrote: the bytes' digest and how many there were. */
+export interface CopiedBytes {
+	hash: string;
+	size: number;
+}
+
+/**
+ * Copy everything `source` holds into `destination`, digesting what is
+ * written on the way through.
+ *
+ * The digest is the point. A copy that stats the source again afterwards is
+ * asking a second time a question it already answered, and the answer can
+ * have changed — on a filesystem whose timestamps have one-second resolution
+ * and whose inode numbers come back round, an in-place rewrite of the same
+ * length leaves size, mtime, ctime, device and inode all identical. The
+ * bytes this function wrote are the bytes it hashed, and nothing that
+ * happens to the source afterwards changes either.
+ */
+export async function copyHandleWithDigest(source: fs.FileHandle, destination: fs.FileHandle): Promise<CopiedBytes> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	let size = 0;
+	for await (const chunk of bytesOfHandle(source)) {
+		hasher.update(chunk);
+		for (let written = 0; written < chunk.byteLength;) {
+			const { bytesWritten } = await destination.write(chunk, written, chunk.byteLength - written, size + written);
+			written += bytesWritten;
+		}
+		size += chunk.byteLength;
+	}
+	return { hash: hasher.digest("hex"), size };
+}
+
+/** The digest and length of everything an open descriptor holds. */
+export async function digestOfHandle(handle: fs.FileHandle): Promise<CopiedBytes> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	let size = 0;
+	for await (const chunk of bytesOfHandle(handle)) {
+		hasher.update(chunk);
+		size += chunk.byteLength;
+	}
+	return { hash: hasher.digest("hex"), size };
+}
+
+/** Whether everything `prefix` holds is how `whole` begins. */
+export async function handleBeginsWith(whole: fs.FileHandle, prefix: fs.FileHandle): Promise<boolean> {
+	return await sourceIsPrefixOfDestination(bytesOfHandle(prefix), whole, false);
+}
+
+/**
+ * A descriptor on `file` only when `file` is a regular file.
+ *
+ * Non-blocking, because an ordinary read-only open of a FIFO waits for a
+ * writer that may never come: the live tree is the user's, anything can be
+ * at a path in it, and a resume that hangs on one is worse than a resume
+ * that refuses. The check is `fstat` on what was opened, not `lstat` on the
+ * name, so the answer is about the file the descriptor holds.
+ */
+export async function openRegularFile(file: string): Promise<fs.FileHandle | undefined> {
+	const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK).catch(error => {
+		if (isEnoent(error)) return undefined;
+		// A FIFO with no writer, or a device nobody is driving.
+		if (codeOf(error) === "ENXIO") return undefined;
+		throw error;
+	});
+	if (!handle) return undefined;
+	if ((await handle.stat()).isFile()) return handle;
+	await handle.close().catch(() => undefined);
+	return undefined;
 }
 
 /** The same, split into newline-delimited records. */
@@ -705,7 +809,12 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
  * Staging residue the archive happens to hold is not an artifact and is not
  * carried home; the sweep that reclaims a killed writer's temps owns it.
  */
-async function copyEntryDereferenced(source: string, destination: string, archiveRoot: string): Promise<void> {
+async function copyEntryDereferenced(
+	source: string,
+	destination: string,
+	archiveRoot: string,
+	notes: string[],
+): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is gone: nothing to carry, nothing to lose.
 		if (isEnoent(error)) return undefined;
@@ -735,20 +844,17 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
 		if (!existing) await fs.chmod(destination, stat.mode & 0o7777);
 		// Sorted, so a restore that stops part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry), archiveRoot);
+			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry), archiveRoot, notes);
 		}
 		return;
 	}
 	if (!stat.isFile()) return;
 	if (SESSION_STAGING_RE.test(path.basename(source))) return;
 	if (existing) {
-		const live = await fs.open(destination, "r").catch(error => {
-			if (isEnoent(error)) return undefined;
-			throw error;
-		});
+		const live = await openRegularFile(destination);
 		try {
-			const target = await live?.stat();
-			if (live && target?.isFile()) {
+			if (live) {
+				const target = await live.stat();
 				if (!(await survivesRemovalOf(destination, target, stat, archiveRoot))) {
 					throw new Error(
 						`${destination} is the archived ${source} itself, not a second copy of it; ` +
@@ -765,21 +871,36 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
 				`move that path aside and restore again`,
 		);
 	}
-	// Named so `omp gc` reclaims it: a killed copy leaves it behind, and the
-	// staging sweep already clears a writer's abandoned temps.
+	// A name of this restore's own making, created exclusively and held open
+	// until it is published — so nothing is written over, and the removal
+	// below can tell the file this run made from whatever else may be
+	// wearing its name by then. Named so `omp gc` reclaims it if this run
+	// dies before it gets there.
 	const tempPath = sessionStagingPath(destination);
+	let staged: fs.FileHandle | undefined;
+	let stagedStat: Stats | undefined;
 	try {
-		// As above: a leftover name can be a second name on real data, and
-		// `copyFile` onto it would truncate that data.
-		await fs.rm(tempPath, { force: true });
-		await fs.copyFile(source, tempPath);
+		staged = await fs.open(tempPath, "wx", stat.mode & 0o7777);
+		stagedStat = await staged.stat();
+		const archived = await fs.open(source, "r");
+		try {
+			await copyHandleWithDigest(archived, staged);
+		} finally {
+			await archived.close().catch(() => undefined);
+		}
+		await staged.chmod(stat.mode & 0o7777);
 		// `link`, not `rename`: a file someone created at the destination while
 		// this copy was being staged is their work, and a rename would write
 		// over it without anyone asking. `EEXIST` sends this entry down the
 		// "already holds something else" road on the next attempt instead.
 		await fs.link(tempPath, destination);
 	} finally {
-		await fs.rm(tempPath, { force: true });
+		try {
+			const note = await removeOwnFile(tempPath, stagedStat);
+			if (note) notes.push(note);
+		} finally {
+			await staged?.close().catch(() => undefined);
+		}
 	}
 }
 
@@ -794,11 +915,33 @@ async function copyEntryDereferenced(source: string, destination: string, archiv
  * phase, which an operator names and acknowledges, is the only thing that
  * takes one away.
  */
-async function copyTreeDereferenced(source: string, destination: string): Promise<void> {
+async function copyTreeDereferenced(source: string, destination: string, notes: string[]): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
-	await copyEntryDereferenced(source, destination, archiveRoot);
+	await copyEntryDereferenced(source, destination, archiveRoot, notes);
 	await assertLiveTreeHoldsArchive(source, destination, archiveRoot);
+}
+
+/**
+ * Remove `file` only while it is still the entry `created` describes.
+ *
+ * A path is a name, and a name can be made to point somewhere else between
+ * the moment a run creates a file and the moment it cleans up — at which
+ * point removing the name throws away somebody else's only copy. The
+ * descriptor the caller still holds pins the inode, so this comparison is
+ * about the file rather than about the name. Call it before closing that
+ * descriptor; it answers with the sentence to report when the path is no
+ * longer this run's to remove.
+ */
+export async function removeOwnFile(file: string, created: Stats | undefined): Promise<string | undefined> {
+	if (!created) return undefined;
+	const standing = await fs.lstat(file).catch(() => undefined);
+	if (!standing) return undefined;
+	if (standing.dev !== created.dev || standing.ino !== created.ino) {
+		return `${file} is no longer the file this run staged there, so it was left alone`;
+	}
+	await fs.rm(file, { force: true });
+	return undefined;
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */
@@ -1103,7 +1246,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
-	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirFlag(agentDir ?? getAgentDir())}`;
+	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirFlag(agentDir ?? agentDirOfArchivedPath(archiveFile) ?? getAgentDir())}`;
 	const leases = await tryAcquireRestoreLeases(owners);
 	const noOwners = (): Error =>
 		new Error(
@@ -1111,6 +1254,13 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				`Close it and run \`${restoreCommand}\` again.`,
 		);
 	if (!leases) throw noOwners();
+	// The record goes down before anything is published and comes up only
+	// when everything is home. Nothing that runs later has to work out from
+	// the live tree whether this finished, which is the question every
+	// earlier version of this got wrong in both directions.
+	const record = restoreRecordPath(archiveFile);
+	await fs.mkdir(path.dirname(record), { recursive: true });
+	await fs.writeFile(record, `${restoreCommand}\n`);
 	try {
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
@@ -1137,6 +1287,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		}
 
 		const notRestored: string[] = [];
+		const notes: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
 		// Neither copy goes. The restore publishes the session into the live
@@ -1149,7 +1300,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, notes);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(
@@ -1167,6 +1318,9 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				);
 			}
 		}
+		notRestored.push(...notes);
+		if (notRestored.length === 0) await fs.rm(record, { force: true });
+		else await fs.writeFile(record, `${restoreCommand}\n${notRestored.join("\n")}\n`);
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
 		leases.release();
@@ -1196,41 +1350,27 @@ export async function restoreArchivedSession(archiveFile: string, agentDir?: str
  * Whether the live session already has a copy of everything its retained
  * archive holds, so opening it needs no restore.
  *
- * Presence, not sameness. A restore keeps its archive, and a session that
- * carries on afterwards diverges from it by design — a child renames itself,
- * a tool rewrites its output — so comparing content here reads ordinary
- * living as an interrupted restore and refuses to open a complete session.
+ * The answer is the one a restore recorded, not one inferred from the live
+ * tree. Every inference was wrong in both directions at once. Content
+ * comparison read ordinary living — a child renaming itself, a tool
+ * rewriting its output — as an interrupted restore and refused to open a
+ * complete session. Presence read an artifact a restore had refused to
+ * write over as a finished one, so a resume that correctly refused became a
+ * silent success on the second attempt. A size test read a tool output a
+ * session had emptied as unfinished while an entry that is genuinely empty
+ * in the archive read as finished. There is no shape of the live tree that
+ * carries the fact, because the fact is about what the restore did.
  *
- * But a path existing is not the same as a copy being there. A restore
- * publishes a file or nothing, so a counterpart of a different kind — a
- * directory where the archive holds a file — or an empty one where the
- * archive holds bytes is a restore that refused, not a session that moved
- * on. Accepting those made a resume that correctly refused once succeed
- * silently the second time and open a session with an artifact it never
- * carried home, which is worse than either refusing twice or finishing.
- *
- * Asking before taking any lease is what keeps an ordinary open — a resume,
- * a fork, a render — from needing ownership it has no reason to want.
- * Reading directory entries rather than file contents is what keeps the cost
- * proportional to how many paths a session has rather than how many bytes.
+ * So the restore writes a record before it publishes anything and removes
+ * it only when every entry is home, and this is a question about that
+ * record: one stat, no ownership taken, and nothing for a later writer to
+ * fool. A live transcript that is not there at all is never complete, which
+ * is what sends a resume-by-id for a fully archived session down the
+ * restore route.
  */
 async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
-	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
-	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
-	if (!(await statIfPresent(archiveArtifacts))) return true;
-	try {
-		for (const file of await treeFiles(archiveArtifacts)) {
-			if (SESSION_STAGING_RE.test(path.basename(file))) continue;
-			const archived = await statIfPresent(file);
-			if (!archived?.isFile()) continue;
-			const live = await statIfPresent(path.join(liveArtifacts, path.relative(archiveArtifacts, file)));
-			if (!live?.isFile()) return false;
-			if (archived.size > 0 && live.size === 0) return false;
-		}
-		return true;
-	} catch {
-		return false;
-	}
+	if (!(await statIfPresent(sessionFile))) return false;
+	return (await statIfPresent(restoreRecordPath(archiveFile))) === undefined;
 }
 
 /**
@@ -1274,7 +1414,7 @@ export async function materializeSessionFile(sessionFile: string, agentDir?: str
 	const restored = await restoreArchivedSession(archived, agentDir);
 	if (restored.notRestored.length > 0) {
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
-		const retry = `omp gc --restore ${shellQuote(stem.slice(stem.lastIndexOf("_") + 1) || stem)} --apply${agentDirFlag(agentDir ?? getAgentDir())}`;
+		const retry = `omp gc --restore ${shellQuote(stem.slice(stem.lastIndexOf("_") + 1) || stem)} --apply${agentDirFlag(agentDir ?? agentDirOfArchivedPath(archived) ?? getAgentDir())}`;
 		throw new Error(
 			`Restored the transcript of "${archived}" to ${restored.sessionPath}, but could not restore ${restored.notRestored.join("; ")}. ` +
 				`The archive is kept; \`${retry}\` retries it once the path is clear.`,

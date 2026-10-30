@@ -17,6 +17,7 @@ import {
 	materializeSessionFile,
 	type RestoredSession,
 	restoreArchivedSession,
+	restoreRecordPath,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -55,6 +56,50 @@ async function writeSession(stamp: string, id: string, prompt = PROMPT): Promise
 	const file = path.join(dir, `${stamp}_${id}.jsonl`);
 	await Bun.write(file, sessionBody(id, prompt, root));
 	return file;
+}
+
+/**
+ * Fail a staging copy the way a full disk does, at the write rather than at
+ * `copyFile`: the archive and the restore copy through descriptors they own
+ * so the bytes they publish are the bytes they digested.
+ */
+function failStagingWrite(when: (target: string) => boolean, code = "ENOSPC") {
+	const realOpen = fs.open;
+	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!when(String(target))) return handle;
+		handle.write = (async () => {
+			throw Object.assign(new Error(`${code}: injected`), { code });
+		}) as typeof handle.write;
+		return handle;
+	}) as typeof fs.open);
+}
+
+/** A staging path below `root` that a copy is about to write. */
+function isStagingUnder(root: string): (target: string) => boolean {
+	return target => target.startsWith(root) && target.endsWith(".tmp");
+}
+/** Run `action` the first time a staging file for `match` is opened. */
+function onStagingOpen(match: string, action: () => Promise<void>) {
+	const realOpen = fs.open;
+	let fired = false;
+	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (!fired && String(target).endsWith(".tmp") && String(target).includes(match)) {
+			fired = true;
+			await action();
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
+}
+
+/**
+ * What a restore killed between the transcript and the artifact tree leaves:
+ * the live transcript back, the artifacts still archived, and the restore's
+ * own record of being unfinished still down.
+ */
+async function halfRestore(): Promise<void> {
+	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await Bun.write(restoreRecordPath(archiveFile), "omp gc --restore <id> --apply\n");
 }
 
 /** Age every live session and archive it, keeping the live copy. */
@@ -771,18 +816,12 @@ test("re-archiving a half-restored session keeps the artifacts only the archive 
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
 	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
 
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		if (String(source).startsWith(liveArtifacts)) {
-			throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
-		}
-		return await realCopyFile(source, destination, mode);
-	});
+	const open = failStagingWrite(isStagingUnder(archivedArtifacts));
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -1044,20 +1083,17 @@ test("archiving checks the bytes it is about to write, not the live file it read
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-ARCHIVED-ONLY-SUFFIX\n");
 
-	// The live file loses the archived suffix after it was staged for the copy.
-	// The comparison has to run on what is being written, so this is refused.
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		if (String(source) === path.join(liveArtifacts, "tool.log")) {
-			await Bun.write(String(source), "PREFIX");
-		}
-		return await realCopyFile(source, destination, mode);
+	// The live file loses the archived suffix before the copy reads it. What
+	// the archive compares is what this run copied, so the shorter live file
+	// is refused rather than written over the longer archived one.
+	const open = onStagingOpen("tool.log", async () => {
+		await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX");
 	});
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -1162,19 +1198,14 @@ test("a conflict that appears after an earlier artifact copied still keeps its a
 
 	// The second file's archived copy grows after the first one has been
 	// published, so a decision taken before the walk started would be stale.
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		const result = await realCopyFile(source, destination, mode);
-		if (String(source) === path.join(liveArtifacts, "a-first.log")) {
-			await Bun.write(path.join(archivedArtifacts, "z-later.log"), "BASE-ARCHIVED-ONLY");
-		}
-		return result;
+	const open = onStagingOpen("a-first.log", async () => {
+		await Bun.write(path.join(archivedArtifacts, "z-later.log"), "BASE-ARCHIVED-ONLY");
 	});
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -1194,16 +1225,12 @@ test("a failed archive copy keeps archive-only entries below a symlinked archive
 	await Bun.write(path.join(liveArtifacts, "nested", "shared.log"), "SHARED");
 	await Bun.write(path.join(liveArtifacts, "nested", "new.log"), "NEW");
 
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		if (String(source).endsWith("new.log")) throw new Error("ENOSPC injected");
-		return await realCopyFile(source, destination, mode);
-	});
+	const open = failStagingWrite(target => target.includes("new.log") && target.endsWith(".tmp"));
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -1216,14 +1243,12 @@ test("a failed archive copy keeps archive-only entries below a symlinked archive
 test("a first archive that runs out of space leaves the live session whole", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "only.log"), "LIVE-ARTIFACT");
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async () => {
-		throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
-	});
+	const open = failStagingWrite(target => target.endsWith(".tmp"));
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	// The transcript's own copy landed before the artifact copy ran out of
@@ -1305,17 +1330,14 @@ test("a restore does not write over a file that appeared while it was staging", 
 	await archiveEverything();
 	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
 
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		const result = await realCopyFile(source, destination, mode);
+	const open = onStagingOpen("tool.log", async () => {
 		await Bun.write(path.join(liveArtifacts, "tool.log"), "NEW USER WORK");
-		return result;
 	});
 	let restored: RestoredSession | undefined;
 	try {
 		restored = await restoreArchivedSession(archiveFile, root);
 	} finally {
-		copyFile.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(restored?.artifactsRestored).toBe(false);
@@ -1355,17 +1377,16 @@ test("a live artifact rewritten after it was staged is kept, not deleted", async
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
 
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		const result = await realCopyFile(source, destination, mode);
-		if (String(source).endsWith("tool.log")) await Bun.write(String(source), "NEW WORK");
-		return result;
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (String(to).endsWith("tool.log")) await Bun.write(path.join(liveArtifacts, "tool.log"), "NEW WORK");
 	});
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		link.mockRestore();
 	}
 
 	expect(result.archive?.errors.join("\n")).toContain("was kept:");
@@ -1578,21 +1599,22 @@ test("a rollback leaves alone a name this run created and something else replace
 
 	// `a.log` is published, then replaced by someone else's file, and the run
 	// then fails. The replacement is not this run's to undo.
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		if (String(source).endsWith("z.log")) {
-			const replacement = path.join(root, "someone-elses-file");
-			await Bun.write(replacement, "NEW USER WORK");
-			await fs.rename(replacement, path.join(archivedArtifacts, "a.log"));
-			throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
-		}
-		return await realCopyFile(source, destination, mode);
+	const open = onStagingOpen("z.log", async () => {
+		const replacement = path.join(root, "someone-elses-file");
+		await Bun.write(replacement, "NEW USER WORK");
+		await fs.rename(replacement, path.join(archivedArtifacts, "a.log"));
+	});
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		if (String(to).endsWith("z.log")) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+		await realLink(from, to);
 	});
 	let result: GcResult;
 	try {
 		result = await archiveEverything();
 	} finally {
-		copyFile.mockRestore();
+		link.mockRestore();
+		open.mockRestore();
 	}
 
 	expect(result.archive?.archived).toBe(0);
@@ -1761,29 +1783,29 @@ test("a restore does not write through a staging name left on real data", async 
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "ONLY ARCHIVED COPY");
 	await archiveEverything();
-	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	await halfRestore();
 	const movedAside = path.join(root, "moved-aside.log");
+	await Bun.write(movedAside, "SOMEONE ELSE'S DATA");
 
-	// What a crashed publication leaves: the staging name still on the file it
-	// published, with the destination moved elsewhere. The guard that takes
-	// that name off its data is the one thing between the restore and emptying
-	// the moved-aside copy, so the collision is forced where the guard runs.
-	const realRm = fs.rm;
-	const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
-		const staged = String(target);
-		if (staged.startsWith(liveArtifacts) && staged.endsWith(".tmp") && !(await Bun.file(staged).exists())) {
-			await Bun.write(movedAside, "SOMEONE ELSE'S DATA");
-			await fs.link(movedAside, staged);
-		}
-		return await realRm(target, options);
+	// The staging name is taken off this restore's file and put on someone
+	// else's, between publication and cleanup. A cleanup that removes the
+	// name empties data that exists nowhere else.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (!String(from).includes("tool.log")) return;
+		await fs.rm(String(from), { force: true });
+		await realLink(movedAside, String(from));
 	});
+	let restored: RestoredSession | undefined;
 	try {
-		await restoreArchivedSession(archiveFile, root);
+		restored = await restoreArchivedSession(archiveFile, root);
 	} finally {
-		rm.mockRestore();
+		link.mockRestore();
 	}
 
 	expect(await Bun.file(movedAside).text()).toBe("SOMEONE ELSE'S DATA");
+	expect(restored?.notRestored.join("\n")).toContain("no longer the file this run staged");
 });
 
 test("a failed archive leaves no empty directory behind its own staging residue", async () => {
@@ -2385,8 +2407,9 @@ test("resuming a session whose artifacts are still archived finishes the restore
 	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
 	await archiveEverything();
 	// What a kill between publishing the transcript and carrying the tree
-	// home leaves: the live transcript back, the artifacts still archived.
-	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// home leaves: the live transcript back, the artifacts still archived,
+	// and the restore's record of being unfinished still down.
+	await halfRestore();
 
 	const materialized = await materializeSessionFile(sessionFile, root);
 
@@ -2399,10 +2422,9 @@ test("the resume route finishes a half restore rather than opening a session wit
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
 	await archiveEverything();
-	// What a kill between publishing the transcript and carrying the tree
-	// home leaves. Resume-by-id resolves to the live `.jsonl`, not the
-	// archive, so a materialize that only looks at `.gz` never runs.
-	await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
+	// The same half restore. Resume-by-id resolves to the live `.jsonl`, not
+	// the archive, so a materialize that only looks at `.gz` never runs.
+	await halfRestore();
 
 	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
 		suppressBreadcrumb: true,
@@ -2436,29 +2458,28 @@ test("a complete session that carried on since it was archived still opens", asy
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
-test("a truncated stage is not published as an archived artifact", async () => {
+test("a live file emptied while it is being archived leaves the archive holding what was read", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+	const live = path.join(liveArtifacts, "tool.log");
+	await Bun.write(live, "FIRST");
 
-	// Emptied after it is staged and before it is read. Proving the stage is
-	// contained in the source accepts that; proving it is the source does not.
-	const realCopyFile = fs.copyFile;
-	const copyFile = spyOn(fs, "copyFile").mockImplementation(async (source, destination, mode) => {
-		const result = await realCopyFile(source, destination, mode);
-		if (String(destination).includes("tool.log")) await fs.truncate(String(destination), 0);
-		return result;
+	// Emptied in place after the copy has read it. An archive that measured
+	// the source again here would publish nothing and call it archived.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		if (String(from).includes("tool.log")) await fs.truncate(live, 0);
+		await realLink(from, to);
 	});
 	let result: GcResult;
 	try {
-		result = await archiveEverything();
+		result = await archiveOnly();
 	} finally {
-		copyFile.mockRestore();
+		link.mockRestore();
 	}
 
-	expect(result.archive?.archived).toBe(0);
-	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).exists()).toBe(false);
-	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+	expect(result.archive?.archived).toBe(1);
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("FIRST");
 });
 
 test("a staging failure leaves no temp behind", async () => {
@@ -2496,10 +2517,9 @@ for (const [shape, plant] of [
 		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 		await Bun.write(path.join(liveArtifacts, "b.log"), "SECOND");
 		await archiveEverything();
-		await Bun.write(sessionFile, Bun.gunzipSync(await fs.readFile(archiveFile)));
-		// What the restore this resume is finishing would have left: one
-		// artifact carried home, and in the other's place something it
-		// refused to write over. A path is there either way.
+		await halfRestore();
+		// What a restore killed part-way leaves: one artifact carried home,
+		// and in the other's place something it refused to write over.
 		await fs.mkdir(liveArtifacts, { recursive: true });
 		await plant(path.join(liveArtifacts, "b.log"));
 
@@ -2518,48 +2538,66 @@ for (const [shape, plant] of [
 	});
 }
 
-/** `fs.open`, with the staging descriptor emptied after its `n`th `stat()`. */
-function truncateStagedAfterStat(n: number) {
-	const realOpen = fs.open;
-	return spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-		if (!String(target).endsWith(".tmp")) return handle;
-		let stats = 0;
-		const realStat = handle.stat.bind(handle);
-		handle.stat = (async (...args: unknown[]) => {
-			const result = await (realStat as (...a: unknown[]) => Promise<Stats>)(...args);
-			if (++stats === n) await fs.truncate(String(target), 0);
-			return result;
-		}) as typeof handle.stat;
-		return handle;
-	}) as typeof fs.open);
-}
+test("a live file rewritten in place while it is being archived does not change what is archived", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	const live = path.join(liveArtifacts, "tool.log");
+	await Bun.write(live, "FIRST");
 
-for (const [when, n] of [
-	["before it is measured", 1],
-	["after it is measured and before it is read", 2],
-] as const) {
-	test(`a stage emptied ${when} is not published as an archived artifact`, async () => {
-		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-		const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-		await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
-
-		const open = truncateStagedAfterStat(n);
-		let result: GcResult;
-		try {
-			result = await archiveEverything();
-		} finally {
-			open.mockRestore();
+	// Same length, same inode, and on a one-second-resolution filesystem the
+	// same size, mtime, ctime and device too — there is no stat comparison
+	// that sees this. The copy does not need one: it publishes the bytes it
+	// read and digested.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		if (String(to).endsWith("tool.log")) {
+			const writer = await fs.open(live, "r+");
+			await writer.write(Buffer.from("WRONG"), 0, 5, 0);
+			await writer.close();
 		}
-
-		// Nothing is empty here by accident: an emptied stage reads as the
-		// prefix of every file there is, so containment alone would publish
-		// it and report it archived.
-		expect(result.archive?.archived).toBe(0);
-		expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).exists()).toBe(false);
-		expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
+		await realLink(from, to);
 	});
-}
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(result.archive?.archived).toBe(1);
+	expect(result.archive?.errors).toEqual([]);
+	// Either reading is defensible; publishing `WRONG` and calling it a copy
+	// of what was read is not.
+	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).text()).toBe("FIRST");
+	expect(await Bun.file(live).text()).toBe("WRONG");
+});
+
+test("a staging name rebound to someone else's file is left alone, not deleted", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+	const theirs = path.join(root, "theirs.log");
+	await Bun.write(theirs, "WRONG");
+
+	// The staging path is rebound to a file whose bytes exist nowhere else,
+	// after the entry is published and before the cleanup runs. Removing a
+	// path by its name is how that file dies.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (!String(from).includes("tool.log")) return;
+		await fs.rm(String(from), { force: true });
+		await realLink(theirs, String(from));
+	});
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		link.mockRestore();
+	}
+
+	expect(await Bun.file(theirs).text()).toBe("WRONG");
+	expect(result.archive?.errors.join("\n")).toContain("no longer the file this run staged");
+});
 
 test("a staging close that fails still leaves no temp behind", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
@@ -2680,4 +2718,68 @@ test("a printed recovery command survives an agent directory with a space in it"
 	// One shell word, or the reader's terminal looks in "…/agent" and the
 	// recovery reports success for a session it never touched.
 	expect(collectGcErrors(result).join("\n")).toContain(`--agent-dir '${spaced}'`);
+});
+test("a FIFO where an artifact belongs is refused rather than waited on", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ARCHIVED");
+	await archiveEverything();
+	await halfRestore();
+	await fs.mkdir(liveArtifacts, { recursive: true });
+	await Bun.spawn(["mkfifo", path.join(liveArtifacts, "tool.log")]).exited;
+
+	// An ordinary read-only open of a FIFO waits for a writer that never
+	// comes; this test would then end as a timeout rather than a refusal.
+	const restored = await restoreArchivedSession(archiveFile, root);
+
+	expect(restored.notRestored.join("\n")).toContain("already holds something else");
+});
+
+test("a tool output the session empties after a restore does not refuse the next resume", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	// The session carries on and truncates its own tool output. The archive
+	// still holds eight bytes at that path; a size test reads that as an
+	// unfinished restore and refuses to open a session nothing is wrong with.
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "");
+
+	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	await manager.close();
+
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("");
+});
+
+test("an entry that is empty in the archive restores and opens", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "empty.log"), "");
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "ORIGINAL");
+	await archiveEverything();
+
+	const materialized = await materializeSessionFile(archiveFile, root);
+
+	expect(materialized).toBe(sessionFile);
+	expect(await Bun.file(path.join(liveArtifacts, "empty.log")).exists()).toBe(true);
+	expect(await fs.stat(path.join(liveArtifacts, "empty.log"))).toHaveProperty("size", 0);
+	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("ORIGINAL");
+});
+
+test("archiving a session again clears a restore record an earlier attempt left", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+	await archiveEverything();
+	await halfRestore();
+	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
+
+	expect((await archiveOnly()).archive?.archived).toBe(1);
+
+	// The archive is the live session's own copy again, so the unfinished
+	// restore it records is about a state that no longer exists.
+	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(false);
+	const manager = await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
+		suppressBreadcrumb: true,
+	});
+	await manager.close();
 });

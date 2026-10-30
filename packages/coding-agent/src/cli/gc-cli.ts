@@ -43,6 +43,12 @@ import {
 	listArchivedSessionFiles,
 	agentDirFlag,
 	archivedHandleIsHeldBy,
+	type CopiedBytes,
+	copyHandleWithDigest,
+	digestOfHandle,
+	handleBeginsWith,
+	removeOwnFile,
+	restoreRecordPath,
 	shellQuote,
 	archivedHandleIsPrefixOfLive,
 	isSamePath,
@@ -1160,6 +1166,8 @@ interface ArchiveCopyState {
 	created: ArchiveCreation[];
 	/** The `--agent-dir` suffix an instruction this copy prints needs to be runnable. */
 	recovery: string;
+	/** What this copy left alone because it was no longer its own to remove. */
+	notes: string[];
 }
 
 /**
@@ -1221,56 +1229,50 @@ async function publishArtifactIntoArchive(
 	sourceRoot: string,
 	state: ArchiveCopyState,
 ): Promise<void> {
+	// The stage is this run's own file, at a name of its own making, created
+	// exclusively and held open until the entry is published — and what it
+	// holds is known because this run wrote it and digested the bytes as
+	// they went by. That digest is the whole proof. Every version of this
+	// that asked the question a second time — stat the source again, read
+	// the stage back, compare sizes and timestamps — was asking at T2 about
+	// a fact established at T1, and on a filesystem with one-second
+	// timestamps and reusable inodes an in-place rewrite of the same length
+	// leaves size, mtime, ctime, device and inode all identical. There is no
+	// stat comparison that can be made sound there, and none is needed: the
+	// bytes published are the bytes copied.
+	//
+	// The archived file still has to be read, because the question about it
+	// — does the archive already hold this, or something else — is about a
+	// file this run did not write.
 	const tempPath = sessionStagingPath(destination);
-	// Staged exclusively, then held open until the entry is published. Both
-	// halves matter. `COPYFILE_EXCL` makes the creation this run's own; the
-	// descriptor is what makes the identity mean anything afterwards, because
-	// closing it and reopening by name lets the filesystem hand the same inode
-	// number back out to a replacement, and a stat that then matches is
-	// matching a different file. While it is open the inode cannot be reused.
-	//
-	// What the identity cannot see is the file being emptied in place, which
-	// keeps the inode and so passes every name and inode test there is. So
-	// the stage is proved by what it holds, and proved at the moment it is
-	// published rather than once at the start: a size measured earlier is a
-	// claim about a file that has since been read again, and containment
-	// alone is no help, because a stage truncated to nothing reads as the
-	// empty prefix of everything. Hence all three together — the size from a
-	// fresh stat of the descriptor, the bytes, and a second stat proving the
-	// descriptor did not change underneath the read.
-	//
-	// Everything from the staging write on is inside the cleanup, so a copy
-	// that fails part-way or a descriptor that cannot be opened leaves no
-	// temp behind.
-	let stagedHandle: fs.FileHandle | undefined;
+	let staged: fs.FileHandle | undefined;
+	let stagedStat: Stats | undefined;
 	try {
-		await fs.rm(tempPath, { force: true });
-		await fs.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
-		stagedHandle = await fs.open(tempPath, "r");
-		const held = stagedHandle;
-		const staged = await held.stat();
-		const stagedChanged = `${tempPath} was replaced while ${source} was being archived; run \`omp gc --archive\` again`;
-		const stagedIsSource = async (): Promise<boolean> => {
-			const before = await held.stat();
-			// Measured against the source as it stands, because a live file
-			// that changed since this run stat'd it is the live file
-			// changing, not the stage being replaced.
-			const live = await fs.stat(source).catch(() => undefined);
-			if (!live || before.size !== live.size) return false;
-			if (!(await archivedHandleIsHeldBy(held, before, source))) return false;
-			const after = await held.stat();
-			if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
-			const standing = await fs.lstat(tempPath).catch(() => undefined);
-			return standing?.dev === before.dev && standing.ino === before.ino;
-		};
+		staged = await fs.open(tempPath, "wx+", sourceStat.mode & 0o7777).catch(error => {
+			if (codeOf(error) !== "EEXIST") throw error;
+			throw new Error(
+				`${tempPath} is already there, so ${source} was left where it is; ` +
+					`\`omp gc --apply\` reclaims staging files an interrupted run left behind`,
+			);
+		});
+		stagedStat = await staged.stat();
+		const live = await fs.open(source, "r");
+		let copied: CopiedBytes;
+		try {
+			copied = await copyHandleWithDigest(live, staged);
+		} finally {
+			await live.close().catch(() => undefined);
+		}
+		// `open` applies the umask; the archived copy keeps the live file's
+		// own permissions, so a deliberately private artifact stays private.
+		await staged.chmod(sourceStat.mode & 0o7777);
 		const archived = await fs.open(destination, "r").catch(error => {
 			if (codeOf(error) === "ENOENT") return undefined;
 			throw error;
 		});
 		if (!archived) {
-			if (!(await stagedIsSource())) throw new Error(stagedChanged);
 			await fs.link(tempPath, destination);
-			state.created.push({ path: destination, dev: staged.dev, ino: staged.ino });
+			state.created.push({ path: destination, dev: stagedStat.dev, ino: stagedStat.ino });
 			return;
 		}
 		try {
@@ -1281,51 +1283,53 @@ async function publishArtifactIntoArchive(
 						`archiving it would write the archive over its own file`,
 				);
 			}
-			if (
-				!verified.isFile() ||
-				!(await survivesSourceRemoval(destination, sourceRoot)) ||
-				!(await archivedHandleIsHeldBy(archived, verified, tempPath))
-			) {
+			const conflict = (): Error => {
 				const stem = path.basename(sourceRoot);
 				const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
-				throw new Error(
+				return new Error(
 					`the archive already holds ${destination}, and it is not what archiving ${source} would write; ` +
 						`the archive is left as it is. Bring the session home with ` +
 						`\`omp gc --restore ${shellQuote(target)} --apply${state.recovery}\` and archive it again, ` +
 						`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
 				);
+			};
+			if (!verified.isFile() || !(await survivesSourceRemoval(destination, sourceRoot))) throw conflict();
+			const held = await digestOfHandle(archived);
+			// Same length settles it either way: the archive already holds
+			// exactly these bytes, or it holds different ones and nothing
+			// here may write over them.
+			if (held.size === copied.size) {
+				if (held.hash === copied.hash) return;
+				throw conflict();
 			}
-			// The archived copy is held in full by what would be written. Same
-			// length means the archive already holds exactly this; longer on
-			// the live side — what a restore leaves behind, since it keeps its
-			// copy — means the longer replaces the shorter, which loses nothing
-			// because the shorter is inside it.
-			if (verified.size === (await stagedHandle.stat()).size) return;
-			// The content is read first, through the descriptor that was
-			// examined, and the name is settled last — so a file replaced
-			// after the content read is caught by the inode comparison rather
-			// than overwritten, and one updated in place, which no inode
-			// comparison can see, is caught by the read. What survives is the
-			// gap between the last of them and the rename.
-			if (!(await archivedHandleIsHeldBy(archived, verified, tempPath))) {
-				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
-			}
+			// A shorter archived copy is only superseded when it is how the
+			// copied bytes begin — what a restore leaves behind, since it
+			// keeps its copy and the session carries on. Anything else is a
+			// different file wearing the name.
+			if (held.size > copied.size || !(await handleBeginsWith(staged, archived))) throw conflict();
 			const standing = await statIfPresent(destination);
 			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
 				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
 			}
-			if (!(await stagedIsSource())) throw new Error(stagedChanged);
 			await fs.rename(tempPath, destination);
 		} finally {
 			await archived.close().catch(() => undefined);
 		}
 		return;
 	} finally {
-		// A close that rejects must not take the removal with it: the
-		// descriptor is this run's own, and a staging file left behind is a
-		// file the next run has to refuse.
-		await stagedHandle?.close().catch(() => undefined);
-		await fs.rm(tempPath, { force: true });
+		// Removed by identity, never by name. A staging path someone rebinds
+		// between the copy and the cleanup is their file at that moment, and
+		// deleting it would throw away bytes that exist nowhere else — so
+		// what goes is the entry this run created, proved by the descriptor
+		// it still holds, and anything else is left alone and reported. The
+		// close comes last for the same reason: while it is open the inode
+		// cannot come back round under another name.
+		try {
+			const note = await removeOwnFile(tempPath, stagedStat);
+			if (note) state.notes.push(note);
+		} finally {
+			await staged?.close().catch(() => undefined);
+		}
 	}
 }
 
@@ -1540,16 +1544,16 @@ async function copyArtifactsTree(
 	source: string,
 	destination: string,
 	recovery: string,
-): Promise<{ brokenLinks: number }> {
+): Promise<{ brokenLinks: number; notes: string[] }> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const state: ArchiveCopyState = { brokenLinks: 0, created: [], recovery };
+	const state: ArchiveCopyState = { brokenLinks: 0, created: [], recovery, notes: [] };
 	try {
 		await copyArtifactEntryIntoArchive(source, destination, source, state);
 	} catch (error) {
 		await removeTreeAdditions(state.created);
 		throw error;
 	}
-	return { brokenLinks: state.brokenLinks };
+	return { brokenLinks: state.brokenLinks, notes: state.notes };
 }
 
 /**
@@ -1584,7 +1588,7 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
  * A destination that already holds this very transcript is a move a killed
  * run did not finish, and is finished here rather than reported forever.
  */
-async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ brokenLinks: number }> {
+async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ brokenLinks: number; notes: string[] }> {
 	const sourceSession = candidate.session.path;
 	const destSession = candidate.destinationPath;
 	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
@@ -1636,10 +1640,17 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	// An archive that already holds this transcript needs no second copy of
 	// it; its artifact tree still does.
 	if (!alreadyArchived) await gzipSessionFile(sourceSession, destSession, supersedes);
+	const notes: string[] = [];
 	if (await pathExists(sourceArtifacts)) {
-		brokenLinks = (await copyArtifactsTree(sourceArtifacts, destArtifacts, candidate.recovery)).brokenLinks;
+		const copied = await copyArtifactsTree(sourceArtifacts, destArtifacts, candidate.recovery);
+		brokenLinks = copied.brokenLinks;
+		notes.push(...copied.notes);
 	}
-	return { brokenLinks };
+	// The archive this run just wrote is the live session's own copy again,
+	// so an earlier restore's unfinished record describes a state that no
+	// longer exists and must not refuse the next open.
+	await fs.rm(restoreRecordPath(destSession), { force: true });
+	return { brokenLinks, notes };
 }
 
 function sqliteNumber(value: number | bigint | null | undefined): number {
@@ -1829,9 +1840,10 @@ async function runArchiveGc(
 			}
 			result.wouldArchive += 1;
 			if (!options.apply) continue;
-			const { brokenLinks } = await copySessionIntoArchive(candidate);
+			const { brokenLinks, notes } = await copySessionIntoArchive(candidate);
 			result.archived += 1;
 			result.brokenLinks += brokenLinks;
+			result.errors.push(...notes);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		} finally {
