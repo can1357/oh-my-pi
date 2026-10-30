@@ -214,6 +214,14 @@ The `speech` role accepts TTS catalog models and the `dictation` role accepts ST
 
 Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model. Speaking rate is likewise split: `tts.localSpeed` for the `tts` tool and `omp say`, `speech.speed` for vocalization (both default `1`, clamped to `0.5`–`2.5`).
 
+For automatic read-aloud, set `speech.enabled: true`. `speech.mode: yield` speaks the complete final reply; `speech.mode: digest` first asks the configured tiny/smol model for a short spoken summary, while leaving the displayed reply unchanged. This adds one model completion before audio starts. If summary generation fails, omp speaks the original reply; if the model deliberately returns no summary, nothing is spoken.
+
+```yaml
+speech:
+   enabled: true
+   mode: digest
+```
+
 ### Speech to text
 
 Use these canonical catalog model ids:

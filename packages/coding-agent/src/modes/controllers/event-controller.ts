@@ -353,18 +353,18 @@ export class EventController {
 	// keeps working — the WeakSet makes the coalesced path speak each delta exactly
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
+	#speechEnhancer: SpeechEnhancer | null = null;
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
 
 	constructor(private ctx: InteractiveModeContext) {
-		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
-		// tiny/smol role with this session's registry and credentials; the
-		// vocalizer falls back to mechanical cleanup when unset. Tolerates
-		// partial contexts (tests, minimal embeddings) by wiring null.
+		// Enhanced speech and digest summaries use this session's tiny/smol
+		// model, registry, and credentials. The vocalizer uses it for streamed
+		// rewrites; digest mode calls it after the completed assistant turn.
 		const session = ctx.session;
 		this.#detachToolApprovalPreviewWaiter = session?.extensionRunner?.setToolApprovalPreviewWaiter(toolCallId =>
 			this.#waitForToolApprovalPreview(toolCallId),
 		);
-		vocalizer.setEnhancer(
+		this.#speechEnhancer =
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
 						settings: session.settings,
@@ -372,8 +372,8 @@ export class EventController {
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
 					})
-				: null,
-		);
+				: null;
+		vocalizer.setEnhancer(this.#speechEnhancer);
 		this.#streamingReveal = new StreamingRevealController({
 			// Extension text renderers get the full text so far on each drawn update (deltas within one
 			// frame are coalesced), never a partly revealed prefix from the typing reveal.
@@ -1535,10 +1535,9 @@ export class EventController {
 	}
 
 	/**
-	 * Speak streamed assistant output as a side effect of the turn. The mode
-	 * decides which deltas feed the vocalizer (the vocalizer re-checks enabled):
-	 * assistant|all speak text; all also speaks thinking; yield speaks nothing
-	 * live (the final message is spoken at turn end).
+	 * Speak streamed assistant output as a side effect of the turn. Assistant/all
+	 * modes feed deltas live; yield and digest wait until the final assistant
+	 * message at turn end.
 	 */
 	#vocalizeDelta(event: Extract<AgentSessionEvent, { type: "message_update" }>): void {
 		if (!cfgSpeechEnabled.get(settings)) return;
@@ -1552,20 +1551,28 @@ export class EventController {
 	}
 
 	/**
-	 * End-of-turn vocalization: yield mode speaks the final assistant message in
-	 * one shot here (the only mode that is post-hoc); every other mode just makes
-	 * sure the live buffer's trailing partial gets flushed.
+	 * End-of-turn vocalization: yield speaks the final assistant message and
+	 * digest summarizes it first. Both fall back to the original text if the
+	 * optional summary model is unavailable or fails.
 	 */
-	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+	async #handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): Promise<void> {
 		if (!cfgSpeechEnabled.get(settings)) return;
-		if (cfgSpeechMode.get(settings) !== "yield") {
+		const mode = cfgSpeechMode.get(settings);
+		if (mode !== "yield" && mode !== "digest") {
 			vocalizer.flush();
 			return;
 		}
 		if (event.message.role !== "assistant") return;
 		if (event.message.stopReason === "aborted") return; // interrupted: never speak the aborted partial
 		const text = extractTextContent(event.message);
-		if (text) vocalizer.speak(text);
+		if (!text) return;
+		if (mode === "digest") {
+			const summary = await this.#speechEnhancer?.summarize(text);
+			if (summary === null || summary === undefined) vocalizer.speak(text);
+			else if (summary) vocalizer.speak(summary);
+		} else {
+			vocalizer.speak(text);
+		}
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {

@@ -53,18 +53,19 @@ export const cfgSpeechEnabled = register({
 export const cfgSpeechMode = register({
 	id: "speech.mode",
 	type: "enum",
-	values: ["all", "assistant", "yield"] as const,
+	values: ["all", "assistant", "yield", "digest"] as const,
 	default: "assistant",
 	ui: {
 		tab: "providers",
 		group: "Services",
 		label: "Speech Vocalization Mode",
 		description:
-			"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
+			"What to speak: all = assistant messages + thinking; assistant = messages only; yield = final message at turn end; digest = a short summary of the final reply",
 		options: [
 			{ value: "all", label: "All (messages + thinking)" },
 			{ value: "assistant", label: "Assistant messages" },
 			{ value: "yield", label: "Final message only" },
+			{ value: "digest", label: "Short spoken summary" },
 		],
 	},
 });
