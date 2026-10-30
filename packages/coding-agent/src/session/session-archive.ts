@@ -1,21 +1,22 @@
 /**
  * The cold archive `omp gc --archive` writes to, and the way back out of it.
  *
- * `gc --archive` gzips a transcript to
- * `<agentDir>/archive/sessions/<bucket>/<name>.jsonl.gz` and moves its
- * artifact tree beside it. Nothing else in the agent writes there. A session
- * stays resumable because every read path that misses in the live sessions
- * tree falls back to this module, and because a session is restored to its
- * original path before any component opens it for writing — a `.jsonl.gz` is
- * never handed to the session writer.
+ * `gc --archive` copies a transcript, gzipped, to
+ * `<agentDir>/archive/sessions/<bucket>/<name>.jsonl.gz` and copies its
+ * artifact tree beside it; the live copy stays until `gc --reclaim` gives it
+ * up. Nothing else in the agent writes there. A session stays resumable
+ * because every read path that misses in the live sessions tree falls back
+ * to this module, and because a session is restored to its original path
+ * before any component opens it for writing — a `.jsonl.gz` is never handed
+ * to the session writer.
  *
  * The archive root is routinely a symlink onto another filesystem, so every
  * walk follows symlinks and nothing here renames or hard-links across the two
  * roots.
  *
- * A restore moves a session between the two trees in two steps (transcript,
- * then artifact tree), which is also what the archive phase does in reverse,
- * so both hold `<agentDir>/gc.lock` while they do it.
+ * A restore copies a session into the live tree in two steps (transcript,
+ * then artifact tree), the reverse of what the archive phase does, so both
+ * hold `<agentDir>/gc.lock` while they do it.
  */
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
@@ -23,6 +24,7 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
+import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderId, sessionHeaderIdFromBytes } from "./session-loader";
@@ -199,66 +201,48 @@ export async function inflateArchivedBytes(file: string): Promise<Uint8Array> {
 }
 
 /**
- * Inflate `source` onto `destination` through a temp file in the destination's
- * own directory, and return the bytes written. A truncated archive or a full
- * disk then leaves the destination untouched instead of a zero-length
- * transcript — which is exactly what a hand-written `gunzip -c … > …`
- * produces. The temp file shares the destination's directory so the publish
- * is a link, which the archive and the sessions tree being on different
- * filesystems would otherwise rule out.
+ * Inflate `source` onto `destination` through a staging directory this run
+ * mints beside the destination, and return the bytes written. A truncated
+ * archive or a full disk then leaves the destination untouched instead of a
+ * zero-length transcript — which is exactly what a hand-written
+ * `gunzip -c … > …` produces. The stage shares the destination's filesystem
+ * so the publish is a link, which the archive and the sessions tree being on
+ * different filesystems would otherwise rule out.
  *
  * `link`, not `rename`: a transcript only comes out of the archive onto a
  * path nothing holds, so a file that appeared there in the meantime is
- * someone's work. `EEXIST` says so instead of writing over it.
+ * someone's work. `EEXIST` says so instead of writing over it. What the link
+ * left at that name is read back by {@link publishedIsStaged}.
  */
 export async function inflateArchivedTranscript(
 	source: string,
 	destination: string,
+	ledger: string,
 	notes: string[] = [],
 ): Promise<number> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const ground = await mintStagingGround(destination);
-	const tempPath = ground.file;
-	let handle: fs.FileHandle | undefined;
-	let staged: Stats | undefined;
+	// A directory this run mints and records, so the stage is a file of this
+	// run's own making and a kill leaves a record to reclaim it by.
+	const ground = await mintStagingGround(destination, ledger);
 	try {
-		// Inside a directory this run minted, so the name this publication
-		// reads from is not one anybody else can bind, and the cleanup is
-		// that directory rather than a name a check had to vouch for.
-		handle = await fs.open(tempPath, "wx");
-		staged = await handle.stat();
-		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), handle);
-		const landed = await fs.lstat(tempPath).catch(() => undefined);
-		if (landed?.dev !== staged.dev || landed.ino !== staged.ino) {
-			throw new Error(`${tempPath} was replaced while the transcript was being written`);
+		const written = await inflateIntoHandleWithDigest(Bun.file(source).stream(), ground.handle);
+		const landed = await fs.lstat(ground.file).catch(() => undefined);
+		if (landed?.dev !== ground.created.dev || landed.ino !== ground.created.ino) {
+			throw new Error(`${ground.file} was replaced while the transcript was being written`);
 		}
-		await fs.link(tempPath, destination);
-		// What was published, read back through a descriptor: non-blocking
-		// against a FIFO, `fstat` for a regular file, `lstat` against a
-		// symlink onto the very file just written, and then the digest,
-		// which is the only one of the four that is about bytes.
-		const published = await openRegularFile(destination);
-		if (!published) throw new Error(`${destination} is not the transcript this restore wrote`);
-		try {
-			if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) {
-				throw new Error(`${destination} is not the transcript this restore wrote`);
-			}
-			const back = await digestOfHandle(published);
-			if (back.hash !== written.hash || back.size !== written.size) {
-				throw new Error(`${destination} is not the transcript this restore wrote`);
-			}
-		} finally {
-			await published.close().catch(() => undefined);
+		await fs.link(ground.file, destination);
+		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
+			throw new Error(`${destination} is not the transcript this restore wrote, so it was left as it is`);
 		}
 		return written.size;
 	} catch (error) {
 		throw archiveReadError(source, error);
 	} finally {
 		try {
-			const note = await removeStagingGround(ground, staged);
+			const note = await removeStagingGround(ground);
 			if (note) notes.push(note);
 		} finally {
-			await handle?.close().catch(() => undefined);
+			await ground.handle.close().catch(() => undefined);
 		}
 	}
 }
@@ -458,7 +442,7 @@ async function* linesOf(source: AsyncIterable<Uint8Array>): AsyncGenerator<strin
  * the one being read and stays open for the next comparison — a read stream
  * over a `FileHandle` closes it when it ends.
  */
-async function* bytesOfHandle(handle: fs.FileHandle): AsyncGenerator<Uint8Array> {
+export async function* bytesOfHandle(handle: fs.FileHandle): AsyncGenerator<Uint8Array> {
 	const window = Buffer.allocUnsafe(64 * 1024);
 	let offset = 0;
 	for (;;) {
@@ -563,6 +547,55 @@ export async function openRegularFile(file: string): Promise<fs.FileHandle | und
 	if ((await handle.stat()).isFile()) return handle;
 	await handle.close().catch(() => undefined);
 	return undefined;
+}
+
+/**
+ * Whether the entry a publication left at `destination` is the very file
+ * this run staged, holding what this run wrote.
+ *
+ * A descriptor pins an inode, not a name, so each step answers a question
+ * the others cannot. The open is non-blocking, because an ordinary open of a
+ * FIFO published at that name never returns. `fstat` says the descriptor
+ * holds the staged inode. `lstat` says the name holds it too: a symlink onto
+ * that inode reads right through the descriptor, and so does a different
+ * file put at the name after the open. `holds` reads the bytes, because an
+ * in-place rewrite keeps every identity field. And the name is asked once
+ * more after the read, because a file put there while the bytes were being
+ * read leaves the descriptor right and the name wrong.
+ *
+ * The answer is about the moment of that last look. A process that can
+ * write the destination's directory can rebind the name after it, and
+ * nothing run here sees that; what this rules out is reporting a
+ * publication whose name, when this run last looked, held somebody else's
+ * file.
+ */
+export async function publishedIsStaged(
+	destination: string,
+	staged: Stats,
+	holds: (published: fs.FileHandle) => Promise<boolean>,
+): Promise<boolean> {
+	const isStaged = (entry: Stats | undefined): boolean =>
+		entry?.isFile() === true && entry.dev === staged.dev && entry.ino === staged.ino;
+	const published = await openRegularFile(destination).catch(() => undefined);
+	if (!published) return false;
+	try {
+		if (!isStaged(await published.stat())) return false;
+		if (!isStaged(await fs.lstat(destination).catch(() => undefined))) return false;
+		if (!(await holds(published))) return false;
+	} catch {
+		return false;
+	} finally {
+		await published.close().catch(() => undefined);
+	}
+	return isStaged(await fs.lstat(destination).catch(() => undefined));
+}
+
+/** A `holds` for {@link publishedIsStaged}: exactly the bytes a copy wrote. */
+export function holdsCopied(written: CopiedBytes): (published: fs.FileHandle) => Promise<boolean> {
+	return async published => {
+		const back = await digestOfHandle(published);
+		return back.hash === written.hash && back.size === written.size;
+	};
 }
 
 /** The same, split into newline-delimited records. */
@@ -848,10 +881,10 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
 /**
  * Copy one entry out of the archive, resolving symlinks into real files.
  *
- * Each file lands on a temp beside its destination and is renamed into place,
- * so a killed restore never leaves a partial file at a real path — if it did,
- * the retry below would take that partial for a finished one, skip it, and
- * then drop the archive's complete copy.
+ * Each file is staged in a directory this run mints beside its destination
+ * and linked into place, so a killed restore never leaves a partial file at
+ * a real path — if it did, the retry below would take that partial for a
+ * finished one and skip it.
  *
  * An entry the live tree already holds with the archive's own bytes is left
  * alone: that is an entry an interrupted attempt of this restore already
@@ -865,13 +898,15 @@ async function assertLiveTreeHoldsArchive(source: string, destination: string, a
  * permission or I/O failure says nothing about what is there, and only its
  * absence may be read as an empty slot.
  *
- * Staging residue the archive happens to hold is not an artifact and is not
- * carried home; the sweep that reclaims a killed writer's temps owns it.
+ * A flat `.<name>.<id>.tmp` in the archive is a session writer's rewrite
+ * that was killed before it renamed its temp away, copied in with the tree.
+ * It is not an artifact and is not carried home.
  */
 async function copyEntryDereferenced(
 	source: string,
 	destination: string,
 	archiveRoot: string,
+	ledger: string,
 	notes: string[],
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
@@ -903,7 +938,13 @@ async function copyEntryDereferenced(
 		if (!existing) await fs.chmod(destination, stat.mode & 0o7777);
 		// Sorted, so a restore that stops part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
-			await copyEntryDereferenced(path.join(source, entry), path.join(destination, entry), archiveRoot, notes);
+			await copyEntryDereferenced(
+				path.join(source, entry),
+				path.join(destination, entry),
+				archiveRoot,
+				ledger,
+				notes,
+			);
 		}
 		return;
 	}
@@ -930,48 +971,33 @@ async function copyEntryDereferenced(
 				`move that path aside and restore again`,
 		);
 	}
-	// Staged inside a directory this run mints, so nothing of anyone else's
-	// can wear the name this publication reads from, and the cleanup is the
-	// directory rather than a name a check had to vouch for.
-	const ground = await mintStagingGround(destination);
-	let staged: fs.FileHandle | undefined;
-	let stagedStat: Stats | undefined;
+	// Staged in a directory this run mints and records, so the stage is a
+	// file of this run's own making and a kill leaves a record to reclaim it
+	// by.
+	const ground = await mintStagingGround(destination, ledger, stat.mode & 0o7777);
 	try {
-		staged = await fs.open(ground.file, "wx", stat.mode & 0o7777);
-		stagedStat = await staged.stat();
 		const archived = await fs.open(source, "r");
 		let written: CopiedBytes;
 		try {
-			written = await copyHandleWithDigest(archived, staged);
+			written = await copyHandleWithDigest(archived, ground.handle);
 		} finally {
 			await archived.close().catch(() => undefined);
 		}
-		await staged.chmod(stat.mode & 0o7777);
+		await ground.handle.chmod(stat.mode & 0o7777);
 		// `link`, not `rename`: a file someone created at the destination while
 		// this copy was being staged is their work, and a rename would write
 		// over it without anyone asking. `EEXIST` sends this entry down the
 		// "already holds something else" road on the next attempt instead.
 		await fs.link(ground.file, destination);
-		// What landed, read back: opened non-blocking so a FIFO cannot hang
-		// this, `fstat`ed and `lstat`ed for a regular file that is not a
-		// link, and then digested against what was written.
-		const published = await openRegularFile(destination);
-		const wrong = (): Error =>
-			new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
-		if (!published) throw wrong();
-		try {
-			if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) throw wrong();
-			const back = await digestOfHandle(published);
-			if (back.hash !== written.hash || back.size !== written.size) throw wrong();
-		} finally {
-			await published.close().catch(() => undefined);
+		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
+			throw new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
 		}
 	} finally {
 		try {
-			const note = await removeStagingGround(ground, stagedStat);
+			const note = await removeStagingGround(ground);
 			if (note) notes.push(note);
 		} finally {
-			await staged?.close().catch(() => undefined);
+			await ground.handle.close().catch(() => undefined);
 		}
 	}
 }
@@ -983,43 +1009,90 @@ async function copyEntryDereferenced(
  * that holds from the moment it is taken to the moment the bytes go, and
  * there is no way here to hold a subagent out of the tree across those two
  * operations — which is what every round of review found, in a different
- * place each time. So the session ends up in two places and the archive
- * phase, which an operator names and acknowledges, is the only thing that
- * takes one away.
+ * place each time. So the session ends up in two places, and
+ * `omp gc --reclaim`, which an operator runs by name on one session and
+ * acknowledges, is the only thing that takes the live copy away.
  */
-async function copyTreeDereferenced(source: string, destination: string, notes: string[]): Promise<void> {
+async function copyTreeDereferenced(
+	source: string,
+	destination: string,
+	ledger: string,
+	notes: string[],
+): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
-	await copyEntryDereferenced(source, destination, archiveRoot, notes);
+	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes);
 	await assertLiveTreeHoldsArchive(source, destination, archiveRoot);
 }
 
-/** A private directory this run minted, and the staging path inside it. */
+/**
+ * `<agentDir>/gc-staging`, where a run records each staging directory it
+ * mints — one file per directory — before it stages a byte into it.
+ *
+ * Every run that mints holds `<agentDir>/gc.lock` for its whole life, so a
+ * record still standing while the lock is held belongs to a run that is
+ * gone. That is what lets a later run take a dead run's staged copy away by
+ * the record of what that run made, rather than by the shape of a name
+ * anybody can choose.
+ */
+export function stagingLedgerDir(agentDir: string): string {
+	return path.join(agentDir, "gc-staging");
+}
+
+/** What a run records about one staging directory it minted. */
+interface StagingRecord {
+	dir: string;
+	/** The one file staged inside it, and that file's identity. */
+	file: string;
+	dev: number;
+	ino: number;
+}
+
+/** A private directory this run minted, the file it stages into there, and its record. */
 export interface StagingGround {
 	dir: string;
 	file: string;
+	/** The staged file, open for reading and writing. The caller closes it. */
+	handle: fs.FileHandle;
+	/** The staged file's identity, from the descriptor that created it. */
+	created: Stats;
+	/** This directory's record in {@link stagingLedgerDir}. */
+	record: string;
 }
 
 /**
- * Mint a staging directory of this run's own beside `target`.
+ * Names tried before minting gives up. A name taken this many times in a row
+ * is not a collision a fresh id fixes, and a run that kept trying would
+ * never finish.
+ */
+const STAGING_MINT_ATTEMPTS = 16;
+
+/**
+ * Mint a staging directory of this run's own beside `target`, create the
+ * file to stage into inside it, and record both in `ledger`.
  *
  * `mkdir` without `recursive`, so `EEXIST` is the kernel saying the name is
  * taken and another is minted — uniqueness comes from the kernel rather
- * than from a name this process picked. Mode `0700`, so what is inside is
- * this run's until it publishes it.
+ * than from a name this process picked — up to
+ * {@link STAGING_MINT_ATTEMPTS} times. Mode `0700`, so nothing without this
+ * user's rights puts a file inside it.
  *
- * The directory is what makes the cleanup honest. There is no way to unlink
- * an inode: `unlinkat` takes a name, so any identity check is taken at one
- * moment and acted on at another, and a staging path anyone could rebind
- * between the two is a file somebody else's bytes can end up at. Inside
- * ground this run minted, the only actor who can arrange that is one who
- * can already write in a `0700` directory that did not exist a moment ago.
+ * The record is written once the directory and its file exist and before
+ * anything is staged, so a run killed after that leaves a record the next
+ * run reclaims by — see {@link reclaimRecordedStagingGrounds}. A run killed
+ * in the instant between creating them and recording them leaves an empty
+ * file in a directory nothing reclaims.
  *
- * The name matches {@link SESSION_STAGING_RE}, so the sweep that reclaims
- * an interrupted run's leftovers recognises it.
+ * What the directory is not: a boundary against a process that can write
+ * the directory it sits in. Such a process can rename the minted directory
+ * away and put one of its own at the name, and every later step here names
+ * a path — there is no system call that unlinks an inode — so it then acts
+ * on whatever stands there. The identity checks below narrow what that can
+ * do; they do not take it away.
  */
-export async function mintStagingGround(target: string): Promise<StagingGround> {
-	for (;;) {
+export async function mintStagingGround(target: string, ledger: string, mode = 0o666): Promise<StagingGround> {
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	for (let attempt = 0; attempt < STAGING_MINT_ATTEMPTS; attempt++) {
 		const dir = sessionStagingPath(target);
 		try {
 			await fs.mkdir(dir, { mode: 0o700 });
@@ -1027,59 +1100,193 @@ export async function mintStagingGround(target: string): Promise<StagingGround> 
 			if (codeOf(error) === "EEXIST") continue;
 			throw error;
 		}
-		return { dir, file: path.join(dir, path.basename(target)) };
+		const file = path.join(dir, path.basename(target));
+		const record = path.join(ledger, `${Snowflake.next()}.json`);
+		let handle: fs.FileHandle | undefined;
+		let created: Stats | undefined;
+		let recorded: fs.FileHandle | undefined;
+		try {
+			handle = await fs.open(file, "wx+", mode);
+			created = await handle.stat();
+			recorded = await fs.open(record, "wx", 0o600);
+			const entry: StagingRecord = { dir, file, dev: created.dev, ino: created.ino };
+			await recorded.writeFile(JSON.stringify(entry));
+			await recorded.close();
+			return { dir, file, handle, created, record };
+		} catch (error) {
+			// What this attempt made goes again before the failure is
+			// reported: a record that names nothing, or a directory nothing
+			// records, is the residue this ledger exists to rule out.
+			await handle?.close().catch(() => undefined);
+			if (recorded) {
+				await recorded.close().catch(() => undefined);
+				await fs.rm(record, { force: true }).catch(() => undefined);
+			}
+			const note = await clearStagingGround(dir, file, created, "this run");
+			if (note) throw new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`);
+			throw error;
+		}
 	}
+	throw new Error(
+		`no staging directory could be made beside ${target}: ${STAGING_MINT_ATTEMPTS} names in a row were already taken`,
+	);
 }
 
 /**
- * Take the staging ground away again, with what this run put there.
+ * Take a staging directory away with the one file staged in it, while that
+ * file is still the inode staged there — and nothing else.
  *
- * Anything else inside it is reported rather than deleted, and a failure to
+ * Anything else inside is reported rather than deleted, and a failure to
  * look is reported rather than read as an absence: "it was not there" and "I
  * could not tell" are different answers, and treating the second as the
- * first is how a foreign file disappears into an empty error list. The
- * sentence returned is the one for the command to print; nothing here
- * throws, because this runs on the way out of a failure as often as a
+ * first is how a foreign file disappears into an empty error list. Nothing
+ * here throws, because this runs on the way out of a failure as often as a
  * success.
  */
-export async function removeStagingGround(
-	ground: StagingGround,
-	created: Stats | undefined,
+async function clearStagingGround(
+	dir: string,
+	file: string,
+	created: { dev: number; ino: number } | undefined,
+	stager: string,
 ): Promise<string | undefined> {
 	const notes: string[] = [];
-	const entries = await fs.readdir(ground.dir).catch(error => {
+	const entries = await fs.readdir(dir).catch(error => {
 		if (isEnoent(error)) return undefined;
-		notes.push(`${ground.dir} could not be read, so it was left as it is: ${error}`);
+		notes.push(`${dir} could not be read, so it was left as it is: ${error}`);
 		return undefined;
 	});
 	if (entries === undefined) return notes[0];
 	for (const name of entries) {
-		const at = path.join(ground.dir, name);
+		const at = path.join(dir, name);
 		const standing = await fs.lstat(at).catch(error => {
 			if (!isEnoent(error)) notes.push(`${at} could not be read, so it was left alone: ${error}`);
 			return undefined;
 		});
 		if (!standing) continue;
-		if (at !== ground.file || !created || standing.dev !== created.dev || standing.ino !== created.ino) {
-			notes.push(`${at} is not what this run staged there, so it was left alone`);
+		if (at !== file || !created || standing.dev !== created.dev || standing.ino !== created.ino) {
+			notes.push(`${at} is not what ${stager} staged there, so it was left alone`);
 			continue;
 		}
 		await fs.rm(at).catch((error: unknown) => notes.push(`${at} could not be removed: ${error}`));
 	}
 	if (notes.length === 0) {
-		await fs.rmdir(ground.dir).catch((error: unknown) => {
-			if (!isEnoent(error)) notes.push(`${ground.dir} could not be removed: ${error}`);
+		await fs.rmdir(dir).catch((error: unknown) => {
+			if (!isEnoent(error)) notes.push(`${dir} could not be removed: ${error}`);
 		});
 	}
 	return notes.length > 0 ? notes.join("; ") : undefined;
 }
+
+/**
+ * Take this run's staging directory away again, with what this run staged
+ * there, and its record with it. A directory that cannot be taken away
+ * keeps its record, so the next run looks at it again. The sentence returned
+ * is the one for the command to print.
+ */
+export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
+	const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
+	if (note === undefined) await fs.rm(ground.record, { force: true }).catch(() => undefined);
+	return note;
+}
+
+/** What {@link reclaimRecordedStagingGrounds} found and did. */
+export interface StagingReclaim {
+	/** Recorded staging directories still standing. */
+	found: number;
+	/** Of those, the ones taken away. */
+	removed: number;
+	/** What the files staged in them held. */
+	bytes: number;
+	notes: string[];
+}
+
+function parseStagingRecord(text: string): StagingRecord {
+	const entry: unknown = JSON.parse(text);
+	if (
+		typeof entry !== "object" ||
+		entry === null ||
+		!("dir" in entry && typeof entry.dir === "string") ||
+		!("file" in entry && typeof entry.file === "string") ||
+		!("dev" in entry && typeof entry.dev === "number") ||
+		!("ino" in entry && typeof entry.ino === "number")
+	) {
+		throw new Error("not a staging record");
+	}
+	return { dir: entry.dir, file: entry.file, dev: entry.dev, ino: entry.ino };
+}
+
+/**
+ * Take away the staging directories that runs recorded and did not live to
+ * clean up. Without `apply`, only count them.
+ *
+ * The caller holds the gc lock, so every record here belongs to a run that
+ * is gone — see {@link stagingLedgerDir}. What goes is what the record
+ * names: the one staged file while it is still the inode recorded, and then
+ * the directory once nothing else is in it. Anything else is reported and
+ * the record kept, so the next run reports it again rather than forgetting
+ * it.
+ */
+export async function reclaimRecordedStagingGrounds(ledger: string, apply: boolean): Promise<StagingReclaim> {
+	const result: StagingReclaim = { found: 0, removed: 0, bytes: 0, notes: [] };
+	let names: string[];
+	try {
+		names = await fs.readdir(ledger);
+	} catch (error) {
+		if (!isEnoent(error))
+			result.notes.push(`${ledger} could not be read, so no staging directory was reclaimed: ${error}`);
+		return result;
+	}
+	for (const name of names.sort()) {
+		const record = path.join(ledger, name);
+		let entry: StagingRecord;
+		try {
+			entry = parseStagingRecord(await fs.readFile(record, "utf8"));
+		} catch (error) {
+			result.notes.push(`${record} could not be read, so the staging directory it records was left alone: ${error}`);
+			continue;
+		}
+		let standing: Stats | undefined;
+		try {
+			standing = await fs.lstat(entry.dir);
+		} catch (error) {
+			if (!isEnoent(error)) {
+				result.notes.push(`${entry.dir} could not be read, so it was left as it is: ${error}`);
+				continue;
+			}
+		}
+		if (!standing?.isDirectory()) {
+			// Nothing of that run's stands at the name any more. A record
+			// that names nothing is dropped; the name is somebody else's.
+			if (standing)
+				result.notes.push(`${entry.dir} is no longer the directory a run staged in, so it was left alone`);
+			if (apply) await fs.rm(record, { force: true }).catch(() => undefined);
+			continue;
+		}
+		result.found += 1;
+		const staged = await fs.lstat(entry.file).catch(() => undefined);
+		if (staged?.dev === entry.dev && staged.ino === entry.ino) result.bytes += staged.size;
+		if (!apply) continue;
+		const note = await clearStagingGround(entry.dir, entry.file, entry, "the run that recorded it");
+		if (note) {
+			result.notes.push(note);
+			continue;
+		}
+		result.removed += 1;
+		await fs.rm(record, { force: true }).catch(() => undefined);
+	}
+	return result;
+}
+
 /**
  * Archived paths with no live counterpart, as relative names.
  *
  * The question a stale restore record raises: has the live tree caught up
- * with what the archive holds? Presence, not sameness — a session that
- * carried on diverges from its archive by design — and only enough of it to
- * decide whether an unfinished restore is still unfinished.
+ * with what the archive holds? A regular file at the name, not sameness — a
+ * session that carried on diverges from its archive by design — and only
+ * enough of it to decide whether an unfinished restore is still unfinished.
+ * A FIFO, a device or a directory standing there is not the artifact: a
+ * reader of it waits or fails instead of reading the archived bytes, so
+ * the restore that would bring them home is still outstanding.
  */
 export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessionFile: string): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
@@ -1088,7 +1295,7 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 	for (const file of await treeFiles(archiveArtifacts)) {
 		if (SESSION_STAGING_RE.test(path.basename(file))) continue;
 		const name = path.relative(archiveArtifacts, file);
-		if (!(await statIfPresent(path.join(liveArtifacts, name)))) outstanding.push(name);
+		if (!(await statIfPresent(path.join(liveArtifacts, name)))?.isFile()) outstanding.push(name);
 	}
 	return outstanding.sort();
 }
@@ -1253,26 +1460,26 @@ async function inflateArchivedHeaderId(archiveFile: string): Promise<string | un
 }
 
 /**
- * Leases of every transcript a restore moves: the session's own, read from
- * the header rather than from the archive's filename, and those nested in
- * either artifact tree, found the same way.
+ * Leases of every transcript a restore brings home: the session's own, read
+ * from the header rather than from the archive's filename, and those nested
+ * in either artifact tree, found the same way.
  *
  * This has to match what the archive phase acquires, or the two disagree
  * about who owns what. A filename is not a session id — archiving accepts a
  * transcript called anything, and the id lives in the header — and a
  * parent's lease says nothing about the subagent sessions below it, which is
  * why archiving leases the whole tree and skips a session whose child is
- * live. A restore moving those files while their owners held their leases
- * would lose exactly the writes the lease exists to protect.
+ * live. A restore publishing those files while their owners held their
+ * leases would race exactly the writes the lease exists to protect.
  *
  * The set is taken to a fixed point rather than calculated once, and it is
- * taken again immediately before the artifact tree moves: a subagent can
- * appear in the tree between an enumeration and the first copy, and a set
- * only as fresh as its first pass would not cover it. Each pass enumerates
- * again while holding everything the pass before it took, so a child that
- * appears is either leased too or refuses the run. Passes stop when one
- * finds nothing new; a tree that never settles is refused rather than
- * chased.
+ * taken again immediately before and after the artifact tree is copied: a
+ * subagent can appear in the tree between an enumeration and the first copy,
+ * and a set only as fresh as its first pass would not cover it. Each pass
+ * enumerates again while holding everything the pass before it took, so a
+ * child that appears is either leased too or refuses the run. Passes stop
+ * when one finds nothing new; a tree that never settles is refused rather
+ * than chased.
  *
  * Null, with everything taken so far released, when any of them is live.
  */
@@ -1341,11 +1548,15 @@ export function agentDirFlag(agentDir?: string): string {
 
 /**
  * Put an archived transcript back where it belongs, with its artifact tree,
- * and drop the archive copy so the session exists in exactly one place.
+ * and leave the archive where it is: after a restore the session is in two
+ * places until `omp gc --reclaim` gives the live copy up.
  *
  * The caller must hold the gc lock: between the transcript landing and the
- * artifact tree following it, the session exists in both trees, and an
- * archive phase running in that window would move the halves past each other.
+ * artifact tree following it, the session is half in each tree, and an
+ * archive phase running in that window would copy the halves past each
+ * other. Holding it also means every staging record standing in the ledger
+ * is a dead run's, so those are reclaimed first, before this walks a tree
+ * one of them could be in — see {@link reclaimRecordedStagingGrounds}.
  *
  * Ownership leases are taken first, for every transcript the restore moves —
  * the session's own, read from its header, and every nested one in either
@@ -1355,20 +1566,17 @@ export function agentDirFlag(agentDir?: string): string {
  * What a refusal leaves, because "both copies whole" is not the same as a
  * transaction and this is not one:
  *
- * - No archived bytes are ever lost. Every path that gives one up proves
- *   first that the live tree holds it, and the archive is set aside rather
- *   than deleted until that proof has been taken again with the whole move
- *   finished — see {@link copyTreeDereferenced}.
+ * - Nothing archived is removed or changed: a restore only adds to the live
+ *   tree.
  * - A refusal before the copy leaves both trees untouched.
  * - A refusal during the copy leaves the live tree holding the entries
- *   carried so far, with the archive still complete. Running the restore
- *   again finishes it; the entries already there are recognised rather than
+ *   carried so far, with the archive complete. Running the restore again
+ *   finishes it; the entries already there are recognised rather than
  *   copied twice.
  * - A refusal after the copy — a changed owner set, a live file that no
- *   longer holds what the archive held — puts every retired entry back and
- *   leaves the live tree holding the whole copy. The archive is complete,
- *   the live tree is complete, and the space is not reclaimed until a later
- *   run succeeds.
+ *   longer holds what the archive holds — leaves the live tree holding the
+ *   whole copy and the restore's record down, so the next resume finishes
+ *   or reports it rather than opening the session as if it were whole.
  * - A content conflict names the live path to move aside; nothing moves
  *   until someone does.
  *
@@ -1385,6 +1593,11 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	}
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
+	const ledger = stagingLedgerDir(agentDir ?? getAgentDir());
+	// A dead run's staged copies go by their records before this walks a
+	// tree one of them could be in. What cannot go is the archive phase's to
+	// report: a resume is not the place to fail over somebody else's residue.
+	await reclaimRecordedStagingGrounds(ledger, true);
 	const owners = async (): Promise<(string | undefined)[]> => [
 		await inflateArchivedHeaderId(archiveFile),
 		...(await Promise.all(
@@ -1439,23 +1652,22 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 			}
 			bytes = (await fs.stat(sessionPath)).size;
 		} else {
-			bytes = await inflateArchivedTranscript(archiveFile, sessionPath, notes);
+			bytes = await inflateArchivedTranscript(archiveFile, sessionPath, ledger, notes);
 		}
 
 		const notRestored: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
 		// Neither copy goes. The restore publishes the session into the live
-		// tree and leaves the archive where it is, so `omp gc --archive`,
-		// which an operator invokes by name and acknowledges, stays the only
-		// step that takes a copy away. Re-archiving the session recognises
-		// its own archive and finishes the move; until someone asks, the
-		// space is not reclaimed, which is the cost this feature can afford.
+		// tree and leaves the archive where it is, so `omp gc --reclaim`,
+		// which an operator runs by name and acknowledges, stays the only
+		// step that takes a copy away; until someone asks, the space is not
+		// given back, which is the cost this feature can afford.
 		if (!(await leases.refresh())) throw noOwners();
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, notes);
+				await copyTreeDereferenced(archiveArtifacts, liveArtifacts, ledger, notes);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(

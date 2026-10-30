@@ -2373,7 +2373,7 @@ export class SessionManager {
 		this.#sessionClaim?.release?.();
 		this.#sessionClaim = undefined;
 
-		// `gc --archive` leaves cold transcripts gzipped outside the sessions
+		// `gc --archive` keeps cold transcripts gzipped outside the sessions
 		// tree. Bring one back to its own path before anything reads or appends
 		// to it: the writer appends raw JSONL, so a `.jsonl.gz` must never
 		// become this manager's session file.

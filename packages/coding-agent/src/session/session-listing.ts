@@ -898,7 +898,7 @@ export async function findSessionContinuation(
 ): Promise<SessionContinuation | undefined> {
 	const target = path.resolve(sessionPath);
 	// An archived transcript is read where it lies, but it is named for — and
-	// continued in — the live bucket `gc --archive` moved it out of. Searching
+	// continued in — the live bucket `gc --archive` copied it out of. Searching
 	// beside the archive finds no continuation at all: the archive bucket holds
 	// no `.jsonl` sibling. Resuming the id would then open the cold copy while
 	// the conversation went on in another file.
@@ -1484,8 +1484,8 @@ export async function resolveResumableSession(
 		return { session: globalMatch, scope: "global" };
 	}
 
-	// `gc --archive` moves cold transcripts out of the sessions tree. They stay
-	// resumable: the match is restored to its original path when it is opened.
+	// A session given up with `gc --reclaim` exists only in the archive. It
+	// stays resumable: the match is restored to its original path when opened.
 	const [archiveFile] = await findArchivedSessionFiles(sessionArg);
 	if (!archiveFile) return undefined;
 	const [archived] = await collectSessionsFromFiles([archiveFile], storage, true);

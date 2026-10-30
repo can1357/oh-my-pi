@@ -835,23 +835,23 @@ describe("runGcCommand session staging sweep", () => {
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
-	test("reclaims an archive-root staging temp a killed compression left, and spares one still being written", async () => {
+	test("leaves staging-shaped files in the archive alone when no run recorded staging them", async () => {
 		const archiveSessions = path.join(root, "archive", "sessions", "project");
 		await fs.mkdir(archiveSessions, { recursive: true });
-		// What a killed `gc --archive` used to leave beside the archive it was
-		// staging: `<archive>.<pid>.<epoch-ms>.tmp`, which no sweep claimed.
-		const killed = path.join(archiveSessions, "killed.jsonl.gz.4242.1700000000000.tmp");
-		// What a kill leaves today, in a bucket the archive holds through a
-		// symlink onto another filesystem.
+		// Names a killed writer could have left, and names anybody could have
+		// chosen. Nothing records which, and the archive may hold the only
+		// copy of what is in them, so none of them is the archive phase's to
+		// delete.
+		const legacyShape = path.join(archiveSessions, "killed.jsonl.gz.4242.1700000000000.tmp");
 		const linkedTarget = path.join(root, "elsewhere", "linked-project");
 		await fs.mkdir(linkedTarget, { recursive: true });
 		await fs.symlink(linkedTarget, path.join(root, "archive", "sessions", "linked-project"));
-		const killedInLinkedBucket = sessionStagingPath(path.join(linkedTarget, "killed-too.jsonl.gz"));
-		// A second gc is compressing this one right now; its temp is not ours to take.
-		const inFlight = sessionStagingPath(path.join(archiveSessions, "in-flight.jsonl.gz"));
-		for (const file of [killed, killedInLinkedBucket, inFlight]) await Bun.write(file, "half a gzip");
-		await agePath(killed);
-		await agePath(killedInLinkedBucket);
+		const stagingShape = sessionStagingPath(path.join(linkedTarget, "killed-too.jsonl.gz"));
+		const humanNote = path.join(archiveSessions, ".human-note.0123456789abcdef.tmp");
+		for (const file of [legacyShape, stagingShape, humanNote]) {
+			await Bun.write(file, "UNIQUE BYTES");
+			await agePath(file);
+		}
 		const cold = await writeSession(root, "project", "cold", "complete", { ageDays: 90 });
 
 		const result = await runGcCommand({
@@ -866,10 +866,9 @@ describe("runGcCommand session staging sweep", () => {
 			},
 		});
 
-		expect(result.archive).toMatchObject({ archived: 1, wouldDeleteTemps: 2, deletedTemps: 2, errors: [] });
-		expect(await Bun.file(killed).exists()).toBe(false);
-		expect(await Bun.file(killedInLinkedBucket).exists()).toBe(false);
-		expect(await Bun.file(inFlight).exists()).toBe(true);
+		expect(result.archive).toMatchObject({ archived: 1, wouldDeleteTemps: 0, deletedTemps: 0, errors: [] });
+		for (const file of [legacyShape, stagingShape, humanNote])
+			expect(await Bun.file(file).text()).toBe("UNIQUE BYTES");
 		// The same run staged and published its own archive through that directory.
 		expect(await Bun.file(path.join(archiveSessions, "cold.jsonl.gz")).exists()).toBe(true);
 		// Archiving copies and keeps the live copy; `--reclaim` gives it up.
