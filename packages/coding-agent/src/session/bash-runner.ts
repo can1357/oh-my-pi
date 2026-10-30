@@ -93,6 +93,13 @@ export class BashRunner {
 		return execution;
 	}
 
+	/** Whether any execution is still running or recording its result. Broader than
+	 *  {@link isRunning}, which ends when the child exits: the append that follows is what a
+	 *  caller clearing the transcript has to outlast. */
+	get hasInFlightExecutions(): boolean {
+		return this.#inFlight.size > 0;
+	}
+
 	/** Resolves once no execution is still running or recording its result. */
 	async waitForIdle(): Promise<void> {
 		while (this.#inFlight.size > 0) await Promise.all([...this.#inFlight]);

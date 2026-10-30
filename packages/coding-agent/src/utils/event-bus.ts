@@ -1,4 +1,18 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "@oh-my-pi/pi-utils";
+
+/** Wraps a callback a session accepts from an extension: inert once that session retires, owned
+ *  while it runs. Structural, to keep this module free of extension types. */
+export type AcceptedCallbackOwner = {
+	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
+};
+
+/** The session accepting extension callbacks on this stack. `pi.events` is handed to extensions
+ *  as the bus itself — an extension comparing it across bindings must see one object — so a
+ *  subscription cannot be owned by wrapping the bus. It is owned by WHO IS SUBSCRIBING instead:
+ *  the loader runs each factory inside this scope, and every owned callback re-enters it, so a
+ *  bus two sessions share attributes each subscription to its own registrant. */
+export const extensionCallbackScope = new AsyncLocalStorage<AcceptedCallbackOwner>();
 
 /**
  * Methods are bound arrow fields: upstream Pi's `createEventBus()` returns
@@ -7,20 +21,6 @@ import { logger } from "@oh-my-pi/pi-utils";
  */
 export class EventBus {
 	readonly #listeners = new Map<string, Set<(data: unknown) => void>>();
-	/** Reports a running handler to whoever owns extension-callback lifetimes for this bus's
-	 *  session. A `pi.events` subscription is invoked by the bus, not by the extension runner, so
-	 *  this is the only party that can see when one starts. */
-	#own: <T>(result: T) => T = result => result;
-	#ownerInstalled = false;
-
-	/** Installs the callback owner once. A later call is ignored: the first binding on this bus is
-	 *  its session's, and a bus an embedder shares with a second session must not have its
-	 *  callbacks reattributed to the newcomer. */
-	setCallbackOwner(own: <T>(result: T) => T): void {
-		if (this.#ownerInstalled) return;
-		this.#ownerInstalled = true;
-		this.#own = own;
-	}
 
 	emit = (channel: string, data: unknown): void => {
 		const handlers = this.#listeners.get(channel);
@@ -31,13 +31,18 @@ export class EventBus {
 		}
 	};
 
+	/** The owner is captured per SUBSCRIPTION, not per bus: a bus two sessions share must
+	 *  attribute each handler to the session that registered it, and must stop calling a retired
+	 *  session's handlers while the other session's keep working. */
 	on = (channel: string, handler: (data: unknown) => void): (() => void) => {
 		if (!this.#listeners.has(channel)) {
 			this.#listeners.set(channel, new Set());
 		}
+		const owner = extensionCallbackScope.getStore();
+		const owned = owner ? owner.ownCallback(handler) : handler;
 		const safeHandler = async (data: unknown) => {
 			try {
-				await this.#own(handler(data) as unknown);
+				await owned(data);
 			} catch (err) {
 				logger.error("Event handler error", { channel, error: String(err) });
 			}

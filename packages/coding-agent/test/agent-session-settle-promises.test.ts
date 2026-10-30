@@ -1675,4 +1675,89 @@ describe("AgentSession settles what it promised", () => {
 			await command;
 		}
 	}, 20_000);
+
+	it("refuses a bus subscription a facility still holds after disposal", async () => {
+		let bus: EventBus | undefined;
+		let entered = 0;
+		await startPooledRunWithStrandedAside(undefined, undefined, undefined, pi => {
+			bus = pi.events;
+			pi.events.on("r12-after-dispose", () => {
+				entered++;
+			});
+		});
+		await session?.dispose();
+
+		// The bus still holds the subscription — a host can share it, and nothing unsubscribes it.
+		// Reporting the call would come too late: disposal has released what the callback reads.
+		bus?.emit("r12-after-dispose", {});
+		for (let i = 0; i < 20; i++) await setImmediate();
+		expect(entered).toBe(0);
+	}, 20_000);
+
+	it("attributes a shared bus subscription to the session that registered it", async () => {
+		const bus = new EventBus();
+		const firstRuntime = new ExtensionRuntime();
+		const secondRuntime = new ExtensionRuntime();
+		const release = Promise.withResolvers<void>();
+		await loadExtensionFromFactory(
+			pi => {
+				pi.events.on("r12-shared", () => undefined);
+			},
+			tempDir.path(),
+			bus,
+			firstRuntime,
+			"first",
+		);
+		await loadExtensionFromFactory(
+			pi => {
+				pi.events.on("r12-shared", async () => await release.promise);
+			},
+			tempDir.path(),
+			bus,
+			secondRuntime,
+			"second",
+		);
+		try {
+			// The first session is gone; its retirement must not silence the second's handler, and
+			// the second's work must not be attributed to the first.
+			firstRuntime.retire();
+			bus.emit("r12-shared", {});
+			for (let i = 0; i < 5; i++) await setImmediate();
+
+			expect(firstRuntime.hasPendingCallbacks()).toBe(false);
+			expect(secondRuntime.hasPendingCallbacks()).toBe(true);
+		} finally {
+			release.resolve();
+			await secondRuntime.waitForPendingCallbacks();
+		}
+	}, 20_000);
+
+	it("owns a deferred load the host started before disposal", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		await startPooledRunWithStrandedAside();
+		session?.setDeferredExtensionLoader(async () => {
+			entered.resolve();
+			await release.promise;
+		});
+		const resetSpy = spyOn(Agent.prototype, "reset");
+		let load: Promise<void> | undefined;
+		try {
+			// Started BEFORE disposal, so the load-time refusal has nothing to say about it.
+			load = session?.loadDeferredExtensions();
+			await withTimeout(entered.promise, 5_000, "deferred factory never entered");
+
+			await withTimeout(session?.dispose({ drainTimeoutMs: 40 }) ?? Promise.resolve(), 10_000, "dispose hung");
+			expect(resetSpy.mock.calls).toHaveLength(1);
+
+			release.resolve();
+			await load;
+			for (let i = 0; i < 40; i++) await setImmediate();
+			expect(resetSpy.mock.calls).toHaveLength(2);
+		} finally {
+			release.resolve();
+			await load;
+			resetSpy.mockRestore();
+		}
+	}, 20_000);
 });

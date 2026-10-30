@@ -2388,19 +2388,25 @@ export interface ExtensionCommandContextActions {
 	reload: () => Promise<void>;
 }
 
-/** Owns the lifetime of extension-authored callbacks for one session.
+/** Owns the lifetime of extension-authored callbacks for one session, from the moment the session
+ *  ACCEPTS them.
  *
- *  There is no single place the host *calls* extension code — event handlers go through the
- *  runner, commands and shortcuts through their controllers, `ctx.setTimeout`/`setInterval`
- *  through `ManagedTimers`, `pi.events` subscriptions through the shared `EventBus`, a tool's
- *  `onSession` through the UI controller — and each facility is the only party that knows when
- *  its call starts and ends. They report here because the runtime is what they have in common:
- *  the loader builds `pi` with it and the runner holds it. A new facility that invokes extension
- *  code owns its invocations by calling {@link trackCallback}; nothing infers a lifetime from a
- *  method name or an object's brand. */
+ *  Ownership keyed on the facility that invokes a callback cannot be completed by enumeration:
+ *  any facility handed a callback through `pi` can invoke it, and the set of such facilities is
+ *  open (the runner, `ManagedTimers`, the `EventBus`, the tool UI controller, `ModelRegistry` by
+ *  way of a provider config, a compaction `onError`). The set of places a callback is ACCEPTED is
+ *  closed: it is an argument to a `pi` or `ctx` method. {@link ownCallback} wraps it there, so the
+ *  wrapper owns its own execution and no invoker has to opt in. */
 export interface ExtensionCallbackOwner {
-	/** Counts `result` as a live callback when it is awaitable, and returns it unchanged. */
+	/** Wraps a callback this session accepts: inert after {@link retire}, owned while it runs. */
+	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
+	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
+	 *  more — a cold thenable must not be run twice. */
 	trackCallback<T>(result: T): T;
+	/** Makes every accepted callback inert. A facility still holding one — a bus subscription, a
+	 *  provider config, a timer — can no longer enter a session whose resources are released. */
+	retire(): void;
+	readonly isRetired: boolean;
 	/** Whether any extension callback is executing. */
 	hasPendingCallbacks(): boolean;
 	/** Resolves once every callback executing now has returned. */

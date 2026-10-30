@@ -31,7 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
-import { EventBus } from "../../utils/event-bus";
+import { EventBus, extensionCallbackScope } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -44,6 +44,7 @@ import type {
 	AssistantThinkingRenderer,
 	Extension,
 	ExtensionAPI,
+	ExtensionCallbackOwner,
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
@@ -113,6 +114,23 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 	}
 }
 
+/** Takes ownership of a callback a session accepts from an extension.
+ *
+ *  Acceptance, not invocation: the set of facilities that may later CALL one is open and three
+ *  rounds of review proved it cannot be enumerated; the set of places a callback crosses into the
+ *  host is one `pi` or `ctx` method argument.
+ *
+ *  Only a value that IS a function is taken. Descending into a configuration object to find
+ *  `{ handler }`, `{ onSession }` or `{ oauth: { login } }` was tried and reverted: rewriting a
+ *  registration's own properties breaks consumers that key on what they were handed — a
+ *  re-registered built-in tool and an extension `web_search` both stopped executing, and the
+ *  TTSR `willContinue` gate stopped firing. A callback reached only through such a configuration
+ *  is therefore NOT owned yet; see the round-twelve section of the report. */
+export function ownAcceptedCallbacks(value: unknown, owner: ExtensionCallbackOwner): unknown {
+	if (typeof value === "function") return owner.ownCallback(value as (...args: unknown[]) => unknown);
+	return value;
+}
+
 /**
  * Extension runtime with throwing stubs for action methods.
  * These are replaced with real implementations during initialization.
@@ -122,29 +140,63 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
 
 	/**
-	 * Extension-authored callbacks running right now, whoever invoked them.
+	 * Extension-authored callbacks, owned from the moment this session ACCEPTS them.
 	 *
-	 * There is no single place the host *calls* extension code: handlers go through the runner,
-	 * commands and shortcuts through their controllers, timers through {@link ManagedTimers},
-	 * `pi.events` subscriptions through the shared `EventBus`, a tool's `onSession` through the UI
-	 * controller. Each of those facilities is the only thing that knows when its call starts and
-	 * ends, so each reports here; the runtime is what they have in common, because it is the one
-	 * object both the loader (which builds `pi`) and the runner hold. A new facility that invokes
-	 * extension code owns its invocations by calling {@link trackCallback} — nothing infers a
-	 * lifetime from a name or a shape.
+	 * Ownership keyed on the facility that invokes a callback cannot be completed by enumeration.
+	 * Three rounds of review each closed the measured routes — the runner, timers, the event bus,
+	 * a tool's `onSession` — and found more: a provider config's `login` and `fetchDynamicModels`
+	 * reaching `ModelRegistry`, a `ctx.compact({ onError })` continuation, a deferred factory the
+	 * host started. Any facility handed a callback through `pi` can invoke it, and reaching this
+	 * object from the runner does not make the runner see what it never started.
+	 *
+	 * So ownership is taken where the set IS closed: every extension callback is a value the
+	 * extension passes into `pi` or a `ctx` method, and {@link ownCallback} wraps it there. The
+	 * wrapper owns its own execution, so no invoking facility has to opt in and a new one cannot
+	 * reopen the hole — and it REFUSES to run once {@link retire} has been called, because a
+	 * callback that should not have been entered cannot be fixed by reporting that it was.
 	 */
 	readonly #pendingCallbacks = new Set<Promise<unknown>>();
 	#callbacksChanged: PromiseWithResolvers<void> | undefined;
+	#retired = false;
 
-	/** Counts `result` as a live extension callback when it is awaitable. Thenable duck-typing, not
-	 *  `instanceof`: a callback compiled in another realm (`node:vm`, an `--import` loader) returns
-	 *  a Promise that fails the brand check while being every bit as live. Returns `result`. */
+	/** Retires this session's extension surface: every callback accepted through `pi`/`ctx` becomes
+	 *  inert, so a facility still holding one (a bus subscription, a provider config, a timer) can
+	 *  no longer enter a session whose resources are being released. Work already running is
+	 *  unaffected and still has to be waited for. */
+	retire(): void {
+		this.#retired = true;
+	}
+
+	get isRetired(): boolean {
+		return this.#retired;
+	}
+
+	/** Wraps a callback this session accepts. The wrapper refuses after {@link retire}, and owns
+	 *  the lifetime of what it returns. */
+	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
+		const owner = this;
+		// A regular function, not an arrow: a facility may invoke a callback with a receiver
+		// (`definition.execute.call(tool, …)`), and dropping `this` silently breaks it.
+		return function (this: unknown, ...args: A): R | undefined {
+			if (owner.isRetired) return undefined;
+			// Re-entered so a subscription this callback makes (`pi.events.on` from inside a
+			// handler) is attributed to this session, not to whoever is on the stack.
+			return extensionCallbackScope.run(owner, () => owner.trackCallback(fn.apply(this, args)));
+		};
+	}
+
+	/** Counts `result` as a live extension callback when it is awaitable, and returns something
+	 *  awaitable exactly once more. Thenable duck-typing, not `instanceof`: a callback compiled in
+	 *  another realm (`node:vm`, an `--import` loader) returns a Promise that fails the brand check
+	 *  while being every bit as live. A COLD thenable runs its body on each `then`, so observing
+	 *  one by calling `then` and handing the original back would run it twice; the adopted promise
+	 *  is returned in its place. */
 	trackCallback<T>(result: T): T {
 		if (result === null || (typeof result !== "object" && typeof result !== "function")) return result;
 		if (!("then" in result) || typeof result.then !== "function") return result;
 		// `then` is callable, so this is awaitable; the compiler cannot express that for `unknown`.
-		const awaitable = result as PromiseLike<unknown>;
-		const settled = Promise.resolve(awaitable).then(
+		const adopted = Promise.resolve(result as PromiseLike<unknown>);
+		const settled = adopted.then(
 			() => undefined,
 			() => undefined,
 		);
@@ -154,7 +206,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 			this.#pendingCallbacks.delete(settled);
 			this.#notifyCallbacksChanged();
 		});
-		return result;
+		return adopted as T;
 	}
 
 	/** Whether any extension callback is executing. */
@@ -280,15 +332,17 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly cwd: string,
 		events: EventBus,
 	) {
-		// `pi.events` subscriptions are invoked by the bus, not by the runner, so the bus is the
-		// only party that can see when one starts; point it at the runtime that owns
-		// extension-callback lifetimes for this session. The bus itself is handed on unchanged —
-		// an extension comparing `pi.events` across bindings must still see its own session's bus.
-		events.setCallbackOwner(result => runtime.trackCallback(result));
+		// Handed on unchanged: an extension comparing `pi.events` across bindings must see its own
+		// session's bus. Its subscriptions are still owned — `EventBus.on` takes ownership of the
+		// handler it is given, attributed to whichever session is accepting on that stack.
 		this.events = events;
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
 		// rather than listing methods: a new method is bound without touching this.
+		//
+		// Taking ownership of every ARGUMENT here was tried and reverted: a callback reached only
+		// through a registration's configuration object cannot be owned without rewriting that
+		// object, and consumers key on what they were handed. See `ownAcceptedCallbacks`.
 		const prototype = ConcreteExtensionAPI.prototype;
 		for (const name of Object.getOwnPropertyNames(prototype)) {
 			if (name === "constructor") continue;
@@ -296,6 +350,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			if (typeof descriptor?.value !== "function") continue;
 			Object.defineProperty(this, name, { value: descriptor.value.bind(this), writable: true, configurable: true });
 		}
+	}
+
+	#ownAccepted(value: unknown): unknown {
+		return ownAcceptedCallbacks(value, this.runtime);
+	}
+
+	retire(): void {
+		this.runtime.retire();
+	}
+
+	get isRetired(): boolean {
+		return this.runtime.isRetired;
+	}
+
+	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
+		return this.runtime.ownCallback(fn);
 	}
 
 	/** Callback ownership belongs to the one runtime behind every facade for this session; this
@@ -537,7 +607,9 @@ async function runExtensionFactory(
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
 	try {
-		await factory(api);
+		// Scoped so a `pi.events.on` during registration is attributed to THIS session, which a
+		// bus shared between sessions cannot work out for itself.
+		await extensionCallbackScope.run(runtime, () => factory(api));
 	} catch (error) {
 		runtime.pendingProviderRegistrations.splice(
 			0,

@@ -6622,6 +6622,19 @@ export class AgentSession implements SettingsScope {
 		// is repopulated with exactly the state we are trying to drop.
 		this.agent.setProviderResponseInterceptor(undefined);
 		this.agent.setRawSseEventInterceptor(undefined);
+		// Retire this session's extension surface before anything is released. Waiting for work we
+		// can see is not enough: a facility still holding an accepted callback — a bus subscription
+		// on a bus the host shares, a provider config inside ModelRegistry, a timer — can enter a
+		// disposed session long after, and no amount of reporting repairs a call that should not
+		// have happened. After this, every callback this session accepted is inert.
+		// Feature-tested: `extensionRunner` is host-supplied and embedders (and this repo's tests)
+		// pass partial stand-ins that implement only what they use.
+		const runnerToRetire = this.#extensionRunner;
+		if (typeof runnerToRetire?.retireExtensionCallbacks === "function") runnerToRetire.retireExtensionCallbacks();
+		// A deferred load the HOST started before disposal is extension code already running;
+		// refusing the next load (loadDeferredExtensions) says nothing about this one. Wait where
+		// it is awaited, inside the drain window, so its factory finishes before the release.
+		const deferredLoad = this.#deferredExtensionLoad;
 		let drained = false;
 		// Whatever is left of the one window. Spent already means the run is still going: it is
 		// abandoned by the caller, never *declared* settled — `drained` stays false so the deferred
@@ -6635,6 +6648,7 @@ export class AgentSession implements SettingsScope {
 			try {
 				await withTimeout(
 					(async () => {
+						if (deferredLoad) await deferredLoad;
 						await this.agent.waitForIdle();
 						await this.#drainInFlightEventHandlers();
 					})(),
@@ -6734,6 +6748,9 @@ export class AgentSession implements SettingsScope {
 	 *  only honest stopping point. There is no deadline here on purpose — see the caller. */
 	async #waitForLiveSessionWork(): Promise<void> {
 		do {
+			// A load the host started before disposal is extension code already running; refusing
+			// the next one says nothing about this one.
+			if (this.#deferredExtensionLoad) await this.#deferredExtensionLoad;
 			await this.agent.waitForIdle();
 			await this.waitForAdmittedSubmissions();
 			await this.#bash.waitForIdle();
@@ -6754,7 +6771,9 @@ export class AgentSession implements SettingsScope {
 		return (
 			this.agent.state.isStreaming ||
 			this.hasAdmittedSubmission ||
-			this.isBashRunning ||
+			this.#deferredExtensionLoad !== undefined ||
+			// `isBashRunning` ends when the child exits; the result is recorded after that.
+			this.#bash.hasInFlightExecutions ||
 			this.hasPendingBashMessages ||
 			this.#queuedPreparations.size > 0 ||
 			this.#inFlightEventHandlers.size > 0 ||

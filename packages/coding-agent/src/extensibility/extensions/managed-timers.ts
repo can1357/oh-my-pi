@@ -72,9 +72,15 @@ export class ManagedTimers {
 
 	#run(kind: "interval" | "timeout", callback: (...args: unknown[]) => void, args: unknown[]): void {
 		try {
-			const result = this.own(callback(...args) as unknown);
-			if (result instanceof Promise) {
-				result.catch((err: unknown) => this.#report(kind, err));
+			const result: unknown = this.own(callback(...args) as unknown);
+			// Thenable duck-typing, not `instanceof`: a callback from another realm or a hand-rolled
+			// thenable rejects just as loudly, and an unreported rejection here is the
+			// uncaughtException this class exists to prevent.
+			if (result !== null && (typeof result === "object" || typeof result === "function")) {
+				const then = (result as { then?: unknown }).then;
+				if (typeof then === "function") {
+					Promise.resolve(result as PromiseLike<unknown>).catch((err: unknown) => this.#report(kind, err));
+				}
 			}
 		} catch (err) {
 			this.#report(kind, err);

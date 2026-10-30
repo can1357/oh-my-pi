@@ -109,6 +109,7 @@ import type {
 } from "./types";
 
 import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import { ownAcceptedCallbacks } from "./loader";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -1644,7 +1645,11 @@ export class ExtensionRunner {
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
-			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
+			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
+			// hands over here outlives the command that made the call. Owned at acceptance, like
+			// everything the `pi` surface takes.
+			compact: instructionsOrOptions =>
+				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
@@ -1759,7 +1764,8 @@ export class ExtensionRunner {
 			navigateTree: (targetId, options) => this.#navigateTreeHandler(targetId, options),
 			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
-			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
+			compact: instructionsOrOptions =>
+				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, this.runtime) as typeof instructionsOrOptions),
 		};
 	}
 
@@ -1848,6 +1854,14 @@ export class ExtensionRunner {
 			await Promise.race([this.#workChanged.promise, this.runtime.whenCallbacksChange()]);
 		}
 	}
+
+	/** Makes every callback this session's extensions handed over inert. See
+	 *  `ExtensionCallbackOwner`: waiting for work this runner can see does not stop a facility it
+	 *  never told from entering a disposed session. */
+	retireExtensionCallbacks(): void {
+		this.runtime.retire();
+	}
+
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
