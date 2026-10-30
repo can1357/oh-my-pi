@@ -1,5 +1,4 @@
 # Feedback on {{sourceLabel}}
-
 {{#if includeSource}}
 
 ## Source
@@ -20,7 +19,6 @@
 {{#list annotations join="\n\n"}}
 
 ## {{number}}. {{#if isLine}}Feedback on line {{line}}:{{else}}General feedback{{/if}}
-
 {{#if isLine}}
 {{#if quoteIsInline}}"{{quote}}"{{else}}{{quoteFence}}text
 {{quote}}

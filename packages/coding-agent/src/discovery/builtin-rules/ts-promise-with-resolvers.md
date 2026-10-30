@@ -60,12 +60,8 @@ class Gate {
 		this.#resolve = resolve;
 	}
 
-	open(): void {
-		this.#resolve();
-	}
-	wait(): Promise<void> {
-		return this.#promise;
-	}
+	open(): void { this.#resolve(); }
+	wait(): Promise<void> { return this.#promise; }
 }
 ```
 

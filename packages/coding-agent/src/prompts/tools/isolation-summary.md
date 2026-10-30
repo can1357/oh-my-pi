@@ -20,64 +20,62 @@ Isolation: no changes captured.
 Captured branch preserved as {{branchName}}.
 {{/if}}
 {{#if rootPatchPath}}
-
 - patch: `{{rootPatchPath}}`
-  {{/if}}
-  {{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
-  {{/when}}
-  {{#when kind "==" "nested-apply-failed"}}
-  <system-notification>Some nested repository patches failed to apply: {{error}}{{#if nestedPatchPaths}}
-  Captured nested patches preserved at:
-  {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}{{/if}}</system-notification>
-  {{/when}}
-  {{#when kind "==" "not-applied"}}
-  <system-notification>Patches were not applied and must be handled manually.</system-notification>
+{{/if}}
+{{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
+{{/when}}
+{{#when kind "==" "nested-apply-failed"}}
+<system-notification>Some nested repository patches failed to apply: {{error}}{{#if nestedPatchPaths}}
+Captured nested patches preserved at:
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}{{/if}}</system-notification>
+{{/when}}
+{{#when kind "==" "not-applied"}}
+<system-notification>Patches were not applied and must be handled manually.</system-notification>
 
 {{#if rootPatchPath}}
 Patch artifact:
-
 - {{rootPatchPath}}
-  {{/if}}
-  {{#if nestedPatchPaths}}
-  Nested repository patches (not applied):
-  {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
-  {{/if}}
-  {{/when}}
-  {{#when kind "==" "branch-merge-failed"}}
-  <system-notification>Branch merge failed: {{branchName}}.
-  {{#if conflict}}
-  Conflict: {{conflict}}
-  {{/if}}
-  The unmerged branch remains for manual resolution.</system-notification>
-  {{#if nestedPatchPaths}}
-  Nested repository patches (not applied):
-  {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
-  {{/if}}
-  {{/when}}
-  {{#when kind "==" "branch-capture-failed"}}
-  <system-notification>Branch merge failed while capturing the task branch: {{error}}
-  Task outputs are preserved but changes were not applied.</system-notification>
-  {{#if rootPatchPath}}
-  Patch artifact:
+{{/if}}
+{{#if nestedPatchPaths}}
+Nested repository patches (not applied):
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
+{{/if}}
+{{/when}}
+{{#when kind "==" "branch-merge-failed"}}
+<system-notification>Branch merge failed: {{branchName}}.
+{{#if conflict}}
+Conflict: {{conflict}}
+{{/if}}
+The unmerged branch remains for manual resolution.</system-notification>
+{{#if nestedPatchPaths}}
+Nested repository patches (not applied):
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
+{{/if}}
+{{/when}}
+{{#when kind "==" "branch-capture-failed"}}
+<system-notification>Branch merge failed while capturing the task branch: {{error}}
+Task outputs are preserved but changes were not applied.</system-notification>
+{{#if rootPatchPath}}
+Patch artifact:
 - {{rootPatchPath}}
-  {{/if}}
-  {{#if nestedPatchPaths}}
-  Nested repository patches (not applied):
-  {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
-  {{/if}}
-  {{/when}}
-  {{#when kind "==" "merge-error"}}
-  <system-notification>Merge phase failed: {{error}}
-  Task outputs are preserved but changes were not applied.</system-notification>
-  {{#if branchName}}
-  Unmerged branch preserved as {{branchName}} for manual resolution.
-  {{/if}}
-  {{#if rootPatchPath}}
-  Patch artifact:
+{{/if}}
+{{#if nestedPatchPaths}}
+Nested repository patches (not applied):
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
+{{/if}}
+{{/when}}
+{{#when kind "==" "merge-error"}}
+<system-notification>Merge phase failed: {{error}}
+Task outputs are preserved but changes were not applied.</system-notification>
+{{#if branchName}}
+Unmerged branch preserved as {{branchName}} for manual resolution.
+{{/if}}
+{{#if rootPatchPath}}
+Patch artifact:
 - {{rootPatchPath}}
-  {{/if}}
-  {{#if nestedPatchPaths}}
-  Nested repository patches (not applied):
-  {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
-  {{/if}}
-  {{/when}}
+{{/if}}
+{{#if nestedPatchPaths}}
+Nested repository patches (not applied):
+{{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
+{{/if}}
+{{/when}}

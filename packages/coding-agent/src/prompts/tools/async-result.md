@@ -10,10 +10,8 @@ Agent: agent://{{this.agentUrlId}}, history://{{this.agentUrlId}}{{/if}}{{#if th
 Agent: history://{{this.agentUrlId}}{{/if}}{{#if this.schemaStatus}}
 
 Structured output: {{this.schemaStatusLabel}}{{#if this.schemaError}}: {{this.schemaError}}{{/if}}{{#if this.hasStructuredData}}; full payload at agent://{{this.agentUrlId}}, fields via agent://{{this.agentUrlId}}/<field>[/<index>/…]{{/if}}{{#unless this.schemaValid}}{{#if this.structuredJson}}; preview:
-
-````json
+```json
 {{this.structuredJson}}
 ```{{/if}}{{/unless}}{{/if}}{{#unless @last}}
 {{/unless}}{{/each}}
 </system-notice>
-````

@@ -7,7 +7,6 @@ Continue active goal.
 </objective>
 
 Budget:
-
 - Tokens used: {{tokensUsed}}
 - Token budget: {{tokenBudget}}
 - Tokens remaining: {{remainingTokens}}

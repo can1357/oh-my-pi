@@ -1,8 +1,7 @@
 Plan approved.
 {{#if contextPreserved}}
-
 - History usable; the plan below authoritative if it conflicts with earlier exploration.
-  {{/if}}
+{{/if}}
 
 <instruction>
 Full plan inlined below; durable copy at `{{planFilePath}}` (identical content).

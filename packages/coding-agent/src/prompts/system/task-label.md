@@ -1,5 +1,4 @@
 # Task
-
 Label the delegated work in the next user message: one short imperative sentence, ≤9 words, naming the concrete change or investigation.
 
 - Answer ONLY with the label inside `<title>` and `</title>`; no actionable work (greeting/small talk) → `<title/>`.

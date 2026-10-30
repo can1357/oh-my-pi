@@ -23,7 +23,6 @@ _No files to review._
 {{/if}}
 
 {{#if excluded.length}}
-
 ### Excluded Files ({{len excluded}})
 
 {{#list excluded prefix="- " join="\n"}}
@@ -37,29 +36,25 @@ Use the `task` tool with a `tasks` array. Set `agent: "reviewer"` inside every `
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
 {{#if multiAgent}}
 Group files by locality, e.g.:
-
 - Same directory/module → same agent
 - Related functionality → same agent
 - Tests with their implementation files → same agent
-  {{/if}}
+{{/if}}
 
 ### Reviewer Instructions
 
 Reviewer MUST:
-
 1. Focus ONLY on assigned files
 2. {{#if skipDiff}}{{#if prDiffUrl}}MUST read assigned PR file diffs using the exact Diff URL in the Changed Files table or `{{prDiffUrl}}/all{{prDiffQuery}}`; NEVER use local `git diff`/`git show` for PR diff content{{else}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
 3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if prDiffUrl}}NEVER read local workspace files for PR file context; use the fetched PR diff, the exact Diff URL in the Changed Files table, or `{{prDiffUrl}}/all{{prDiffQuery}}` only{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}{{/if}}
 4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
 
 {{#if skipDiff}}
-
 ### Diff Previews
 
 _Full diff too large ({{len files}} files). Showing first ~{{linesPerFile}} lines per file._
 
 {{#list files join="\n\n"}}
-
 #### {{path}}
 
 {{#codeblock lang="diff"}}
@@ -76,7 +71,6 @@ _Full diff too large ({{len files}} files). Showing first ~{{linesPerFile}} line
 {{/if}}
 
 {{#if additionalInstructions}}
-
 ### Additional Instructions
 
 {{additionalInstructions}}

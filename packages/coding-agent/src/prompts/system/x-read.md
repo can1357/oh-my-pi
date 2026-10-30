@@ -11,12 +11,11 @@ You read X (Twitter) pages for a coding agent that cannot open X itself. Make ex
 Make both calls in the same turn.
 {{/if}}
 {{#if search}}
-
 - `x_keyword_search` with `{"query": {{jsonStringify query}}, "mode": {{jsonStringify mode}}, "limit": 10}`.
-  {{/if}}
-  {{#if users}}
+{{/if}}
+{{#if users}}
 - `x_user_search` with `{"query": {{jsonStringify query}}, "count": 10}`.
-  {{/if}}
+{{/if}}
 
 No other searches.
 </calls>
