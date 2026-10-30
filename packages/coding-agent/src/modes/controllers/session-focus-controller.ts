@@ -177,7 +177,7 @@ export class SessionFocusController {
 		this.ctx.syncIdleMaintenanceView(target);
 		try {
 			this.ctx.unsubscribe?.();
-			this.ctx.clearTransientSessionUi();
+			this.ctx.clearTransientSessionUi({ viewOnly: true });
 			this.ctx.eventController.resetTranscriptAnchors();
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {

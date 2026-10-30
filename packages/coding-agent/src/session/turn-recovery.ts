@@ -397,6 +397,8 @@ export class TurnRecovery {
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
 	 */
 	readonly #refusalWalkTried = new Set<string>();
+	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
+	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -889,6 +891,7 @@ export class TurnRecovery {
 	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
+		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
@@ -2936,6 +2939,11 @@ export class TurnRecovery {
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
 		if (accountPolicyDenial && currentModel) {
+			const accountPolicyKey = `${currentModel.provider}/${currentModel.id}`;
+			const rotationsRemaining =
+				this.#accountPolicyRotationsRemaining.get(accountPolicyKey) ??
+				Math.max(0, this.#host.modelRegistry.authStorage.credentials.list(currentModel.provider).length - 1);
+			this.#accountPolicyRotationsRemaining.set(accountPolicyKey, Math.max(0, rotationsRemaining - 1));
 			// `rotate` may sleep out a sibling's short block; register its signal
 			// as the retry controller so `abortRetry()` cancels that wait exactly
 			// like the backoff sleep below.
@@ -2948,8 +2956,12 @@ export class TurnRecovery {
 						error: errorMessage,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
+						waitForSibling: rotationsRemaining > 0,
 					})
 				).switched;
+				// Rotation is advisory: expired blocks or a repeatedly offered sibling
+				// must not retry beyond one pool traversal in this saga.
+				switchedCredential &&= rotationsRemaining > 0;
 			} catch (error) {
 				if (!rotateAbortController.signal.aborted) throw error;
 				if (this.#retryAbortController !== rotateAbortController) return false;

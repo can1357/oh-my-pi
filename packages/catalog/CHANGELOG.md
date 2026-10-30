@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
+- Long image-heavy conversations on the official Anthropic API now keep up to 120 MB of inline images before evicting older ones, following the Messages API request limit increase from 32 MB to 128 MB
+
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
