@@ -211,10 +211,15 @@ export async function resolveRetryKey(
 }
 
 export interface AuthRetryKeyState {
-	/** Bearer strings already sent during this logical operation. */
+	/**
+	 * Bearer strings an attempt of this logical operation sent. A key a
+	 * resolver handed over joins only when an attempt sends it: a request held
+	 * before dispatch may resolve its key again, and the key that replaced was
+	 * never refused by anyone, so a retry must not reject it as a cycle.
+	 */
 	attemptedKeys: Set<string>;
-	/** Bearer used by the most recent failed attempt. */
-	lastKey: string;
+	/** Bearer the most recent attempt sent; `undefined` until one has. */
+	lastKey: string | undefined;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
@@ -223,14 +228,26 @@ export interface AuthRetryKeyState {
 	attempts: number;
 }
 
-export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
+/** Retry state for an operation whose first attempt is about to start; record its key with {@link recordAuthRetryKeySent}. */
+export function createAuthRetryKeyState(): AuthRetryKeyState {
 	return {
-		attemptedKeys: new Set([initialKey]),
-		lastKey: initialKey,
+		attemptedKeys: new Set(),
+		lastKey: undefined,
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
 	};
+}
+
+/**
+ * Record `key` as the one an attempt of this operation took to the wire: the
+ * retry after it names it to the resolver as the failed key and never sends it
+ * again. A driver calls this where the attempt sends the key, not where the
+ * resolver returns it.
+ */
+export function recordAuthRetryKeySent(state: AuthRetryKeyState, key: string): void {
+	state.attemptedKeys.add(key);
+	state.lastKey = key;
 }
 
 function acceptRetryKey(
@@ -242,9 +259,9 @@ function acceptRetryKey(
 	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
 		return undefined;
 	}
-	state.attemptedKeys.add(key);
+	// The attempt counts against the ceiling now; its key counts as sent only
+	// once the attempt sends it, which may be with a key resolved later still.
 	state.attempts += 1;
-	state.lastKey = key;
 	state.refreshedCurrent = refreshedCurrent;
 	return key;
 }
@@ -356,8 +373,10 @@ export async function withAuth<T>(
 	}
 	if (initialKey === undefined) throw missingKey();
 
-	const state = createAuthRetryKeyState(initialKey);
+	const state = createAuthRetryKeyState();
 	let lastError: unknown;
+	// `attempt` sends the key it is handed, so each is recorded as it starts.
+	recordAuthRetryKeySent(state, initialKey);
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
@@ -368,6 +387,7 @@ export async function withAuth<T>(
 	while (true) {
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
+		recordAuthRetryKeySent(state, nextKey);
 		try {
 			return await attempt(nextKey);
 		} catch (error) {

@@ -2,10 +2,19 @@ import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { registerCustomApi, unregisterCustomApis } from "../src/api-registry";
 import { OAUTH_REFRESH_SKEW_MS } from "../src/auth/refresh";
-import type { ApiKeyResolver } from "../src/auth-retry";
+import type { OAuthRequestIdentity } from "../src/auth/types";
+import type { ApiKeyResolveContext, ApiKeyResolver } from "../src/auth-retry";
 import { RESOLVED_CREDENTIAL_REUSE_MS, streamSimple } from "../src/stream";
 import type { Api, DispatchHold, FetchImpl, Model } from "../src/types";
 import { AssistantMessageEventStream } from "../src/utils/event-stream";
+import {
+	type CapturedRequest,
+	captureFetch,
+	completionsChunks,
+	factoryModel,
+	WORKOS_TOKEN,
+} from "./helpers/factory-droid";
+import { afterMicrotasks, nextTurn, PROBE_MAX_DEPTH, ProbedGate } from "./helpers/probed-gate";
 
 /**
  * Round 3 of the PR #17399 review (R3-5) found a request authorized before its
@@ -95,12 +104,15 @@ const customModel = { ...common, id: "custom", name: "Custom", api: customApi, p
 
 /** The key each dispatch to the custom API carried. */
 const customWire: (string | undefined)[] = [];
+/** The OAuth identity each dispatch to the custom API carried. */
+const customIdentities: (OAuthRequestIdentity | undefined)[] = [];
 
 function registerRecordingApi(): void {
 	registerCustomApi(
 		customApi,
 		(model, _context, options) => {
 			customWire.push(typeof options?.apiKey === "string" ? options.apiKey : undefined);
+			customIdentities.push(options?.oauthIdentity);
 			const events = new AssistantMessageEventStream();
 			queueMicrotask(() =>
 				events.push({
@@ -180,6 +192,7 @@ afterEach(() => {
 	setSystemTime();
 	unregisterCustomApis(SOURCE_ID);
 	customWire.length = 0;
+	customIdentities.length = 0;
 });
 
 describe("the chokepoint re-resolves a caller's key that a pause may have outlived", () => {
@@ -303,5 +316,304 @@ describe("the chokepoint re-resolves a caller's key that a pause may have outliv
 
 		expect(minted).toEqual(["key-1000"]);
 		expect(wire).toEqual(["Bearer key-1000"]);
+	});
+});
+
+/** What one ask of a resolver was for, in the terms of `ApiKeyResolveContext`. */
+type AskStep = "resolve" | "refresh" | "rotate";
+
+/** One ask of a resolver: what it was for, the key it gave, and the failed key it was told about. */
+interface Ask {
+	step: AskStep;
+	key: string | undefined;
+	previousKey: string | undefined;
+}
+
+function stepOf(context: ApiKeyResolveContext): AskStep {
+	if (context.error === undefined) return "resolve";
+	return context.lastChance ? "rotate" : "refresh";
+}
+
+const COMPLETION_STREAM = `${[
+	{ id: "chatcmpl-test", choices: [{ index: 0, delta: { content: "ok" } }] },
+	{ id: "chatcmpl-test", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+]
+	.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`)
+	.join("")}data: [DONE]\n\n`;
+
+/**
+ * OpenAI completions that records the key each request carried, refuses the
+ * ones `rejects` names with a 401, and answers the rest with a one-word stream.
+ */
+function authCheckingFetch(wire: string[], rejects: (key: string) => boolean): FetchImpl {
+	return async (_input, init) => {
+		const key = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /, "");
+		wire.push(key);
+		if (rejects(key)) return Response.json({ error: { message: "Invalid API key" } }, { status: 401 });
+		return new Response(COMPLETION_STREAM, { headers: { "content-type": "text/event-stream" } });
+	};
+}
+
+/**
+ * Round 4 of the PR #17399 review found the auth-retry driver counting every
+ * key it resolved as one the provider had refused (R4-5), and the chokepoint
+ * dropping a refreshed OAuth identity whenever the bearer and the credential
+ * row stayed the same (R4-6). A key a refresh replaced before dispatch never
+ * reached the provider, so a retry must not reject it as a cycle; a key that
+ * did reach it and was refused still must not be sent again.
+ */
+describe("after a hold, the retry driver and the provider see the credential the request sent", () => {
+	const openai = HTTP_ROUTES[0].model;
+	const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
+
+	it("a key a refresh replaced before dispatch was never sent, so the auth retry may send it", async () => {
+		setSystemTime(MINTED);
+		const pause = pauseGate();
+		const asks: Ask[] = [];
+		const wire: string[] = [];
+		const resolver: ApiKeyResolver = ctx => {
+			const step = stepOf(ctx);
+			let key: string | undefined;
+			if (step === "resolve") {
+				key = asks.length === 0 ? "valid-A" : "invalid-B";
+				if (asks.length === 0) pause.close();
+			} else if (step === "refresh") {
+				key = "valid-A";
+			}
+			asks.push({ step, key, previousKey: ctx.previousKey });
+			return key;
+		};
+		const result = streamSimple(openai, context, {
+			apiKey: resolver,
+			beforeDispatch: pause.hold,
+			fetch: authCheckingFetch(wire, key => key === "invalid-B"),
+		}).result();
+
+		await settleUntil(() => asks.length > 0);
+		await settle();
+		setSystemTime(new Date(MINTED.getTime() + PAUSE_MS));
+		pause.open();
+		const message = await result;
+
+		expect(asks).toEqual([
+			{ step: "resolve", key: "valid-A", previousKey: undefined },
+			{ step: "resolve", key: "invalid-B", previousKey: undefined },
+			{ step: "refresh", key: "valid-A", previousKey: "invalid-B" },
+		]);
+		expect(wire).toEqual(["invalid-B", "valid-A"]);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	it("a key the provider refused is still never sent again", async () => {
+		setSystemTime(MINTED);
+		const pause = pauseGate();
+		const asks: Ask[] = [];
+		const wire: string[] = [];
+		const resolver: ApiKeyResolver = ctx => {
+			const step = stepOf(ctx);
+			const key = asks.length === 0 ? "valid-A" : "invalid-B";
+			if (asks.length === 0) pause.close();
+			asks.push({ step, key, previousKey: ctx.previousKey });
+			return key;
+		};
+		const result = streamSimple(openai, context, {
+			apiKey: resolver,
+			beforeDispatch: pause.hold,
+			fetch: authCheckingFetch(wire, key => key === "invalid-B"),
+		}).result();
+
+		await settleUntil(() => asks.length > 0);
+		await settle();
+		setSystemTime(new Date(MINTED.getTime() + PAUSE_MS));
+		pause.open();
+		const message = await result;
+
+		expect(asks).toEqual([
+			{ step: "resolve", key: "valid-A", previousKey: undefined },
+			{ step: "resolve", key: "invalid-B", previousKey: undefined },
+			{ step: "refresh", key: "invalid-B", previousKey: "invalid-B" },
+			{ step: "rotate", key: "invalid-B", previousKey: "invalid-B" },
+		]);
+		expect(wire).toEqual(["invalid-B"]);
+		expect(message.stopReason).toBe("error");
+	});
+
+	it("a retry key a refresh replaced before dispatch was never sent either", async () => {
+		setSystemTime(MINTED);
+		const pause = pauseGate();
+		const asks: Ask[] = [];
+		const wire: string[] = [];
+		const resolver: ApiKeyResolver = ctx => {
+			const step = stepOf(ctx);
+			const key = step === "resolve" ? (asks.length === 0 ? "k1" : "k3") : "k2";
+			// The pause engages as the first 401's refresh answers, so the retry
+			// waits it out and its key is replaced before it is sent.
+			if (step === "refresh") pause.close();
+			asks.push({ step, key, previousKey: ctx.previousKey });
+			return key;
+		};
+		const result = streamSimple(openai, context, {
+			apiKey: resolver,
+			beforeDispatch: pause.hold,
+			fetch: authCheckingFetch(wire, key => key === "k1" || key === "k3"),
+		}).result();
+
+		await settleUntil(() => asks.some(ask => ask.step === "refresh"));
+		await settle();
+		expect(wire).toEqual(["k1"]);
+		setSystemTime(new Date(MINTED.getTime() + PAUSE_MS));
+		pause.open();
+		const message = await result;
+
+		expect(asks).toEqual([
+			{ step: "resolve", key: "k1", previousKey: undefined },
+			{ step: "refresh", key: "k2", previousKey: "k1" },
+			{ step: "resolve", key: "k3", previousKey: undefined },
+			{ step: "rotate", key: "k2", previousKey: "k3" },
+		]);
+		expect(wire).toEqual(["k1", "k3", "k2"]);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	it("a pause landing anywhere between the hold's answer and the send leaves only the sent key counted", async () => {
+		let caught = 0;
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			let now = MINTED.getTime();
+			setSystemTime(new Date(now));
+			const gate = new ProbedGate();
+			const minted: string[] = [];
+			const asks: Ask[] = [];
+			const wire: string[] = [];
+			const resolver: ApiKeyResolver = ctx => {
+				const step = stepOf(ctx);
+				let key: string | undefined;
+				if (step === "resolve") {
+					key = `k${minted.length + 1}`;
+					minted.push(key);
+					if (minted.length === 1) gate.close();
+				} else if (step === "refresh") {
+					// The key the last refresh replaced before dispatch.
+					key = minted.at(-2);
+				}
+				asks.push({ step, key, previousKey: ctx.previousKey });
+				return key;
+			};
+			let settled = false;
+			const result = streamSimple(openai, context, {
+				apiKey: resolver,
+				beforeDispatch: gate.hold,
+				// The first request is refused; any later one is answered.
+				fetch: authCheckingFetch(wire, () => wire.length === 1),
+			})
+				.result()
+				.finally(() => {
+					settled = true;
+				});
+
+			// Resume as a human would; the first resume pauses again `depth`
+			// microtasks later, and every wait that catches the request unsent
+			// outlives the key it carries.
+			let pauseAgain = true;
+			while (!settled) {
+				await nextTurn();
+				if (!gate.closed) continue;
+				if (wire.length === 0) {
+					now += PAUSE_MS;
+					setSystemTime(new Date(now));
+				}
+				gate.open();
+				if (pauseAgain) {
+					pauseAgain = false;
+					afterMicrotasks(depth, () => gate.close());
+				}
+			}
+			const message = await result;
+
+			const sent = minted.at(-1)!;
+			const replaced = minted.at(-2)!;
+			expect({ depth, wire, retry: asks.at(-1), stopReason: message.stopReason }).toEqual({
+				depth,
+				wire: [sent, replaced],
+				retry: { step: "refresh", key: replaced, previousKey: sent },
+				stopReason: "stop",
+			});
+			if (minted.length === 3) caught++;
+		}
+		// Some depths must land before the send, or the sweep never re-resolved.
+		expect(caught).toBeGreaterThan(0);
+	});
+
+	it("a custom API: a refresh that keeps the bearer and the row dispatches its new OAuth identity", async () => {
+		registerRecordingApi();
+		setSystemTime(MINTED);
+		const pause = pauseGate();
+		let calls = 0;
+		const result = streamSimple(customModel, context, {
+			apiKey: () => {
+				calls++;
+				if (calls === 1) pause.close();
+				return {
+					apiKey: "same-bearer",
+					credentialId: 7,
+					oauthIdentity: { orgId: calls === 1 ? "old-org" : "new-org" },
+				};
+			},
+			beforeDispatch: pause.hold,
+		}).result();
+
+		await settleUntil(() => calls > 0);
+		await settle();
+		setSystemTime(new Date(MINTED.getTime() + PAUSE_MS));
+		pause.open();
+		const message = await result;
+
+		expect(calls).toBe(2);
+		expect(customWire).toEqual(["same-bearer"]);
+		expect(customIdentities).toEqual([{ orgId: "new-org" }]);
+		expect(message.credentialId).toBe(7);
+	});
+
+	it("Factory: a refresh that keeps the bearer and the row sends the new organization, host and upstream", async () => {
+		setSystemTime(MINTED);
+		const pause = pauseGate();
+		const model = factoryModel("kimi-k3");
+		model.factoryDroidApiProviders = ["fireworks", "baseten"];
+		const captured: CapturedRequest[] = [];
+		let calls = 0;
+		const result = streamSimple(model, context, {
+			apiKey: () => {
+				calls++;
+				if (calls === 1) pause.close();
+				return {
+					apiKey: WORKOS_TOKEN,
+					credentialId: 7,
+					oauthIdentity:
+						calls === 1
+							? { orgId: "org-global", region: "global", inferenceRegion: "global" }
+							: { orgId: "org-eu", region: "eu", inferenceRegion: "us" },
+				};
+			},
+			beforeDispatch: pause.hold,
+			fetch: captureFetch(captured, completionsChunks("OK", model.id)),
+		}).result();
+
+		await settleUntil(() => calls > 0);
+		await settle();
+		setSystemTime(new Date(MINTED.getTime() + PAUSE_MS));
+		pause.open();
+		const message = await result;
+
+		expect(calls).toBe(2);
+		expect(message.stopReason).toBe("stop");
+		expect(
+			captured.map(request => [
+				request.url,
+				request.headers["x-factory-org-id"],
+				request.headers["x-api-provider"],
+				request.headers.authorization,
+			]),
+		).toEqual([
+			["https://api.eu.factory.ai/api/llm/o/v1/chat/completions", "org-eu", "baseten", `Bearer ${WORKOS_TOKEN}`],
+		]);
 	});
 });

@@ -11,7 +11,7 @@ import type {
 	OAuthAccessResolution,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { streamSimple } from "@oh-my-pi/pi-ai";
+import { seedApiKeyResolver, streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -59,6 +59,15 @@ export interface DryBalanceAuthStorage {
 	readonly oauth: {
 		access(provider: string, sessionId?: string, options?: DryBalanceAuthOptions): Promise<OAuthAccess | undefined>;
 		accessAll?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
+		/**
+		 * Resolve one stored account again by row id: the same token while it has
+		 * life left, a refreshed one when not. Never rotates to a sibling.
+		 */
+		accessById?(
+			provider: string,
+			credentialId: number,
+			options?: DryBalanceAuthOptions,
+		): Promise<OAuthAccessResolution | undefined>;
 		/**
 		 * Force-refresh a single credential by id (step (b) of the auth-retry
 		 * policy). The bench re-mints the failing account's token in place on a
@@ -405,15 +414,29 @@ async function runBenchRequest(
 	const { account, accessToken, credentialId } = target;
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
+	// The first ask gets the token resolved with the targets. Every target's
+	// request starts at once, so behind a `providers.maxInFlightRequests` cap one
+	// can queue past the time a resolved key is trusted for, and the dispatch
+	// chokepoint asks again: this account's row is read again, which keeps a
+	// token with life left and refreshes one without. A row that cannot be read
+	// leaves the request on the token it has, and a 401 recovers it below.
 	// Re-mint the cached token on a 401: a peer/broker may have rotated it out
 	// from under our snapshot (Anthropic rotates refresh tokens on every use).
 	// The bench measures one account, so the switch step intentionally declines.
-	const apiKey: ApiKeyResolver = async ({ lastChance, error }) => {
-		if (error === undefined) return accessToken;
+	const apiKey: ApiKeyResolver = seedApiKeyResolver(accessToken, async ({ lastChance, error, signal }) => {
+		if (error === undefined) {
+			if (credentialId === undefined || !authStorage.oauth.accessById) return undefined;
+			const current = await authStorage.oauth.accessById(model.provider, credentialId, {
+				baseUrl: model.baseUrl,
+				modelId: model.id,
+				signal,
+			});
+			return current?.ok ? current.accessToken : undefined;
+		}
 		if (lastChance || credentialId === undefined || !authStorage.oauth.refresh) return undefined;
 		const refreshed = await authStorage.oauth.refresh(credentialId);
 		return refreshed.credential.type === "oauth" ? refreshed.credential.access : undefined;
-	};
+	});
 	try {
 		const context: Context = {
 			messages: [

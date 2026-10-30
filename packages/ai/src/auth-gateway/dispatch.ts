@@ -8,7 +8,7 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey, seedApiKeyResolver } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
@@ -113,7 +113,9 @@ export function gatewayRequestLogFields(
  * pi-ai clients never consult `AuthStorage`; the gateway resolves the bearer
  * and its OAuth identity together (refreshing through the broker when needed).
  * Keep this selection snapshot intact even if another request replaces the
- * stored token before dispatch. Storage failures map through
+ * stored token before dispatch: the request sends it whole, and when it waited
+ * too long to send it, {@link buildGatewayApiKeyResolver} replaces bearer and
+ * identity together. Storage failures map through
  * {@link classifyGatewayError}; a provider without any credential is a 401.
  */
 export async function resolveGatewayApiKey(
@@ -222,7 +224,15 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * Build the {@link ApiKeyResolver} handed to a pi-ai client for a gateway
  * request. Drives the central a/b/c auth-retry policy server-side:
  *
- * - initial resolve → the credential already resolved for this request.
+ * - first initial resolve → the credential already resolved for this request.
+ * - any later initial resolve → the session's credential as storage holds it
+ *   now. The client resolves afresh for every operation it runs on this
+ *   resolver (a completion re-sampled after a thinking-loop stall, a split
+ *   judgment's later chunks), and once more at dispatch when a request waited
+ *   past the time a resolved key is trusted for (a provider's in-flight cap,
+ *   which the stdio gateway applies from settings). Storage hands back the same
+ *   token while it has life left and refreshes it when not, so a request sent
+ *   after its token's expiry carries a live one instead of drawing a 401 first.
  * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
  *   (a peer/broker may have rotated its token out from under our cached copy).
  * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
@@ -234,8 +244,9 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * the bearer they sent. Every step resolves under the scoped client's
  * credential session when `opts.client` binds the provider, so refresh,
  * blocking and sibling rotation stay inside its accounts. `onResolvedKey`
- * observes every rotation; routes that retain provider session state use it
- * to re-key the account lease, one-shot routes pass `undefined`.
+ * observes every credential a step after the first resolves; routes that
+ * retain provider session state use it to re-key the account lease, one-shot
+ * routes pass `undefined`.
  */
 export function buildGatewayApiKeyResolver(
 	opts: AuthGatewayCredentialOptions,
@@ -253,15 +264,24 @@ export function buildGatewayApiKeyResolver(
 	// token a 401 rejected is looked up from the bearer that request sent.
 	const provenance = createOAuthProvenance();
 	provenance.record(initialKey);
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return seedApiKeyResolver(initialKey, async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
+		if (error === undefined) {
+			const current = await storage.keys.getWithCredential(
+				model.provider,
+				gatewayCredentialSessionId(opts, model, sessionId),
+				modelKeyOptions(model, sig),
+			);
+			provenance.record(current);
+			if (current) {
+				lastKey = current.apiKey;
+				onResolvedKey?.(current);
+			}
+			return current;
+		}
 		// Only the bearer the failed request actually sent names the rejected
 		// token; a caller that cannot report it keeps the previous behaviour.
 		const rejectedAccessToken = provenance.accessFor(previousKey);
-		if (error === undefined) {
-			lastKey = initialKey.apiKey;
-			return initialKey;
-		}
 		if (!lastChance) {
 			const refreshed = await storage.keys.getWithCredential(
 				model.provider,
@@ -293,7 +313,7 @@ export function buildGatewayApiKeyResolver(
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) onResolvedKey?.(next);
 		return next;
-	};
+	});
 }
 
 /**

@@ -19,6 +19,7 @@ import {
 	type ApiKeyResolution,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
+	recordAuthRetryKeySent,
 	resolvedApiKeyBearer,
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
@@ -679,6 +680,12 @@ interface ResolvedCredential {
 	resolvedAt: number;
 	/** Resolve the key again and record it here; a resolver with nothing to give keeps the current one. */
 	refresh(signal: AbortSignal | undefined): Promise<void>;
+	/**
+	 * Called in the step that hands {@link apiKey} to the provider. Only a key
+	 * sent this way can have been refused: one a refresh replaced before it
+	 * never reached the provider, and the retry after a refusal may still use it.
+	 */
+	sent(): void;
 }
 
 const RESOLVED_CREDENTIAL = Symbol("omp.resolvedCredential");
@@ -689,10 +696,22 @@ function resolvedCredentialOf(options: object | undefined): ResolvedCredential |
 	return (options as CarriesCredential | undefined)?.[RESOLVED_CREDENTIAL];
 }
 
-/** `options` carrying `credential`'s current key; the same object while the key is unchanged. */
+/**
+ * `options` carrying `credential` as it now stands; the same object while
+ * nothing in it changed. All three fields are compared: a refresh can move a
+ * bearer to another organization or residency without changing the bearer or
+ * its row, and the provider builds its host, organization and upstream from
+ * the identity alone.
+ */
 function withCurrentCredential<TOptions extends object>(options: TOptions, credential: ResolvedCredential): TOptions {
-	const current = options as { apiKey?: unknown; credentialId?: number };
-	if (current.apiKey === credential.apiKey && current.credentialId === credential.credentialId) return options;
+	const current = options as Partial<Pick<ResolvedCredential, "apiKey" | "credentialId" | "oauthIdentity">>;
+	if (
+		current.apiKey === credential.apiKey &&
+		current.credentialId === credential.credentialId &&
+		current.oauthIdentity === credential.oauthIdentity
+	) {
+		return options;
+	}
 	// Every options type that reaches the chokepoint carries these three fields.
 	const refreshed = {
 		...options,
@@ -765,22 +784,19 @@ function withProviderInFlightLimit<
 			// An abort ends the wait the same way, so cancelling a request held
 			// behind an indefinite hold also releases the permit acquired above.
 			// The dispatch runs in the same synchronous step as the last read of
-			// the hold's probe: a gate that closed in the microtasks after the
-			// hold answered is still seen, and the request waits again.
+			// the hold's probe and of the signal: a gate that closed in the
+			// microtasks after the hold answered is still seen, and the request
+			// waits again; one cancelled there never reaches this send.
 			const inner = await dispatchWhenOpen(
 				hold,
 				options?.signal,
 				() => {
-					if (options?.signal?.aborted) {
-						throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
+					let dispatched = options;
+					if (credential && options) {
+						dispatched = withCurrentCredential(options, credential);
+						credential.sent();
 					}
-					return healLeakedThinking(
-						model,
-						dispatch(
-							limit !== undefined,
-							credential && options ? withCurrentCredential(options, credential) : options,
-						),
-					);
+					return healLeakedThinking(model, dispatch(limit !== undefined, dispatched));
 				},
 				// A resolved key that the slot wait or the hold may have outlived is
 				// resolved again here, after the holds answer, on every round a
@@ -1471,10 +1487,11 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey);
+			const retryState = createAuthRetryKeyState();
 			// The key an attempt sends, which the chokepoint resolves again when the
 			// wait before dispatch outlived it. The retry below must then know the
-			// key the request actually carried.
+			// key the request actually carried, and only that one: the key a
+			// refresh replaced was never sent, so nothing refused it.
 			const credentialFor = (
 				apiKey: string,
 				id: number | undefined,
@@ -1499,8 +1516,9 @@ function streamSimpleRequest<TApi extends Api>(
 					this.credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 					this.oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					this.resolvedAt = Date.now();
-					retryState.attemptedKeys.add(key);
-					retryState.lastKey = key;
+				},
+				sent() {
+					recordAuthRetryKeySent(retryState, this.apiKey);
 				},
 			});
 			let failure = await runAttempt(credentialFor(lastKey, credentialId, oauthIdentity));
