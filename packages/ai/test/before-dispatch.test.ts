@@ -6,7 +6,7 @@
  * layer makes itself (thinking-loop re-sample, rotated credential) pass
  * through it, and a throw from it fails that attempt instead of hanging.
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,7 +14,13 @@ import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as duoWorkflow from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { __providerInFlightForTesting, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import {
+	__providerInFlightForTesting,
+	completeSimple,
+	RESOLVED_CREDENTIAL_REUSE_MS,
+	stream,
+	streamSimple,
+} from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -464,6 +470,69 @@ describe("beforeDispatch", () => {
 		expect(settled).toBe("cancelled");
 		expect(dispatches).toBe(0);
 		held.resolve();
+	});
+
+	// A key the hold outlived is resolved again inside the barrier, once the
+	// hold answers. That refresh was awaited, not raced: cancelled while the
+	// resolver was still pending, the request stayed parked, and kept its
+	// provider in-flight permit, until the resolver settled.
+	test("ends a credential refresh that never settles when the caller aborts, and frees its in-flight permit", async () => {
+		limiterRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-before-dispatch-"));
+		__providerInFlightForTesting.setRoot(limiterRoot);
+		let dispatches = 0;
+		registerCustomApi(
+			API,
+			() => {
+				dispatches += 1;
+				const events = new AssistantMessageEventStream();
+				queueMicrotask(() => events.push({ type: "done", reason: "stop", message: reply() }));
+				return events;
+			},
+			SOURCE_ID,
+		);
+		const limit = { [model().provider]: 1 };
+		const start = Date.parse("2026-10-30T10:00:00Z");
+		setSystemTime(new Date(start));
+		try {
+			const parked = Promise.withResolvers<void>();
+			const held = Promise.withResolvers<void>();
+			const refreshing = Promise.withResolvers<void>();
+			const refreshed = Promise.withResolvers<string>();
+			const abort = new AbortController();
+			let resolves = 0;
+
+			const result = streamSimple(model(), context(), {
+				signal: abort.signal,
+				maxInFlightRequests: limit,
+				apiKey: () => {
+					resolves += 1;
+					if (resolves === 1) return "old-key";
+					refreshing.resolve();
+					return refreshed.promise;
+				},
+				beforeDispatch: () => {
+					parked.resolve();
+					return held.promise;
+				},
+			}).result();
+			await parked.promise;
+			setSystemTime(new Date(start + RESOLVED_CREDENTIAL_REUSE_MS + 1));
+			held.resolve();
+			await refreshing.promise;
+			abort.abort(new Error("cancelled"));
+
+			await expect(result).rejects.toThrow("cancelled");
+			expect(dispatches).toBe(0);
+
+			// The permit went with the cancellation: the next request under the
+			// same cap of one goes out while the refresh is still pending.
+			const next = await streamSimple(model(), context(), { maxInFlightRequests: limit }).result();
+			expect(next.stopReason).toBe("stop");
+			expect(dispatches).toBe(1);
+			refreshed.resolve("new-key");
+		} finally {
+			setSystemTime();
+		}
 	});
 
 	// `PI_REQ_DEBUG` dumps the request body to disk between the hold and the

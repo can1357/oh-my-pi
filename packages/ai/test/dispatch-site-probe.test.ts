@@ -7,7 +7,8 @@
  * exact only when it sends in the same synchronous step as the last read of
  * the holds' probes. These tests close a probed gate at each microtask depth
  * after the hold is asked and check that nothing reaches the wire while it
- * reads closed.
+ * reads closed. The Cursor stream is also cancelled at each depth, and a
+ * cancelled turn must neither open nor write it.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { EventEmitter } from "node:events";
@@ -186,7 +187,7 @@ describe("Cursor HTTP/2", () => {
 		maxTokens: 1_000,
 	});
 
-	/** The half of an HTTP/2 stream this fixture answers: it never replies, so only the open matters. */
+	/** The half of an HTTP/2 stream this fixture answers: it never replies, so only the open, its writes and its close matter. */
 	type FakeStream = EventEmitter & {
 		closed: boolean;
 		writableEnded: boolean;
@@ -195,16 +196,20 @@ describe("Cursor HTTP/2", () => {
 		close(): void;
 	};
 
-	/** An HTTP/2 session whose `request` is the wire: it reports and opens a stream that never answers. */
-	function fakeSession(onRequest: () => void) {
+	/**
+	 * An HTTP/2 session whose `request` is the wire: it reports and opens a
+	 * stream that never answers, and reports every write to that stream.
+	 */
+	function fakeSession(onRequest: (request: FakeStream) => void, onWrite: () => void = () => {}) {
 		const session = new EventEmitter();
 		return Object.assign(session, {
 			request(): FakeStream {
-				onRequest();
 				const request: FakeStream = Object.assign(new EventEmitter(), {
 					closed: false,
 					writableEnded: false,
-					write() {},
+					write() {
+						onWrite();
+					},
 					end() {
 						request.writableEnded = true;
 					},
@@ -212,6 +217,7 @@ describe("Cursor HTTP/2", () => {
 						request.closed = true;
 					},
 				});
+				onRequest(request);
 				return request;
 			},
 			close() {},
@@ -240,6 +246,79 @@ describe("Cursor HTTP/2", () => {
 
 			expect(sentClosed).toEqual([]);
 			expect(closedFirst.length).toBeGreaterThan(0);
+		} finally {
+			connect.mockRestore();
+		}
+	});
+
+	// The request's signal was read when the hold was asked and when it
+	// answered, not when the stream opened, so a cancellation in the microtasks
+	// after the answer still opened it. One landing after the open but before
+	// the abort listener was added never fired that listener: the run request
+	// was written after the cancellation and the stream was left open.
+	test("neither opens nor writes its request once the caller cancels, and closes a stream it opened", async () => {
+		const wiredCancelled: string[] = [];
+		const leftOpen: number[] = [];
+		const stopReasons = new Set<string>();
+		let cancelledBeforeOpen = 0;
+		let cancelledAfterOpen = 0;
+		let connected = false;
+		let onRequest: (request: FakeStream) => void = () => {};
+		let onWrite: () => void = () => {};
+		const connect = spyOn(http2, "connect").mockImplementation((() => {
+			connected = true;
+			return fakeSession(
+				request => onRequest(request),
+				() => onWrite(),
+			);
+		}) as unknown as typeof http2.connect);
+		try {
+			for (let depth = 1; depth <= MAX_DEPTH; depth++) {
+				const abort = new AbortController();
+				let opened: FakeStream | undefined;
+				onRequest = request => {
+					opened = request;
+					if (abort.signal.aborted) wiredCancelled.push(`request at ${depth}`);
+				};
+				onWrite = () => {
+					if (abort.signal.aborted) wiredCancelled.push(`write at ${depth}`);
+				};
+				connected = false;
+				let armed = true;
+				// Cancel `depth` microtasks after the ask Cursor makes right before
+				// its stream opens, not the chokepoint's earlier one.
+				const hold: DispatchHold = () => {
+					if (!armed || !connected) return;
+					armed = false;
+					afterMicrotasks(depth, () => abort.abort(new Error(`cancelled ${depth} microtasks after the hold`)));
+				};
+				hold.isClosed = () => false;
+
+				const message = await stream(model, context, {
+					apiKey: "fake",
+					transport: "http2",
+					beforeDispatch: hold,
+					signal: abort.signal,
+				}).result();
+				// The turn settles on the cancellation by itself; the provider's
+				// own stream must not outlive it.
+				for (let turn = 0; turn < 4; turn++) await loopTurn();
+
+				stopReasons.add(message.stopReason);
+				if (!opened) {
+					cancelledBeforeOpen += 1;
+				} else {
+					cancelledAfterOpen += 1;
+					if (!opened.closed) leftOpen.push(depth);
+				}
+			}
+
+			expect(wiredCancelled).toEqual([]);
+			expect(leftOpen).toEqual([]);
+			expect([...stopReasons]).toEqual(["aborted"]);
+			// Not vacuous: the sweep spans the open, cancelling on both sides of it.
+			expect(cancelledBeforeOpen).toBeGreaterThan(0);
+			expect(cancelledAfterOpen).toBeGreaterThan(0);
 		} finally {
 			connect.mockRestore();
 		}

@@ -60,10 +60,20 @@ export async function holdBeforeDispatch(hold: DispatchHold | undefined, signal?
  * could close in that await too. A hold given to a live transport while this
  * waits is awaited before any probe is read.
  *
+ * `signal` is the request's own cancellation, which no hold's probe need
+ * encode. It ends the whole wait with the caller's reason, each hold and each
+ * round's preparation alike, and it is read once more in the synchronous step
+ * that calls `send`, after the probes: a request cancelled in any microtask
+ * before its send never reaches it, whether it had holds or none. Neither a
+ * hold nor a preparation is settled by that. Both belong to the caller and may
+ * be shared with other requests, so they keep running, observed, and a later
+ * rejection is never unhandled.
+ *
  * `prepare` is work whose result must not be older than the last wait: a
  * signature, a short-lived token. It runs on every round, after the holds have
  * answered and before the probes are read, so a gate that closes while it runs
- * sends the barrier round again and the work is redone after that wait too.
+ * sends the barrier round again and the work is redone after that wait too. It
+ * is not started for a request already cancelled.
  */
 export async function dispatchWhenOpen<T>(
 	hold: DispatchHold | readonly DispatchHold[] | undefined,
@@ -75,13 +85,20 @@ export async function dispatchWhenOpen<T>(
 	for (;;) {
 		const asked = await awaitHolds(holds, signal);
 		if (prepare) {
-			await prepare();
 			throwIfAborted(signal);
+			// Raced, not awaited: a refresh the caller shares with other
+			// requests need not settle for this one to give up on it.
+			await raceWithSignal(prepare(), signal ?? undefined);
 		}
 		// Synchronous from here to `send`. A hold that joined the live list
 		// after the pass that asked the others has never been awaited, so it
-		// sends the barrier round as a closed probe does.
-		if (asked === holds.length && !holds.some(held => held.isClosed?.() === true)) return send();
+		// sends the barrier round as a closed probe does. The signal is read
+		// here as well as in the waits: a cancellation can land in the
+		// microtasks between any await above and this step.
+		if (asked === holds.length && !holds.some(held => held.isClosed?.() === true)) {
+			throwIfAborted(signal);
+			return send();
+		}
 	}
 }
 

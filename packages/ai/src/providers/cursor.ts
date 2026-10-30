@@ -1395,7 +1395,8 @@ function streamCursorWithWireMode(
 				// runs here — after the payload build, the request-debug dump and the
 				// proxy tunnel, all of which can span a `/pause` — and the request
 				// opens in the same synchronous step as the last read of the hold's
-				// probe, so a gate that closed after the hold answered still holds it.
+				// probe and of the turn's signal, so a gate that closed after the
+				// hold answered still holds it and a cancelled turn never opens it.
 				// The HTTP/1 transport holds in the transport fetch it was given
 				// instead, once per request. The parked time is ours, not Cursor's:
 				// the stream watchdog skips it.
@@ -1634,8 +1635,17 @@ function streamCursorWithWireMode(
 				options.signal.addEventListener("abort", onTransportAbort, { once: true });
 			}
 
-			runTransport.write(frameConnectMessage(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			// A signal fires its listeners once, when it aborts. The stream opened
+			// a few microtasks before the listener above was added (this turn
+			// awaited its dispatch), and a cancellation in between never reaches
+			// that listener: close the stream now rather than write the run
+			// request into a cancelled turn.
+			if (options?.signal?.aborted) {
+				onTransportAbort?.();
+			} else {
+				runTransport.write(frameConnectMessage(requestBytes));
+				heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			}
 			await h2Completion.promise;
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);

@@ -4,11 +4,13 @@
  * open when it answered; in single-threaded JavaScript a gate can still close
  * in any microtask between that answer and the send. These tests close a
  * probed gate at each of those positions in turn and check that the request
- * never reaches the wire while a probe reads closed.
+ * never reaches the wire while a probe reads closed. The request's own
+ * cancellation can land in the same positions, and the cancellation tests
+ * check that a cancelled request never reaches the wire either.
  */
 import { describe, expect, test } from "bun:test";
 import type { Api, DispatchHold, FetchImpl, Model, TransportWrapper } from "@oh-my-pi/pi-ai/types";
-import { holdBeforeDispatch } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
+import { dispatchWhenOpen, holdBeforeDispatch } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
 import { transportFetch, withoutDispatchHold } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 
 const ENDPOINT = "https://example.invalid/v1/messages";
@@ -231,6 +233,189 @@ describe("dispatch hold probe", () => {
 		await fetch(ENDPOINT, { method: "POST" });
 
 		expect(calls).toEqual(["first", "second", "request"]);
+	});
+});
+
+/** One request's barrier: its holds, and the preparation it redoes after each wait. */
+interface Barrier {
+	holds: DispatchHold | readonly DispatchHold[] | undefined;
+	prepare?: () => Promise<void>;
+}
+
+/** Every shape of barrier a cancellation has to end, each built fresh for one request. */
+const BARRIERS: Record<string, () => Barrier> = {
+	"no hold": () => ({ holds: undefined }),
+	"an empty hold list": () => ({ holds: [] }),
+	"one probed hold": () => ({ holds: probedGate().hold }),
+	"two probed holds": () => ({ holds: [probedGate().hold, probedGate().hold] }),
+	"a hold without a probe": () => ({ holds: () => {} }),
+	"a hold that answers late": () => ({
+		holds: async () => {
+			await Promise.resolve();
+		},
+	}),
+	"a probed hold and a preparation": () => ({
+		holds: probedGate().hold,
+		prepare: async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		},
+	}),
+	"a preparation and no hold": () => ({ holds: undefined, prepare: async () => {} }),
+};
+
+describe("dispatch cancellation", () => {
+	// The request's signal was read only when a hold was asked, so with no hold
+	// to ask, a request cancelled before its dispatch went out anyway.
+	test("sends nothing and prepares nothing for a request already cancelled, with no hold to wait on", async () => {
+		for (const holds of [undefined, [] as DispatchHold[]]) {
+			const abort = new AbortController();
+			const reason = new Error("cancelled before dispatch");
+			abort.abort(reason);
+			let sent = 0;
+			let prepared = 0;
+
+			await expect(dispatchWhenOpen(holds, abort.signal, () => sent++)).rejects.toBe(reason);
+			await expect(
+				dispatchWhenOpen(
+					holds,
+					abort.signal,
+					() => sent++,
+					async () => {
+						prepared += 1;
+					},
+				),
+			).rejects.toBe(reason);
+
+			expect({ sent, prepared }).toEqual({ sent: 0, prepared: 0 });
+		}
+	});
+
+	// The signal was read when each hold was asked and when it answered, not
+	// when the request went out: a cancellation in the microtasks after the
+	// last answer still reached the send.
+	test("never sends a cancelled request, wherever before the send the cancellation lands", async () => {
+		const sentCancelled: string[] = [];
+		const otherOutcome: string[] = [];
+		const cancelledFirst = new Set<string>();
+		for (const [shape, build] of Object.entries(BARRIERS)) {
+			for (let depth = 1; depth <= MAX_DEPTH; depth++) {
+				const { holds, prepare } = build();
+				const abort = new AbortController();
+				const reason = new Error(`cancelled ${depth} microtasks in`);
+				afterMicrotasks(depth, () => abort.abort(reason));
+
+				const outcome = await dispatchWhenOpen(
+					holds,
+					abort.signal,
+					() => {
+						if (abort.signal.aborted) sentCancelled.push(`${shape} at ${depth}`);
+						return "sent";
+					},
+					prepare,
+				).catch((error: unknown) => error);
+
+				if (outcome === reason) cancelledFirst.add(shape);
+				else if (outcome !== "sent") otherOutcome.push(`${shape} at ${depth}`);
+				await loopTurn();
+			}
+		}
+
+		expect(sentCancelled).toEqual([]);
+		// A cancelled request fails with the caller's own reason, nothing else.
+		expect(otherOutcome).toEqual([]);
+		// Not vacuous: in every shape some cancellation landed before the send.
+		expect([...cancelledFirst].sort()).toEqual(Object.keys(BARRIERS).sort());
+	});
+
+	// Cancelling one request ends its own wait and nothing else: the gate it
+	// waited on is shared, stays closed, and keeps holding every other request.
+	test("ends only the cancelled request's wait, with its own reason, leaving the gate and other waiters alone", async () => {
+		const gate = probedGate();
+		gate.close();
+		const abort = new AbortController();
+		const reason = new Error("this request cancelled");
+		let sent = 0;
+
+		const cancelled = dispatchWhenOpen(gate.hold, abort.signal, () => sent++);
+		const other = dispatchWhenOpen(gate.hold, undefined, () => sent++);
+		await loopTurn();
+		abort.abort(reason);
+
+		await expect(cancelled).rejects.toBe(reason);
+		expect(gate.closed).toBe(true);
+		expect(await heldForATurn(other)).toBe(true);
+		gate.open();
+		await other;
+		expect(sent).toBe(1);
+	});
+
+	// The preparation was awaited, not raced: a request cancelled while its
+	// preparation (a credential refresh, which other requests may share) was
+	// pending stayed pending until that work ended, and kept its caller's
+	// in-flight permit all that time.
+	test("ends a pending preparation on cancellation with the caller's reason, leaving that work to its other waiters", async () => {
+		const refresh = Promise.withResolvers<void>();
+		let refreshes = 0;
+		// One refresh every request that needs it shares, as a credential cache shares it.
+		const prepare = () => {
+			refreshes += 1;
+			return refresh.promise;
+		};
+		const abort = new AbortController();
+		const reason = new Error("cancelled while its key refreshed");
+		let sent = 0;
+
+		const cancelled = dispatchWhenOpen(probedGate().hold, abort.signal, () => sent++, prepare);
+		const other = dispatchWhenOpen(probedGate().hold, undefined, () => sent++, prepare);
+		await loopTurn();
+		expect(refreshes).toBe(2);
+		abort.abort(reason);
+
+		const outcome = await Promise.race([
+			cancelled.catch((error: unknown) => error),
+			loopTurn().then(() => "still preparing"),
+		]);
+		expect(outcome).toBe(reason);
+		expect(Bun.peek.status(refresh.promise)).toBe("pending");
+		expect(await heldForATurn(other)).toBe(true);
+		refresh.resolve();
+		await other;
+		expect(sent).toBe(1);
+	});
+
+	// Raced, the preparation is no longer awaited by the request that gave up
+	// on it; it must still be observed, or its later failure goes unhandled.
+	test("keeps observing a cancelled request's preparation, so its late failure is never unhandled", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (error: unknown) => {
+			unhandled.push(error);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const refresh = Promise.withResolvers<void>();
+			const abort = new AbortController();
+			const reason = new Error("cancelled while its key refreshed");
+			let sent = 0;
+
+			const cancelled = dispatchWhenOpen(
+				undefined,
+				abort.signal,
+				() => sent++,
+				() => refresh.promise,
+			);
+			await loopTurn();
+			abort.abort(reason);
+			await expect(cancelled).rejects.toBe(reason);
+			refresh.reject(new Error("refresh failed after the request was cancelled"));
+			await loopTurn();
+			await loopTurn();
+
+			expect(unhandled).toEqual([]);
+			expect(sent).toBe(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
 	});
 });
 
