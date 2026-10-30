@@ -92,7 +92,7 @@ function factoryDroidModel(baseUrl: string) {
 // Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes (HTTP 413).
 const FACTORY_DROID_ROUTE_BODY_LIMIT = 4_500_000;
 // A base64 character occupies one byte in Anthropic's JSON request body.
-const HALF_ANTHROPIC_IMAGE_BUDGET = "A".repeat(12_000_000);
+const HALF_ANTHROPIC_IMAGE_BUDGET = "A".repeat(60_000_000);
 
 function image(data: string): ImageContent {
 	return { type: "image", data, mimeType: "image/png" };
@@ -476,8 +476,8 @@ describe("provider context image budgets", () => {
 		expect(overBudget.messages[0]).toBe(context.messages[0]);
 	});
 
-	it("removes oldest live screenshots before Anthropic's 32 MB request cap", () => {
-		const screenshot = "A".repeat(534_000);
+	it("removes oldest live screenshots before Anthropic's 128 MB request cap", () => {
+		const screenshot = "A".repeat(2_670_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -493,7 +493,7 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		const keptImages = imageData(clamped);
 		expect(keptImages).toHaveLength(44);
-		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(23_496_000);
+		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(117_480_000);
 		expect(clamped.messages.slice(0, 18).every(message => message.content.length === 1)).toBe(true);
 		expect(clamped.messages.slice(18).every(message => message.content.length === 2)).toBe(true);
 		expect(textData(clamped)).toEqual(Array.from({ length: 62 }, (_, index) => `result-${index}`));
@@ -653,7 +653,7 @@ describe("provider context image budgets", () => {
 
 	it("keeps a computer screenshot that fits Anthropic's inline budget exactly", () => {
 		const screenshot = "A".repeat(1_000_000);
-		const fresh = "C".repeat(23_000_000);
+		const fresh = "C".repeat(119_000_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -939,7 +939,7 @@ describe("provider context image budgets", () => {
 					role: "toolResult",
 					toolCallId: "call-1",
 					toolName: "screenshot",
-					content: [image("A".repeat(24_000_004))],
+					content: [image("A".repeat(120_000_004))],
 					isError: false,
 					timestamp: 0,
 				},
@@ -954,14 +954,14 @@ describe("provider context image budgets", () => {
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
-			messages: [{ role: "user", content: [image("A".repeat(28_000_000))], timestamp: 0 }],
+			messages: [{ role: "user", content: [image("A".repeat(140_000_000))], timestamp: 0 }],
 		};
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
 	});
 
 	it("does not charge URL or Anthropic file references for inline bytes", () => {
-		const referenceData = "A".repeat(25_000_000);
+		const referenceData = "A".repeat(61_000_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -981,7 +981,7 @@ describe("provider context image budgets", () => {
 
 	it("keeps older external references while removing later inline bytes, but still counts references", () => {
 		const reference = { ...image(""), url: "https://example.com/old.png" };
-		const oversized = image("A".repeat(24_000_004));
+		const oversized = image("A".repeat(120_000_004));
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -1113,7 +1113,7 @@ describe("provider context image budgets", () => {
 				role: "toolResult",
 				toolCallId: `call-${index}`,
 				toolName: "screenshot",
-				content: [image("A".repeat(534_000))],
+				content: [image("A".repeat(2_670_000))],
 				isError: false,
 				timestamp: index,
 			})),
