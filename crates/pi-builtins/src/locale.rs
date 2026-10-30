@@ -197,7 +197,7 @@ pub(crate) fn locale_loadable(locale: &str, mask: libc::c_int) -> bool {
 		let ours: LocaleEnv = LOCALE_ENV_VARS.map(|name| std::env::var_os(name).filter(|v| !v.is_empty()));
 		// This entry point answers about this process's own environment, so
 		// a query it cannot put to libc is not a yes.
-		return matches!(locale_utility_accepts(category_variable(mask), locale, &ours, None), Loadable::Yes);
+		return matches!(locale_utility_accepts(&category_variables(mask), locale, &ours, None), Loadable::Yes);
 	}
 	let Ok(locale) = std::ffi::CString::new(locale) else {
 		return false;
@@ -264,7 +264,7 @@ pub(crate) fn locale_loadable_in_shell(host: &Host, locale: &str, mask: libc::c_
 			},
 		},
 	};
-	locale_utility_accepts(category_variable(mask), locale, &shell, cwd)
+	locale_utility_accepts(&category_variables(mask), locale, &shell, cwd)
 }
 
 /// Where libc looks for locale data, and for the charset aliases it checks
@@ -592,7 +592,7 @@ enum Ask {
 /// one is only asked once the quiet one has passed.
 #[cfg(unix)]
 fn locale_utility_accepts(
-	category: &str,
+	categories: &[&str],
 	locale: &str,
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
@@ -604,26 +604,26 @@ fn locale_utility_accepts(
 			LOCALE_UTILITIES[0], LOCALE_UTILITIES[1]
 		));
 	};
-	locale_utility_accepts_at(std::path::Path::new(program), category, locale, env, cwd)
+	locale_utility_accepts_at(std::path::Path::new(program), categories, locale, env, cwd)
 }
 
 /// [`locale_utility_accepts`] against one named program.
 #[cfg(unix)]
 fn locale_utility_accepts_at(
 	program: &std::path::Path,
-	category: &str,
+	categories: &[&str],
 	locale: &str,
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
 ) -> Loadable {
-	let said = match locale_utility_output_at(program, category, locale, env, cwd, Ask::Diagnostics) {
+	let said = match locale_utility_output_at(program, categories, locale, env, cwd, Ask::Diagnostics) {
 		Ok(said) => said,
 		Err(Unanswered(why)) => return Loadable::Unasked(why),
 	};
 	if !said.is_empty() {
 		return Loadable::No;
 	}
-	let printed = match locale_utility_output_at(program, category, locale, env, cwd, Ask::Codeset) {
+	let printed = match locale_utility_output_at(program, categories, locale, env, cwd, Ask::Codeset) {
 		Ok(printed) => printed,
 		Err(Unanswered(why)) => return Loadable::Unasked(why),
 	};
@@ -640,23 +640,21 @@ fn locale_utility_accepts_at(
 /// the system's.
 #[cfg(all(unix, test))]
 pub(crate) fn utility_accepts_for_test(program: &std::path::Path, locale: &str) -> Loadable {
-	locale_utility_accepts_at(program, "LC_CTYPE", locale, &LOCALE_ENV_VARS.map(|_| None), None)
+	locale_utility_accepts_at(program, &["LC_CTYPE"], locale, &LOCALE_ENV_VARS.map(|_| None), None)
 }
 
-/// The locale category `mask` names, for the environment variable the
-/// utility reads it from. A mask naming more than one category is asked as
-/// `LC_ALL`, which is how `setlocale` would be asked for all of them.
+/// Every category `mask` names, as the environment variables the utility
+/// reads them from.
+///
+/// Not `LC_ALL`: naming that would make the child require *every* category
+/// to load, which is a stricter question than the mask asked. A shell that
+/// names German data for `LC_CTYPE` and `LC_NUMERIC` and nothing else
+/// initialises — `setlocale(LC_ALL, "")` succeeds there because every
+/// other category selects C — and translating the pair to `LC_ALL` said it
+/// did not, which put a newline inside `é` and C ordering into `sort -sn`.
 #[cfg(unix)]
-fn category_variable(mask: libc::c_int) -> &'static str {
-	match mask {
-		libc::LC_CTYPE_MASK => "LC_CTYPE",
-		libc::LC_COLLATE_MASK => "LC_COLLATE",
-		libc::LC_NUMERIC_MASK => "LC_NUMERIC",
-		libc::LC_TIME_MASK => "LC_TIME",
-		libc::LC_MONETARY_MASK => "LC_MONETARY",
-		libc::LC_MESSAGES_MASK => "LC_MESSAGES",
-		_ => "LC_ALL",
-	}
+fn category_variables(mask: libc::c_int) -> Vec<&'static str> {
+	LOCALE_CATEGORIES.iter().filter(|(_, bit)| mask & bit != 0).map(|(name, _)| *name).collect()
 }
 
 /// The body of [`codeset_from_locale_utility`]: one whole, validated
@@ -667,19 +665,19 @@ fn locale_utility_charmap(
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
 ) -> Result<String, Unanswered> {
-	locale_utility_charmap_with("LC_CTYPE", locale, env, cwd)
+	locale_utility_charmap_with(&["LC_CTYPE"], locale, env, cwd)
 }
 
 /// [`locale_utility_charmap`] with `locale` named for some other category,
 /// which is how a loadability query checks that the utility replied at all.
 #[cfg(unix)]
 fn locale_utility_charmap_with(
-	category: &str,
+	categories: &[&str],
 	locale: &str,
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
 ) -> Result<String, Unanswered> {
-	let printed = locale_utility_output(category, locale, env, cwd, Ask::Codeset)?;
+	let printed = locale_utility_output(categories, locale, env, cwd, Ask::Codeset)?;
 	validated_codeset(&printed).ok_or_else(|| {
 		let shown = String::from_utf8_lossy(&printed[..printed.len().min(40)]).into_owned();
 		Unanswered(format!("the locale utility reported {shown:?} where one codeset was due"))
@@ -690,7 +688,7 @@ fn locale_utility_charmap_with(
 /// names, with `category` set to `locale`.
 #[cfg(unix)]
 fn locale_utility_output(
-	category: &str,
+	categories: &[&str],
 	locale: &str,
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
@@ -704,7 +702,7 @@ fn locale_utility_output(
 			LOCALE_UTILITIES[0], LOCALE_UTILITIES[1]
 		)));
 	};
-	locale_utility_output_at(std::path::Path::new(program), category, locale, env, cwd, ask)
+	locale_utility_output_at(std::path::Path::new(program), categories, locale, env, cwd, ask)
 }
 
 /// [`locale_utility_output`] against one named program: everything the
@@ -713,17 +711,25 @@ fn locale_utility_output(
 #[cfg(unix)]
 fn locale_utility_output_at(
 	program: &std::path::Path,
-	category: &str,
+	categories: &[&str],
 	locale: &str,
 	env: &LocaleEnv,
 	cwd: Option<&std::path::Path>,
 	ask: Ask,
 ) -> Result<Vec<u8>, Unanswered> {
-	use std::io::Read as _;
 	use std::os::fd::AsRawFd as _;
 	use std::os::unix::ffi::OsStrExt as _;
 
 	let report = Unanswered;
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = (program, categories, locale, env, cwd, ask);
+		return Err(report(
+			"a child cannot be held by anything but its number here, so the locale utility is not started"
+				.to_owned(),
+		));
+	}
+	#[cfg(target_os = "linux")]
 	if children_are_reaped_for_us() {
 		return Err(report(
 			"this process has the kernel reap its children, so the locale utility's end cannot be observed \
@@ -742,11 +748,17 @@ fn locale_utility_output_at(
 	let cwd_c = cwd.map(|cwd| text(cwd.as_os_str().as_bytes())).transpose()?;
 	// `locale` sets each category it was given from the environment and
 	// reports on its standard error every one it could not
-	// (`locale/programs/locale.c`), so naming the category directly is the
-	// `setlocale(CATEGORY, "")` the callers model, and every other category
-	// is left to default to C rather than to a locale whose data is only
-	// partly there.
-	let mut vars = vec![text(format!("{category}={locale}").as_bytes())?];
+	// (`locale/programs/locale.c`), so naming the categories directly is the
+	// `setlocale(CATEGORY, "")` the callers model. Every category *not*
+	// named is left to default to C, which is what makes this the question
+	// asked rather than `LC_ALL`: a locale that holds only `LC_CTYPE` and
+	// `LC_NUMERIC` initialises for a shell that names only those two, and
+	// `setlocale(LC_ALL, "")` succeeds there because every other category
+	// selects C.
+	let mut vars = Vec::with_capacity(categories.len() + LOCALE_ENV_VARS.len());
+	for category in categories {
+		vars.push(text(format!("{category}={locale}").as_bytes())?);
+	}
 	for (name, value) in LOCALE_ENV_VARS.iter().zip(env) {
 		if let Some(value) = value {
 			let mut var = format!("{name}=").into_bytes();
@@ -758,102 +770,93 @@ fn locale_utility_output_at(
 		[argv0.as_ptr().cast_mut(), argv1.as_ptr().cast_mut(), std::ptr::null_mut()];
 	let mut envp: Vec<*mut std::ffi::c_char> = vars.iter().map(|var| var.as_ptr().cast_mut()).collect();
 	envp.push(std::ptr::null_mut());
-	let (reader, writer) =
-		std::io::pipe().map_err(|err| report(format!("no pipe for the locale utility's answer: {err}")))?;
-	// Both ends have to sit above the standard descriptors, or the file
-	// actions below would open `/dev/null` over the very descriptor the
-	// answer is written to (reproduced with this process's own 1 and 2
-	// closed, which is when `pipe` hands them out).
-	let reader = above_standard(reader.into()).map_err(|err| report(format!("no pipe: {err}")))?;
-	let writer = above_standard(writer.into()).map_err(|err| report(format!("no pipe: {err}")))?;
-	let mut reader = std::fs::File::from(reader);
+	// The answer goes to a memory file rather than a pipe, and the whole
+	// query costs two descriptors: this one and the handle the child is
+	// made with. A pipe costs two on its own, which with the handle would
+	// be three, and a lookup has to answer where two are free. What a pipe
+	// gave and this does not is backpressure, so the child caps its own
+	// output with `RLIMIT_FSIZE` instead.
+	let answer = memory_file().map_err(|err| report(format!("no file for the answer: {err}")))?;
+	// It has to sit above the standard descriptors, or the child's
+	// `/dev/null` would land on the very descriptor the answer is written
+	// to (reproduced with this process's own 1 and 2 closed).
+	let answer = above_standard(answer).map_err(|err| report(format!("no file for the answer: {err}")))?;
 
 	let deadline = std::time::Instant::now() + LOCALE_QUERY_TIMEOUT;
-	let pid = spawn_locale_utility(&program_c, &argv, &envp, writer.as_raw_fd(), cwd_c.as_deref(), ask)
-		.map_err(|err| match cwd_c.is_some() {
-			true => report(format!("{named} could not enter the shell's working directory or start: {err}")),
-			false => report(format!("{named} could not be started: {err}")),
-		})?;
-	// The write end is the child's now; holding it here would keep the read
-	// below from ever seeing the end of the answer — and the descriptor it
-	// frees is the one the handle below takes, so the query still needs only
-	// two.
-	drop(writer);
-	// A number is not an identity. Everything that follows — watching the
-	// child, ending its process group, reaping it — goes through this
-	// handle, which names that one process however the number is recycled.
-	let child = match child_handle(pid) {
-		Ok(child) => child,
-		Err(err) => {
-			// Without a handle nothing may be signalled, and the child is
-			// left for the kernel rather than reached by number.
-			return Err(report(format!("{named} could not be held: {err}")));
-		},
-	};
-
-	let mut answer = Vec::new();
-	let mut timed_out = false;
-	let mut too_much = false;
-	let mut read_failed = None;
-	loop {
-		let left = deadline.saturating_duration_since(std::time::Instant::now());
-		if left.is_zero() {
-			timed_out = true;
-			break;
-		}
-		let mut poll = [libc::pollfd { fd: reader.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-		// SAFETY: one initialised `pollfd` naming a descriptor this scope owns.
-		let ready =
-			unsafe { libc::poll(poll.as_mut_ptr(), 1, i32::try_from(left.as_millis()).unwrap_or(i32::MAX)) };
-		if ready == 0 {
-			timed_out = true;
-			break;
-		}
-		if ready < 0 {
-			let err = std::io::Error::last_os_error();
-			if err.kind() == std::io::ErrorKind::Interrupted {
-				continue;
-			}
-			read_failed = Some(err);
-			break;
-		}
-		let mut buffer = [0u8; 128];
-		match reader.read(&mut buffer) {
-			Ok(0) => break,
-			Ok(read) => answer.extend_from_slice(&buffer[..read]),
-			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {},
-			Err(err) => {
-				read_failed = Some(err);
-				break;
-			},
-		}
-		if answer.len() > LOCALE_ANSWER_LIMIT {
-			too_much = true;
-			break;
-		}
-	}
-	// A child that is still writing, or still running with nothing more to
-	// say, is ended here rather than waited for.
-	let completion = reap_locale_utility(&child, deadline, timed_out || too_much || read_failed.is_some());
-	if timed_out {
-		return Err(report(format!("{named} did not answer within {}s", LOCALE_QUERY_TIMEOUT.as_secs())));
-	}
-	if too_much {
+	// The child and the handle on it are made by the same call: a number a
+	// spawn hands back is already recyclable, and opening a handle from it
+	// afterwards can open whatever took it.
+	let child = start_locale_utility(&program_c, &argv, &envp, answer.as_raw_fd(), cwd_c.as_deref(), ask)
+		.map_err(|err| report(format!("{named} could not be started: {err}")))?;
+	let completion = reap_locale_utility(&child, deadline, false);
+	let printed = read_from_start(&answer, LOCALE_ANSWER_LIMIT + 1)
+		.map_err(|err| report(format!("{named} could not be read: {err}")))?;
+	if printed.len() > LOCALE_ANSWER_LIMIT {
 		return Err(report(format!("{named} wrote more than {LOCALE_ANSWER_LIMIT} bytes")));
 	}
-	if let Some(err) = read_failed {
-		return Err(report(format!("{named} could not be read: {err}")));
-	}
+	let answer = printed;
 	match completion {
 		// glibc's `locale` reports a locale it could not set on its standard
 		// error and still exits 0 (measured on glibc 2.39), so any other
 		// status is a utility this code does not know rather than a failed
 		// load, and its output is not an answer.
 		Completion::Exited(0) => {},
+		Completion::Exited(CHILD_NO_DIRECTORY) => {
+			return Err(report(format!("{named} could not enter the shell's working directory")));
+		},
+		Completion::Exited(CHILD_NO_PROGRAM) => return Err(report(format!("{named} would not run"))),
 		Completion::Exited(status) => return Err(report(format!("{named} exited with status {status}"))),
 		Completion::Ended(how) => return Err(report(format!("{named} {how}"))),
 	}
 	Ok(answer)
+}
+
+/// A file with no name and no directory, for the utility's answer.
+#[cfg(target_os = "linux")]
+fn memory_file() -> std::io::Result<std::os::fd::OwnedFd> {
+	use std::os::fd::FromRawFd as _;
+
+	// SAFETY: a static name and the close-on-exec flag; the call either
+	// returns a fresh descriptor or an error.
+	let made = unsafe { libc::memfd_create(c"omp-locale".as_ptr(), libc::MFD_CLOEXEC) };
+	if made < 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: a fresh descriptor nothing else owns.
+	Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(made) })
+}
+
+/// At most `limit` bytes of `file`, read from its start without moving the
+/// offset the child left behind.
+#[cfg(target_os = "linux")]
+fn read_from_start(file: &std::os::fd::OwnedFd, limit: usize) -> std::io::Result<Vec<u8>> {
+	use std::os::fd::AsRawFd as _;
+
+	let mut read = Vec::new();
+	let mut buffer = vec![0u8; limit];
+	loop {
+		let taken = i64::try_from(read.len()).unwrap_or(i64::MAX);
+		// SAFETY: the descriptor is the caller's and the buffer is this
+		// scope's, with the length the call is given.
+		let got = unsafe {
+			libc::pread(file.as_raw_fd(), buffer.as_mut_ptr().cast(), limit - read.len(), taken)
+		};
+		if got < 0 {
+			let err = std::io::Error::last_os_error();
+			if err.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(err);
+		}
+		let got = usize::try_from(got).unwrap_or_default();
+		if got == 0 {
+			return Ok(read);
+		}
+		read.extend_from_slice(&buffer[..got]);
+		if read.len() >= limit {
+			return Ok(read);
+		}
+	}
 }
 
 /// [`codeset_from_locale_utility`] against a utility a test puts in place of
@@ -867,7 +870,7 @@ pub(crate) fn codeset_from_utility_for_test(
 ) -> Codeset {
 	let values: LocaleEnv =
 		LOCALE_ENV_VARS.map(|name| env(name).filter(|value| !value.is_empty()).map(std::ffi::OsString::from));
-	let printed = match locale_utility_output_at(program, "LC_CTYPE", locale, &values, None, Ask::Codeset) {
+	let printed = match locale_utility_output_at(program, &["LC_CTYPE"], locale, &values, None, Ask::Codeset) {
 		Ok(printed) => printed,
 		Err(Unanswered(why)) => return Codeset::Unasked(why),
 	};
@@ -918,111 +921,8 @@ fn above_standard(fd: std::os::fd::OwnedFd) -> std::io::Result<std::os::fd::Owne
 	Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(moved) })
 }
 
-/// `posix_spawn` of the locale utility, in its own process group, with
-/// `answer` as the stream `ask` names, its own `/dev/null` for the other
-/// two, and `cwd` as its working directory when one is given.
-///
-/// The two `/dev/null`s are opened by the child, not here, which keeps this
-/// process's cost at the one answer pipe — the whole margin the lookup has
-/// under a descriptor limit that leaves two free.
-#[cfg(unix)]
-fn spawn_locale_utility(
-	program: &std::ffi::CStr,
-	argv: &[*mut std::ffi::c_char; 3],
-	envp: &[*mut std::ffi::c_char],
-	answer: std::os::fd::RawFd,
-	cwd: Option<&std::ffi::CStr>,
-	ask: Ask,
-) -> Result<libc::pid_t, std::io::Error> {
-	let mut actions = std::mem::MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
-	let mut attributes = std::mem::MaybeUninit::<libc::posix_spawnattr_t>::uninit();
-	let mut pid: libc::pid_t = 0;
-	// SAFETY: every pointer names a value that outlives the call; the actions
-	// and the attributes are initialised before use and destroyed on every
-	// path out of the block; `answer` is a descriptor the caller owns for the
-	// whole call, and it is duplicated onto the child's standard output before
-	// anything else can take that number.
-	let status = unsafe {
-		let started = libc::posix_spawn_file_actions_init(actions.as_mut_ptr());
-		if started != 0 {
-			return Err(std::io::Error::from_raw_os_error(started));
-		}
-		let started = libc::posix_spawnattr_init(attributes.as_mut_ptr());
-		if started != 0 {
-			libc::posix_spawn_file_actions_destroy(actions.as_mut_ptr());
-			return Err(std::io::Error::from_raw_os_error(started));
-		}
-		let actions = actions.as_mut_ptr();
-		let attributes = attributes.as_mut_ptr();
-		let (taken, discarded) = match ask {
-			Ask::Codeset => (1, 2),
-			Ask::Diagnostics => (2, 1),
-		};
-		let mut status = libc::posix_spawn_file_actions_adddup2(actions, answer, taken);
-		if status == 0 {
-			status = libc::posix_spawn_file_actions_addopen(actions, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0);
-		}
-		if status == 0 {
-			status = libc::posix_spawn_file_actions_addopen(
-				actions,
-				discarded,
-				c"/dev/null".as_ptr(),
-				libc::O_WRONLY,
-				0,
-			);
-		}
-		if status == 0 && let Some(cwd) = cwd {
-			status = add_chdir(actions, cwd);
-		}
-		if status == 0 {
-			status = libc::posix_spawnattr_setpgroup(attributes, 0);
-		}
-		if status == 0 {
-			status = libc::posix_spawnattr_setflags(
-				attributes,
-				libc::c_short::try_from(libc::POSIX_SPAWN_SETPGROUP).unwrap_or_default(),
-			);
-		}
-		if status == 0 {
-			status =
-				libc::posix_spawn(&raw mut pid, program.as_ptr(), actions, attributes, argv.as_ptr(), envp.as_ptr());
-		}
-		libc::posix_spawnattr_destroy(attributes);
-		libc::posix_spawn_file_actions_destroy(actions);
-		status
-	};
-	match status {
-		0 => Ok(pid),
-		status => Err(std::io::Error::from_raw_os_error(status)),
-	}
-}
-
-/// Adds the child's `chdir` to a spawn's file actions.
-///
-/// # Safety
-///
-/// `actions` is an initialised file-action list and `cwd` outlives the spawn.
-#[cfg(all(unix, not(target_os = "linux")))]
-unsafe fn add_chdir(_actions: *mut libc::posix_spawn_file_actions_t, _cwd: &std::ffi::CStr) -> libc::c_int {
-	// No portable file action does this, and nothing else here can put the
-	// child in the shell's working directory, so the query is reported
-	// rather than asked from a directory that is not the one in question.
-	libc::ENOSYS
-}
-
-/// Adds the child's `chdir` to a spawn's file actions.
-///
-/// # Safety
-///
-/// `actions` is an initialised file-action list and `cwd` outlives the spawn.
-#[cfg(target_os = "linux")]
-unsafe fn add_chdir(actions: *mut libc::posix_spawn_file_actions_t, cwd: &std::ffi::CStr) -> libc::c_int {
-	// SAFETY: the caller's contract.
-	unsafe { libc::posix_spawn_file_actions_addchdir_np(actions, cwd.as_ptr()) }
-}
-
 /// How the locale utility stopped.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 enum Completion {
 	/// It ended of its own accord, with this status.
 	Exited(libc::c_int),
@@ -1031,53 +931,160 @@ enum Completion {
 }
 
 /// A handle on the locale utility that names that one process whatever
-/// happens to its number.
+/// happens to its number, made by the same call that makes the child.
 ///
-/// A process number is not an identity. `waitid(…, WNOWAIT)` says the child
-/// is there and does not consume it, but it cannot stop another thread's
-/// `waitpid(-1)` from consuming it in the interval before a signal: a
-/// review reproduced exactly that three times out of three in a private PID
-/// namespace, where the released number was reused and
-/// `kill(-pid, SIGKILL)` ended an unrelated process group. No check before
-/// the signal closes that interval, so there is no number in this path at
-/// all. On Linux a pidfd is that handle: it refers to the process, signals
-/// through it fail with `ESRCH` once that process is gone rather than
-/// reaching whoever took the number, and `PIDFD_SIGNAL_PROCESS_GROUP`
-/// resolves the group from the process rather than from an integer.
+/// A process number is not an identity, and it is recyclable from the
+/// moment the child exists. A pidfd opened from a number the kernel handed
+/// back is already too late: a review paused a query between the child's
+/// creation and that open, let another thread's `waitpid(-1)` consume the
+/// child, and watched the reused number be opened, signalled and reaped —
+/// three times out of three, against a process with nothing to do with this
+/// query. No ordering of a separate acquisition closes that, so there is no
+/// separate acquisition: `clone3(CLONE_PIDFD)` returns the handle and the
+/// child together, and watching, ending the group and reaping all go
+/// through the handle, where a signal fails with `ESRCH` once that process
+/// is gone rather than reaching whoever took its number.
 ///
-/// Where there is no such handle — a kernel without `pidfd_open`, or any
-/// other Unix — a query is not started, because its child could not be
+/// Where this does not exist — a kernel without `clone3`, or any Unix that
+/// is not Linux — no query is started, because its child could not be
 /// ended safely afterwards.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct ChildHandle(std::os::fd::OwnedFd);
 
-/// `PIDFD_SIGNAL_PROCESS_GROUP`: send to the process group the pidfd's
+/// `CLONE_PIDFD`: hand back a handle on the new child.
+#[cfg(target_os = "linux")]
+const CLONE_PIDFD: u64 = 0x0000_1000;
+
+/// `PIDFD_SIGNAL_PROCESS_GROUP`: send to the process group the handle's
 /// process leads. Linux 6.9 and later.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const PIDFD_SIGNAL_PROCESS_GROUP: libc::c_uint = 4;
 
-/// Opens the handle for a child just spawned.
-#[cfg(all(unix, target_os = "linux"))]
-fn child_handle(pid: libc::pid_t) -> std::io::Result<ChildHandle> {
+/// The status the child exits with when it could not enter the shell's
+/// working directory, and the one it uses when the program would not run.
+/// A utility could exit with either of its own accord; both are refused
+/// either way, and only the wording depends on telling them apart.
+#[cfg(target_os = "linux")]
+const CHILD_NO_DIRECTORY: libc::c_int = 125;
+#[cfg(target_os = "linux")]
+const CHILD_NO_PROGRAM: libc::c_int = 126;
+
+/// `clone3`'s argument block, as much of it as this uses.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Default)]
+struct CloneArgs {
+	flags: u64,
+	pidfd: u64,
+	child_tid: u64,
+	parent_tid: u64,
+	exit_signal: u64,
+	stack: u64,
+	stack_size: u64,
+	tls: u64,
+}
+
+/// Whether this kernel has `clone3`, asked once with arguments it must
+/// refuse: a kernel that knows the call answers `EINVAL`, one that does not
+/// answers `ENOSYS`, and neither makes a process.
+///
+/// Asked *before* anything is started. A capability discovered afterwards
+/// leaves a child that nothing here can end — five refusals used to leave
+/// five of them.
+#[cfg(target_os = "linux")]
+static CLONE3_IS_THERE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+	// SAFETY: a null argument block with a zero size is refused before the
+	// kernel reads anything, so this makes no process either way.
+	let refused = unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<CloneArgs>(), 0usize) };
+	refused < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
+});
+
+/// Starts the locale utility, in its own process group, with `answer` as
+/// the stream `ask` names, its own `/dev/null` for the other two, and `cwd`
+/// as its working directory when one is given.
+///
+/// The two `/dev/null`s are opened by the child, not here, which keeps this
+/// process's cost at the one answer pipe — the whole margin the lookup has
+/// under a descriptor limit that leaves two free. `clone3` without
+/// `CLONE_VM` leaves the child a copy of this process, as `fork` does, so
+/// everything it does before `execve` is async-signal-safe and reads only
+/// values built before the call.
+#[cfg(target_os = "linux")]
+fn start_locale_utility(
+	program: &std::ffi::CStr,
+	argv: &[*mut std::ffi::c_char; 3],
+	envp: &[*mut std::ffi::c_char],
+	answer: std::os::fd::RawFd,
+	cwd: Option<&std::ffi::CStr>,
+	ask: Ask,
+) -> Result<ChildHandle, std::io::Error> {
 	use std::os::fd::FromRawFd as _;
 
-	// SAFETY: `pidfd_open` only takes a process number and returns a
-	// descriptor or an error; nothing is dereferenced.
-	let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-	let opened = libc::c_int::try_from(opened).unwrap_or(-1);
-	if opened < 0 {
+	if !*CLONE3_IS_THERE {
+		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+	}
+	let (taken, discarded) = match ask {
+		Ask::Codeset => (1, 2),
+		Ask::Diagnostics => (2, 1),
+	};
+	let mut handle: libc::c_int = -1;
+	let args = CloneArgs {
+		flags: CLONE_PIDFD,
+		pidfd: (&raw mut handle) as u64,
+		exit_signal: u64::try_from(libc::SIGCHLD).unwrap_or_default(),
+		..CloneArgs::default()
+	};
+	// SAFETY: the argument block is initialised and outlives the call; the
+	// kernel writes `handle` in this process. The child branch below ends in
+	// `execve` or `_exit`, so no destructor and no `atexit` handler of this
+	// process's runs there.
+	let child = unsafe { libc::syscall(libc::SYS_clone3, &raw const args, size_of::<CloneArgs>()) };
+	if child < 0 {
 		return Err(std::io::Error::last_os_error());
 	}
-	// SAFETY: a fresh descriptor nothing else owns.
-	Ok(ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(opened) }))
+	if child == 0 {
+		// SAFETY: this is the whole of the child, and every call here is
+		// async-signal-safe.
+		unsafe {
+			libc::setpgid(0, 0);
+			// What a pipe used to do by filling up: a utility that writes
+			// past this dies on `SIGXFSZ` instead of filling memory with an
+			// answer that was never going to be one. One byte over the
+			// limit is let through, so the length reports it rather than
+			// the signal.
+			let cap = libc::rlimit {
+				rlim_cur: LOCALE_ANSWER_LIMIT as libc::rlim_t + 1,
+				rlim_max: LOCALE_ANSWER_LIMIT as libc::rlim_t + 1,
+			};
+			libc::setrlimit(libc::RLIMIT_FSIZE, &raw const cap);
+			if libc::dup2(answer, taken) < 0 {
+				libc::_exit(CHILD_NO_PROGRAM);
+			}
+			let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+			if null >= 0 {
+				libc::dup2(null, 0);
+				libc::dup2(null, discarded);
+				if null > 2 {
+					libc::close(null);
+				}
+			}
+			if let Some(cwd) = cwd
+				&& libc::chdir(cwd.as_ptr()) != 0
+			{
+				libc::_exit(CHILD_NO_DIRECTORY);
+			}
+			libc::execve(program.as_ptr(), argv.as_ptr().cast(), envp.as_ptr().cast());
+			libc::_exit(CHILD_NO_PROGRAM);
+		}
+	}
+	if handle < 0 {
+		return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+	}
+	// SAFETY: a fresh descriptor the kernel just wrote, owned from here.
+	Ok(ChildHandle(unsafe { std::os::fd::OwnedFd::from_raw_fd(handle) }))
 }
 
-/// Opens the handle for a child just spawned.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn child_handle(_pid: libc::pid_t) -> std::io::Result<ChildHandle> {
-	Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-}
-
+#[cfg(target_os = "linux")]
 impl ChildHandle {
 	/// Whether the utility has ended, without consuming it: `Ok(true)`
 	/// reapable, `Ok(false)` running.
@@ -1172,7 +1179,7 @@ impl ChildHandle {
 /// Ends the locale utility and everything left in its process group, within
 /// the deadline the answer had, and reaps it — all through the handle, so
 /// no number of anyone else's can be reached.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn reap_locale_utility(child: &ChildHandle, deadline: std::time::Instant, kill_now: bool) -> Completion {
 	let mut finished = false;
 	let mut watch_failed = None;
@@ -1211,7 +1218,7 @@ fn reap_locale_utility(child: &ChildHandle, deadline: std::time::Instant, kill_n
 /// A query cannot be run then: the utility's number is released the moment
 /// it exits, so neither its end nor its process group can be reached
 /// without the risk of reaching somebody else's.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn children_are_reaped_for_us() -> bool {
 	// SAFETY: reading the current disposition with a null new action changes
 	// nothing; the structure is initialised by the call before it is read.
@@ -1226,7 +1233,7 @@ fn children_are_reaped_for_us() -> bool {
 }
 
 /// A reaped child's `siginfo_t`, read the way [`Completion`] puts it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn completion_of(ended: &libc::siginfo_t) -> Completion {
 	// SAFETY: `si_status` is the status member of a `siginfo_t` a completed
 	// `waitid` filled in, which is what the caller passes.

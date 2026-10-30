@@ -550,6 +550,10 @@ fn a_competing_reaper_does_not_turn_the_query_into_a_stray_signal() {
 			"{answer:?}"
 		);
 	}
+	// Nothing is left for the kernel to carry: every query either reaped
+	// its own child or never started one.
+	let left = fs::read_to_string(format!("/proc/self/task/{}/children", std::process::id())).unwrap_or_default();
+	assert!(left.trim().is_empty(), "children left behind: {left}");
 }
 
 /// Every caller of [`crate::locale::locale_loadable`] models
