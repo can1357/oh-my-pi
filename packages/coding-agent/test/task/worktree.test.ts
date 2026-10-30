@@ -282,9 +282,11 @@ describe("worktree isolation helpers", () => {
 				expect(mergedLeaf).toBe("m");
 				expect(isolationSegment).not.toContain(longTaskId);
 				// Compact, and unique per materialisation: the digest names the
-				// repository and task, the mint after it names this one, so no
-				// path is ever handed out twice.
-				expect(isolationSegment.length).toBeLessThanOrEqual(32);
+				// repository and task, and the 128 bits after it name this one,
+				// so no path is ever handed out twice — not even after the
+				// directory has been reclaimed, which is what a surviving
+				// descendant needs.
+				expect(isolationSegment.length).toBeLessThanOrEqual(48);
 			} finally {
 				if (originalWorktreeDir === undefined) {
 					delete process.env.OMP_WORKTREE_DIR;

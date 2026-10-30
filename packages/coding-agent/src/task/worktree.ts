@@ -644,7 +644,17 @@ function errorMessage(err: unknown): string {
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${Snowflake.next()}`;
+	// 128 bits from the system's cryptographic source, not a timestamp and a
+	// counter. A timestamp-and-counter mint is a prediction two processes can
+	// make identically — same clock, same entropy, same name, and the second
+	// materialisation destroyed the first's output — and `mkdir` can only say
+	// whether a name is free *now*, which is a different question: ordinary
+	// reclamation frees a name while a dead owner's git hook is still writing
+	// to it, and the next mint hands that hook a successor's workspace. The
+	// property a surviving descendant needs is that the name was never handed
+	// out before, which only an unguessably large draw gives. `mkdir` with
+	// `EEXIST` below stays as the last guard, not as the mechanism.
+	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 /**
@@ -670,7 +680,11 @@ async function mintSandboxDirectory(repoRoot: string, id: string): Promise<strin
 			lastError = error;
 		}
 	}
-	throw new Error(`Could not mint an unused isolation workspace under ${parent}`, { cause: lastError });
+	throw new Error(
+		`Could not mint an unused isolation workspace under ${parent}: 64 names in a row already existed ` +
+			`(EEXIST). Last error: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+		{ cause: lastError },
+	);
 }
 
 /**
@@ -895,8 +909,8 @@ async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ r
 		if (code === "EMFILE" || code === "ENFILE" || /EMFILE|ENFILE|too many open files/i.test(text)) {
 			throw new Error(
 				`Could not ${purpose} isolation workspace ${baseDir}: this host is out of file descriptors (${code}). ` +
-					"Nothing is holding the workspace; raise the open-file limit (`ulimit -n`) or reduce how many " +
-					"sessions run at once.",
+					"The lock could not be opened at all, so whether anything holds the workspace is unknown; raise " +
+					"the open-file limit (`ulimit -n`) or reduce how many sessions run at once.",
 				{ cause: error },
 			);
 		}

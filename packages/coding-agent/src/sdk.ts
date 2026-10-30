@@ -4532,6 +4532,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					await scheduler.wait(200);
 				}
 			}
+			// Still there. Giving up here leaves a live record nothing can
+			// finish — the sandbox is then pinned for this process's life even
+			// though the writer is long done — so keep trying in the
+			// background, unreferenced, until it goes or the process does.
+			const slowRetry = setInterval(() => {
+				void clear().then(
+					() => {
+						clearInterval(slowRetry);
+						writerRecord = undefined;
+						writerRecordGeneration += 1;
+					},
+					() => undefined,
+				);
+			}, 5_000);
+			slowRetry.unref?.();
 		};
 		const dropWorkspaceLease = (): void => {
 			if (workspaceLeaseDropped) return;
@@ -4601,13 +4616,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// The same record, not a second one. Giving the lease up is how a
 				// stalled disposal stops holding a kernel; it is not a statement
 				// that this session has stopped writing.
-				void recordWriter(armedGeneration)
-					.catch(error => {
-						logger.warn("could not record an unfinished writer on the workspace", {
-							error: String(error),
-						});
-					})
-					.finally(dropWorkspaceLease);
+				// The lease goes only once the record is really on disk. A
+				// publication that *failed* is not a publication that finished,
+				// and dropping protection on it hands the workspace to a
+				// teardown while this session is still writing.
+				void (async () => {
+					for (let attempt = 0; attempt < 5; attempt += 1) {
+						try {
+							await recordWriter(armedGeneration);
+							dropWorkspaceLease();
+							return;
+						} catch (error) {
+							logger.warn("could not record an unfinished writer; keeping the workspace lease", {
+								attempt,
+								error: String(error),
+							});
+							await scheduler.wait(200);
+						}
+					}
+					logger.warn("keeping this session's workspace lease: its writer record could not be published", {
+						id: resolvedAgentId,
+					});
+				})();
 			}, SESSION_LEASE_DISPOSE_GRACE_MS);
 			workspaceLeaseTimer.unref?.();
 		});

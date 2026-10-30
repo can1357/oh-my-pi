@@ -37,7 +37,7 @@ import { generateCommitMessage } from "../utils/commit-message-generator";
 const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { armTeardown } from "./isolation-lease";
+import { armTeardown, hasUnfinishedWriter } from "./isolation-lease";
 import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -321,6 +321,17 @@ export async function retainIsolationWorkspace(
 	backend?: natives.IsoBackendKind,
 ): Promise<RetainedWorkspace> {
 	const baseDir = path.dirname(isolationDir);
+	// A recorded writer is still using this path as its cwd. Renaming the
+	// workspace out from under it gives its next write `ENOENT` and loses the
+	// work, which is the thing retention exists to prevent — and it does that
+	// without any publication having failed. The workspace is retained where
+	// it is instead: `clear` reclaims it once that writer's process is gone.
+	if (await hasUnfinishedWriter(baseDir)) {
+		logger.warn("isolation workspace retained in place: a recorded writer is still using this path", {
+			isolationDir,
+		});
+		return { dir: isolationDir, sidecarOk: true };
+	}
 	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
 	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
 	let sidecarOk = !needsSidecar;

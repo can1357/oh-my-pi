@@ -305,6 +305,18 @@ export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
 	return unfinished;
 }
 
+/** Whether every unfinished-writer record at `baseDir` belongs to this process. */
+async function ownsEveryUnfinishedWriter(baseDir: string): Promise<boolean> {
+	const dir = path.join(baseDir, ISOLATION_UNFINISHED_DIR);
+	const entries = await fs.readdir(dir).catch(() => [] as string[]);
+	for (const entry of entries) {
+		const holder = await readProcessIdentity(path.join(dir, entry));
+		if (holder === undefined) continue;
+		if (holder === "unreadable" || holder.pid !== process.pid) return false;
+	}
+	return true;
+}
+
 /** Whether the sandbox at `baseDir` was materialised by this process, so its teardown runs here. */
 export function isLocalIsolationOwner(baseDir: string): boolean {
 	for (const workspace of workspaces.values()) {
@@ -340,12 +352,25 @@ function watchLeaseDirectory(baseDir: string): FSWatcher | undefined {
 		} catch {
 			writers = undefined;
 		}
+		// `unref` forwarded, not dropped: a wrapper with only `close` made every
+		// later `unref` a silent no-op, and the process stayed alive on a watch
+		// nobody could release.
 		return {
 			close: () => {
 				leases.close();
 				writers?.close();
 			},
-		} as FSWatcher;
+			unref: () => {
+				leases.unref?.();
+				writers?.unref?.();
+				return undefined as unknown as FSWatcher;
+			},
+			ref: () => {
+				leases.ref?.();
+				writers?.ref?.();
+				return undefined as unknown as FSWatcher;
+			},
+		} as unknown as FSWatcher;
 	} catch {
 		// No watch available (the directory may not exist yet): the poll carries it.
 		return undefined;
@@ -392,11 +417,18 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 		// its record going away is the event this is waiting for just as much
 		// as the last lease going away.
 		if (await hasUnfinishedWriter(baseDir)) {
-			// Deliberately kept until that process exits, so waiting for it must
-			// not keep *this* one alive: the record is on disk and reclamation
-			// takes the workspace afterwards.
-			workspace.poll?.unref?.();
-			workspace.watcher?.unref?.();
+			// Our own record is kept until this process exits, so waiting for it
+			// must not keep this process alive: the record is on disk and
+			// reclamation takes the workspace afterwards. A *foreign* writer's
+			// record is different — it will go while this process can still do
+			// the final capture, and exiting early leaves that work uncaptured.
+			if (await ownsEveryUnfinishedWriter(baseDir)) {
+				workspace.poll?.unref?.();
+				workspace.watcher?.unref?.();
+			} else {
+				workspace.poll?.ref?.();
+				workspace.watcher?.ref?.();
+			}
 			return;
 		}
 		pending = workspace.pendingTeardown;
