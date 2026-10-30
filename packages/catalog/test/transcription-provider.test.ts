@@ -37,4 +37,15 @@ describe("cloud transcription catalog policy", () => {
 			expect(model.api).toBe("openai-transcriptions");
 		}
 	});
+
+	test("openai-codex maps stt onto the Codex dictation runner and seeds codex-transcribe as that kind", async () => {
+		const rules = await compileCompatRules(RULES_DIR);
+		const provider = rules.providers["openai-codex"];
+		expect(provider?.kindApis?.stt).toBe("openai-codex-transcriptions");
+		const row = provider?.seed?.models.find(seed => seed.id === "codex-transcribe");
+		if (!row) throw new Error("openai-codex has no codex-transcribe seed");
+		const model = buildModel(row as ModelSpec);
+		expect(model.kind).toBe("stt");
+		expect(model.api).toBe("openai-codex-transcriptions");
+	});
 });

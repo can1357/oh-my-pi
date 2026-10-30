@@ -25,4 +25,56 @@ describe("auth-gateway stdio model selectors", () => {
 	it("offers nothing when no entry resolves", () => {
 		expect(selectorCandidates("@commit", Settings.isolated({}), registry)).toEqual([]);
 	});
+
+	it("resolves runner-kind models that the chat-only registry view hides", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		expect(selectorCandidates(key(dictation), Settings.isolated({}), kindRegistry)).toEqual([dictation]);
+	});
+
+	it("uses the first comma entry that resolves, even when it is a runner and a later entry is chat", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		expect(selectorCandidates(`${key(dictation)},${key(mini)}`, Settings.isolated({}), kindRegistry)).toEqual([
+			dictation,
+		]);
+	});
+
+	it("drops chat models a runner's default fallback chain names, since the runner's route cannot serve them", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation] : models),
+		};
+		const settings = Settings.isolated({ "retry.fallbackChains": { default: [key(mini)] } });
+		expect(selectorCandidates(key(dictation), settings, kindRegistry)).toEqual([dictation]);
+	});
+
+	it("drops on-device runners from a hosted runner's chain, so their 400 never masks the hosted failure", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const local = getBundledModel("local", "whisper-small")!;
+		const kindRegistry = {
+			getAll: (kind = "chat") => (kind === "all" ? [...models, dictation, local] : models),
+			getAvailable: (kind = "chat") => (kind === "all" ? [...models, dictation, local] : models),
+		};
+		const settings = Settings.isolated({ "retry.fallbackChains": { [key(dictation)]: [key(local)] } });
+		expect(selectorCandidates(key(dictation), settings, kindRegistry)).toEqual([dictation]);
+	});
+
+	it("prefers the chat model when the chat view and the full catalog both match a selector", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		// A runner that shares the chat model's bare id and sorts ahead of it in the full catalog.
+		const runner = { ...dictation, id: mini.id };
+		const registryWithRunner = {
+			getAll: (kind = "chat") => (kind === "all" ? [runner, mini] : [mini]),
+			getAvailable: (kind = "chat") => (kind === "all" ? [runner, mini] : [mini]),
+		};
+		expect(selectorCandidates(mini.id, Settings.isolated({}), registryWithRunner)).toEqual([mini]);
+	});
 });

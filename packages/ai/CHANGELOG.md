@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` now accept the `openai-codex/codex-transcribe` model and transcribe with an existing `openai-codex` login (WAV, MP3, M4A, FLAC, WebM and Ogg/Opus; uploads are renamed to match their container, since the backend rejects mismatched extensions) ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
+
 ### Changed
 
 - Cursor runs served through `omp auth-gateway` are limited to the client's own tools, all advertised as MCP; Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are no longer offered on that path ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
