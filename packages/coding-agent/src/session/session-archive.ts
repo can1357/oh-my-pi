@@ -25,6 +25,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { statIfPresent, withGcLock } from "./gc-lock";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
+import { readSessionHeaderId, sessionHeaderIdFromBytes } from "./session-loader";
 import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
@@ -434,17 +435,29 @@ function jsonContains(held: unknown, holder: unknown): boolean {
 class MigratedEntryTree {
 	/** Live entry names by entry index, the session header being entry zero. */
 	readonly #liveIdByEntry: (string | undefined)[] = [];
+	/** Names already in use, because a name the migration assigns names one entry. */
+	readonly #used = new Set<string>();
+	#ambiguous = false;
 
 	/** Record the live name of the entry at `entry`, the header being entry zero. */
 	note(entry: number, live: Record<string, unknown>): void {
 		// Only a usable name is recorded. An entry whose name is missing or
 		// empty names nothing, and treating it as a name would let a history
 		// whose relations point at nothing compare as one the migration built.
-		this.#liveIdByEntry[entry] = typeof live.id === "string" && live.id !== "" ? live.id : undefined;
+		const id = typeof live.id === "string" && live.id !== "" ? live.id : undefined;
+		// A name already naming an earlier entry names neither: the migration
+		// gives each entry its own, and a history where one entry stands in for
+		// another rebuilds as a different conversation.
+		if (id !== undefined) {
+			if (this.#used.has(id)) this.#ambiguous = true;
+			this.#used.add(id);
+		}
+		this.#liveIdByEntry[entry] = id;
 	}
 
 	/** Whether the live record stands where the migration would have put it. */
 	holdsRelations(archived: Record<string, unknown>, live: Record<string, unknown>, entry: number): boolean {
+		if (this.#ambiguous) return false;
 		if (typeof live.id !== "string" || live.id === "") return false;
 		// The record before this one, or nothing when this is the first.
 		const expectedParent = entry > 1 ? this.#liveIdByEntry[entry - 1] : null;
@@ -849,27 +862,12 @@ export async function isSamePath(source: string, destination: string): Promise<b
 	return a !== undefined && b !== undefined && a.dev === b.dev && a.ino === b.ino;
 }
 
-/** Bytes sniffed before a file is read as a transcript header at all. */
-const HEADER_SNIFF_BYTES = 64;
-
-/** The session id a transcript's own header carries, or undefined when it has none. */
-async function headerSessionId(lines: AsyncGenerator<string>): Promise<string | undefined> {
-	const header = await openingHeader(lines);
-	const id = header?.id;
-	return typeof id === "string" && id !== "" ? id : undefined;
-}
-
-/** The same for a file on disk, without reading one that cannot be a transcript. */
-async function pathSessionId(file: string): Promise<string | undefined> {
-	try {
-		const prefix = (await Bun.file(file).slice(0, HEADER_SNIFF_BYTES).text()).replace(/^[ \t\r\n]+/, "");
-		if (prefix === "" || prefix[0] !== "{") return undefined;
-		return await headerSessionId(linesOf(Bun.file(file).stream()));
-	} catch {
-		// Absent, unreadable, or not text: nothing here names a session.
-		return undefined;
-	}
-}
+/**
+ * Bytes of an archived transcript inflated before giving up on finding its
+ * header. The production reader's own limit, so the two agree about where a
+ * header can be.
+ */
+const ARCHIVED_HEADER_READ_LIMIT = 1024 * 1024;
 
 /** Every file below `root`, links followed, the way the archive phase enumerates one. */
 async function treeFiles(root: string): Promise<string[]> {
@@ -886,19 +884,32 @@ async function treeFiles(root: string): Promise<string[]> {
 	return files;
 }
 
-/** The session id the archived transcript's own header carries. */
+/**
+ * The session id the archived transcript's own header carries, read with the
+ * reader every other part of omp uses.
+ *
+ * Inventing header semantics here is how a lease misses an identity the
+ * writer holding it is using: leading blank lines, a pretty-printed header, a
+ * title slot narrower than its usual width, whitespace past any sniff window
+ * — all of them are headers to the session loader, and a restore that cannot
+ * see them walks past their owners.
+ */
 async function inflateArchivedHeaderId(archiveFile: string): Promise<string | undefined> {
-	let id: string | undefined;
+	const head: Uint8Array[] = [];
+	let bytes = 0;
 	try {
 		await pipeline(Bun.file(archiveFile).stream(), createGunzip(), async (source: NodeJS.ReadableStream) => {
-			id = await headerSessionId(linesOf(source as AsyncIterable<Uint8Array>));
-			// Drained so the pipeline finishes rather than failing on a half-read.
-			for await (const _ of source as AsyncIterable<Uint8Array>) void _;
+			for await (const chunk of source as AsyncIterable<Uint8Array>) {
+				if (bytes >= ARCHIVED_HEADER_READ_LIMIT) continue;
+				head.push(chunk);
+				bytes += chunk.byteLength;
+			}
 		});
 	} catch {
+		// Unreadable or damaged: the archive error paths report that on their own.
 		return undefined;
 	}
-	return id;
+	return sessionHeaderIdFromBytes(Buffer.concat(head, bytes));
 }
 
 /**
@@ -914,22 +925,56 @@ async function inflateArchivedHeaderId(archiveFile: string): Promise<string | un
  * live. A restore moving those files while their owners held their leases
  * would lose exactly the writes the lease exists to protect.
  *
+ * The set is taken to a fixed point rather than calculated once, and it is
+ * taken again immediately before the artifact tree moves: a subagent can
+ * appear in the tree between an enumeration and the first copy, and a set
+ * only as fresh as its first pass would not cover it. Each pass enumerates
+ * again while holding everything the pass before it took, so a child that
+ * appears is either leased too or refuses the run. Passes stop when one
+ * finds nothing new; a tree that never settles is refused rather than
+ * chased.
+ *
  * Null, with everything taken so far released, when any of them is live.
  */
-async function tryAcquireRestoreLeases(ids: readonly (string | undefined)[]): Promise<FileLockHandle[] | null> {
+const RESTORE_LEASE_PASSES = 8;
+
+interface RestoreLeases {
+	/** Take the set again, for owners that have appeared since. False when one is live. */
+	refresh(): Promise<boolean>;
+	release(): void;
+}
+
+async function tryAcquireRestoreLeases(owners: () => Promise<(string | undefined)[]>): Promise<RestoreLeases | null> {
 	const leases: FileLockHandle[] = [];
 	const leased = new Set<string>();
-	for (const id of ids) {
-		if (id === undefined || leased.has(id)) continue;
-		const lease = tryAcquireSessionLease(id);
-		if (!lease) {
-			for (const held of leases) held.release();
-			return null;
+	const release = (): void => {
+		for (const held of leases) held.release();
+		leases.length = 0;
+	};
+	const refresh = async (): Promise<boolean> => {
+		try {
+			for (let pass = 0; pass < RESTORE_LEASE_PASSES; pass += 1) {
+				let added = false;
+				for (const id of await owners()) {
+					if (id === undefined || leased.has(id)) continue;
+					const lease = tryAcquireSessionLease(id);
+					if (!lease) return false;
+					leased.add(id);
+					leases.push(lease);
+					added = true;
+				}
+				if (!added) return true;
+			}
+			return false;
+		} catch {
+			// A probe that throws says nothing about who owns what, and holding
+			// what it took would read as a live owner to everything after it.
+			return false;
 		}
-		leased.add(id);
-		leases.push(lease);
-	}
-	return leases;
+	};
+	if (await refresh()) return { refresh, release };
+	release();
+	return null;
 }
 
 /**
@@ -955,24 +1000,24 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	}
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
-	const owners = [
+	const owners = async (): Promise<(string | undefined)[]> => [
 		await inflateArchivedHeaderId(archiveFile),
 		...(await Promise.all(
 			[...(await treeFiles(archiveArtifacts)), ...(await treeFiles(liveArtifacts)), sessionPath].map(file =>
-				pathSessionId(file),
+				readSessionHeaderId(file),
 			),
 		)),
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	const leases = await tryAcquireRestoreLeases(owners);
-	if (!leases) {
-		throw new Error(
+	const noOwners = (): Error =>
+		new Error(
 			`Cannot restore "${archiveFile}": a running process owns this session or one of its subagent sessions. ` +
 				`Close it and run \`omp gc --restore ${target} --apply\` again ` +
 				`(add \`--agent-dir <dir>\` when it is not the default one).`,
 		);
-	}
+	if (!leases) throw noOwners();
 	try {
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
@@ -998,6 +1043,10 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		const notRestored: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
 		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
+		// The owners are counted again with nothing left to do but move the
+		// tree: a subagent that joined it since the first count owns files this
+		// is about to carry.
+		if (!(await leases.refresh())) throw noOwners();
 		if (hasArtifacts) {
 			try {
 				await copyTreeDereferenced(archiveArtifacts, liveArtifacts);
@@ -1015,7 +1064,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 		if (artifactsRestored || !hasArtifacts) await fs.rm(archiveFile, { force: true });
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
-		for (const held of leases) held.release();
+		leases.release();
 	}
 }
 

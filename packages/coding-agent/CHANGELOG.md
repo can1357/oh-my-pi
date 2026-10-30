@@ -67,6 +67,10 @@
 - A migrated version 1 transcript whose entry names are empty, or whose relations point at nothing, is refused instead of authorising the archive's deletion ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - `omp gc --restore` takes a leftover staging name off its data before staging through it, the way archiving already did, and a failed archive leaves no empty directory behind its own residue ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 - Every refusal from `omp gc --archive` and `omp gc --restore` names the session id, `--apply`, and `--agent-dir` where it matters, instead of a bare command ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --restore` finds an owner with the session loader's own header reader, so a transcript that opens with blank lines, a pretty-printed header or a narrow title slot is leased like any other, and it counts the owners again immediately before the artifact tree moves ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- `omp gc --archive` no longer finishes a move through an archive name that only points elsewhere, which left the archive naming a file the same run removed and the session undiscoverable ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- A migrated version 1 transcript that gives one entry another entry's name is refused instead of reading as the same session ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+- Archiving over an archive that holds a different session now names the command that recovers it ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 

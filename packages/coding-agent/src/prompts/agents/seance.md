@@ -4,7 +4,6 @@ description: Read a historical session and nested transcripts to answer a consul
 tools: read, grep, glob
 read-summarize: false
 ---
-
 You are a read-only consultant for one historical session.
 
 <system-conventions>

@@ -1384,9 +1384,17 @@ async function moveArtifactsTree(
  * write — the signature of a run killed between the archive landing and the
  * transcript being dropped. Finishing that move is what keeps one session
  * from wedging every later run on `archive destination exists`.
+ *
+ * The destination has to be a file of its own. A name that only points
+ * somewhere else reads byte for byte as the transcript while holding none of
+ * it: finish the move through one and the archive is left naming a file this
+ * very run then removes, so `findArchivedSessionFiles` lists nothing and
+ * `gc --restore` says there is no such archive while the bytes sit at a path
+ * omp does not search.
  */
 async function archiveAlreadyHolds(source: string, destination: string): Promise<boolean> {
 	try {
+		if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) return false;
 		const live = await digestStream(Bun.file(source).stream());
 		const stored = await digestArchivedSessionFile(destination);
 		return live.hash === stored.hash;
@@ -1413,8 +1421,17 @@ async function moveSessionWithArtifacts(
 	const destArtifacts = sessionArtifactsPath(destSession);
 	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
 	const alreadyArchived = (await pathExists(destSession)) && (await archiveAlreadyHolds(sourceSession, destSession));
-	if ((await pathExists(destSession)) && !alreadyArchived) {
-		throw new Error(`archive destination holds a different session: ${destSession}`);
+	if (await pathExists(destSession)) {
+		if (!alreadyArchived) {
+			const stem = path.basename(destSession, ".jsonl.gz");
+			throw new Error(
+				`the archive at ${destSession} holds a different session, so ${sourceSession} was left where it is. ` +
+					`Bring the archived one home with \`omp gc --restore ${stem.slice(stem.lastIndexOf("_") + 1) || stem} --apply\` ` +
+					`— add \`--agent-dir <dir>\` when it is not the default one — and archive again; ` +
+					`or move ${destSession} out of the archive directory yourself, keeping it, and archive again. ` +
+					`Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
+			);
+		}
 	}
 
 	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];

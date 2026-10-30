@@ -244,6 +244,17 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	return isValidSessionHeader(entry) ? entry.id : undefined;
 }
 
+/**
+ * The session id in a transcript's leading bytes, for callers that already
+ * hold them — an archived transcript inflated into memory, say. The same
+ * reader {@link readSessionHeaderId} uses on a file, so the two agree on
+ * what a header is.
+ */
+export function sessionHeaderIdFromBytes(prefix: Uint8Array): string | undefined {
+	const id = sessionHeaderIdFromPrefix(prefix, true);
+	return id === HEADER_INCOMPLETE ? undefined : id;
+}
+
 /** Parse session JSONL and visit each entry without retaining prior entries. */
 export async function visitEntriesFromFileStream(
 	filePath: string,

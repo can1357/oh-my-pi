@@ -1760,3 +1760,123 @@ test("a failed archive leaves no empty directory behind its own staging residue"
 	expect(await Bun.file(archivedArtifacts).exists()).toBe(false);
 	expect(await fs.readdir(archivedArtifacts).catch(() => undefined)).toBeUndefined();
 });
+
+test("a restore sees an owner whose transcript opens the way the session loader allows", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	const childId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const body = sessionBody(childId, "UNIQUE ORIGINAL", root);
+	const header = body.slice(0, body.indexOf("\n"));
+	// Headers the production reader accepts and a hand-rolled one does not:
+	// blank lines first, the header pretty-printed, and more leading
+	// whitespace than any sniff window.
+	const shapes = [
+		`\n\n${body}`,
+		`${JSON.stringify(JSON.parse(header), null, 2)}\n${body.slice(body.indexOf("\n") + 1)}`,
+		`${" ".repeat(200)}\n${body}`,
+	];
+	for (const [index, shape] of shapes.entries()) {
+		await Bun.write(path.join(liveArtifacts, `child-${index}.jsonl`), shape);
+	}
+	await archiveEverything();
+
+	const lease = tryAcquireSessionLease(childId);
+	expect(lease).not.toBeNull();
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("subagent sessions");
+	} finally {
+		lease?.release();
+	}
+
+	for (const index of shapes.keys()) {
+		expect(await Bun.file(path.join(archivedArtifacts, `child-${index}.jsonl`)).text()).toContain("UNIQUE ORIGINAL");
+	}
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("a child that appears after the owners were counted still stops the restore", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "first.log"), "FIRST");
+	await archiveEverything();
+	const lateId = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	const late: { lease: { release(): void } | null } = { lease: null };
+
+	// A subagent session joins the tree after the owners were counted and
+	// before the tree moves — the transcript landing is exactly that moment —
+	// with its own lease, the way one started mid-restore would.
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (source, destination) => {
+		await realLink(source, destination);
+		if (late.lease === null && String(destination) === sessionFile) {
+			await Bun.write(path.join(archivedArtifacts, "late.jsonl"), sessionBody(lateId, "LATE CHILD", root));
+			late.lease = tryAcquireSessionLease(lateId);
+		}
+	});
+	try {
+		await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("subagent sessions");
+	} finally {
+		link.mockRestore();
+		late.lease?.release();
+	}
+
+	expect(await Bun.file(path.join(archivedArtifacts, "late.jsonl")).text()).toContain("LATE CHILD");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("an archived transcript that only points elsewhere is not a finished move", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	// The archive's canonical name points at a gzip inside the live artifact
+	// tree: it reads as this very transcript and holds none of it.
+	const inside = path.join(liveArtifacts, "copy.jsonl.gz");
+	await Bun.write(inside, Bun.gzipSync(await Bun.file(sessionFile).bytes()));
+	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
+	await fs.symlink(inside, archiveFile);
+
+	const result = await archiveEverything();
+
+	// Finishing the move through that name would leave the archive naming a
+	// file this run removes, with nothing for discovery or restore to find.
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+	expect(await Bun.file(inside).exists()).toBe(true);
+});
+
+test("a migrated transcript that gives one entry another's name is refused", async () => {
+	const artifacts = sessionFile.slice(0, -".jsonl".length);
+	const header = { type: "session", version: 1, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: root };
+	const user = (content: string) => JSON.stringify({ type: "message", message: { role: "user", content } });
+	const assistant = JSON.stringify({ type: "message", message: { role: "assistant", content: [] } });
+	await Bun.write(sessionFile, `${JSON.stringify(header)}\n${user("FIRST")}\n${user("MIDDLE")}\n${assistant}\n`);
+	await Bun.write(path.join(artifacts, "sub.jsonl"), "UNRESTORED-CHILD\n");
+	await archiveEverything();
+	// Every record present and every name a string — but the last entry wears
+	// the first's name, so the history rebuilt from it loses FIRST.
+	const named = (id: string, parentId: string | null, content: string) =>
+		JSON.stringify({ type: "message", id, parentId, message: { role: "user", content } });
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify({ ...header, version: 3 })}\n${named("e1", null, "FIRST")}\n${named("e2", "e1", "MIDDLE")}\n${JSON.stringify(
+			{ type: "message", id: "e1", parentId: "e2", message: { role: "assistant", content: [] } },
+		)}\n`,
+	);
+
+	await expect(restoreArchivedSession(archiveFile, root)).rejects.toThrow("different session file");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("archiving over a different archived session names the way back", async () => {
+	const other = "01a18630-42ae-7117-ba7c-029b1eee0f4c";
+	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
+	await Bun.write(archiveFile, Bun.gzipSync(Buffer.from(sessionBody(other, "ANOTHER SESSION", root))));
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(sessionFile, old, old);
+
+	const result = await archiveEverything();
+
+	const errors = result.archive?.errors.join("\n") ?? "";
+	expect(errors).toContain("--restore");
+	expect(errors).toContain("--apply");
+	expect(errors).toContain("--agent-dir");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+});
