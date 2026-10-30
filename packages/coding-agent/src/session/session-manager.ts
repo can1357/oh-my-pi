@@ -1082,10 +1082,23 @@ async function removeEmptyDirectory(
 		// directory that was moved: a bind mount that stood on the old name is
 		// a different inode, detached or not.
 		const inside = await pinVerifiedChild(asideDir, ASIDE_ENTRY, "it was left where it was moved to");
-		const ours = Boolean(inside && sameNode(inside.identity, expected));
+		// And still holding nothing but what leaves with it. The emptiness was
+		// decided before the move; something put in between is somebody else's
+		// object, and carrying it off — to a directory this process then takes
+		// down — loses it as surely as deleting it would. Judged here, where
+		// the object is on disk and under a name nothing else can reach, and
+		// the whole tree goes back if there is anything to go back for.
+		const held = inside
+			? await fs.promises.readdir(inside.at).catch(() => ["unreadable"])
+			: [ARTIFACT_STAGING_MARKER, "unreadable"];
+		const empty = held.every(entry => entry === ARTIFACT_STAGING_MARKER);
+		const ours = Boolean(inside && sameNode(inside.identity, expected)) && empty;
 		await inside?.close();
 		if (!ours) {
-			logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
+			logger.warn("A session artifact staging entry changed as it was being removed; put back", {
+				path: staged,
+				held: empty ? undefined : held.slice(0, ARTIFACT_COPY_LARGEST),
+			});
 			await putDirectoryBack(parent, name, asideDir, staged);
 			return;
 		}
@@ -1233,7 +1246,7 @@ async function publishArtifactStaging(
 	staging: ArtifactStaging,
 	destination: string,
 	created: Map<string, ObjectIdentity>,
-): Promise<Set<string> | undefined> {
+): Promise<Map<string, number | null> | undefined> {
 	// The directory both names live in, held for the handover: the rename is
 	// then resolved from a descriptor on each side rather than from two
 	// pathnames, so a staging directory substituted at that instant cannot be
@@ -1312,7 +1325,9 @@ async function publishArtifactStaging(
 					destination,
 				});
 			}
-			return new Set(published);
+			// `null` is the whole tree in one rename: every name arrived,
+			// whatever is in it, because the directory itself is what moved.
+			return new Map(published.map(name => [name, null]));
 		} catch (error) {
 			if (!isEnotempty(error) && !isEexist(error) && !isEnotdir(error)) {
 				logger.warn("Could not publish a session's copied artifacts", {
@@ -1330,9 +1345,16 @@ async function publishArtifactStaging(
 }
 
 /**
- * The first object in the staged tree that the copy did not create, or the
- * first created object that is no longer what it was, by walking what is
- * actually there.
+ * The first staged object the copy cannot answer for: one it did not create,
+ * one that is no longer what it was, or one it did create that is no longer
+ * there.
+ *
+ * Both halves matter, and they are not the same question. Walking what is
+ * there finds a file somebody else added; only comparing the record against
+ * what is there finds a file that was taken away. The second is the half that
+ * decides a delivery: a fork whose transcript refers to `artifact://1` and
+ * whose directory has only `0` has not inherited its artifacts, and publishing
+ * it says that it has.
  */
 async function firstUnexpectedObject(
 	dir: PinnedDirectory,
@@ -1344,6 +1366,14 @@ async function firstUnexpectedObject(
 		entries = await fs.promises.readdir(dir.at, { withFileTypes: true });
 	} catch (error) {
 		return `${stagedUnder || "."}: ${toError(error).message}`;
+	}
+	const present = new Set(entries.map(entry => entry.name));
+	const prefix = stagedUnder ? `${stagedUnder}/` : "";
+	for (const staged of created.keys()) {
+		if (!staged.startsWith(prefix)) continue;
+		const rest = staged.slice(prefix.length);
+		if (rest.length === 0 || rest.includes("/")) continue;
+		if (!present.has(rest)) return staged;
 	}
 	for (const entry of entries) {
 		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
@@ -1391,31 +1421,37 @@ async function mergeIntoDestination(
 	staging: ArtifactStaging,
 	destination: string,
 	staged: readonly string[],
-): Promise<Set<string> | undefined> {
+): Promise<Map<string, number> | undefined> {
 	const from = await pinDirectory(staging.path, stagingIdentity(staging));
 	if (!from) return undefined;
 	try {
-		const into = await pinDirectory(destination);
-		if (!into) {
-			logger.warn("Session artifacts destination is not a directory; nothing was published", { destination });
+		// Through the directory that holds the destination's name, so the
+		// destination root gets what every directory below it gets: its device
+		// against its parent's, the mount table, and its own link to its
+		// parent. Opening it by its pathname asks none of those, and a bind
+		// mounted over it and then detached is a descriptor on somebody else's
+		// directory that answers to all of this copy's other checks.
+		const above = await pinDirectory(path.dirname(destination));
+		if (!above) {
+			logger.warn("Could not hold the directory a session's artifacts go in; nothing was published", {
+				destination,
+			});
 			return undefined;
 		}
 		try {
-			const mounts = await mountsUnder(destination);
-			if (mounts === undefined || mounts.length > 0) {
-				logger.warn("Session artifacts destination is mounted or unverifiable; nothing was published", {
-					destination,
-					mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
-				});
-				return undefined;
+			const into = await pinVerifiedChild(above, path.basename(destination), "nothing was published into it");
+			if (!into) return undefined;
+			try {
+				const published = new Map<string, number>();
+				for (const name of staged) {
+					published.set(name, await moveIntoHeldDirectory(from, into, name, destination));
+				}
+				return published;
+			} finally {
+				await into.close();
 			}
-			const published = new Set<string>();
-			for (const name of staged) {
-				if (await moveIntoHeldDirectory(from, into, name, destination)) published.add(name);
-			}
-			return published;
 		} finally {
-			await into.close();
+			await above.close();
 		}
 	} finally {
 		await from.close();
@@ -1438,7 +1474,7 @@ async function moveIntoHeldDirectory(
 	into: PinnedDirectory,
 	name: string,
 	destination: string,
-): Promise<boolean> {
+): Promise<number> {
 	const source = `${from.at}/${name}`;
 	const target = `${into.at}/${name}`;
 	try {
@@ -1449,7 +1485,7 @@ async function moveIntoHeldDirectory(
 			// own removal.
 			await fs.promises.link(source, target);
 			await fs.promises.unlink(source).catch(() => {});
-			return true;
+			return 1;
 		}
 		try {
 			await fs.promises.mkdir(target);
@@ -1466,41 +1502,32 @@ async function moveIntoHeldDirectory(
 		if (!sourceDir || !targetDir) {
 			await sourceDir?.close();
 			await targetDir?.close();
-			return false;
+			return 0;
 		}
 		try {
+			// What this placed, counted as it places it. A staged name that is
+			// simply gone when the walk reaches it was not delivered by this
+			// copy — somebody removing it is not the same event as it arriving
+			// — and the caller turns this number into "the fork inherited
+			// these files", which is what stops anyone looking for them.
+			let placed = 0;
 			for (const child of await fs.promises.readdir(sourceDir.at)) {
-				await moveIntoHeldDirectory(sourceDir, targetDir, child, destination);
+				placed += await moveIntoHeldDirectory(sourceDir, targetDir, child, destination);
 			}
-			// Delivered means *all* of it arrived. What the caller does with
-			// this is count the entry's files and bytes, and a directory that
-			// lost one child to a name the destination already had, or to a
-			// check that refused it, did not deliver what that number says. A
-			// report of a delivery that did not happen is worse than the loss
-			// it hides: it is what stops anyone looking for the files.
-			const left = await fs.promises.readdir(sourceDir.at).catch(() => ["unreadable"]);
-			if (left.length > 0) {
-				logger.warn("Part of a session's copied artifact directory could not be published", {
-					destination,
-					name,
-					left: left.slice(0, ARTIFACT_COPY_LARGEST),
-				});
-				return false;
-			}
-			return true;
+			return placed;
 		} finally {
 			await sourceDir.close();
 			await targetDir.close();
 			await fs.promises.rmdir(source).catch(() => {});
 		}
 	} catch (error) {
-		if (isEexist(error) || isEnotempty(error) || isEnotdir(error) || isEnoent(error)) return false;
+		if (isEexist(error) || isEnotempty(error) || isEnotdir(error) || isEnoent(error)) return 0;
 		logger.warn("Could not publish one of a session's copied artifacts", {
 			destination,
 			name,
 			error: toError(error).message,
 		});
-		return false;
+		return 0;
 	}
 }
 
@@ -1644,13 +1671,19 @@ async function copySessionArtifactsOnce(
 	const published = await publishArtifactStaging(staging, destinationArtifactsDir, progress.created);
 	await discardArtifactStaging(staging, progress.created);
 	if (!published) return await settle({ ...empty, discarded: true, reason: "copy-failed" });
-	if (published.size === 0) {
+	// Only what this copy placed. A name the destination already had kept its
+	// own version; an entry that lost part of itself — to such a name, to a
+	// check that refused it, or to somebody removing a staged file before the
+	// move reached it — is not reported as inherited, because this number is
+	// what tells a reader the files are there.
+	const delivered = perEntry.filter(entry => {
+		const placed = published.get(entry.name);
+		return placed === null || placed === entry.files;
+	});
+	if (delivered.length === 0) {
 		const lost = sourceEntries.length > 0;
 		return await settle({ ...empty, discarded: lost, reason: lost ? "copy-failed" : undefined });
 	}
-	// Only what the destination accepted: a name it already had kept its own
-	// version, and the copy is not charged for one it did not deliver.
-	const delivered = perEntry.filter(entry => published.has(entry.name));
 	const tally: ArtifactCopyTally = {
 		entries: delivered.reduce((total, entry) => total + entry.files, 0),
 		bytes: delivered.reduce((total, entry) => total + entry.bytes, 0),
