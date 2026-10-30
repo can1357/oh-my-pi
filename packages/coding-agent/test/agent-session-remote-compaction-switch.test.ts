@@ -190,13 +190,17 @@ describe("switch after an OpenAI remote compaction", () => {
 		expect(countFacts(sent)).toBeLessThan(80);
 	});
 
-	it("skips the OpenAI remote method when compacting for a reader that cannot replay it", async () => {
+	// Native lanes run before a configured endpoint, so an endpoint does not make the remote method portable.
+	it.each([
+		["no remote endpoint", {}],
+		["a remote endpoint", { "compaction.remoteEndpoint": "https://compactor.invalid/summarize" }],
+	])("skips the OpenAI remote method for a reader that cannot replay it, with %s", async (_label, extra) => {
 		const sessionManager = SessionManager.inMemory();
 		seedRemoteCompaction(sessionManager, 160);
 		const { session } = startSession(
 			sessionManager,
 			gpt,
-			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"] }),
+			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"], ...extra }),
 		);
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
 			summary: `portable summary by ${model.provider}`,
@@ -211,6 +215,6 @@ describe("switch after an OpenAI remote compaction", () => {
 		// Soft summarization re-expands the history behind the remote boundary.
 		expect(countFacts(JSON.stringify(compactSpy.mock.calls[0]![0].messagesToSummarize))).toBeGreaterThan(0);
 		const latest = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
-		expect(latest?.type === "compaction" && latest.preserveData?.openaiRemoteCompaction).toBeFalsy();
+		expect(latest?.type === "compaction" && latest.method).toBe("soft");
 	});
 });

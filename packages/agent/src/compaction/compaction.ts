@@ -1400,12 +1400,13 @@ export function canReplayRemoteCompaction(
 
 /**
  * Whether `reader` can replay the provider-native compaction `compactor` would
- * write. Only the OpenAI Responses lanes store a provider-bound payload; the
+ * write. Only the OpenAI Responses lanes (the model's own API or its
+ * `remoteCompaction.api` override) store a provider-bound payload; the
  * Anthropic lane and local methods leave a summary any model reads.
  */
 export function canReplayRemoteCompactionFrom(compactor: Model, reader: Model): boolean {
 	return (
-		!isOpenAiRemoteCompactionApi(compactor.api) ||
+		!isOpenAiRemoteCompactionApi(compactor.remoteCompaction?.api ?? compactor.api) ||
 		(compactor.provider === reader.provider && isOpenAiRemoteCompactionApi(reader.api))
 	);
 }

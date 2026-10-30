@@ -45,7 +45,7 @@ Compaction and branch summaries are first-class session entries, not plain assis
 
 When context is rebuilt (`buildSessionContext`):
 
-1. Latest compaction on the active path is converted to one `compactionSummary` message.
+1. The latest compaction on the active path that `options.model` can read (any compaction when the option is omitted, and always for transcripts; see below) is converted to one `compactionSummary` message.
 2. Kept entries from `firstKeptEntryId` to the compaction point are re-included.
 3. Later entries on the path are appended.
 4. `branch_summary` entries are converted to `branchSummary` messages.

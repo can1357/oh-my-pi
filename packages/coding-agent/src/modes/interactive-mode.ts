@@ -6777,12 +6777,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				// so it reaches native summarization without leaking into the public
 				// `customInstructions` channel on `session_before_compact` — extensions
 				// there treat that field as user focus and would query-bias the
-				// summary toward the plan boilerplate (issue #4359).
+				// summary toward the plan boilerplate (issue #4359). The model the
+				// transition below restores reads the summary.
+				const readerModel =
+					options.executionModel?.model ?? this.#planModePreviousModelState?.model ?? this.session.model;
 				compactOutcome = await this.handleCompactCommand(
 					undefined,
 					undefined,
 					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
-					{ internalGuidance: compactionPrompt, readerModel: options.executionModel?.model },
+					{ internalGuidance: compactionPrompt, readerModel },
 				);
 			}
 		} finally {

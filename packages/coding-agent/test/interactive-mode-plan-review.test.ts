@@ -2470,6 +2470,34 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(markSentSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("Approve and compact context: compacts for the pre-plan model the approval restores", async () => {
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
+		const prePlanModel = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const planModel = session.modelRegistry.find("openai", "gpt-5.4");
+		if (!prePlanModel || !planModel) throw new Error("Expected sonnet + gpt-5.4 to exist in registry");
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("plan", "openai/gpt-5.4");
+
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact, then execute on the pre-plan model.");
+
+		await mode.handlePlanModeCommand();
+		expect(session.model?.id).toBe(planModel.id);
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and compact context");
+		const compactSpy = vi.spyOn(mode, "handleCompactCommand").mockResolvedValue("ok");
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		// The summary is written for the model execution runs on, not the plan model.
+		expect(compactSpy.mock.calls[0]?.[3]?.readerModel?.id).toBe(prePlanModel.id);
+	});
+
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {
 		// Mock `handleCompactCommand` to surface the "cancelled" outcome directly.
 		// (Testing the consumer — `#approvePlan`'s outcome handling — at the

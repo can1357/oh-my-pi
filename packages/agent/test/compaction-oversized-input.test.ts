@@ -253,4 +253,15 @@ describe("canReplayRemoteCompactionFrom", () => {
 	test("the Anthropic lane leaves a summary any model reads", () => {
 		expect(canReplayRemoteCompactionFrom(claude, codex)).toBe(true);
 	});
+
+	test("a Chat Completions model compacting through a Responses override writes a provider-bound payload", () => {
+		const completions: Model = {
+			...openai,
+			api: "openai-completions",
+			remoteCompaction: { api: "openai-responses" },
+		};
+		expect(canReplayRemoteCompactionFrom(completions, claude)).toBe(false);
+		// Its own Completions encoder cannot replay it either.
+		expect(canReplayRemoteCompactionFrom(completions, completions)).toBe(false);
+	});
 });
