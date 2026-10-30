@@ -1,7 +1,7 @@
 import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
-import type { Api, DispatchHold, FetchImpl, Model } from "../types";
+import type { Api, DispatchHold, FetchImpl, Model, TransportWrapper } from "../types";
 import { holdBeforeDispatch } from "./dispatch-hold";
 import { preResponseGuard } from "./idle-iterator";
 import { getProxyForProvider, withProxyInit } from "./proxy";
@@ -15,6 +15,8 @@ interface TransportFetchStamp {
 	base: FetchImpl;
 	/** Every hold baked in, in the order they were supplied. */
 	holds: readonly DispatchHold[];
+	/** Every caller wrapper baked in, in the order they were supplied. */
+	wraps: readonly TransportWrapper[];
 	/** The same transport with no hold, built once on demand for cleanup traffic. */
 	unheld?: FetchImpl;
 }
@@ -25,10 +27,11 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: TransportFetchStamp };
 
 /**
  * The one fetch every inference request goes through. Per call it applies, in
- * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
- * per-provider proxy, `PI_REQ_DEBUG` request recording, then the caller's
- * dispatch hold — and then calls `fetchImpl` (or the model's default fetch)
- * exactly once. Providers never layer transport concerns themselves.
+ * order: the caller's `wrap` (outermost), the inference User-Agent default,
+ * `NODE_EXTRA_CA_CERTS`, the per-provider proxy, `PI_REQ_DEBUG` request
+ * recording, then the caller's dispatch hold — and then calls `fetchImpl` (or
+ * the model's default fetch) exactly once. Providers never layer transport
+ * concerns themselves.
  *
  * `hold` is the caller's `beforeDispatch`. It belongs here because this is the
  * only place every HTTP attempt passes through: a provider's own retry loop
@@ -38,23 +41,45 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: TransportFetchStamp };
  * filesystem. The request's own `signal` ends the wait, so cancelling a
  * request parked on a hold no longer leaves it parked forever.
  *
+ * `wrap` is the caller's `wrapTransport`: a wrapper around the built fetch,
+ * for a caller that must *see* each attempt and its response — the only way
+ * to answer a provider SDK's own HTTP retry loop, whose budget is a
+ * constructor literal. It sits outside everything above, so an attempt it
+ * declines costs no hold, no debug dump and no wire traffic, and the hold
+ * stays the last step before a request that does go out. It is per-request
+ * state (an attempt counter, the caller's report-back): build one per request
+ * and never share it between requests, or one request's decision leaks into
+ * another's.
+ *
  * Idempotent: the built fetch is stamped and returned as-is on later passes,
  * hold and all — `streamSimple` re-enters `stream`, and `streamSimpleRequest`
  * re-enters itself on auth retries, so without the stamp each entry point
  * would add another layer (three PI_REQ_DEBUG dumps, and three holds, for one
- * request). A hold the stamp does not already carry is not dropped: the fetch
- * is rebuilt from the stamped base with that hold added, which gates the
- * request without a second transport layer.
+ * request). A hold or a wrapper the stamp does not already carry is not
+ * dropped: the fetch is rebuilt from the stamped base with it added, which
+ * gates or observes the request without a second transport layer.
  */
-export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined, hold?: DispatchHold): FetchImpl {
+export function transportFetch(
+	model: Model<Api>,
+	fetchImpl: FetchImpl | undefined,
+	hold?: DispatchHold,
+	wrap?: TransportWrapper,
+): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	const stamp = given?.[TRANSPORT_FETCH];
-	if (given && stamp && (hold === undefined || stamp.holds.includes(hold))) return given;
+	const hasHold = hold === undefined || stamp?.holds.includes(hold) === true;
+	const hasWrap = wrap === undefined || stamp?.wraps.includes(wrap) === true;
+	if (given && stamp && hasHold && hasWrap) return given;
 	const base =
 		stamp?.base ??
 		given ??
 		(model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
-	return buildTransportFetch(model, base, hold ? [...(stamp?.holds ?? []), hold] : (stamp?.holds ?? []));
+	return buildTransportFetch(
+		model,
+		base,
+		hasHold || !hold ? (stamp?.holds ?? []) : [...(stamp?.holds ?? []), hold],
+		hasWrap || !wrap ? (stamp?.wraps ?? []) : [...(stamp?.wraps ?? []), wrap],
+	);
 }
 
 /**
@@ -69,14 +94,20 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 export function withoutDispatchHold(fetchImpl: FetchImpl): FetchImpl {
 	const stamp = (fetchImpl as TransportFetch)[TRANSPORT_FETCH];
 	if (!stamp || stamp.holds.length === 0) return fetchImpl;
-	stamp.unheld ??= buildTransportFetch(stamp.model, stamp.base, []);
+	// Keeps the caller's wrappers: only the hold is wrong for cleanup traffic.
+	stamp.unheld ??= buildTransportFetch(stamp.model, stamp.base, [], stamp.wraps);
 	return stamp.unheld;
 }
 
-function buildTransportFetch(model: Model<Api>, base: FetchImpl, holds: readonly DispatchHold[]): TransportFetch {
+function buildTransportFetch(
+	model: Model<Api>,
+	base: FetchImpl,
+	holds: readonly DispatchHold[],
+	wraps: readonly TransportWrapper[],
+): TransportFetch {
 	const proxyUrl = getProxyForProvider(model.provider);
 
-	const fetch: TransportFetch = async (input, init) => {
+	const inner: FetchImpl = async (input, init) => {
 		const method = init?.method ?? (input instanceof Request ? input.method : "GET");
 		const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
 		// A pre-response deadline bounds the provider's latency, so it must not
@@ -98,8 +129,11 @@ function buildTransportFetch(model: Model<Api>, base: FetchImpl, holds: readonly
 		const response = await base(input, init);
 		return debug ? debug.wrapResponse(response) : response;
 	};
+	// Outermost: an attempt the caller's wrapper declines never reaches the
+	// preparation, the hold or the wire above.
+	const fetch = wraps.reduce<TransportFetch>((wrapped, wrap) => wrap(wrapped), inner);
 	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = { model, base, holds };
+	fetch[TRANSPORT_FETCH] = { model, base, holds, wraps };
 	return fetch;
 }
 
@@ -139,13 +173,14 @@ export function resetDispatchOriginsForTesting(): void {
 
 /**
  * Options-bag form of {@link transportFetch}; returns `options` untouched when
- * its fetch is already built and it gates nothing. A `beforeDispatch` travels
- * into the built fetch, so every HTTP attempt the transport makes waits on it.
+ * its fetch is already built and it neither gates nor observes anything. A
+ * `beforeDispatch` and a `wrapTransport` travel into the built fetch, so every
+ * HTTP attempt the transport makes waits on the one and passes through the
+ * other.
  */
-export function withTransportFetch<T extends { fetch?: FetchImpl; beforeDispatch?: DispatchHold }>(
-	model: Model<Api>,
-	options: T,
-): T {
-	const fetch = transportFetch(model, options.fetch, options.beforeDispatch);
+export function withTransportFetch<
+	T extends { fetch?: FetchImpl; beforeDispatch?: DispatchHold; wrapTransport?: TransportWrapper },
+>(model: Model<Api>, options: T): T {
+	const fetch = transportFetch(model, options.fetch, options.beforeDispatch, options.wrapTransport);
 	return fetch === options.fetch ? options : { ...options, fetch };
 }

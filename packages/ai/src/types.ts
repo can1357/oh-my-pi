@@ -486,6 +486,13 @@ export type OpenAIResponseInclude =
  */
 export type DispatchHold = () => Promise<void> | void;
 
+/**
+ * A caller's wrapper around the transport this layer builds, for a caller that
+ * must see each HTTP attempt and its response. See
+ * {@link StreamOptions.wrapTransport}.
+ */
+export type TransportWrapper = (fetch: FetchImpl) => FetchImpl;
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -529,6 +536,22 @@ export interface StreamOptions {
 	 * the provider in order must serialize them itself.
 	 */
 	beforeDispatch?: DispatchHold;
+	/**
+	 * Wraps the transport this layer builds for the request, outside everything
+	 * it does: the User-Agent default, the CA bundle, the proxy, the
+	 * `PI_REQ_DEBUG` dump and {@link beforeDispatch}, which stays the last step
+	 * before the wire. A caller that must *see* each HTTP attempt and its
+	 * response uses it — answering a provider SDK's own retry loop, whose
+	 * budget is a constructor literal, is not expressible as a hold. An
+	 * attempt the wrapper declines costs no hold, no debug dump and no traffic.
+	 *
+	 * It is per-request state (an attempt count, the caller's report-back):
+	 * build one per request and never share it between requests. Rejecting
+	 * from it fails that attempt as a transport error, which the provider's
+	 * own retry loop may still retry; only an abort on {@link signal} ends
+	 * those retries at once.
+	 */
+	wrapTransport?: TransportWrapper;
 	/**
 	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
 	 * errors are not replayed above the transport, so retries share this limit.

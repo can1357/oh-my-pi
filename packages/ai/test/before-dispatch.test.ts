@@ -23,6 +23,7 @@ import type {
 	Model,
 	ModelSpec,
 	SimpleStreamOptions,
+	TransportWrapper,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -787,5 +788,67 @@ describe("beforeDispatch", () => {
 
 		expect(abortedAtWire).toBe(false);
 		expect(response.status).toBe(200);
+	});
+
+	// A caller that has to answer a provider SDK's own retry loop needs to see
+	// each attempt and its response; a hold cannot express that. The wrapper
+	// composes onto an already-built transport the same way a hold does, and
+	// without a second layer: one debug capture per attempt that goes out.
+	test("takes on a transport wrapper the stamped fetch does not carry, without a second layer", async () => {
+		const calls: string[] = [];
+		const debugCaptures: string[] = [];
+		const debugEnabled = spyOn(requestDebug, "isRequestDebugEnabled").mockReturnValue(true);
+		const debugSession = spyOn(requestDebug, "createFetchRequestDebugSession").mockImplementation(async input => {
+			debugCaptures.push(String(input));
+			return {
+				id: debugCaptures.length,
+				requestPath: "unused",
+				responsePath: "unused",
+				openResponseLog: async () => ({ write() {}, async close() {} }),
+				wrapResponse: async (response: Response) => response,
+			};
+		});
+		try {
+			const base = (async () => {
+				calls.push("request");
+				return new Response("{}", { status: 200 });
+			}) satisfies FetchImpl;
+			const hold = () => {
+				calls.push("hold");
+			};
+			// Per-request state: the first attempt goes out, later ones are
+			// declined before anything of the transport's own runs.
+			let attempts = 0;
+			let declined = 0;
+			const wrap: TransportWrapper = inner => async (input, init) => {
+				attempts += 1;
+				if (attempts > 1) {
+					declined += 1;
+					throw new Error("retry declined");
+				}
+				return inner(input, init);
+			};
+
+			const once = transportFetch(model(), base, hold);
+			const observed = transportFetch(model(), once, hold, wrap);
+			expect(observed).not.toBe(once);
+			// Supplying the same wrapper again changes nothing.
+			expect(transportFetch(model(), observed, hold, wrap)).toBe(observed);
+
+			const response = await observed("https://example.invalid/v1/messages", { method: "POST" });
+			expect(response.status).toBe(200);
+			await expect(observed("https://example.invalid/v1/messages", { method: "POST" })).rejects.toThrow(
+				"retry declined",
+			);
+
+			// One hold and one request for the attempt that went out, nothing for
+			// the declined one, and exactly one debug capture — one layer.
+			expect(calls).toEqual(["hold", "request"]);
+			expect(debugCaptures).toHaveLength(1);
+			expect(declined).toBe(1);
+		} finally {
+			debugEnabled.mockRestore();
+			debugSession.mockRestore();
+		}
 	});
 });
