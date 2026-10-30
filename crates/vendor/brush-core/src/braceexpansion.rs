@@ -30,8 +30,16 @@ pub(crate) async fn generate_and_combine_brace_expansions(
 	}
 
 	let mut words = vec![];
-	for (step, combination) in expansions.into_iter().multi_cartesian_product().enumerate() {
-		interp::element_checkpoint(params, step).await?;
+	let mut budget = interp::ElementBudget::new();
+	for combination in expansions.into_iter().multi_cartesian_product() {
+		// One word per combination, and concatenating it copies its parts, so
+		// the budget is charged in bytes as well as steps. Counting is
+		// synchronous: awaiting on every word kept the loop's state in the
+		// future and cost more than the checkpoints did.
+		let due = budget.charge(combination.iter().map(String::len).sum());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
 		words.push(combination.concat());
 	}
 
@@ -97,8 +105,12 @@ async fn expand_brace_expr_member(
 		},
 	};
 
-	for (step, generated) in sequence.enumerate() {
-		interp::element_checkpoint(params, step).await?;
+	let mut budget = interp::ElementBudget::new();
+	for generated in sequence {
+		let due = budget.charge(generated.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
 		words.push(generated);
 	}
 

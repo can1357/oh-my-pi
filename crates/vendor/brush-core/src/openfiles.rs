@@ -480,7 +480,16 @@ enum Readiness {
 /// A handle that reports not-ready and will not show a descriptor cannot be
 /// polled; it is retried after a short sleep, which is slower than readiness
 /// but keeps the contract. Nothing in this repository is such a handle.
-fn wait_until_ready(file: &OpenFile, readiness: Readiness) {
+///
+/// # Errors
+///
+/// Returns the polling failure. Treating one as readiness turns a descriptor
+/// that can never become ready into a loop that cannot be cancelled: with
+/// `RLIMIT_NOFILE` lowered under it, `poll` failed with `EINVAL` on every call
+/// and the copy made a quarter of a million read attempts in a tenth of a
+/// second, and as many again after its caller had walked away. `EINTR` is the
+/// one failure that means "ask again".
+fn wait_until_ready(file: &OpenFile, readiness: Readiness) -> std::io::Result<()> {
 	#[cfg(unix)]
 	{
 		use std::os::fd::AsRawFd as _;
@@ -494,16 +503,24 @@ fn wait_until_ready(file: &OpenFile, readiness: Readiness) {
 				},
 				revents: 0,
 			};
-			// SAFETY: one `pollfd` is passed with a length of one, the
-			// descriptor is open for as long as `file` is borrowed, and a
-			// negative timeout waits without end. A failure (`EINTR`) only
-			// returns early, and the caller retries the operation either way.
-			unsafe { nix::libc::poll(&raw mut waited, 1, -1) };
-			return;
+			loop {
+				// SAFETY: one `pollfd` is passed with a length of one, the
+				// descriptor is open for as long as `file` is borrowed, and a
+				// negative timeout waits without end.
+				let ready = unsafe { nix::libc::poll(&raw mut waited, 1, -1) };
+				if ready >= 0 {
+					return Ok(());
+				}
+				let failure = std::io::Error::last_os_error();
+				if failure.kind() != std::io::ErrorKind::Interrupted {
+					return Err(failure);
+				}
+			}
 		}
 	}
 
 	std::thread::sleep(std::time::Duration::from_millis(1));
+	Ok(())
 }
 
 /// A handle whose blocking I/O runs on a thread of its own.
@@ -562,7 +579,9 @@ impl Detached {
 						match std::io::Read::read(&mut file, &mut buf) {
 							Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
 							Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-								wait_until_ready(&file, Readiness::Readable);
+								if let Err(failure) = wait_until_ready(&file, Readiness::Readable) {
+									break Err(failure);
+								}
 							},
 							Ok(read) => break Ok(DetachedReply::Read(buf, read)),
 							Err(error) => break Err(error),
@@ -583,7 +602,10 @@ impl Detached {
 								},
 								Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
 								Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-									wait_until_ready(&file, Readiness::Writable);
+									if let Err(failure) = wait_until_ready(&file, Readiness::Writable)
+									{
+										break Err(failure);
+									}
 								},
 								Err(error) => break Err(error),
 							}
@@ -593,7 +615,9 @@ impl Detached {
 						match std::io::Write::flush(&mut file) {
 							Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
 							Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-								wait_until_ready(&file, Readiness::Writable);
+								if let Err(failure) = wait_until_ready(&file, Readiness::Writable) {
+									break Err(failure);
+								}
 							},
 							other => break other.map(|()| DetachedReply::Flushed),
 						}

@@ -756,3 +756,106 @@ fn two_copies_of_one_descriptor_both_run() {
 	assert!(fired, "a timer on the same worker still ran while both copies waited");
 	assert!(bytes, "both copies of the one descriptor finished");
 }
+
+/// A `poll` that can never succeed must end the copy, not be read as
+/// readiness. With the soft descriptor limit lowered under it, `poll` fails
+/// with `EINVAL` on every call; treating that as "ready" turned the copy into
+/// a loop that made a quarter of a million read attempts in a tenth of a
+/// second and as many again after its caller had walked away.
+#[test]
+fn a_polling_failure_ends_the_copy() {
+	/// Replaces the soft descriptor limit and returns what was there.
+	fn set_descriptor_limit(soft: u64) -> libc::rlimit {
+		// SAFETY: `getrlimit`/`setrlimit` touch only the `rlimit` they are
+		// given, and nextest gives this test a process of its own.
+		unsafe {
+			let mut saved = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+			assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut saved), 0);
+			let replaced = libc::rlimit { rlim_cur: soft, rlim_max: saved.rlim_max };
+			assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const replaced), 0);
+			saved
+		}
+	}
+
+	// Everything this test needs a descriptor for is opened before the limit
+	// goes down, because afterwards nothing else can be — the runtime included.
+	let (reader, writer) = std::io::pipe().expect("pipe");
+	make_non_blocking(&reader);
+	let sink = tempfile::tempfile().expect("sink");
+
+	let outcome = on_single_worker(1, Duration::from_secs(20), async move {
+		let saved = set_descriptor_limit(0);
+		let outcome = copy_async(OpenFile::from(reader), OpenFile::from(sink))
+			.await
+			.map_err(|error| error.kind());
+		// SAFETY: as above; restores what this test lowered.
+		unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const saved) };
+		outcome
+	})
+	.expect("the copy spun instead of ending");
+
+	drop(writer);
+	assert!(outcome.is_err(), "a polling failure is surfaced, not retried for ever: {outcome:?}");
+}
+
+/// The scratch socket probe also checked that a payload arrives whole through
+/// EOF, which the replacement above does not; this is that half.
+#[test]
+fn a_socket_source_delivers_its_payload_through_eof() {
+	const BYTES: usize = 512 * 1024;
+
+	let (near, far) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+	let sender = std::thread::spawn(move || {
+		let mut far = far;
+		std::io::Write::write_all(&mut far, &vec![b'q'; BYTES]).expect("send");
+		drop(far);
+	});
+
+	let sink = tempfile::tempfile().expect("sink");
+	let mut inspect = sink.try_clone().expect("sink handle");
+	on_single_worker(1, Duration::from_secs(30), async move {
+		copy_async(
+			OpenFile::from(std::fs::File::from(std::os::fd::OwnedFd::from(near))),
+			OpenFile::from(sink),
+		)
+		.await
+	})
+	.expect("the runtime answered")
+	.expect("copy");
+
+	sender.join().expect("sender thread");
+	std::io::Seek::rewind(&mut inspect).expect("rewind");
+	let mut got = Vec::new();
+	std::io::Read::read_to_end(&mut inspect, &mut got).expect("read back");
+	assert_eq!(got, vec![b'q'; BYTES], "every byte arrived, and the copy ended at EOF");
+}
+
+/// The scratch shared-descriptor probe also cancelled one copy while the other
+/// stayed pending; this is that half. Abandoning one must leave the other
+/// waiting and able to finish.
+#[test]
+fn cancelling_one_copy_leaves_the_other_pending() {
+	let (reader, mut writer) = std::io::pipe().expect("pipe");
+	let second = reader.try_clone().expect("second descriptor");
+
+	let survived = on_single_worker(1, Duration::from_secs(20), async move {
+		let abandoned = tokio::spawn(copy_async(
+			OpenFile::from(reader),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		let kept = tokio::spawn(copy_async(
+			OpenFile::from(second),
+			OpenFile::from(tempfile::tempfile().expect("sink")),
+		));
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		abandoned.abort();
+		assert!(abandoned.await.expect_err("aborted").is_cancelled());
+		assert!(!kept.is_finished(), "the other copy is still waiting");
+		std::io::Write::write_all(&mut writer, b"shared").expect("write");
+		drop(writer);
+		kept.await.expect("kept").is_ok()
+	})
+	.expect("the runtime answered");
+
+	assert!(survived, "the copy that was not cancelled finished");
+}

@@ -497,6 +497,97 @@ pub(crate) async fn element_checkpoint(
 	Ok(())
 }
 
+/// Moves `items` onto the end of `out`, spending a checkpoint before every
+/// [`ELEMENT_CHECKPOINT_STRIDE`] of them: the checkpoints
+/// [`element_checkpoint`] spends on a loop that pushes them one at a time.
+///
+/// The moves between two checkpoints run as one synchronous `extend`. A loop
+/// that awaited [`element_checkpoint`] on every push kept its state in the
+/// future, read back and written out again on every element.
+pub(crate) async fn extend_in_strides<T>(
+	params: &ExecutionParameters,
+	out: &mut Vec<T>,
+	mut items: impl ExactSizeIterator<Item = T>,
+) -> Result<(), error::Error> {
+	let mut remaining = items.len();
+	out.reserve(remaining);
+	while remaining > 0 {
+		loop_checkpoint(params).await?;
+		let stride = remaining.min(ELEMENT_CHECKPOINT_STRIDE);
+		out.extend(items.by_ref().take(stride));
+		remaining -= stride;
+	}
+	Ok(())
+}
+
+/// How many bytes a loop may copy or rewrite between checkpoints.
+///
+/// Counting steps alone is wrong wherever a step's work is the length of what
+/// it moves: 128 array elements of 4 MiB each are 128 steps and half a
+/// gigabyte, and a stride of 256 would let all of it pass without a yield.
+/// `mapfile` already spends its checkpoint on a 64 KiB byte budget; this is the
+/// same number for the same reason.
+pub(crate) const BYTE_CHECKPOINT_STRIDE: usize = 64 * 1024;
+
+/// Counts the checkpoints a loop over elements owes, by both the number of
+/// steps and the bytes those steps copy.
+///
+/// [`element_checkpoint`] is the right thing only where a step is cheap *and*
+/// bounded. Where a step copies a string, the string's length is the work, and
+/// a step count says nothing about it.
+///
+/// Counting is synchronous, and a loop awaits [`loop_checkpoints`] only on a
+/// step that owes one. Awaiting a future on every step, even a step that owes
+/// nothing, cost copying a million-element array 9%: more than the
+/// checkpoints it spent.
+pub(crate) struct ElementBudget {
+	steps: usize,
+	bytes: usize,
+}
+
+impl ElementBudget {
+	pub(crate) const fn new() -> Self {
+		Self { steps: 0, bytes: 0 }
+	}
+
+	/// Call once per step, before it runs, with the bytes that step copies or
+	/// rewrites — zero where it only moves a value it already owns. Returns
+	/// how many checkpoints are due before the step; spend them with
+	/// [`loop_checkpoints`].
+	///
+	/// The first step always owes one, so a run already cancelled stops before
+	/// it touches anything, and so does every [`ELEMENT_CHECKPOINT_STRIDE`]-th
+	/// after it. A step that copies more than [`BYTE_CHECKPOINT_STRIDE`] owes
+	/// one checkpoint for each stride it covers, not one for the step: Tokio
+	/// yields once per 128 checkpoints spent, so a loop of 64 steps that each
+	/// copy two megabytes would otherwise spend 64 and yield none.
+	#[inline]
+	#[must_use]
+	pub(crate) const fn charge(&mut self, bytes: usize) -> usize {
+		let first = self.steps == 0;
+		self.steps += 1;
+		self.bytes = self.bytes.saturating_add(bytes);
+		let mut due = (first || self.steps % ELEMENT_CHECKPOINT_STRIDE == 0) as usize;
+		if self.bytes >= BYTE_CHECKPOINT_STRIDE {
+			due += self.bytes / BYTE_CHECKPOINT_STRIDE;
+			self.bytes %= BYTE_CHECKPOINT_STRIDE;
+		}
+		due
+	}
+}
+
+/// Spends `count` checkpoints in a row: the ones
+/// [`ElementBudget::charge`] found due.
+pub(crate) async fn loop_checkpoints(
+	params: &ExecutionParameters,
+	count: usize,
+) -> Result<(), error::Error> {
+	for _ in 0..count {
+		loop_checkpoint(params).await?;
+	}
+	Ok(())
+}
+
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
 pub enum ProcessGroupPolicy {
@@ -2098,12 +2189,9 @@ async fn expand_assignment_value(
 					// Array elements are treated as regular words, not assignments
 					let split_expanded_value =
 						expansion::full_expand_and_split_word(shell, params, value).await?;
-					// One element can expand to any number of words (`"${a[@]}"`),
-					// and each step is one push.
-					for (step, expanded_value) in split_expanded_value.into_iter().enumerate() {
-						element_checkpoint(params, step).await?;
-						expanded_values.push((None, expanded_value.into()));
-					}
+					// One element can expand to any number of words (`"${a[@]}"`).
+					let words = split_expanded_value.into_iter().map(|word| (None, word.into()));
+					extend_in_strides(params, &mut expanded_values, words).await?;
 				}
 			}
 
@@ -2166,12 +2254,9 @@ async fn apply_assignment(
 					// Array elements are treated as regular words, not assignments
 					let values =
 						expansion::full_expand_and_split_word(shell, params, unexpanded_value).await?;
-					// One element can expand to any number of words (`"${a[@]}"`),
-					// and each step is one push.
-					for (step, value) in values.into_iter().enumerate() {
-						element_checkpoint(params, step).await?;
-						elements.push((None, value));
-					}
+					// One element can expand to any number of words (`"${a[@]}"`).
+					let words = values.into_iter().map(|value| (None, value));
+					extend_in_strides(params, &mut elements, words).await?;
 				}
 			}
 			ShellValueLiteral::Array(ArrayLiteral(elements))

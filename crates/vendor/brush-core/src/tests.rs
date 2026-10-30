@@ -537,15 +537,28 @@ mod regression {
 			(longest, closed - opened, succeeded)
 		}
 
+		/// The shortest stretch worth failing a test over.
+		///
+		/// The share rule below is there to catch a whole pass that spends no
+		/// checkpoint. It cannot tell one apart from a single operation that no
+		/// checkpoint can be put inside — freeing the twenty-five megabytes a
+		/// million-field expansion holds is one `munmap` of one and a half to
+		/// two and a half milliseconds — so a stretch shorter than this passes
+		/// whatever share of the window it is. Two milliseconds of a worker is
+		/// below what any caller can observe, and the alternative is a test
+		/// that fails when the work around it gets faster.
+		const SHORTEST_FAILING_HOLD: Duration = Duration::from_millis(5);
+
 		/// Asserts that `command` succeeded and that no stretch of its window
-		/// kept the worker for an eighth of the window or more. A pass with no
+		/// kept the worker for an eighth of the window or more, unless that
+		/// stretch is shorter than [`SHORTEST_FAILING_HOLD`]. A pass with no
 		/// checkpoint is one stretch as long as the window.
 		fn assert_yields_throughout(command: &str, prepare: fn(&mut Shell<DefaultShellExtensions>)) {
 			let (longest, window, succeeded) = longest_hold(command, prepare);
 			eprintln!("HOLD {command}: longest={longest:?} window={window:?} succeeded={succeeded}");
 			assert!(succeeded, "{command}: the run succeeded");
 			assert!(
-				longest * 8 < window,
+				longest * 8 < window || longest < SHORTEST_FAILING_HOLD,
 				"{command}: kept its worker for {longest:?} of a {window:?} window"
 			);
 		}
@@ -718,6 +731,46 @@ mod regression {
 
 			for command in cases {
 				assert_yields_throughout(&command, seeded);
+			}
+		}
+
+		/// How large one element is where the byte budget is pinned, and how
+		/// few of them there are: 64 steps is a quarter of the step stride, so
+		/// a stride counted in steps spends nothing at all across all of them.
+		const LARGE_ELEMENT_BYTES: usize = 2 << 20;
+		const LARGE_ELEMENTS: u64 = 64;
+
+		/// `bulk`: [`LARGE_ELEMENTS`] elements of [`LARGE_ELEMENT_BYTES`] each.
+		fn bulky(shell: &mut Shell<DefaultShellExtensions>) {
+			let values: BTreeMap<u64, String> =
+				(0..LARGE_ELEMENTS).map(|index| (index, "b".repeat(LARGE_ELEMENT_BYTES))).collect();
+			shell
+				.env_mut()
+				.set_global("bulk", ShellVariable::new(ShellValue::IndexedArray(values)))
+				.expect("bulk");
+		}
+
+		/// A step that copies a string does work in that string's length, and a
+		/// stride counted in steps says nothing about it: 64 elements of 2 MiB
+		/// are a quarter of a step stride and an eighth of a gigabyte, so the
+		/// count never reached the stride and the whole copy ran between two
+		/// checkpoints. Each case opens the window before the expansion that
+		/// copies them, because that is where the length of an element is the
+		/// work; what follows it only moves owned values.
+		#[test]
+		fn large_elements_yield_throughout() {
+			let n = LARGE_ELEMENTS;
+			let cases = [
+				// Copying each element out of the variable into a field.
+				format!("words=(\"$open\" ${{bulk[@]}}\"$close\"); (( ${{#words[@]}} == {n} + 1 ))"),
+				// Concatenating them into one quoted field.
+				"words=(\"$open${bulk[*]}$close\"); (( ${#words[@]} == 1 ))".to_owned(),
+				// Joining them into the one string a scalar holds.
+				"joined=\"$open${bulk[@]}$close\"; [[ ${joined:0:2} == 'bb' ]]".to_owned(),
+			];
+
+			for command in cases {
+				assert_yields_throughout(&command, bulky);
 			}
 		}
 	}

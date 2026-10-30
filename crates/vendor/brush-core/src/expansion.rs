@@ -107,8 +107,13 @@ impl Expansion {
 				self.fields = next.fields;
 			}
 		} else {
+			let mut budget = interp::ElementBudget::new();
 			for (index, field) in next.fields.into_iter().enumerate() {
-				interp::element_checkpoint(params, index).await?;
+				// Joining onto the field before it copies that field's pieces.
+				let due = budget.charge(if index == 0 { field.len() } else { 0 });
+				if due > 0 {
+					interp::loop_checkpoints(params, due).await?;
+				}
 				join_or_push(&mut self.fields, index == 0, field.0);
 			}
 		}
@@ -606,8 +611,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// every [`interp::ELEMENT_CHECKPOINT_STRIDE`].
 	async fn join_fields(&self, expansion: Expansion) -> Result<String, error::Error> {
 		let mut joined = String::new();
+		let mut budget = interp::ElementBudget::new();
 		for (index, field) in expansion.fields.into_iter().enumerate() {
-			interp::element_checkpoint(self.params, index).await?;
+			// Every piece of the field is copied into `joined`.
+			let due = budget.charge(field.len());
+			if due > 0 {
+				interp::loop_checkpoints(self.params, due).await?;
+			}
 			// TODO(IFS): Use IFS instead for separator?
 			if index > 0 {
 				joined.push(' ');
@@ -864,10 +874,15 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 		// Now expand pathnames if necessary. This also unquotes as a side effect.
 		let mut result = Vec::new();
-		for (step, field) in fields.into_iter().enumerate() {
-			// One field per brace element or array element, and a field that
-			// does glob spends the walk's own checkpoints while it does.
-			interp::element_checkpoint(self.params, step).await?;
+		let mut budget = interp::ElementBudget::new();
+		for field in fields {
+			// One field per brace element or array element; the unquoting below
+			// rewrites its text, and a field that globs spends the walk's own
+			// checkpoints while it does.
+			let due = budget.charge(field.len());
+			if due > 0 {
+				interp::loop_checkpoints(self.params, due).await?;
+			}
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
 				result.push(String::from(field));
 			} else {
@@ -1161,8 +1176,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				// Every field, joined by IFS's first character, makes one quoted
 				// string; with no fields, an empty one.
 				let mut concatenated = String::new();
-				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
-					interp::element_checkpoint(self.params, index).await?;
+				let mut budget = interp::ElementBudget::new();
+				for (index, field) in this_fields.into_iter().enumerate() {
+					// Every piece of the field is copied into `concatenated`.
+					let due = budget.charge(field.len());
+					if due > 0 {
+						interp::loop_checkpoints(self.params, due).await?;
+					}
+					let WordField(pieces) = field;
 					if index > 0 {
 						concatenated.push(concatenation_joiner);
 					}
@@ -1172,8 +1193,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				}
 				join_or_push(&mut fields, true, vec![ExpansionPiece::Unsplittable(concatenated)]);
 			} else {
-				for (index, WordField(pieces)) in this_fields.into_iter().enumerate() {
-					interp::element_checkpoint(self.params, index).await?;
+				let mut budget = interp::ElementBudget::new();
+				for (index, field) in this_fields.into_iter().enumerate() {
+					// The first field's pieces are copied onto the one before it.
+					let due = budget.charge(if index == 0 { field.len() } else { 0 });
+					if due > 0 {
+						interp::loop_checkpoints(self.params, due).await?;
+					}
+					let WordField(pieces) = field;
 					let pieces = pieces.into_iter().map(ExpansionPiece::make_unsplittable).collect();
 					join_or_push(&mut fields, index == 0, pieces);
 				}
@@ -1485,9 +1512,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				//
 
 				let mut transformed_fields = vec![];
-				for (step, field) in expanded_parameter.fields.into_iter().enumerate() {
-					// `${name[@]…}` transforms one field per array element.
-					interp::element_checkpoint(self.params, step).await?;
+				let mut budget = interp::ElementBudget::new();
+				for field in expanded_parameter.fields {
+					// `${name[@]…}` transforms one field per array element, and
+					// the transform rewrites its whole text.
+					let due = budget.charge(field.len());
+					if due > 0 {
+						interp::loop_checkpoints(self.params, due).await?;
+					}
 					let s = String::from(field);
 					let transformed = self.apply_transform_to(&op, s, came_from_undefined).await?;
 					transformed_fields.push(WordField::from(transformed));
@@ -2109,8 +2141,13 @@ async fn fields_from(
 	values: impl Iterator<Item = String>,
 ) -> Result<Vec<WordField>, error::Error> {
 	let mut fields = Vec::with_capacity(values.size_hint().0);
-	for (step, value) in values.enumerate() {
-		interp::element_checkpoint(params, step).await?;
+	let mut budget = interp::ElementBudget::new();
+	for value in values {
+		// The caller copied this value out of the variable it came from.
+		let due = budget.charge(value.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
 		fields.push(WordField::from(value));
 	}
 
@@ -2127,9 +2164,14 @@ where
 	FReturn: Future<Output = Result<String, error::Error>>,
 {
 	let mut transformed_fields = vec![];
-	for (step, field) in expansion.fields.into_iter().enumerate() {
-		// One field per array element when the parameter is an array.
-		interp::element_checkpoint(params, step).await?;
+	let mut budget = interp::ElementBudget::new();
+	for field in expansion.fields {
+		// One field per array element when the parameter is an array, and the
+		// transform rewrites its whole text.
+		let due = budget.charge(field.len());
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
 		let transformed_field = WordField::from(f(String::from(field)).await?);
 		transformed_fields.push(transformed_field);
 	}

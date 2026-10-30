@@ -757,8 +757,14 @@ impl ArrayLiteral {
 		params: &ExecutionParameters,
 	) -> Result<Self, error::Error> {
 		let mut literal = Vec::with_capacity(elements.len());
-		for (step, (key, value)) in elements.iter().enumerate() {
-			interp::element_checkpoint(params, step).await?;
+		let mut budget = interp::ElementBudget::new();
+		for (key, value) in elements {
+			// Each step copies both strings, so the work is their length.
+			let bytes = key.as_ref().map_or(0, |key| key.value.len()) + value.value.len();
+			let due = budget.charge(bytes);
+			if due > 0 {
+				interp::loop_checkpoints(params, due).await?;
+			}
 			literal.push((key.as_ref().map(|key| key.value.clone()), value.value.clone()));
 		}
 
@@ -871,8 +877,13 @@ impl ShellValue {
 			.last_key_value()
 			.map_or(0, |(largest_index, _)| largest_index + 1);
 
-		for (step, (key, value)) in literal_values.0.into_iter().enumerate() {
-			interp::element_checkpoint(params, step).await?;
+		let mut budget = interp::ElementBudget::new();
+		for (key, value) in literal_values.0 {
+			// `convert` rewrites the value, so its length is the work.
+			let due = budget.charge(value.len());
+			if due > 0 {
+				interp::loop_checkpoints(params, due).await?;
+			}
 			if let Some(key) = key {
 				new_key = literal_index(&key);
 			}
@@ -890,8 +901,8 @@ impl ShellValue {
 	/// key and value.
 	///
 	/// The literal can hold any number of elements and nothing in the loop
-	/// waits on anything, so it spends a checkpoint every
-	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`] elements.
+	/// waits on anything, so it spends a checkpoint on an
+	/// [`interp::ElementBudget`] of steps and bytes.
 	async fn update_associative_array_from_literals(
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
@@ -902,14 +913,18 @@ impl ShellValue {
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
-		interp::element_checkpoint(params, 0).await?;
+		let mut budget = interp::ElementBudget::new();
+		interp::loop_checkpoints(params, budget.charge(first_value.len())).await?;
 		let first_value = convert(first_value);
 
 		if let Some(first_key) = first_key {
 			existing_values.insert(first_key, first_value);
 
-			for (step, (key, value)) in literal_values.enumerate() {
-				interp::element_checkpoint(params, step + 1).await?;
+			for (key, value) in literal_values {
+				let due = budget.charge(value.len());
+				if due > 0 {
+					interp::loop_checkpoints(params, due).await?;
+				}
 				let Some(key) = key else {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
@@ -918,8 +933,11 @@ impl ShellValue {
 			}
 		} else {
 			let mut current_key = Some(first_value);
-			for (step, (key, value)) in literal_values.enumerate() {
-				interp::element_checkpoint(params, step + 1).await?;
+			for (key, value) in literal_values {
+				let due = budget.charge(key.as_ref().map_or(0, String::len) + value.len());
+				if due > 0 {
+					interp::loop_checkpoints(params, due).await?;
+				}
 				let value = convert(value);
 				let value = if let Some(key) = key {
 					let mut word = String::with_capacity(key.len() + value.len() + 3);
