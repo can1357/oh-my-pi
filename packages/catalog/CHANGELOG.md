@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `tool-name-prefix` catalog axis for Responses hosts that reject certain declared tool names; Muse Code sets it to `_` ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167))
+
 ### Changed
 
 - Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))

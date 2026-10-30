@@ -1164,6 +1164,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 */
 	storeResponses: boolean;
 	/**
+	 * Prefix the `openai-responses` handler adds to every function-tool name it
+	 * declares or replays, and strips from returned calls. Rule-owned: hosts that
+	 * reject requests declaring certain exact tool names (Muse Code). Unset sends
+	 * names unchanged. Other Responses-family handlers do not read it.
+	 */
+	toolNamePrefix?: string;
+	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
 	 * prior turns from message content until its first successful response.
