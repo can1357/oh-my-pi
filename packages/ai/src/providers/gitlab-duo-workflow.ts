@@ -22,6 +22,7 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
+import { holdBeforeDispatch } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
@@ -1359,7 +1360,7 @@ async function runGitLabDuoWorkflow(
 			// an approval round, a step-limit restart. Each is traffic the caller's
 			// gate has to see; the REST calls above reach the wire through the
 			// transport fetch, which holds for the same reason.
-			await options.beforeDispatch?.();
+			await holdBeforeDispatch(options.beforeDispatch, options.signal);
 			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
 				token: workflowConnection.token,
 				projectId: webSocketProjectId,
@@ -2105,7 +2106,27 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			// `startRequest` is what starts (and bills) the workflow; the socket
+			// before it is only a connection. The caller's gate is held once more
+			// here because the handshake between the two outlasts a `/pause`
+			// engaged while it runs. Without a gate the send stays on the
+			// handshake tick, so an ungated workflow starts exactly as before.
+			const hold = options.beforeDispatch;
+			if (!hold) {
+				ws.send(JSON.stringify({ startRequest: startPayload }));
+				return;
+			}
+			void (async () => {
+				try {
+					await holdBeforeDispatch(hold, options.signal);
+				} catch (error) {
+					close();
+					settle("closed", error);
+					return;
+				}
+				if (settled) return;
+				ws.send(JSON.stringify({ startRequest: startPayload }));
+			})();
 		};
 	}
 	resetIdleTimer();

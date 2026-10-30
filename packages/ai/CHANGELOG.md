@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A caller's dispatch hold (`StreamOptions.beforeDispatch`) now also covers the Codex websocket, the Cursor run request and the GitLab Duo workflow start, and a cancelled request no longer stays parked on a hold ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

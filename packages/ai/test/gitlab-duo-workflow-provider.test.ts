@@ -1150,8 +1150,9 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
-	// Every restart opens a socket of its own, and each is traffic a caller's
-	// `/pause` gate has to see: the hold runs before each `webSocketFactory`.
+	// Every restart opens a socket of its own and starts a workflow on it, and
+	// both are traffic a caller's `/pause` gate has to see: the hold runs before
+	// each `webSocketFactory` and again before each `startRequest`.
 	it("waits on the caller's dispatch hold before each workflow socket", async () => {
 		const order: string[] = [];
 		let createCount = 0;
@@ -1227,8 +1228,70 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		}).result();
 
 		expect(sockets).toHaveLength(2);
-		expect(order).toEqual(["hold", "socket", "hold", "socket"]);
+		expect(order).toEqual(["hold", "socket", "hold", "hold", "socket", "hold"]);
 		expect(result.stopReason).not.toBe("error");
+	});
+
+	// The hold before the factory covers the connection only. The handshake
+	// after it outlasts a pause engaged while it runs, and `startRequest` —
+	// not the socket — is what starts and bills the workflow.
+	it("holds the workflow start request until after the socket handshake", async () => {
+		const sentWhileHeld: boolean[] = [];
+		const gate = { closed: false };
+		const resumed = Promise.withResolvers<void>();
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {
+				sentWhileHeld.push(gate.closed);
+				queueMicrotask(() =>
+					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) })),
+				);
+			},
+			close() {},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+
+		const run = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream: new AssistantMessageEventStream(), output, started: true },
+			{
+				apiKey: "redacted",
+				beforeDispatch: () => {
+					if (!gate.closed) return;
+					queueMicrotask(() => {
+						gate.closed = false;
+						resumed.resolve();
+					});
+					return resumed.promise;
+				},
+			},
+		);
+		// The caller pauses while the socket is still connecting.
+		gate.closed = true;
+		socket.onopen?.(new Event("open"));
+		await run;
+
+		expect(sentWhileHeld).toEqual([false]);
 	});
 
 	it("retries once on a fresh workflow when the server returns the generic processing error", async () => {
