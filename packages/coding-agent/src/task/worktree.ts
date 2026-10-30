@@ -21,7 +21,7 @@ import {
 } from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
-	describeSandboxLockFailure,
+	acquireSandboxLockWithNotice,
 	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
 	markIsolationRetiring,
@@ -750,7 +750,7 @@ export async function ensureIsolation(
 		// The whole attempt runs under the sandbox lock, so a teardown cannot
 		// retire the directory out from under a materialisation that has already
 		// claimed it, and two materialisations of one id cannot interleave.
-		const lock = await acquireSandboxLock(baseDir, "materialise");
+		const lock = await acquireSandboxLockWithNotice(baseDir, "materialise");
 		let claimed = false;
 		try {
 			// Taking this slot destroys what is in it, so the same question the
@@ -892,15 +892,6 @@ async function settleAbandonedStop(
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
  */
-/** Take the sandbox lock, and explain the wait when it cannot be taken. */
-async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ release: () => void }> {
-	const startedAt = Date.now();
-	try {
-		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
-	} catch (error) {
-		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
-	}
-}
 
 export async function cleanupIsolation(
 	handle: IsolationHandle,
@@ -911,7 +902,7 @@ export async function cleanupIsolation(
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
 	// Waiting for a slow materialisation or teardown is the point of the lock,
 	// so wait generously rather than failing the run that needs the sandbox.
-	const lock = await acquireSandboxLock(baseDir, "tear down");
+	const lock = await acquireSandboxLockWithNotice(baseDir, "tear down");
 	let retiredDir: string | undefined;
 	let proceed = false;
 	try {

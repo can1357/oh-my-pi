@@ -9,7 +9,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { isEnoent, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
@@ -453,4 +453,49 @@ export async function describeSandboxLockFailure(
 				: `the lock could not be taken at all (${text}); nothing is known about a holder, and ${recorded}.`),
 		{ cause: error },
 	);
+}
+
+/** How long a lock wait runs before the caller is told it is waiting, and how often after. */
+const SANDBOX_LOCK_NOTICE_MS = 1_000;
+const SANDBOX_LOCK_REMINDER_MS = 30_000;
+
+/**
+ * Take a sandbox lock, telling the caller at the *start* of a wait rather than
+ * at the end of it.
+ *
+ * The wait itself is unchanged — shortening it would only trade a slow
+ * materialisation for a failed one — but there is no reason the caller should
+ * learn in the sixtieth second what can be said in the first. The notice
+ * carries what is actually knowable: the holder of the lock is an anonymous
+ * kernel object, and the pid in the marker is the run that built the
+ * workspace, which may not be the holder.
+ */
+export async function acquireSandboxLockWithNotice(baseDir: string, purpose: string): Promise<{ release: () => void }> {
+	const startedAt = Date.now();
+	const announce = async (): Promise<void> => {
+		const owner = await readProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE)).catch(() => undefined);
+		const recorded =
+			owner === undefined || owner === "unreadable"
+				? "its recorded owner is not readable"
+				: `its marker records pid ${owner.pid} as the run that built it, which may not be the process holding the lock`;
+		logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
+			waitedMs: Date.now() - startedAt,
+			detail:
+				`Another run holds it; the holder is not identifiable, and ${recorded}. A workspace is held while ` +
+				"its task's patch is being saved, while it is being built, and while it is being removed. " +
+				"`omp worktree list` shows what owns it.",
+		});
+	};
+	const notice = setTimeout(() => void announce(), SANDBOX_LOCK_NOTICE_MS);
+	const reminder = setInterval(() => void announce(), SANDBOX_LOCK_REMINDER_MS);
+	notice.unref?.();
+	reminder.unref?.();
+	try {
+		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+	} catch (error) {
+		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
+	} finally {
+		clearTimeout(notice);
+		clearInterval(reminder);
+	}
 }

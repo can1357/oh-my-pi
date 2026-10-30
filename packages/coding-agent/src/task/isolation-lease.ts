@@ -31,7 +31,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { acquireFileLock, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
-	describeSandboxLockFailure,
+	acquireSandboxLockWithNotice,
 	isProcessStillLive,
 	type ProcessIdentity,
 	readIsolationClaim,
@@ -244,10 +244,7 @@ export async function leaseIsolationWorkspace(
 	}
 	const sandbox = found.baseDir;
 	const leaseFile = path.join(sandbox, ISOLATION_LEASE_DIR, `${process.pid}-${Snowflake.next()}.json`);
-	const leaseLockStartedAt = Date.now();
-	const lock = await acquireFileLock(sandbox, SANDBOX_LOCK_WAIT).catch(async (error: unknown) => {
-		throw await describeSandboxLockFailure(sandbox, "lease", error, Date.now() - leaseLockStartedAt);
-	});
+	const lock = await acquireSandboxLockWithNotice(sandbox, "lease");
 	try {
 		const claim = await readIsolationClaim(sandbox);
 		if (claim.kind !== "claimed") {
