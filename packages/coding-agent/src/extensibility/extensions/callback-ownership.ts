@@ -12,14 +12,16 @@ import type { ExtensionCallbackOwner } from "./types";
  * owner to `ModelRegistry.registerProvider` needs nothing else.
  *
  * A host that drains the queue itself passes only the documented three fields, which lose the
- * token. The registry then recovers it from the drain itself, never from queue age: a record still
- * waiting in its runtime's queue has not been drained and is never claimed, while one the host has
- * taken out of the queue, or the one its `for…of` over the queue is on, has been. The drained
- * records that match name, object and source must all belong to one session, or the registration
- * is refused — a guess would install one session's provider under another's lifetime, where the
- * right session's withdrawal cannot reach it. Records that left the queue without being registered
- * are withdrawn from the index, so they can lend their owner to nobody. Nothing of the author's
- * object is wrapped, copied, extended or read: the index holds it only as a key.
+ * token. The registry then recovers it from the drain itself, never from queue age: the records
+ * the host has taken out of the queue, or the one its `for…of` over the queue is on, are the ones
+ * drained. A drain the registry cannot see — an index loop or `forEach` over the queue in place —
+ * drains nothing it can tell apart, so every matching record still waiting is a candidate. The
+ * candidates that match name, object and source must all belong to one session, or the
+ * registration is refused — a guess would install one session's provider under another's
+ * lifetime, where the right session's withdrawal cannot reach it. Records that left the queue
+ * without being registered are withdrawn from the index, so they can lend their owner to nobody.
+ * Nothing of the author's object is wrapped, copied, extended or read: the index holds it only as
+ * a key.
  */
 export interface QueuedProviderRegistration<C extends object = object> {
 	readonly name: string;
@@ -60,7 +62,9 @@ function* iterateProviderRegistrationQueue<C extends object>(
  * A runtime's queue of provider registrations: an ordinary array whose `for…of` the registry can
  * see. While a host's loop over the queue is on a record, that record is the one being drained even
  * though it has not left the queue — the in-place drain hosts write. Index loops and `forEach` are
- * not observed; a host draining that way takes the records out first or passes their owners.
+ * not observed: they register a record only while one session's records match it, and a host
+ * draining that way over several sessions' queues takes the records out first or passes their
+ * owners.
  */
 export function createProviderRegistrationQueue<C extends object>(): QueuedProviderRegistration<C>[] {
 	const queue: QueuedProviderRegistration<C>[] = [];
@@ -127,9 +131,10 @@ function isDrained(record: QueuedProviderRegistration): boolean {
  *
  * With `owner` given, the caller knows; that owner's matching record is consumed, wherever it is,
  * so a later ownerless registration of the same object cannot claim it again. Without `owner`, the
- * record is the one the host drained (see {@link QueuedProviderRegistration}); this throws rather
- * than guess when drained records of several sessions match, or when the only matching records are
- * still waiting in their queues.
+ * candidates are the matching records the host drained (see {@link QueuedProviderRegistration}),
+ * or, when it drained none — an index loop or `forEach` over the queue in place — every matching
+ * record still waiting. Candidates of one session are that session's; candidates of several are
+ * refused rather than guessed.
  */
 export function claimProviderRegistrationOwner(
 	name: string,
@@ -147,15 +152,11 @@ export function claimProviderRegistrationOwner(
 		claimed = matching.find(registration => registration.owner === owner);
 	} else {
 		const drained = matching.filter(isDrained);
-		const first = drained[0];
-		if (first && drained.some(registration => registration.owner !== first.owner)) {
+		const candidates = drained.length > 0 ? drained : matching;
+		const first = candidates[0];
+		if (first && candidates.some(registration => registration.owner !== first.owner)) {
 			throw new Error(
-				`Provider "${name}": several sessions' queued registrations of this configuration have left their queues, so which one this is cannot be told. Pass the queued record's owner to registerProvider.`,
-			);
-		}
-		if (!first && matching.length > 0) {
-			throw new Error(
-				`Provider "${name}": this configuration is still waiting in a session's queue. Take its record out of the queue, or pass the record's owner to registerProvider.`,
+				`Provider "${name}": queued registrations of this configuration by several sessions match, so which session this one belongs to cannot be told. Pass the record's owner, as registerProvider(entry.name, entry.config, entry.sourceId, entry.owner), or drain one queue at a time by taking its records out of the queue (for example with splice) before registering them.`,
 			);
 		}
 		claimed = first;

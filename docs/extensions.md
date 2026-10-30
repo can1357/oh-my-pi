@@ -213,6 +213,41 @@ usage provider's `cacheVersion`, normalized base URL, and credential identity. W
 distinct from the built-in one so processes without the extension (older sessions,
 `--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
 
+### What the host keeps, and when
+
+A provider registration belongs to the session that made it, and the host reads the data it
+needs **once**, while that session is still there to answer for it. Two consequences worth
+knowing before you write a provider.
+
+**Data is copied; change it by registering again.** `headers`, `compat`, `remoteCompaction`,
+`transport` and the `models` rows are read and copied when the registry takes the registration.
+Mutating those objects afterwards does not change what later requests send — re-register the
+provider instead, which is also how you replace it. The copy happens when the registry admits
+the registration, which for a queued provider is when the host drains the queue rather than when
+`pi.registerProvider` returns; a mutation in that gap still reaches requests, and is not
+something to rely on. Callbacks are not data and are not copied: `fetchUsage`, `login`,
+`refreshToken`, `getApiKey`, `modifyModels`, `fetchDynamicModels`, `streamSimple` and a
+`resolveHeaders` your `modifyModels` returns stay yours and are called on your object, so a
+class instance keeps its receiver and its private fields.
+
+**Put values in data fields, not functions.** A function where the host expects data — a
+`toJSON` inside `compat`, a callable `extraBody` — is refused at registration with the field
+named. Those run during request construction, long after the registration, and a session that
+has gone cannot answer for them. Compute the value before you register.
+
+Several sessions can register the same provider name; a subagent that rebinds its parent's
+extensions does. The registration in force is the most recent one whose session is still alive,
+so when that session ends the earlier one answers again rather than the provider breaking.
+`pi.unregisterProvider(name)` withdraws **your** registration and leaves anyone else's.
+
+**A custom `streamSimple` is read to its end, and gets its own abort signal.** The host starts
+reading the stream you return as soon as you return it, so a custom async iterator runs ahead of
+whoever is consuming the events rather than at their pace, and its `return()` runs when the
+stream ends rather than when a consumer stops early. The `signal` your function receives is the
+host's own: it aborts with the caller's reason, at the same moment, and stops following once
+your stream has finished. Both exist so that what your stream does while it runs is still your
+session's work, which is what keeps its credentials in place until it ends.
+
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
 A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.

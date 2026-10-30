@@ -6,6 +6,12 @@
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- An extension's provider registration is now read once, when the registry takes it: `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied, so mutating those objects afterwards no longer changes what later requests send — re-register the provider instead. Callbacks are unaffected and are still called on your own object. A function where the host expects data (a `toJSON` inside `compat`, a callable `extraBody`) is refused at registration with the field named; compute the value before registering. A host's own registration keeps its objects live as before ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- A host draining `runtime.pendingProviderRegistrations` itself should pass each record's `owner` to `modelRegistry.registerProvider`, as the bundled hosts do. Draining without it still works when the registration being applied can be identified; when several sessions queued indistinguishable records it now fails with a message naming the fix, rather than registering a provider under the wrong session ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- A custom API an extension registers now receives its own abort signal, which aborts with the caller's reason, and the stream it returns is read to its end as soon as it is returned. A custom async iterator therefore runs ahead of the consumer, and its `return()` runs when the stream ends rather than when a consumer stops early ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).

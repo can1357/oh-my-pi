@@ -187,12 +187,41 @@ describe("R19-2: an ownerless drain registers the occurrence it took out of the 
 		expect(auth.usage.providerEntryFor(PROVIDER)?.gate).toBe(providerCallGate(child.runtime));
 	});
 
-	test("a configuration still waiting in its queue is not claimed", () => {
+	test("a configuration waiting only in one session's queue is that session's", () => {
 		const parent = owner();
 		const config = shared();
 		parent.runtime.registerProvider(PROVIDER, config, SOURCE);
 
-		expect(() => registry.registerProvider(PROVIDER, config, SOURCE)).toThrow(/owner/);
+		registry.registerProvider(PROVIDER, config, SOURCE);
+
+		expect(auth.usage.providerEntryFor(PROVIDER)?.gate).toBe(providerCallGate(parent.runtime));
+	});
+
+	test("an in-place forEach drain with one session registers under that session", () => {
+		const parent = owner();
+		parent.runtime.registerProvider(PROVIDER, shared(), SOURCE);
+
+		parent.runtime.pendingProviderRegistrations.forEach(entry => {
+			registry.registerProvider(entry.name, entry.config, entry.sourceId);
+		});
+
+		expect(auth.usage.providerEntryFor(PROVIDER)?.gate).toBe(providerCallGate(parent.runtime));
+	});
+
+	test("an in-place forEach drain over one of two sessions' identical queues is refused with what to do", () => {
+		const parent = owner();
+		const child = owner();
+		const config = shared();
+		parent.runtime.registerProvider(PROVIDER, config, SOURCE);
+		child.runtime.registerProvider(PROVIDER, config, SOURCE);
+
+		expect(() =>
+			parent.runtime.pendingProviderRegistrations.forEach(entry => {
+				registry.registerProvider(entry.name, entry.config, entry.sourceId);
+			}),
+		).toThrow(
+			`Provider "${PROVIDER}": queued registrations of this configuration by several sessions match, so which session this one belongs to cannot be told. Pass the record's owner, as registerProvider(entry.name, entry.config, entry.sourceId, entry.owner), or drain one queue at a time by taking its records out of the queue (for example with splice) before registering them.`,
+		);
 		expect(auth.usage.providerEntryFor(PROVIDER)).toBeUndefined();
 
 		drain(parent.runtime);

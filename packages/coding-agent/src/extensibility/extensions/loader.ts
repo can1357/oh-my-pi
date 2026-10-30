@@ -148,11 +148,14 @@ export function ownAcceptedCallbacks(value: unknown, owner: ExtensionCallbackOwn
 	return value;
 }
 
-/** Whether `value` reports completion by settling. Objects AND functions: a thenable may be
- *  either, and treating only objects as awaitable let a callable terminal promise through. */
+/** Whether `value` reports completion by settling, asked the way `await` asks: READ the
+ *  property and see whether it is callable. `"then" in value` is a different question, and a
+ *  Proxy whose `has` says no while its `get` returns a real `then` answers it differently — a
+ *  genuine awaitable then slipped past unowned. Objects and functions alike: a thenable may be
+ *  either. */
 function isThenable(value: unknown): value is PromiseLike<unknown> {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
-	return "then" in value && typeof (value as PromiseLike<unknown>).then === "function";
+	return typeof (value as PromiseLike<unknown>).then === "function";
 }
 
 /** The terminal a producer admitted as a stream reports through `result()`.
@@ -335,7 +338,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	 * session cannot be held open for is one it cannot own, and silently treating it as done is
 	 * how a child's stream outlived its credential restriction. A call that returns a PROMISE of
 	 * a producer is held open until the producer it resolves has finished, not merely until the
-	 * promise settles.
+	 * promise settles — and if that producer reports no completion, the refusal reaches the
+	 * caller through the promise it is awaiting rather than settling quietly on a promise only
+	 * this object watches.
 	 */
 	runOwned<R>(call: () => R, kind: AdmittedWorkKind = "value"): R {
 		if (this.isRetired) throw new Error("Extension session retired; its callbacks are no longer callable");
@@ -343,9 +348,13 @@ export class ExtensionRuntime implements IExtensionRuntime {
 			const produced = call();
 			if (kind !== "stream") return this.trackCallback(produced);
 			if (isThenable(produced)) {
-				const adopted = Promise.resolve(produced);
-				this.#watch(adopted.then(value => streamCompletion(value)));
-				return adopted as R;
+				const resolved = Promise.resolve(produced).then(value => {
+					// Throws here on a malformed producer, so the caller's await rejects.
+					this.#watch(streamCompletion(value));
+					return value;
+				});
+				this.#watch(resolved);
+				return resolved as R;
 			}
 			this.#watch(streamCompletion(produced));
 			// The producer itself is handed back untouched: the caller consumes the stream.
@@ -520,8 +529,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.ownCallback(fn);
 	}
 
-	runOwned<R>(call: () => R): R {
-		return this.runtime.runOwned(call);
+	runOwned<R>(call: () => R, kind?: AdmittedWorkKind): R {
+		return this.runtime.runOwned(call, kind);
 	}
 
 	/** Callback ownership belongs to the one runtime behind every facade for this session; this

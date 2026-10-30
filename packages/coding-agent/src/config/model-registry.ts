@@ -9,13 +9,23 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
+	AntigravityModelWireProfile,
 	Api,
 	Context,
+	CursorModelParameter,
+	CursorModelRoute,
+	EffectiveTokenCost,
+	LongContextTokenCost,
 	Model,
+	ModelAccountAccess,
+	ModelCost,
+	ModelPromptCache,
 	ModelSpec,
+	PeakPricingWindow,
 	RemoteCompactionConfig,
 	SimpleStreamOptions,
 	ThinkingConfig,
+	TimeBasedCost,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
@@ -251,33 +261,331 @@ type ProviderOAuthBlock = NonNullable<ProviderConfigInput["oauth"]>;
 type HeaderResolver = NonNullable<Model<Api>["resolveHeaders"]>;
 
 /**
+ * How {@link snapshotAuthorData} copies one value of a session's data.
+ *
+ * - `data`: an open value — a record whose keys are its content (headers, `compat`, `extraBody`),
+ *   a list, or a primitive. Copied as JSON copies it: each own enumerable string key and each
+ *   array element, read once. `compat` is one: unknown keys from a newer release stay intact.
+ * - `fields`: a known shape — a model, its cost, its thinking. Copied by reading each field the
+ *   shape has, the way a field read reads it, so an inherited or non-enumerable field and a
+ *   prototype getter arrive as they would for the host. Nothing else on the object is read.
+ * - `items` / `entries`: a list, or an open record, whose values all have one schema.
+ * - `callback`: a function the registry calls through its registration's gate — a projected
+ *   `resolveHeaders` — kept as it is.
+ */
+type AuthorDataSchema =
+	| { readonly kind: "data" }
+	| { readonly kind: "callback" }
+	| { readonly kind: "fields"; readonly fields: readonly (readonly [field: string, schema: AuthorDataSchema])[] }
+	| { readonly kind: "items"; readonly items: AuthorDataSchema }
+	| { readonly kind: "entries"; readonly entries: AuthorDataSchema };
+
+const DATA: AuthorDataSchema = { kind: "data" };
+const CALLBACK: AuthorDataSchema = { kind: "callback" };
+
+/** A known shape: one entry for every field of `T`, so a field added to `T` does not compile until
+ *  it says how it is copied. */
+function fieldsOf<T>(fields: { readonly [K in keyof T]-?: AuthorDataSchema }): AuthorDataSchema {
+	return { kind: "fields", fields: Object.entries<AuthorDataSchema>(fields) };
+}
+
+const TOKEN_COST_FIELDS = { input: DATA, output: DATA, cacheRead: DATA, cacheWrite: DATA };
+const LONG_CONTEXT_COST = fieldsOf<LongContextTokenCost>({
+	...TOKEN_COST_FIELDS,
+	inputThreshold: DATA,
+	inputThresholdInclusive: DATA,
+});
+const MODEL_COST = fieldsOf<ModelCost>({
+	...TOKEN_COST_FIELDS,
+	longContext: LONG_CONTEXT_COST,
+	timeBased: fieldsOf<TimeBasedCost>({
+		offPeakMultiplier: DATA,
+		peakWindows: {
+			kind: "items",
+			items: fieldsOf<PeakPricingWindow>({ weekdays: DATA, startMinute: DATA, endMinute: DATA }),
+		},
+		effectiveRates: {
+			kind: "items",
+			items: fieldsOf<EffectiveTokenCost>({
+				...TOKEN_COST_FIELDS,
+				effectiveFrom: DATA,
+				longContext: LONG_CONTEXT_COST,
+			}),
+		},
+	}),
+});
+const MODEL_THINKING = fieldsOf<ThinkingConfig>({
+	mode: DATA,
+	efforts: DATA,
+	defaultLevel: DATA,
+	effortMap: DATA,
+	supportsDisplay: DATA,
+	prefixBinding: DATA,
+	effortRouting: DATA,
+	effortBudgets: DATA,
+	suppressWhenOff: DATA,
+	requiresEffort: DATA,
+	unverified: DATA,
+});
+const MODEL_PROMPT_CACHE = fieldsOf<ModelPromptCache>({ short: DATA, long: DATA });
+const REMOTE_COMPACTION = fieldsOf<RemoteCompactionConfig>({
+	enabled: DATA,
+	api: DATA,
+	endpoint: DATA,
+	v2StreamingEnabled: DATA,
+	v2Endpoint: DATA,
+	streamingEndpoint: DATA,
+	model: DATA,
+});
+const ANTIGRAVITY_WIRE_PROFILES: AuthorDataSchema = {
+	kind: "entries",
+	entries: fieldsOf<AntigravityModelWireProfile>({
+		modelEnum: DATA,
+		maxOutputTokens: DATA,
+		thinkingLevel: DATA,
+		thinkingBudget: DATA,
+	}),
+};
+const CURSOR_MODEL_PARAMETERS: AuthorDataSchema = {
+	kind: "items",
+	items: fieldsOf<CursorModelParameter>({ id: DATA, value: DATA }),
+};
+
+/** A model row, as `oauth.modifyModels` returns it: every field a model has. */
+const MODEL_ROW = fieldsOf<Model<Api>>({
+	id: DATA,
+	kind: DATA,
+	kindConfig: DATA,
+	webSearch: DATA,
+	webSearchModel: DATA,
+	hostedImage: DATA,
+	imageModel: DATA,
+	identity: fieldsOf<Model<Api>["identity"]>({
+		class: DATA,
+		family: DATA,
+		revision: DATA,
+		effort: DATA,
+		thinkingVariant: DATA,
+		logicalId: DATA,
+	}),
+	requiresGlyphTokenization: DATA,
+	requiresCursorToolSchemaProjection: DATA,
+	toolSchemasInContext: DATA,
+	requiresToolResultImageHoisting: DATA,
+	supportsAssistantPrefill: DATA,
+	requestModelId: DATA,
+	reasoningMode: DATA,
+	name: DATA,
+	api: DATA,
+	provider: DATA,
+	providerType: DATA,
+	baseUrl: DATA,
+	reasoning: DATA,
+	tokenizer: DATA,
+	input: DATA,
+	imageInputDecoder: DATA,
+	imageCountBudget: DATA,
+	supportsTools: DATA,
+	supportsComputerUse: DATA,
+	supportsComputerUseConfig: DATA,
+	gitlabDuoWorkflowRootNamespaceId: DATA,
+	cursorMaxMode: DATA,
+	cursorMaxModeRoutes: DATA,
+	antigravityWireProfiles: ANTIGRAVITY_WIRE_PROFILES,
+	accountAccess: {
+		kind: "entries",
+		entries: fieldsOf<ModelAccountAccess>({
+			cyberPrograms: DATA,
+			antigravityWireProfiles: ANTIGRAVITY_WIRE_PROFILES,
+		}),
+	},
+	cursorModelParameters: CURSOR_MODEL_PARAMETERS,
+	cursorModelRoutes: {
+		kind: "entries",
+		entries: fieldsOf<CursorModelRoute>({ modelId: DATA, parameters: CURSOR_MODEL_PARAMETERS, maxMode: DATA }),
+	},
+	cursorPrice: DATA,
+	cursorRequiresDataRetention: DATA,
+	cursorSupportsAgent: DATA,
+	cursorSupportsSandboxing: DATA,
+	factoryDroidApiProviders: DATA,
+	factoryDroidRoutingSource: DATA,
+	factoryDroidCredits: DATA,
+	factoryDroidOrgId: DATA,
+	cost: MODEL_COST,
+	promptCache: MODEL_PROMPT_CACHE,
+	promptCacheConfig: MODEL_PROMPT_CACHE,
+	pricingStatus: DATA,
+	premiumMultiplier: DATA,
+	contextWindow: DATA,
+	contextWindowAuthoritative: DATA,
+	longContextWindowUncapped: DATA,
+	maxContextWindow: DATA,
+	maxTokens: DATA,
+	omitMaxOutputTokens: DATA,
+	headers: DATA,
+	resolveHeaders: CALLBACK,
+	transport: DATA,
+	preferWebsockets: DATA,
+	useResponsesLite: DATA,
+	serviceTiers: DATA,
+	contextPromotionTarget: DATA,
+	compactionModel: DATA,
+	remoteCompaction: REMOTE_COMPACTION,
+	priority: DATA,
+	serviceTierCost: fieldsOf<NonNullable<Model<Api>["serviceTierCost"]>>({
+		flex: DATA,
+		priority: DATA,
+		ultrafast: DATA,
+	}),
+	description: DATA,
+	isNew: DATA,
+	isBeta: DATA,
+	isProviderDefault: DATA,
+	isRecommended: DATA,
+	thinking: MODEL_THINKING,
+	int: DATA,
+	tps: DATA,
+	compat: DATA,
+	compatConfig: DATA,
+	applyPatchToolType: DATA,
+	editPromptVariant: DATA,
+	isOAuth: DATA,
+	guardrailIdentifier: DATA,
+	guardrailVersion: DATA,
+	guardrailTrace: DATA,
+	requestMetadata: DATA,
+});
+
+/** What a provider's `models` and `fetchDynamicModels` rows are read for — validation, the overlay
+ *  builder and the `!command` scan. A row's `resolveHeaders` is none of these, so it is not read. */
+type ModelDefinitionFields = Omit<CustomModelDefinitionLike, "resolveHeaders"> &
+	NonNullable<ProviderConfigInput["models"]>[number];
+
+/** The rows a provider's `models` and `fetchDynamicModels` hand over. */
+const MODEL_DEFINITIONS: AuthorDataSchema = {
+	kind: "items",
+	items: fieldsOf<ModelDefinitionFields>({
+		id: DATA,
+		name: DATA,
+		api: DATA,
+		kind: DATA,
+		baseUrl: DATA,
+		reasoning: DATA,
+		thinking: MODEL_THINKING,
+		input: DATA,
+		imageInputDecoder: DATA,
+		imageCountBudget: DATA,
+		tokenizer: DATA,
+		supportsTools: DATA,
+		cost: MODEL_COST,
+		promptCache: MODEL_PROMPT_CACHE,
+		contextWindow: DATA,
+		maxContextWindow: DATA,
+		maxTokens: DATA,
+		omitMaxOutputTokens: DATA,
+		preferWebsockets: DATA,
+		headers: DATA,
+		compat: DATA,
+		contextPromotionTarget: DATA,
+		compactionModel: DATA,
+		remoteCompaction: REMOTE_COMPACTION,
+		premiumMultiplier: DATA,
+	}),
+};
+
+/** Where a copy is taken, for the error that refuses a function where data belongs: whose data,
+ *  the path walked to the value (its root first), and what the author does instead. */
+interface AuthorDataSite {
+	readonly subject: string;
+	readonly path: (string | number)[];
+	readonly advice: string;
+}
+
+const REGISTERING_ADVICE = "Compute the value before registering the provider.";
+const RETURNING_ADVICE = "Compute the value before returning it.";
+
+function authorDataSite(providerName: string, root: string, advice: string): AuthorDataSite {
+	return { subject: `Provider ${providerName}`, path: [root], advice };
+}
+
+function renderAuthorDataPath(path: readonly (string | number)[]): string {
+	let rendered = "";
+	for (const step of path) {
+		if (rendered === "") rendered = String(step);
+		else if (typeof step === "number") rendered += `[${step}]`;
+		else if (/^[A-Za-z_$][\w$]*$/.test(step)) rendered += `.${step}`;
+		else rendered += `[${JSON.stringify(step)}]`;
+	}
+	return rendered;
+}
+
+/**
  * A host-owned plain copy of data an author handed over, taken inside that author's admission.
  *
  * A provider's own fields are read once (see {@link AdmittedProviderConfig}), but the objects
  * they hold are the author's code just the same: a getter, or a Proxy's `ownKeys`,
  * `getOwnPropertyDescriptor` and `get` traps, runs whenever the host enumerates or reads them —
  * and the registry does both long after registration, merging headers and serializing `compat`
- * into a request. So the nested data the registry keeps is copied here, each own enumerable key
- * and array element read once, and only the copy is consumed afterwards. This reads the author's
- * data under admission; it does not wrap the author's object. Functions are not data: they are
- * kept as they are, stay the author's, and are called only through their registration's gate.
- * Registration takes JSON-shaped data, so other built-ins are not reproduced.
+ * into a request. So the nested data the registry keeps is copied here by its
+ * {@link AuthorDataSchema}, each value read once, and only the copy is consumed afterwards. This
+ * reads the author's data under admission; it does not wrap the author's object.
+ *
+ * Data holds no functions. A function where data belongs — a `toJSON` a request's serializer would
+ * call, a callable record whose reflection the request builder would run — would be author code
+ * the host invokes later with no admission to run under, so it is refused, with the field it was
+ * found at. The callbacks the registry invokes itself are not data: they stay on the author's
+ * object, read and called through their registration's gate when used. Registration takes
+ * JSON-shaped data, so other built-ins are not reproduced.
  */
-function snapshotAuthorData<T>(value: T, copies = new Map<object, unknown>()): T {
+function snapshotAuthorData(
+	value: unknown,
+	schema: AuthorDataSchema,
+	site: AuthorDataSite,
+	copies: Map<AuthorDataSchema, Map<object, unknown>>,
+): unknown {
+	if (schema.kind === "callback") return value;
+	if (typeof value === "function") {
+		throw new Error(
+			`${site.subject}: ${renderAuthorDataPath(site.path)} is a function, but it must be data. ${site.advice}`,
+		);
+	}
 	if (typeof value !== "object" || value === null) return value;
-	const known = copies.get(value);
-	if (known !== undefined) return known as T;
+	let copied = copies.get(schema);
+	if (!copied) {
+		copied = new Map();
+		copies.set(schema, copied);
+	}
+	const known = copied.get(value);
+	if (known !== undefined) return known;
 	if (Array.isArray(value)) {
+		const itemSchema = schema.kind === "items" ? schema.items : DATA;
 		const copy: unknown[] = [];
-		copies.set(value, copy);
+		copied.set(value, copy);
 		const length = value.length;
-		for (let index = 0; index < length; index++) copy[index] = snapshotAuthorData(value[index], copies);
-		return copy as T;
+		for (let index = 0; index < length; index++) {
+			site.path.push(index);
+			copy[index] = snapshotAuthorData(value[index], itemSchema, site, copies);
+			site.path.pop();
+		}
+		return copy;
 	}
 	const copy: Record<string, unknown> = {};
-	copies.set(value, copy);
+	copied.set(value, copy);
+	if (schema.kind === "fields") {
+		for (const [key, fieldSchema] of schema.fields) {
+			site.path.push(key);
+			const item = snapshotAuthorData((value as Record<string, unknown>)[key], fieldSchema, site, copies);
+			site.path.pop();
+			if (item !== undefined) copy[key] = item;
+		}
+		return copy;
+	}
+	const entrySchema = schema.kind === "entries" ? schema.entries : DATA;
 	for (const key of Object.keys(value)) {
-		const item = snapshotAuthorData((value as Record<string, unknown>)[key], copies);
+		site.path.push(key);
+		const item = snapshotAuthorData((value as Record<string, unknown>)[key], entrySchema, site, copies);
+		site.path.pop();
 		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 		if (key === "__proto__") {
 			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });
@@ -285,7 +593,7 @@ function snapshotAuthorData<T>(value: T, copies = new Map<object, unknown>()): T
 			copy[key] = item;
 		}
 	}
-	return copy as T;
+	return copy;
 }
 
 /**
@@ -298,8 +606,14 @@ function snapshotAuthorData<T>(value: T, copies = new Map<object, unknown>()): T
  * live for request-time reads" and "oauth.modifyModels projection survives refresh and
  * refreshProvider"). An extension that needs different data registers again.
  */
-function registrationData<T>(gate: ProviderCallGate | undefined, value: T, copies?: Map<object, unknown>): T {
-	return gate ? snapshotAuthorData(value, copies) : value;
+function registrationData<T>(
+	gate: ProviderCallGate | undefined,
+	value: T,
+	schema: AuthorDataSchema,
+	site: AuthorDataSite,
+	copies?: Map<AuthorDataSchema, Map<object, unknown>>,
+): T {
+	return gate ? (snapshotAuthorData(value, schema, site, copies ?? new Map()) as T) : value;
 }
 
 /** What one registration contributes to the provider state THIS registry folds — keys, catalog
@@ -334,17 +648,20 @@ interface RuntimeProviderRegistration extends GatedRegistration {
 	readonly fold: RegistrationFold;
 }
 
-/** A registration's discovery as it stood when its `fetchDynamicModels` produced rows: the same
- *  session re-registering replaces the discovery, and its earlier rows are no longer its answer. */
+/** A registration's discovery as it stood when its `fetchDynamicModels` was called: the same
+ *  session re-registering replaces the discovery, and its earlier fetch is no longer its answer. */
 interface RuntimeDiscoveryProducer {
 	readonly registration: RuntimeProviderRegistration;
 	readonly discovery: NonNullable<RuntimeProviderRegistration["discovery"]>;
 }
 
-/** One discovery pass of a runtime provider's manager, and the producer of its rows once its
- *  fetch has answered. */
+/** One discovery pass of a runtime provider's manager. `producer` is the registration chosen to
+ *  fetch, recorded before the fetch so a pass whose producer departs while it runs is still known
+ *  as that producer's — whatever the manager then serves, its fetched rows or the model cache.
+ *  `fetched` is set once the producer's own rows were accepted. */
 interface RuntimeDiscoveryRun {
 	producer: RuntimeDiscoveryProducer | undefined;
+	fetched: boolean;
 }
 
 /** Thrown inside a projected resolver whose registration stopped answering while it ran. */
@@ -1320,14 +1637,17 @@ export class ModelRegistry {
 					const authored = oauth.modifyModels?.(snapshot, credential);
 					// A block whose hook was removed since registration projects nothing.
 					if (authored === undefined) return before;
-					const copies = new Map<object, unknown>();
+					const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
+					const site = authorDataSite(providerName, "oauth.modifyModels() result", RETURNING_ADVICE);
 					const rows: Model<Api>[] = [];
 					const length = authored.length;
 					for (let index = 0; index < length; index++) {
 						// Each row is read once; the one the hook authored stays the receiver of a
 						// resolver it put there.
 						const authoredRow = authored[index];
-						const model = registrationData(gate, authoredRow, copies);
+						site.path.push(index);
+						const model = registrationData(gate, authoredRow, MODEL_ROW, site, copies);
+						site.path.pop();
 						const resolver = model.resolveHeaders;
 						const headers = model.headers;
 						const withHeaders =
@@ -1398,10 +1718,11 @@ export class ModelRegistry {
 	 * the row it came with, and what it returns is read inside that admission too.
 	 *
 	 * It answers only while that registration is the projection in force, checked again once the
-	 * author's resolver settles. After the registration has gone — retired, withdrawn or
-	 * superseded — the call is answered as the projection in force now serves the row, so a row
-	 * cached before the change neither reaches departed code nor fails while a live registration
-	 * still serves the provider.
+	 * author's resolver settles, whether it fulfils or rejects. After the registration has gone —
+	 * retired, withdrawn or superseded — the call is answered as the projection in force now serves
+	 * the row, so a row cached before the change neither reaches departed code nor fails while a
+	 * live registration still serves the provider. A failure is the caller's only while the
+	 * registration that produced it still answers.
 	 */
 	#ownProjectedResolver(
 		providerName: string,
@@ -1418,7 +1739,14 @@ export class ModelRegistry {
 		const authored: HeaderResolver = async signal => {
 			const produced = await callThroughGate(gate, () => resolver.call(receiver, signal));
 			if (!answers()) throw PROJECTION_SUPERSEDED;
-			return callThroughGate(gate, () => snapshotAuthorData(produced));
+			return callThroughGate(gate, () =>
+				snapshotAuthorData(
+					produced,
+					DATA,
+					authorDataSite(providerName, "resolveHeaders() result", RETURNING_ADVICE),
+					new Map(),
+				),
+			) as Record<string, string> | undefined;
 		};
 		const own = headers ? (createConfigHeaderResolver([authored, headers]) ?? authored) : authored;
 		const owned: HeaderResolver = async signal => {
@@ -1426,7 +1754,9 @@ export class ModelRegistry {
 				try {
 					return await own(signal);
 				} catch (error) {
-					if (error !== PROJECTION_SUPERSEDED) throw error;
+					// A rejection from a projection that has since gone is no more its answer than a
+					// fulfilment would be.
+					if (error !== PROJECTION_SUPERSEDED && answers()) throw error;
 				}
 			}
 			return this.#resolveLiveRowHeaders(provider, id, owned, signal);
@@ -2861,10 +3191,10 @@ export class ModelRegistry {
 		const providerId = options.providerId;
 		let runOptions = options;
 		let runStrategy = strategy;
-		// An extension's manager: this pass records the registration whose fetch produced its rows
-		// (see #discoverRuntimeModels), so they are published only while it is still in force.
+		// An extension's manager: this pass records the registration it asked to fetch (see
+		// #discoverRuntimeModels), so what it found is published only while that one is in force.
 		const run: RuntimeDiscoveryRun | undefined = this.#runtimeManagerOptions.has(options)
-			? { producer: undefined }
+			? { producer: undefined, fetched: false }
 			: undefined;
 		if (run) {
 			runtimeRuns.set(providerId, run);
@@ -2921,6 +3251,11 @@ export class ModelRegistry {
 			}
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
+			// A pass whose producer departed while it ran — its fetch timing out after a newer
+			// pass of the registration in force succeeded — has no failure to report for it.
+			if (run?.producer && !this.#runtimeDiscoveryProducerAnswers(providerId, run.producer)) {
+				return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
@@ -4078,13 +4413,13 @@ export class ModelRegistry {
 		gate: ProviderCallGate | undefined,
 	): AdmittedProviderConfig {
 		const {
-			baseUrl,
-			apiKey,
-			api,
+			baseUrl: authoredBaseUrl,
+			apiKey: authoredApiKey,
+			api: authoredApi,
 			headers: authoredHeaders,
 			compat: authoredCompat,
 			remoteCompaction: authoredRemoteCompaction,
-			authHeader,
+			authHeader: authoredAuthHeader,
 			transport: authoredTransport,
 			usage,
 			oauth,
@@ -4092,11 +4427,17 @@ export class ModelRegistry {
 			streamSimple,
 			fetchDynamicModels,
 		} = config;
-		const headers = registrationData(gate, authoredHeaders);
-		const compat = registrationData(gate, authoredCompat);
-		const remoteCompaction = registrationData(gate, authoredRemoteCompaction);
-		const transport = registrationData(gate, authoredTransport);
-		const models = registrationData(gate, authoredModels);
+		const data = <T>(value: T, field: string, schema: AuthorDataSchema = DATA): T =>
+			registrationData(gate, value, schema, authorDataSite(providerName, field, REGISTERING_ADVICE));
+		const baseUrl = data(authoredBaseUrl, "baseUrl");
+		const apiKey = data(authoredApiKey, "apiKey");
+		const api = data(authoredApi, "api");
+		const authHeader = data(authoredAuthHeader, "authHeader");
+		const headers = data(authoredHeaders, "headers");
+		const compat = data(authoredCompat, "compat");
+		const remoteCompaction = data(authoredRemoteCompaction, "remoteCompaction", REMOTE_COMPACTION);
+		const transport = data(authoredTransport, "transport");
+		const models = data(authoredModels, "models", MODEL_DEFINITIONS);
 		const modifies = Boolean(oauth?.modifyModels);
 		if (streamSimple && !api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
@@ -4355,15 +4696,16 @@ export class ModelRegistry {
 	/**
 	 * One discovery fetch for a runtime provider, for the pass `run` belongs to. The registration
 	 * that discovers is chosen after the key is read — the one in force before that await may have
-	 * gone — as the newest live one that declared discovery. Its `fetchDynamicModels` is read off
-	 * its configuration and called on it inside its admission. When the fetch settles it is
-	 * selected again, and its rows are read only if it is still the discovery in force: a
-	 * registration withdrawn or replaced while it ran does not answer, though its owner may still
-	 * be alive. The rows are that session's data, read inside its admission (see
-	 * {@link registrationData}), and the run records their producer, so the pass publishes them
-	 * only while it is still in force. Without an answering registration the answer is `null` —
-	 * "could not fetch" — which leaves the cache as it is. An empty list would instead prune the
-	 * catalog and overwrite the cache a live registration may still serve.
+	 * gone — as the newest live one that declared discovery, and the run records it as its producer
+	 * before the fetch: whatever the pass serves from here — these rows, or the model cache when the
+	 * fetch fails or stops answering — it serves for that producer, and only while it is in force.
+	 * Its `fetchDynamicModels` is read off its configuration and called on it inside its admission.
+	 * When the fetch settles it is selected again, and its rows are read only if it is still the
+	 * discovery in force: a registration withdrawn or replaced while it ran does not answer, though
+	 * its owner may still be alive. The rows are that session's data, read inside its admission (see
+	 * {@link registrationData}). Without an answering registration the answer is `null` — "could
+	 * not fetch" — which leaves the cache as it is. An empty list would instead prune the catalog
+	 * and overwrite the cache a live registration may still serve.
 	 */
 	async #discoverRuntimeModels(providerName: string, run: RuntimeDiscoveryRun): Promise<ModelSpec<Api>[] | null> {
 		const apiKey = await this.#peekApiKeyForProvider(providerName);
@@ -4372,6 +4714,7 @@ export class ModelRegistry {
 		const discovery = registration?.discovery;
 		if (!registration || !discovery) return null;
 		const producer: RuntimeDiscoveryProducer = { registration, discovery };
+		run.producer = producer;
 		const { gate } = registration;
 		const { config, fields } = discovery;
 		const authored = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
@@ -4379,7 +4722,12 @@ export class ModelRegistry {
 		);
 		if (!this.#runtimeDiscoveryProducerAnswers(providerName, producer)) return null;
 		const rows = callThroughGate(gate, () => {
-			const modelDefs = registrationData(gate, authored);
+			const modelDefs = registrationData(
+				gate,
+				authored,
+				MODEL_DEFINITIONS,
+				authorDataSite(providerName, "fetchDynamicModels() result", RETURNING_ADVICE),
+			);
 			// Dynamic rows can carry `!command` headers that are not on the
 			// registerProvider() config; track them so F5 / 401 can evict the cache.
 			this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
@@ -4412,7 +4760,7 @@ export class ModelRegistry {
 			}
 			return results.map(toModelSpec);
 		});
-		run.producer = producer;
+		run.fetched = true;
 		// The manager writes these rows to the model cache.
 		this.#runtimeDiscoveryWriters.set(providerName, producer);
 		return rows;
@@ -4447,11 +4795,15 @@ export class ModelRegistry {
 		);
 	}
 
-	/** Whether what a discovery pass found for a runtime provider may still be published: the rows
-	 *  its fetch produced while that producer is in force, or cached rows that may serve the
-	 *  registration in force now. */
+	/** Whether what a discovery pass found for a runtime provider may still be published. A pass
+	 *  that chose a producer answers only while that producer is in force: its own fetched rows,
+	 *  or — its fetch having failed — cached rows that may serve it. A pass that chose none serves
+	 *  cached rows that may serve the registration in force now. */
 	#runtimeDiscoveryRunAnswers(providerName: string, run: RuntimeDiscoveryRun): boolean {
-		if (run.producer) return this.#runtimeDiscoveryProducerAnswers(providerName, run.producer);
+		if (run.producer) {
+			if (!this.#runtimeDiscoveryProducerAnswers(providerName, run.producer)) return false;
+			if (run.fetched) return true;
+		}
 		const inForce = this.#discoveryInForce(providerName);
 		return inForce !== undefined && this.#runtimeDiscoveryCacheServes(providerName, inForce);
 	}
