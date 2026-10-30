@@ -189,23 +189,118 @@ describe("experimental context notes", () => {
 		const advisorBound = toolSession(settings, SessionManager.inMemory(), "advisor-session");
 		expect(ContextNotesTool.createIf(advisorBound)).toBeNull();
 	});
-	it("does not append notes when the branch changes while disk preparation is pending", async () => {
+	async function runPendingSave(
+		prepare: (sessionManager: SessionManager) => void,
+		whilePending: (sessionManager: SessionManager) => void,
+		text: string,
+	) {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
 		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
 		if (!tool) throw new Error("expected context notes tool");
+		prepare(sessionManager);
 		const pendingEnsure = Promise.withResolvers<void>();
 		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
 		try {
-			const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
+			const pendingWrite = tool.execute("pending-save", { text });
 			await Promise.resolve();
-			sessionManager.appendCustomEntry("test_branch_change");
+			whilePending(sessionManager);
 			pendingEnsure.resolve();
-			await expect(pendingWrite).rejects.toThrow("session branch changed");
-			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
+			return { sessionManager, result: await Promise.allSettled([pendingWrite]).then(([r]) => r) };
 		} finally {
 			ensureSpy.mockRestore();
 		}
+	}
+
+	it("does not append notes when the branch changes while disk preparation is pending", async () => {
+		let base = "";
+		const { sessionManager, result } = await runPendingSave(
+			manager => {
+				base = manager.appendCustomEntry("test_branch_base");
+				manager.appendCustomEntry("test_branch_tip");
+			},
+			manager => manager.branch(base),
+			"must not persist",
+		);
+		expect(result).toMatchObject({
+			status: "rejected",
+			reason: { message: expect.stringContaining("session branch changed") },
+		});
+		expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
+	});
+
+	it("saves notes when another writer appends while disk preparation is pending", async () => {
+		const { sessionManager, result } = await runPendingSave(
+			manager => void manager.appendCustomEntry("existing_journal_entry"),
+			manager => void manager.appendCustomEntry("concurrent_journal_entry"),
+			"save despite append",
+		);
+		expect(result).toMatchObject({ status: "fulfilled", value: { details: { text: "save despite append" } } });
+		expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "save despite append" });
+	});
+
+	it("saves the first notes of an empty session when entries are appended while disk preparation is pending", async () => {
+		const { sessionManager, result } = await runPendingSave(
+			() => {},
+			manager => void manager.appendCustomEntry("first_journal_entry"),
+			"first save",
+		);
+		expect(result).toMatchObject({ status: "fulfilled", value: { details: { text: "first save" } } });
+		expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "first save" });
+	});
+
+	const usageEntry = {
+		purpose: "test",
+		role: "default",
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5.5",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+	} as Parameters<SessionManager["appendModelUsage"]>[0];
+
+	it("saves notes when usage is recorded on the snapshotted leaf while disk preparation is pending", async () => {
+		const { sessionManager, result } = await runPendingSave(
+			manager => void manager.appendCustomEntry("active_leaf"),
+			manager => {
+				const usageId = manager.appendModelUsage(usageEntry, {
+					sessionId: manager.getSessionId(),
+					parentId: manager.getLeafId(),
+				});
+				// The usage entry became the leaf, so the leaf moved past the snapshot.
+				expect(manager.getLeafId()).toBe(usageId ?? null);
+			},
+			"save despite usage",
+		);
+		expect(result).toMatchObject({ status: "fulfilled", value: { details: { text: "save despite usage" } } });
+		expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "save despite usage" });
+	});
+
+	it("saves notes when usage is recorded on an older parent while disk preparation is pending", async () => {
+		let olderParent = "";
+		let leafBefore: string | null = null;
+		const { sessionManager, result } = await runPendingSave(
+			manager => {
+				olderParent = manager.appendCustomEntry("older_parent");
+				manager.appendCustomEntry("active_leaf");
+				leafBefore = manager.getLeafId();
+			},
+			manager => {
+				manager.appendModelUsage(usageEntry, { sessionId: manager.getSessionId(), parentId: olderParent });
+				// The usage entry hangs off an older parent, so the active leaf did not move.
+				expect(manager.getLeafId()).toBe(leafBefore);
+			},
+			"save despite late usage",
+		);
+		expect(result).toMatchObject({ status: "fulfilled", value: { details: { text: "save despite late usage" } } });
+		expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "save despite late usage" });
 	});
 
 	it("does not append notes when experimental context management is disabled while preparing disk", async () => {
