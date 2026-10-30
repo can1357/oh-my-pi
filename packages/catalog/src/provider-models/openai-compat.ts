@@ -52,6 +52,7 @@ import {
 	toPositiveNumber,
 	toPositiveNumberOrNull,
 } from "../utils";
+import { AIMLAPI_API_BASE_URL } from "../wire/aimlapi";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -2204,7 +2205,7 @@ export function aimlApiModelManagerOptions(
 	return createOpenAICompatibleModelManagerOptions({
 		api: "openai-completions",
 		providerId: "aimlapi",
-		defaultBaseUrl: "https://api.aimlapi.com/v1",
+		defaultBaseUrl: AIMLAPI_API_BASE_URL,
 		config,
 		dynamicModelsAuthoritative: true,
 		requireApiKey: true,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `@oh-my-pi/pi-catalog/wire/aimlapi`, which holds the AI/ML API base URL and the client-identity headers sent only to its origin; AI/ML API model discovery now uses the same base URL ([#17374](https://github.com/can1357/oh-my-pi/pull/17374) by [@hugoaimlapi](https://github.com/hugoaimlapi))
+
 ### Changed
 
 - Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
