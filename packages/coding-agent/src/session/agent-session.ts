@@ -1203,7 +1203,7 @@ export class AgentSession implements SettingsScope {
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
-	/** Aborted by {@link beginDispose}: work that started before it (the auto-thinking classifier) stops there. */
+	/** Aborted by {@link beginDispose}: work that started before it (the auto-thinking classifier, side requests) stops there. */
 	readonly #disposeAbortController = new AbortController();
 	/**
 	 * Cancels the current turn's pre-dispatch setup (memory-backend auto-recall and
@@ -6185,10 +6185,12 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: eval starts throw, queued asides and background deliveries
-	 * are dropped and later ones refused, the aside provider is detached, cache
-	 * warming stops for good, and settings listeners bound to the session stop
-	 * (a config reload mid-teardown must not reconnect or re-steer anything).
+	 * immediately: eval starts throw, prompts and side requests are refused,
+	 * queued steers and follow-ups are no longer delivered, queued asides and
+	 * background deliveries are dropped and later ones refused, the aside
+	 * provider is detached, cache warming stops for good, and settings listeners
+	 * bound to the session stop (a config reload mid-teardown must not reconnect
+	 * or re-steer anything).
 	 * Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
@@ -6205,9 +6207,9 @@ export class AgentSession implements SettingsScope {
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
-		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
-			this.agent.prepareQueuedMessages = undefined;
-		}
+		// The queued-message hook stays installed: it is what refuses a steer or follow-up queued
+		// before this point. Removed, the agent would deliver the queue as it is and start another
+		// provider request from the disposing session.
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -6225,10 +6227,12 @@ export class AgentSession implements SettingsScope {
 		// wrapper's awaits before `dispose()`, each of which reached the provider or the
 		// transcript from a disposing session: extension timers (their callbacks can prompt),
 		// a speculative or retrying compaction, the unexpected-stop judge and other post-prompt
-		// work, and the auto-thinking classifier. `dispose()` repeats the first three for
-		// anything its own teardown starts.
+		// work, the auto-thinking classifier, and side requests (`runEphemeralTurn`). `dispose()`
+		// repeats the first three for anything its own teardown starts.
 		this.#disposeAbortController.abort();
-		this.#extensionRunner?.clearManagedTimers();
+		// Optional only for hand-rolled `ExtensionRunner` doubles in tests, which implement just the
+		// methods their path calls; the production `ExtensionRunner` always has `clearManagedTimers`.
+		this.#extensionRunner?.clearManagedTimers?.();
 		this.#fallbackExtensionTimers?.clearAll();
 		this.#maintenance.cancelSpeculation();
 		this.abortCompaction();
@@ -8624,6 +8628,9 @@ export class AgentSession implements SettingsScope {
 		signal: AbortSignal,
 		queue: QueuedMessageQueue,
 	): Promise<QueuedMessagePreparation> | undefined => {
+		// A disposing session delivers nothing it had queued, user-authored or not: the batch goes
+		// back to the queue and the run it would have extended stops here.
+		if (this.#isDisposed) return Promise.resolve({ commit: () => undefined });
 		const userMessages = messages.filter(isUserAuthoredQueuedMessage);
 		const first = userMessages[0];
 		if (!first) return undefined;
@@ -10086,7 +10093,8 @@ export class AgentSession implements SettingsScope {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
-		if (options?.triggerTurn) this.#refusePromptWhileDisposing();
+		// An aside starts a turn when the session is idle, whatever `triggerTurn` says.
+		if (options?.triggerTurn || options?.deliverAs === "aside") this.#refusePromptWhileDisposing();
 		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
 	}
 
@@ -12746,6 +12754,14 @@ export class AgentSession implements SettingsScope {
 	 * rather than missing context.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		// A side request reaches the provider like a prompt, so a disposing session refuses one
+		// asked for after disposal began, and disposal cancels one still being prepared or streamed.
+		if (this.#isDisposed) {
+			throw new Error("This session has begun disposing, so this side request was refused.");
+		}
+		const signal = args.signal
+			? AbortSignal.any([args.signal, this.#disposeAbortController.signal])
+			: this.#disposeAbortController.signal;
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
@@ -12753,7 +12769,7 @@ export class AgentSession implements SettingsScope {
 		const modelDescription = `${model.provider}/${model.id} (${model.api})`;
 		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
-			args.signal?.throwIfAborted();
+			signal.throwIfAborted();
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -12787,9 +12803,9 @@ export class AgentSession implements SettingsScope {
 		// for the model, and described by a vision model for a text-only one.
 		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
 		const imageDescriptionNotice = promptImages?.length
-			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
+			? await this.#buildImageDescriptionNotice(promptImages, signal)
 			: undefined;
-		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
+		const history = args.history && (await this.#prepareSideHistory(args.history, signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralSnapshot(
@@ -12799,7 +12815,7 @@ export class AgentSession implements SettingsScope {
 			imageDescriptionNotice,
 			args.conversationKey,
 		);
-		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+		const llmMessages = await this.convertMessagesToLlm(snapshot, signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
 		const toolHistory = sideContext.messages.some(
@@ -12858,7 +12874,7 @@ export class AgentSession implements SettingsScope {
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				maxTokens: args.maxTokens,
-				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
+				signal: AbortSignal.any([signal, streamAbort.signal]),
 			},
 			model.provider,
 		);

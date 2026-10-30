@@ -2050,6 +2050,9 @@ export interface ExtensionAPI {
 	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
 	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`
 	 * (plan mode folds it into context instead).
+	 *
+	 * Once the session has begun disposing, a message sent with `triggerTurn` or `deliverAs: "aside"`
+	 * is refused, and a steer or follow-up already queued is not delivered.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
