@@ -4,7 +4,7 @@
 
 ### Added
 
-- Handoff and branch summaries now retain previously loaded skill names so the agent can re-load their instructions after compaction.
+- Handoff and branch summaries now retain previously loaded skill names so the agent can re-load their instructions after compaction ([#17451](https://github.com/can1357/oh-my-pi/pull/17451) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
