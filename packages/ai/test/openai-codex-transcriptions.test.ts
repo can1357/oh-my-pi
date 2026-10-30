@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
+import * as codexAttestation from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { TranscriptionApiError, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 
 const AUDIO = new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0x02, 0x03, 0x04]);
@@ -27,6 +27,10 @@ function codexToken(accountId: string): string {
 }
 
 describe("openai-codex-transcriptions transport", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("posts audio to the ChatGPT dictation endpoint as the Codex Desktop client", async () => {
 		const seen: Array<{ url: string; method?: string; headers: Headers; form: FormData }> = [];
 		const fetchImpl: FetchImpl = async (input, init) => {
@@ -94,8 +98,13 @@ describe("openai-codex-transcriptions transport", () => {
 		expect(await upload("voice.oga", "audio/ogg")).toBe("audio.ogg");
 		// A decodable extension whose container contradicts the MIME type is renamed too: the decoder follows the name.
 		expect(await upload("clip.webm", "audio/ogg")).toBe("audio.ogg");
-		// Browser MIME aliases name their container: `audio/x-m4a` is M4A, `audio/opus` is Ogg/Opus.
+		// Browser MIME aliases name their container: `audio/x-m4a` is M4A, `audio/mp3` and `audio/x-mp3` are MP3.
 		expect(await upload("blob", "audio/x-m4a")).toBe("audio.m4a");
+		expect(await upload("blob", "audio/mp3")).toBe("audio.mp3");
+		expect(await upload("blob", "audio/x-mp3")).toBe("audio.mp3");
+		// A generic or missing MIME type leaves the container to a known suffix.
+		expect(await upload("voice.oga", "application/octet-stream")).toBe("audio.ogg");
+		expect(await upload("voice.oga", "")).toBe("audio.ogg");
 		// Agreeing containers (including aliases) and unknown MIME types keep the caller's name.
 		expect(await upload("clip.mp3", "audio/mpeg")).toBe("clip.mp3");
 		expect(await upload("clip.mpeg", "audio/mpeg")).toBe("clip.mpeg");
@@ -128,31 +137,31 @@ describe("openai-codex-transcriptions transport", () => {
 			attestation = new Headers(init?.headers).get("x-oai-attestation");
 			return Response.json({ text: "ok" });
 		};
-		setCodexAttestationProvider(async () => "attest-envelope");
-		try {
-			await transcribeAudio(
-				model,
-				{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
-				{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
-			);
-		} finally {
-			setCodexAttestationProvider(undefined);
-		}
+		vi.spyOn(codexAttestation, "getCodexAttestationHeader").mockResolvedValue("attest-envelope");
+		await transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
 		expect(attestation).toBe("attest-envelope");
 	});
 
-	it("never sends the Codex bearer to a plain-HTTP base URL override", async () => {
-		let target: string | undefined;
-		const fetchImpl: FetchImpl = async input => {
-			target = String(input);
+	it("refuses a base URL off the ChatGPT HTTPS origin instead of sending its key anywhere", async () => {
+		let called = false;
+		const fetchImpl: FetchImpl = async () => {
+			called = true;
 			return Response.json({ text: "ok" });
 		};
-		await transcribeAudio(
-			{ ...model, baseUrl: "http://chatgpt.com/backend-api" },
-			{ audio: AUDIO, mimeType: "audio/flac", fileName: "a.flac", responseFormat: "json" },
-			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
-		);
-		expect(target).toBe("https://chatgpt.com/backend-api/transcribe");
+		// A relay's configured key outranks the OAuth login, so rewriting to chatgpt.com would disclose it.
+		for (const baseUrl of ["https://relay.example.com/v1", "http://chatgpt.com/backend-api"]) {
+			const failure = transcribeAudio(
+				{ ...model, baseUrl },
+				{ audio: AUDIO, mimeType: "audio/flac", fileName: "a.flac", responseFormat: "json" },
+				{ apiKey: "relay-key", fetch: fetchImpl },
+			);
+			await expect(failure).rejects.toThrow("only runs on chatgpt.com");
+		}
+		expect(called).toBe(false);
 	});
 
 	it("surfaces backend ASR failures as TranscriptionApiError with the upstream detail", async () => {
