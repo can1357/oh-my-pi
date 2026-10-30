@@ -20,6 +20,7 @@ import type { RpcGoalResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal
 import type { RpcMessagesPage } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
 import type {
 	RpcAbortAndRestoreQueueResult,
+	ResourceAnalysis,
 	RpcAgentSessionEventFrame,
 	RpcAskDialogQuestion,
 	RpcAvailableCommandsUpdateFrame,
@@ -53,11 +54,19 @@ import type {
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
+	RpcSkillDiagnosticsUpdateFrame,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
+	SkillAnalysisCandidate,
+	SkillDiagnosticAnalysisRecord,
+	SkillDiagnosticDuplicate,
+	SkillDiagnosticEntry,
+	SkillDiagnosticItem,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type * as Wire from "@oh-my-pi/pi-coding-agent/modes/rpc/wire/rpc-wire.generated";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
@@ -204,6 +213,7 @@ export type Frames = Assert<
 		promptError: Outbound<RpcPromptError, Wire.PromptError>;
 		sessionSettled: Outbound<RpcSessionSettledFrame, Wire.SessionSettledEvent>;
 		availableCommands: Outbound<RpcAvailableCommandsUpdateFrame, Wire.AvailableCommandsUpdateEvent>;
+		skillDiagnosticsUpdate: Outbound<RpcSkillDiagnosticsUpdateFrame, Wire.SkillDiagnosticsUpdateEvent>;
 		subagentLifecycle: Outbound<RpcSubagentLifecycleFrame, Wire.SubagentLifecycleEvent>;
 		subagentLifecyclePayload: Outbound<RpcSubagentLifecycleFrame["payload"], Wire.SubagentLifecyclePayload>;
 		subagentProgress: Outbound<RpcSubagentProgressFrame, Wire.SubagentProgressEvent>;
@@ -277,6 +287,16 @@ export type State = Assert<
 		slashCommand: Outbound<RpcAvailableSlashCommand, Wire.AvailableSlashCommand>;
 		slashSubcommand: Outbound<NonNullable<RpcAvailableSlashCommand["subcommands"]>[number], Wire.SlashSubcommand>;
 		subagentSnapshot: Outbound<RpcSubagentSnapshot, Wire.SubagentSnapshot>;
+		skillDiagnostics: Outbound<SkillDiagnosticsSnapshot, Wire.SkillDiagnosticsSnapshot>;
+		skillResolutionDiagnostic: Outbound<SkillResolutionDiagnostic, Wire.SkillResolutionDiagnostic>;
+		skillDiagnosticDuplicate: Outbound<SkillDiagnosticDuplicate, Wire.SkillDiagnosticDuplicate>;
+		skillDiagnosticEntry: Outbound<SkillDiagnosticEntry, Wire.SkillDiagnosticEntry>;
+		skillDiagnosticItem: Outbound<SkillDiagnosticItem, Wire.SkillDiagnosticItem>;
+		skillAnalysisRecord: Outbound<SkillDiagnosticAnalysisRecord, Wire.SkillDiagnosticAnalysisRecord>;
+		skillAnalysisCandidate: Outbound<SkillAnalysisCandidate, Wire.SkillAnalysisCandidate>;
+		resourceAnalysis: Outbound<ResourceAnalysis, Wire.ResourceAnalysis>;
+		resourceAnalysisEvidence: Outbound<ResourceAnalysis["evidence"][number], Wire.ResourceAnalysisEvidence>;
+		resourceRecommendation: Outbound<ResourceAnalysis["recommendation"], Wire.ResourceRecommendation>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
 		btwHistoryRecord: Outbound<RpcBtwHistoryRecord, Wire.BtwHistoryRecord>;
 		btwHistoryTurn: Outbound<BtwHistoryTurn, Wire.BtwHistoryTurn>;
