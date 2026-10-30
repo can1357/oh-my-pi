@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `viewWithoutFrames`: what a reader without image input reads for an archive, its kept text in place of its frames ([#17510](https://github.com/can1357/oh-my-pi/pull/17510) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

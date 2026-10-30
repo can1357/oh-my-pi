@@ -1574,6 +1574,132 @@ describe("archive helpers", () => {
 		});
 	});
 
+	describe("viewWithoutFrames", () => {
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 20 };
+
+		function sentText(view: snapcompact.ArchiveView): string {
+			const blocks = snapcompact.historyBlocks(view.archive);
+			expect(blocks.every(block => block.type === "text")).toBe(true);
+			return `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
+		}
+
+		async function framedArchive(): Promise<snapcompact.CompactionResult> {
+			const fileOps = snapcompact.createFileOps();
+			fileOps.read.add("src/read-only.ts");
+			fileOps.read.add("src/both.ts");
+			fileOps.edited.add("src/both.ts");
+			fileOps.edited.add("src/edited.ts");
+			const result = await snapcompact.compact(
+				makePreparation({
+					messagesToSummarize: [
+						createUserMessage(`HEAD sentinel. ${"Important fact number one. ".repeat(60)}`),
+						createAssistantMessage([
+							{ type: "thinking", thinking: "PRIVATE plan." },
+							{ type: "text", text: `MIDDLE sentinel. ${"Important fact number two. ".repeat(60)}` },
+						]),
+						createUserMessage(`${"Important fact number three. ".repeat(60)}TAIL sentinel.`),
+					],
+					fileOps,
+				}),
+				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+			);
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.frames.length).toBeGreaterThan(0);
+			expect(archive.textHead).not.toContain("MIDDLE sentinel");
+			expect(archive.textTail).not.toContain("MIDDLE sentinel");
+			return result;
+		}
+
+		it("reads the archive's whole kept source as text in place of its frames, with its file list", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive);
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.text).toBe(archive.text);
+			const sent = sentText(view);
+			for (const sentinel of ["HEAD sentinel", "MIDDLE sentinel", "TAIL sentinel", "PRIVATE plan"]) {
+				expect(sent).toContain(sentinel);
+			}
+			expect(result.summary).toContain("images, not text");
+			expect(sent).not.toContain("images, not text");
+			// This reader may read reasoning, so the legend keeps it.
+			expect(sent).toContain("`¶think:`");
+			// The summary's own file list, read-and-written files included.
+			for (const file of ["read-only.ts (Read)", "both.ts (RW)", "edited.ts (Write)"]) {
+				expect(result.summary).toContain(file);
+				expect(sent).toContain(file);
+			}
+		});
+
+		it("leaves reasoning out of the text for a reader that excludes it, without rendering frames", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive, { includeThinking: false });
+			expect(view.archive.frames).toEqual([]);
+			const sent = sentText(view);
+			expect(sent).toContain("MIDDLE sentinel");
+			expect(sent).not.toContain("PRIVATE plan");
+			expect(sent).not.toContain("¶think:");
+			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
+			expect(sent).toContain("both.ts (RW)");
+		});
+
+		it("keeps the edges and counts the imaged middle as dropped when the archive kept no whole source", () => {
+			const legacy = {
+				frames: [frame, frame],
+				totalChars: 60,
+				truncatedChars: 0,
+				textHead: "¶user: ask",
+				textTail: "secret continuation\n¶ai: answer",
+			};
+			const view = snapcompact.viewWithoutFrames("no scopes\nHISTORY", legacy);
+			expect(view.archive).toEqual({
+				frames: [],
+				totalChars: 10 + legacy.textTail.length,
+				truncatedChars: 40,
+				textHead: "¶user: ask",
+				textTail: legacy.textTail,
+			});
+			expect(sentText(view)).toContain("middle history omitted above");
+
+			// A reader without reasoning skips the tail's lines before its first scope label,
+			// whose scope sat in the dropped middle.
+			const thinking =
+				"`¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+			const scrubbed = snapcompact.viewWithoutFrames(thinking, legacy, { includeThinking: false });
+			expect(scrubbed.archive.textTail).toBe("¶ai: answer");
+			expect(scrubbed.archive.truncatedChars).toBe(40 + "secret continuation\n".length);
+			expect(sentText(scrubbed)).not.toContain("secret");
+		});
+
+		it("keeps both ends of the text past maxChars and counts the cut middle as dropped", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive, { maxChars: 400 });
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.textHead).toHaveLength(200);
+			expect(view.archive.textTail).toHaveLength(200);
+			expect(view.archive.totalChars).toBe(400);
+			expect(view.archive.truncatedChars).toBe(archive.truncatedChars + archive.text!.length - 400);
+			const sent = sentText(view);
+			expect(sent).toContain("HEAD sentinel");
+			expect(sent).toContain("TAIL sentinel");
+			expect(sent).not.toContain("MIDDLE sentinel");
+			expect(sent).toContain("middle history omitted above");
+			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
+		});
+
+		it("cuts a frameless archive's text past maxChars too", () => {
+			const text = `start ${"x".repeat(100)} end`;
+			const archive = { frames: [], totalChars: text.length, truncatedChars: 0, text, textHead: text };
+			expect(snapcompact.viewWithoutFrames("s", archive, { maxChars: text.length }).archive).toBe(archive);
+			const view = snapcompact.viewWithoutFrames("s", archive, { maxChars: 20 });
+			expect(view.archive.textHead).toBe(text.slice(0, 10));
+			expect(view.archive.textTail).toBe(text.slice(-10));
+			expect(view.archive.truncatedChars).toBe(text.length - 20);
+		});
+	});
+
 	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {
 		const summary = [
 			"- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.",

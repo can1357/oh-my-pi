@@ -1,30 +1,38 @@
 /**
- * A snapcompact archive rendered under a non-Anthropic model keeps its
- * `¶think:` sections and reasoning legend. Claude refuses requests that replay
- * them (`reasoning_extraction`), so whatever brings a Claude model to such an
- * archive (a model switch, a resume, a side request) must send the archive's
- * no-reasoning view, while the original stays intact for other readers.
+ * A snapcompact archive is rendered for the model that compacted, and the
+ * model reading it later may differ:
+ * - The archive keeps its `¶think:` sections and reasoning legend. Claude
+ *   refuses requests that replay them (`reasoning_extraction`), so whatever
+ *   brings a Claude model to such an archive (a model switch, a resume, a side
+ *   request) must send the archive's no-reasoning view.
+ * - A model without image input reads frames as image-omitted placeholders, so
+ *   it must get the archive's kept text in place of the frames.
+ * The original stays intact for other readers.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const REASONING = "PRIVATE-REASONING";
 const PLAIN_LEGEND = "`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.";
+const FRAME_LEGEND = "Some middle sections: images, not text.";
+const IMAGE_OMITTED = "[image omitted";
 
 function bundled(provider: GeneratedProvider, modelId: string): Model {
 	const model = getBundledModel(provider, modelId);
@@ -34,6 +42,8 @@ function bundled(provider: GeneratedProvider, modelId: string): Model {
 
 const gpt = bundled("openai", "gpt-5.4");
 const claude = bundled("anthropic", "claude-opus-5-5");
+// Takes no image input.
+const deepseek = bundled("deepseek", "deepseek-v4-flash");
 
 function assistant(model: Model, content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -87,7 +97,17 @@ function latestCompaction(sessionManager: SessionManager): CompactionEntry {
 	return entry;
 }
 
-describe("snapcompact archive read by a Claude model", () => {
+/** A reply marker the archive keeps only on its frames, not in its plain text edges. */
+function imagedReply(archive: snapcompact.Archive): string {
+	for (let i = 0; i < 40; i++) {
+		const marker = `reply ${i}:`;
+		if (archive.textHead?.includes(marker) || archive.textTail?.includes(marker)) continue;
+		if (archive.text?.includes(marker)) return marker;
+	}
+	throw new Error("Expected a reply kept only on frames");
+}
+
+describe("snapcompact archive read by another model", () => {
 	const originalAgentDir = getAgentDir();
 	let tempDir: string;
 	let authStorage: AuthStorage;
@@ -100,6 +120,7 @@ describe("snapcompact archive read by a Claude model", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("deepseek", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -114,8 +135,12 @@ describe("snapcompact archive read by a Claude model", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	/** Appends an archive rendered under GPT (reasoning included) and a kept reply. */
-	async function seedArchive(sessionManager: SessionManager): Promise<snapcompact.CompactionResult> {
+	/** Appends an archive rendered under GPT (reasoning included) and a kept reply; `withoutMethod`
+	 *  records it as a legacy or extension-provided entry would, with no method. */
+	async function seedArchive(
+		sessionManager: SessionManager,
+		{ withoutMethod = false }: { withoutMethod?: boolean } = {},
+	): Promise<snapcompact.CompactionResult> {
 		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		const archive = await snapcompact.compact(
 			{
@@ -132,20 +157,24 @@ describe("snapcompact archive read by a Claude model", () => {
 		sessionManager.appendCompaction(archive.summary, archive.shortSummary, keptId, archive.tokensBefore, {
 			details: archive.details,
 			preserveData: archive.preserveData,
-			method: "snapcompact",
+			...(withoutMethod ? {} : { method: "snapcompact" }),
 		});
 		sessionManager.appendMessage(assistant(gpt, [{ type: "text", text: "Kept reply." }]));
 		return archive;
 	}
 
-	function startSession(sessionManager: SessionManager, model: Model): { session: AgentSession; mock: MockModel } {
+	function startSession(
+		sessionManager: SessionManager,
+		model: Model,
+		options: { settings?: Settings; maxFrameDataBytes?: number } = {},
+	): { session: AgentSession; mock: MockModel } {
 		const mock = createMockModel({ handler: { content: ["ok"] } });
 		const agent = new Agent({
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
 				tools: [],
-				messages: sessionManager.buildSessionContext().messages,
+				messages: sessionManager.buildSessionContext({ maxFrameDataBytes: options.maxFrameDataBytes }).messages,
 			},
 			convertToLlm,
 			streamFn: mock.stream,
@@ -153,7 +182,7 @@ describe("snapcompact archive read by a Claude model", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: options.settings ?? Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 		});
 		sessions.push(session);
@@ -311,5 +340,277 @@ describe("snapcompact archive read by a Claude model", () => {
 		// checks in full; after that only the appended tool turns are visited.
 		expect(checksAtCall[3]).toBe(checksAtCall[2]);
 		expectVariantSent(sessionManager, original, mock.calls[3]?.context);
+	});
+
+	it("sends a model without image input the archive's text in place of its frames, and frames after a switch back", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const marker = imagedReply(archive);
+		const { session, mock } = startSession(sessionManager, gpt);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue.");
+		const textOnly = requestContent(mock.calls[0]?.context.messages);
+		expect(textOnly.images).toEqual([]);
+		expect(textOnly.text).toContain("HISTORY");
+		expect(textOnly.text).toContain(marker);
+		expect(textOnly.text).not.toContain(FRAME_LEGEND);
+		// DeepSeek may read reasoning: the archive keeps it.
+		expect(textOnly.text).toContain(REASONING);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+
+		await session.setModel(gpt);
+		await session.prompt("Continue again.");
+		const vision = requestContent(mock.calls[1]?.context.messages);
+		expect(vision.images).toEqual(archive.frames.map(frame => frame.data));
+		expect(vision.text).toContain(FRAME_LEGEND);
+		expect(vision.text).not.toContain(marker);
+	});
+
+	it("gives a side request to a reader without image input or reasoning the text view without reasoning", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session } = startSession(sessionManager, gpt);
+		const render = vi.spyOn(snapcompact, "compact");
+
+		const { text, images } = requestContent(
+			await session.convertMessagesToLlm(session.messages, undefined, { ...claude, input: ["text"] }),
+		);
+		// Its text view comes from the kept source: no no-reasoning frames rendered for a reader that cannot see them.
+		expect(render).not.toHaveBeenCalled();
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+		expect(text).toContain(PLAIN_LEGEND);
+		expect(text).not.toContain(FRAME_LEGEND);
+		expect(text).not.toContain("¶think:");
+		expect(text).not.toContain(REASONING);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+	});
+
+	it("sends no image placeholders for the archive on a session created under a model without image input", async () => {
+		using sessionDir = TempDir.createSync("@pi-snapcompact-text-reader-");
+		const bodies: string[] = [];
+		const fetchStub = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {
+				bodies.push(String(init?.body ?? ""));
+				const chunk = {
+					id: "gen-1",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: deepseek.id,
+					choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+					usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+				};
+				return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+		const sessionManager = SessionManager.inMemory(sessionDir.path());
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session } = await createAgentSession({
+			cwd: sessionDir.path(),
+			agentDir: sessionDir.path(),
+			sessionManager,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: deepseek,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		sessions.push(session);
+
+		await session.sendUserMessage("Continue.");
+
+		const request = bodies.find(body => body.includes("HISTORY"));
+		expect(request).toBeDefined();
+		expect(request).toContain(marker);
+		expect(request).not.toContain(IMAGE_OMITTED);
+	});
+
+	it("sends the archive's text when the context it resumed from left every frame out", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		// A frame budget of zero drops every frame from the rebuilt summary, as a provider budget or
+		// unavailable frame blobs can: the summary then carries no image blocks at all.
+		const { session, mock } = startSession(sessionManager, deepseek, { maxFrameDataBytes: 0 });
+		expect(session.messages.some(message => message.role === "compactionSummary" && message.images)).toBe(false);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+		expect(text).not.toContain(FRAME_LEGEND);
+	});
+
+	it("sends the text of an archive whose compaction recorded no method", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager, { withoutMethod: true });
+		const marker = imagedReply(snapcompact.getPreservedArchive(original.preserveData)!);
+		const { session, mock } = startSession(sessionManager, deepseek);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain(marker);
+	});
+
+	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const smallWindow = 20_000;
+		const small: Model = { ...deepseek, contextWindow: smallWindow };
+		const { session, mock } = startSession(sessionManager, small);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain("turn 0:");
+		expect(text).toContain("reply 39:");
+		expect(text).toContain("middle history omitted above");
+		// The archive takes at most its share of the window (0.6 of the compaction threshold).
+		const summaryTokens = session.agent.tokenizer.countTokens(text);
+		expect(summaryTokens).toBeLessThan(smallWindow * 0.6);
+		expect(text.length).toBeLessThan(archive.text!.length);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue again.");
+		const large = requestContent(mock.calls[1]?.context.messages);
+		expect(large.text).toContain(imagedReply(archive));
+		expect(large.text).not.toContain("middle history omitted above");
+	});
+
+	it("refits the archive text when another model without image input takes over mid tool loop", async () => {
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager);
+		const middle = "reply 20:";
+		const small: Model = { ...deepseek, contextWindow: 20_000 };
+		const { session, mock } = startSession(sessionManager, small);
+		// By the third call the loop's message lists were already scanned for the small window when the
+		// larger model takes over, as a retry fallback does.
+		const toolCall = { content: [{ type: "toolCall" as const, name: "missing_tool", arguments: {} }] };
+		mock.push(() => toolCall);
+		mock.push(() => {
+			session.agent.setModel(deepseek);
+			return toolCall;
+		});
+		mock.push(() => ({ content: ["done"] }));
+
+		await session.prompt("Continue.");
+		const smallText = requestContent(mock.calls[1]?.context.messages).text;
+		expect(smallText).toContain("middle history omitted above");
+		expect(smallText).not.toContain(middle);
+		const largeText = requestContent(mock.calls[2]?.context.messages).text;
+		expect(largeText).toContain(middle);
+		expect(largeText).not.toContain("middle history omitted above");
+	});
+
+	it("fits the archive text to the window when its ends tokenize more densely than its middle", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
+		// Three-byte characters at both ends, ASCII in the middle: the whole text's rate understates
+		// what the kept ends cost.
+		const dense = "漢字".repeat(20_000);
+		const text = `¶user: ${dense}\n¶ai: ${"plain words ".repeat(40_000)}\n¶user: ${dense}`;
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: text.length - 2_000 };
+		const archive = {
+			frames: [frame],
+			totalChars: text.length,
+			truncatedChars: 0,
+			text,
+			textHead: text.slice(0, 1_000),
+			textTail: text.slice(-1_000),
+		};
+		sessionManager.appendCompaction("HISTORY", "archived", keptId, 100_000, {
+			preserveData: { [snapcompact.PRESERVE_KEY]: archive },
+			method: "snapcompact",
+		});
+		sessionManager.appendMessage(assistant(gpt, [{ type: "text", text: "Kept reply." }]));
+		// A 15K threshold gives the archive 0.6 × 15K = 9K tokens.
+		const { session, mock } = startSession(
+			sessionManager,
+			{ ...deepseek, contextWindow: 20_000 },
+			{ settings: Settings.isolated({ "compaction.enabled": false, "compaction.thresholdTokens": 15_000 }) },
+		);
+
+		await session.prompt("Continue.");
+		const { text: sent, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(sent).toContain("middle history omitted above");
+		// The budget plus the summary's own instructions and the user turns around it.
+		expect(session.agent.tokenizer.countTokens(sent)).toBeLessThan(9_000 + 1_000);
+	});
+
+	it("accepts a compaction that shrinks the archive's text for a model without image input", async () => {
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager);
+		const filler = "the quick brown fox jumps over the lazy dog. ".repeat(40);
+		for (let i = 0; i < 6; i++) {
+			sessionManager.appendMessage({ role: "user", content: `later ${i}: ${filler}`, timestamp: Date.now() });
+			sessionManager.appendMessage(assistant(deepseek, [{ type: "text", text: `later reply ${i}: ${filler}` }]));
+		}
+		const model: Model = { ...deepseek, contextWindow: 400_000 };
+		// A threshold high enough that the archive's whole text is this model's share of the window.
+		const thresholdTokens = 200_000;
+		const { session } = startSession(sessionManager, gpt, {
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdTokens": thresholdTokens,
+				"compaction.keepRecentTokens": 1_000,
+				"compaction.autoContinue": false,
+				"compaction.asyncEnabled": false,
+			}),
+		});
+		await session.setModel(model);
+		// The persisted branch rebuilt with frames, and the context this model reads.
+		const framed = session.agent.tokenizer.countMessages(sessionManager.buildSessionContext().messages);
+		const asText = session.agent.tokenizer.countMessages(session.messages);
+		// A summary larger than the archive's framed form but well under its text.
+		const perFiller = session.agent.tokenizer.countMessages([
+			{ role: "user", content: filler.repeat(10), timestamp: 0 },
+		]);
+		const summaryTokens = Math.floor(framed + (asText - framed) / 2);
+		expect(asText - framed).toBeGreaterThan(perFiller);
+		const summary = filler.repeat(Math.ceil((summaryTokens / perFiller) * 10));
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary,
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const { promise, resolve } = Promise.withResolvers<{ committed: boolean; errorMessage?: string }>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") {
+				resolve({ committed: event.result !== undefined, errorMessage: event.errorMessage });
+			}
+		});
+
+		const trigger = { ...assistant(model, [{ type: "text", text: "Done." }]) };
+		trigger.usage = { ...trigger.usage, input: thresholdTokens + 1_000, totalTokens: thresholdTokens + 1_000 };
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+
+		const end = await promise;
+		expect(end.errorMessage).toBeUndefined();
+		expect(end.committed).toBe(true);
 	});
 });
