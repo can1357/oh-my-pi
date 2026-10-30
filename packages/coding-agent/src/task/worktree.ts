@@ -689,7 +689,7 @@ export async function ensureIsolation(
 		// The whole attempt runs under the sandbox lock, so a teardown cannot
 		// retire the directory out from under a materialisation that has already
 		// claimed it, and two materialisations of one id cannot interleave.
-		const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+		const lock = await acquireSandboxLock(baseDir, "materialise");
 		let claimed = false;
 		try {
 			// Taking this slot destroys what is in it, so the same question the
@@ -831,6 +831,28 @@ async function settleAbandonedStop(
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
  */
+/**
+ * Take the sandbox lock, and explain the wait when it cannot be taken.
+ *
+ * The holder is a teardown saving a task's work, a materialisation building
+ * one, or a reclamation removing one; "Failed to acquire lock after 600
+ * attempts" tells the caller none of that and leaves it nothing to do.
+ */
+async function acquireSandboxLock(baseDir: string, purpose: string): Promise<{ release: () => void }> {
+	try {
+		return await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+	} catch (error) {
+		throw new Error(
+			`Could not ${purpose} isolation workspace ${baseDir}: another run has held it for ` +
+				`${Math.round((SANDBOX_LOCK_WAIT.retries * SANDBOX_LOCK_WAIT.retryDelayMs) / 1000)}s. ` +
+				"A workspace is held while its task's patch is being saved, while it is being built, and while it " +
+				"is being removed; the hold ends when that finishes. Retry, or run `omp worktree list` to see what " +
+				"owns it.",
+			{ cause: error },
+		);
+	}
+}
+
 export async function cleanupIsolation(
 	handle: IsolationHandle,
 	options: { capture?: () => Promise<void> } = {},
@@ -840,7 +862,7 @@ export async function cleanupIsolation(
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
 	// Waiting for a slow materialisation or teardown is the point of the lock,
 	// so wait generously rather than failing the run that needs the sandbox.
-	const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
+	const lock = await acquireSandboxLock(baseDir, "tear down");
 	let retiredDir: string | undefined;
 	let proceed = false;
 	try {
@@ -878,29 +900,49 @@ export async function cleanupIsolation(
 			return;
 		}
 		// The last thing before the directory goes, and still under the lock
-		// that authorises its going. A capture that cannot finish inside its
-		// bound refuses the deletion rather than releasing it.
+		// that authorises its going.
+		//
+		// The deadline decides the *outcome*, never the holding. A capture
+		// cannot be cancelled once a patch write or a branch commit is under
+		// way, so releasing the lock at a deadline while that work continues
+		// hands the pathname to the next materialisation and lets the capture
+		// land in — or move — a successor's workspace. The lock is held until
+		// the capture really stops; past the deadline the only thing that
+		// changes is that this teardown no longer deletes.
 		if (options.capture) {
-			const captured = await Promise.race([
-				options
-					.capture()
-					.then(() => true)
-					.catch(error => {
-						logger.warn("isolation capture failed; keeping the workspace", {
-							mergedDir: handle.mergedDir,
-							error: error instanceof Error ? error.message : String(error),
-						});
-						return false;
-					}),
-				scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS).then(() => false),
-			]);
-			if (!captured) {
-				logger.warn("isolation workspace kept: its work could not be captured before removal", {
-					mergedDir: handle.mergedDir,
-					waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
+			const capturing = options
+				.capture()
+				.then(() => true)
+				.catch(error => {
+					logger.warn("isolation capture failed; keeping the workspace", {
+						mergedDir: handle.mergedDir,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return false;
 				});
+			const deadline = new AbortController();
+			const overran = await Promise.race([
+				capturing.then(() => false),
+				// Aborted the moment the capture settles, so the loser cannot
+				// keep this process alive after the work is done.
+				scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS, { signal: deadline.signal }).then(
+					() => true,
+					() => false,
+				),
+			]);
+			deadline.abort();
+			if (overran) {
+				logger.warn(
+					"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",
+					{
+						mergedDir: handle.mergedDir,
+						waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
+					},
+				);
+				await capturing;
 				return;
 			}
+			if (!(await capturing)) return;
 		}
 		const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 		try {

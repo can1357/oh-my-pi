@@ -1265,6 +1265,70 @@ describe("detachGitDir", () => {
 		}
 	});
 
+	it("holds the workspace and the lock until an overrunning capture stops", async () => {
+		// Releasing the lock at a deadline while the capture keeps writing hands
+		// the pathname to the next materialisation: the capture then lands in,
+		// or moves, a successor's workspace. The deadline decides the outcome
+		// — keep the workspace — never the holding.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-deadline-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "capture-overruns");
+			const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
+			const data = path.join(handle.mergedDir, "work.txt");
+			await fs.writeFile(data, "the user's work\n");
+			const finishCapture = Promise.withResolvers<void>();
+			let lockedWhileOverrunning = false;
+
+			const cleaning = cleanupIsolation(handle, {
+				capture: async () => {
+					await finishCapture.promise;
+				},
+			});
+			await scheduler.wait(300);
+			lockedWhileOverrunning = tryAcquireFileLock(baseDir) === null;
+			finishCapture.resolve();
+			await cleaning;
+
+			expect(lockedWhileOverrunning).toBe(true);
+			expect(await Bun.file(data).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("explains who holds a sandbox when the wait runs out", async () => {
+		const held = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-message-"));
+		tempDirs.push(held);
+		const lock = tryAcquireFileLock(await resolveSandboxIdentity(held));
+		expect(lock).not.toBeNull();
+		try {
+			await expect(
+				cleanupIsolation({
+					mergedDir: path.join(held, "m"),
+					generation: "gen",
+					backend: natives.IsoBackendKind.Rcopy,
+					fellBack: false,
+					fallbackReason: null,
+				}),
+			).rejects.toThrow(/patch is being saved/);
+		} finally {
+			lock?.release();
+		}
+	}, 120_000);
+
 	it("refuses to materialise over a sandbox a live session is leasing", async () => {
 		// Taking the slot destroys what is in it. A live lease belongs to a
 		// session whose cwd and whose files would go with the directory.

@@ -4536,6 +4536,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// never finishes would otherwise hold the sandbox — and the kernel
 		// behind it — for the life of the host.
 		beginDisposeCallbacks.add(() => {
+			// Recorded for the whole of disposal, not only past the grace: a
+			// shutdown handler that outruns its own timeout is still writing
+			// here while disposal finishes, and the owner must not delete the
+			// directory under it. Cleared when disposal is done.
+			void markUnfinishedWriter(sessionManager.getCwd())
+				.then(clear => {
+					clearUnfinishedWriter ??= clear;
+				})
+				.catch(error => {
+					logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+				});
 			workspaceLeaseTimer = setTimeout(() => {
 				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
 					id: resolvedAgentId,

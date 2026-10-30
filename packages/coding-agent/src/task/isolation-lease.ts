@@ -329,9 +329,23 @@ function watchLeaseDirectory(baseDir: string): FSWatcher | undefined {
 		// Deliberately referenced: while a teardown is owed, this process has
 		// work left to do, and exiting with a foreign lease outstanding leaves
 		// the sandbox and the work written in it behind.
-		return watch(path.join(baseDir, ISOLATION_LEASE_DIR), () => {
-			void runPendingTeardownIfIdle(baseDir);
-		});
+		// Both directories: a departure is a lease going away or a writer
+		// clearing its record, and the last of either is what releases the
+		// owner's capture.
+		const onChange = (): void => void runPendingTeardownIfIdle(baseDir);
+		const leases = watch(path.join(baseDir, ISOLATION_LEASE_DIR), onChange);
+		let writers: FSWatcher | undefined;
+		try {
+			writers = watch(path.join(baseDir, ISOLATION_UNFINISHED_DIR), onChange);
+		} catch {
+			writers = undefined;
+		}
+		return {
+			close: () => {
+				leases.close();
+				writers?.close();
+			},
+		} as FSWatcher;
 	} catch {
 		// No watch available (the directory may not exist yet): the poll carries it.
 		return undefined;
@@ -370,6 +384,10 @@ async function settleIfIdle(mergedDir: string, workspace: LeasedWorkspace, baseD
 	try {
 		if (workspace.pendingTeardown === undefined) return;
 		if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return;
+		// A writer that gave up its lease but has not finished is still a user:
+		// its record going away is the event this is waiting for just as much
+		// as the last lease going away.
+		if (await hasUnfinishedWriter(baseDir)) return;
 		pending = workspace.pendingTeardown;
 		workspace.pendingTeardown = undefined;
 		disarmTeardownWatch(workspace);
@@ -461,7 +479,7 @@ export async function deferTeardownWhileLeased(
 	workspace.poll ??= setInterval(() => {
 		void runPendingTeardownIfIdle(baseDir);
 	}, LEASE_POLL_MS);
-	if (await hasLiveIsolationLease(baseDir, workspace.agentId)) return true;
+	if ((await hasLiveIsolationLease(baseDir, workspace.agentId)) || (await hasUnfinishedWriter(baseDir))) return true;
 	// Nobody is here after all, and the caller is about to do the work itself.
 	workspace.pendingTeardown = undefined;
 	disarmTeardownWatch(workspace);

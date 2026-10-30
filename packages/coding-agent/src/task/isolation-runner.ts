@@ -422,72 +422,70 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		})();
 		return cleanupPromise;
 	};
-	/** Write this run's patch, and its branch, from the sandbox as it stands. */
+	/**
+	 * Write this run's patch, and its branch, from the sandbox as it stands.
+	 *
+	 * Raises on failure, always. An earlier successful capture used to make a
+	 * later failure a warning, and the caller that reads this as "captured"
+	 * then deletes the source of a patch that was left half-written. The
+	 * teardown keeps the workspace when this throws; nothing else is safe.
+	 */
 	const capture = async (): Promise<void> => {
 		if (!handle || !taskBaseline || retainWorkspace) {
 			return;
 		}
 		const sandbox = handle;
 		const baselineAtRelease = taskBaseline;
+		let capture: IsolationPatchCapture;
 		try {
-			let capture: IsolationPatchCapture;
-			try {
-				capture = await writeIsolationPatch(sandbox.mergedDir, baselineAtRelease, opts.artifactsDir, opts.agentId);
-			} catch (captureErr) {
-				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend);
-				throw new Error(
-					renderIsolationError({
-						kind: "patch-capture-failed",
-						message: captureErr instanceof Error ? captureErr.message : String(captureErr),
-						retainedDir: retained.dir,
-						sidecarMissing: !retained.sidecarOk,
-					}),
-				);
-			}
-			const patchResult = capture.artifacts;
-			// Kept for the post-run path: a release that ran inside the child's
-			// own teardown — a refused adoption ends the child there — has
-			// already captured and removed the workspace, so the result the
-			// parent reads must carry that capture rather than a second,
-			// impossible one.
-			releasedCapture = { ...patchResult };
-			AgentRegistry.global().setHistory(opts.agentId, {
-				patchPath: patchResult.patchPath,
-				nestedPatchPaths: patchResult.nestedPatchPaths,
-			});
-			// Nothing changed since the run-end capture the caller already
-			// merged or applied: a branch now would only duplicate that work.
-			if (capture.fingerprint === handedOff) return;
-			const commitResult = await commitToBranch(
-				sandbox.mergedDir,
-				baselineAtRelease,
-				opts.agentId,
-				opts.description,
-				undefined,
+			capture = await writeIsolationPatch(sandbox.mergedDir, baselineAtRelease, opts.artifactsDir, opts.agentId);
+		} catch (captureErr) {
+			retainWorkspace = true;
+			const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend);
+			throw new Error(
+				renderIsolationError({
+					kind: "patch-capture-failed",
+					message: captureErr instanceof Error ? captureErr.message : String(captureErr),
+					retainedDir: retained.dir,
+					sidecarMissing: !retained.sidecarOk,
+				}),
 			);
-			// Branch mode's result is the branch, not the patch: a caller handed
-			// only the patch path reports "No changes to apply" and drops work
-			// that is sitting on a branch this release just made.
-			releasedCapture = {
-				...patchResult,
-				...(commitResult?.branchName ? { branchName: commitResult.branchName } : {}),
-				...(commitResult?.baseSha ? { branchBaseSha: commitResult.baseSha } : {}),
-				...(commitResult?.nestedPatches ? { nestedPatches: commitResult.nestedPatches } : {}),
-			};
-			AgentRegistry.global().setHistory(opts.agentId, {
-				patchPath: patchResult.patchPath,
-				branchName: commitResult?.branchName,
-				nestedPatchPaths: patchResult.nestedPatchPaths,
-			});
-		} catch (error) {
-			// The sandbox may be gone by the time a deferred capture runs.
-			if (releasedCapture === undefined) throw error;
-			logger.warn("later isolation capture failed; keeping the capture made at release", {
-				agentId: opts.agentId,
-				error: error instanceof Error ? error.message : String(error),
-			});
 		}
+		const patchResult = capture.artifacts;
+		// Kept for the post-run path: a release that ran inside the child's
+		// own teardown — a refused adoption ends the child there — has
+		// already captured and removed the workspace, so the result the
+		// parent reads must carry that capture rather than a second,
+		// impossible one.
+		releasedCapture = { ...patchResult };
+		AgentRegistry.global().setHistory(opts.agentId, {
+			patchPath: patchResult.patchPath,
+			nestedPatchPaths: patchResult.nestedPatchPaths,
+		});
+		// Nothing changed since the run-end capture the caller already
+		// merged or applied: a branch now would only duplicate that work.
+		if (capture.fingerprint === handedOff) return;
+		const commitResult = await commitToBranch(
+			sandbox.mergedDir,
+			baselineAtRelease,
+			opts.agentId,
+			opts.description,
+			undefined,
+		);
+		// Branch mode's result is the branch, not the patch: a caller handed
+		// only the patch path reports "No changes to apply" and drops work
+		// that is sitting on a branch this release just made.
+		releasedCapture = {
+			...patchResult,
+			...(commitResult?.branchName ? { branchName: commitResult.branchName } : {}),
+			...(commitResult?.baseSha ? { branchBaseSha: commitResult.baseSha } : {}),
+			...(commitResult?.nestedPatches ? { nestedPatches: commitResult.nestedPatches } : {}),
+		};
+		AgentRegistry.global().setHistory(opts.agentId, {
+			patchPath: patchResult.patchPath,
+			branchName: commitResult?.branchName,
+			nestedPatchPaths: patchResult.nestedPatchPaths,
+		});
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
