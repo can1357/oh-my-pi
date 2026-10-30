@@ -588,25 +588,29 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
-			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
-		) {
-			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
-					agentId: opts.agentId,
-					resource: "isolation",
-				});
-			} else {
-				await cleanupHandle();
+		try {
+			if (
+				handle &&
+				!retainWorkspace &&
+				!releasePromise &&
+				!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+			) {
+				if (deferredCleanup) {
+					trackLateCleanup(deferredCleanup.then(cleanupHandle), {
+						agentId: opts.agentId,
+						resource: "isolation",
+					});
+				} else {
+					await cleanupHandle();
+				}
 			}
+		} finally {
+			// The worktree is captured: a held message may now wake a turn in it. The
+			// release also ends a `subagent_stop` hold, so a failed cleanup must not skip it.
+			if (releaseIrcWakes && opts.baseOptions.deferIrcWakeRelease)
+				opts.baseOptions.deferIrcWakeRelease(releaseIrcWakes);
+			else releaseIrcWakes?.();
 		}
-		// The worktree is captured: a held peer message may now wake a turn in it.
-		if (releaseIrcWakes && opts.baseOptions.deferIrcWakeRelease)
-			opts.baseOptions.deferIrcWakeRelease(releaseIrcWakes);
-		else releaseIrcWakes?.();
 	}
 }
 

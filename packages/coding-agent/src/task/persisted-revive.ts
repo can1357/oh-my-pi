@@ -10,11 +10,12 @@ import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
+import { readSessionHeaderId } from "../session/session-loader";
 import {
 	extractSessionInit,
 	hasConversationalHistory,
@@ -72,6 +73,49 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		systemPrompt: init.systemPrompt.join("\n\n"),
 		source: "user",
 	};
+}
+
+/**
+ * The durable definition name (`scout`, `reviewer`, …) of a cold-revived subagent,
+ * not the registry display label: cold-revived refs register with `displayName: id`
+ * (registry/persisted-agents.ts), so a generated task id would silently drop every
+ * agent-scoped rule and be reported as the `subagent_stop` `agent_type`.
+ * `init.agent` carries the real name; only files predating that field fall back to
+ * the display label. A parked transcript may also predate the `main`/`sub`
+ * definition-name reservation (discovery/helpers.ts): a persisted `init.agent` of
+ * either sentinel value from such a legacy custom agent must not masquerade as that
+ * sentinel, so it falls back to the display label too, keeping it scoped as an
+ * ordinary subagent under its generated id instead of `main` or the shared `sub`
+ * bucket.
+ */
+export function persistedAgentName(displayName: string, init: PersistedSessionInit): string {
+	const agent = init.agent?.trim().toLowerCase();
+	return init.agent && agent !== MAIN_AGENT_RULE_NAME && agent !== SUB_AGENT_RULE_NAME ? init.agent : displayName;
+}
+
+/**
+ * The session `subagent_stop` reports as a cold-revived child's spawner. A child
+ * of the top-level session joins that live session. A nested child was spawned
+ * by another subagent: its header records that subagent's transcript as
+ * `parentSession`, and the subagent's id is on its live session or in that
+ * file's header. When neither survives the identity stays unset rather than
+ * naming the top-level session, which did not spawn it.
+ */
+export async function resolveSpawner(
+	registry: AgentRegistry,
+	topLevel: AgentSession,
+	ref: AgentRef,
+	recordedParentFile: string | undefined,
+): Promise<{ sessionId: string | undefined; sessionFile: string | undefined }> {
+	if (!ref.parentId || ref.parentId === MAIN_AGENT_ID) {
+		return { sessionId: topLevel.sessionId, sessionFile: topLevel.sessionFile };
+	}
+	const parent = registry.get(ref.parentId);
+	const sessionFile = recordedParentFile ?? parent?.sessionFile ?? undefined;
+	const sessionId =
+		parent?.session?.sessionId ??
+		(sessionFile ? await readSessionHeaderId(sessionFile).catch(() => undefined) : undefined);
+	return { sessionId, sessionFile };
 }
 
 /**
@@ -226,6 +270,7 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = restoredSeance !== undefined || init.restrictToolNames === true;
 			// The spawn's result contract: a session persisted without `yield` returned its final message.
 			const structured = revivedToolNames.includes("yield");
+			const agentName = persistedAgentName(ref.displayName, init);
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
@@ -247,24 +292,7 @@ export function createPersistedSubagentReviverFactory(
 					sessionManager: reopened,
 					agentId: ref.id,
 					agentDisplayName: ref.displayName,
-					// `agents` rule scoping keys on the durable definition name (`scout`,
-					// `reviewer`, …), not the registry display label — cold-revived refs
-					// register with `displayName: id` (registry/persisted-agents.ts), so a
-					// generated task id would silently drop every agent-scoped rule.
-					// `init.agent` carries the real name; only files predating that field
-					// fall back to the display label. A parked transcript may also predate
-					// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-					// persisted `init.agent` of either sentinel value from such a legacy
-					// custom agent must not masquerade as that sentinel here, so it falls
-					// back to the display label too, keeping it scoped as an ordinary
-					// subagent under its generated id instead of `main` or the shared `sub`
-					// bucket.
-					agentName:
-						init.agent &&
-						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-							? init.agent
-							: ref.displayName,
+					agentName,
 					parentTaskPrefix: ref.id,
 					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
@@ -329,12 +357,19 @@ export function createPersistedSubagentReviverFactory(
 			// The internal run-state signal precedes deferrable public `agent_end`,
 			// keeping idle-TTL ownership synchronized even while prompts unwind.
 			registry.syncSessionStatus(ref.id, session);
+			const spawner = await resolveSpawner(registry, ctx.session, ref, reopened.getHeader()?.parentSession);
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,
 				agent: persistedAgentDefinition(ref.displayName, init),
 				completionProbe: isCompletionProbeEnabled(ctx.settings, taskDepth - 1),
+				// The frames keep the ref label; `subagent_stop` reports the definition.
+				agentType: agentName,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
+				// The session that spawned this child is what the `subagent_stop`
+				// event reports; for a nested child that is its spawning subagent.
+				parentSessionId: spawner.sessionId,
+				parentSessionFile: spawner.sessionFile,
 				sessionFile,
 				structured,
 				outputSchema: init.outputSchema,

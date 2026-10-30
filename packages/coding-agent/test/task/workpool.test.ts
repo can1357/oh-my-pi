@@ -255,6 +255,29 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.batches[1]?.output).toContain("review unavailable");
 	});
 
+	it("hands a worker's follow-up turn the spawning session's identity for subagent_stop", async () => {
+		const session = {
+			...makeSession([], 1),
+			getSessionId: () => "parent-session-1",
+			getSessionFile: () => "/parent/session.jsonl",
+		} satisfies ToolSession;
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id);
+		});
+		const workpool = pool(session, "identity");
+		workpool.push(["first", "second"]);
+		await until(() => followSpy.mock.calls.length === 1);
+
+		expect(followSpy.mock.calls[0]?.[0].parentSessionId).toBe("parent-session-1");
+		expect(followSpy.mock.calls[0]?.[0].parentSessionFile).toBe("/parent/session.jsonl");
+		await finishPool(session, workpool);
+	});
 	it("tombstones the worker session when clearing the yield contract fails", async () => {
 		const session = makeSession([], 1);
 		let workerId = "";
